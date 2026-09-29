@@ -47,8 +47,86 @@ const WARNING_SOURCE: &str = include_str!("fixtures/lsp-e2e-006-module-warning-s
 
 /// The accepted editor corpus is the one source of truth for this LSP gate.
 const ACCEPTED_MANIFEST: &str =
-    include_str!("../../../editors/tree-sitter-orna/test/accepted-corpus.txt");
+    include_str!("fixtures/accepted-corpus.txt");
 const CORPUS_DELIMITER: &str = "====================";
+const ACCEPTED_CORPUS: &[(&str, &str)] = &[
+    (
+        "accepted_actions_inspector.txt",
+        include_str!("fixtures/tree-sitter-corpus/accepted_actions_inspector.txt"),
+    ),
+    (
+        "accepted_client_fixture.txt",
+        include_str!("fixtures/tree-sitter-corpus/accepted_client_fixture.txt"),
+    ),
+    (
+        "alter_drop.txt",
+        include_str!("fixtures/tree-sitter-corpus/alter_drop.txt"),
+    ),
+    (
+        "client_functions.txt",
+        include_str!("fixtures/tree-sitter-corpus/client_functions.txt"),
+    ),
+    (
+        "comments.txt",
+        include_str!("fixtures/tree-sitter-corpus/comments.txt"),
+    ),
+    (
+        "expressions.txt",
+        include_str!("fixtures/tree-sitter-corpus/expressions.txt"),
+    ),
+    (
+        "literals_lambda.txt",
+        include_str!("fixtures/tree-sitter-corpus/literals_lambda.txt"),
+    ),
+    (
+        "procedural.txt",
+        include_str!("fixtures/tree-sitter-corpus/procedural.txt"),
+    ),
+    (
+        "schema.txt",
+        include_str!("fixtures/tree-sitter-corpus/schema.txt"),
+    ),
+    (
+        "server_function_insert.txt",
+        include_str!("fixtures/tree-sitter-corpus/server_function_insert.txt"),
+    ),
+    (
+        "server_function_select.txt",
+        include_str!("fixtures/tree-sitter-corpus/server_function_select.txt"),
+    ),
+    (
+        "server_function_update_delete.txt",
+        include_str!("fixtures/tree-sitter-corpus/server_function_update_delete.txt"),
+    ),
+    (
+        "strings_identifiers.txt",
+        include_str!("fixtures/tree-sitter-corpus/strings_identifiers.txt"),
+    ),
+    (
+        "type_enum.txt",
+        include_str!("fixtures/tree-sitter-corpus/type_enum.txt"),
+    ),
+    (
+        "type_object.txt",
+        include_str!("fixtures/tree-sitter-corpus/type_object.txt"),
+    ),
+    (
+        "type_scalar.txt",
+        include_str!("fixtures/tree-sitter-corpus/type_scalar.txt"),
+    ),
+    (
+        "type_value.txt",
+        include_str!("fixtures/tree-sitter-corpus/type_value.txt"),
+    ),
+    (
+        "unicode_identifiers.txt",
+        include_str!("fixtures/tree-sitter-corpus/unicode_identifiers.txt"),
+    ),
+    (
+        "users_roles_grants.txt",
+        include_str!("fixtures/tree-sitter-corpus/users_roles_grants.txt"),
+    ),
+];
 
 #[derive(Debug)]
 struct CorpusCase {
@@ -84,10 +162,6 @@ fn accepted_case_names() -> Vec<String> {
         "accepted corpus manifest contains duplicate case names"
     );
     names
-}
-
-fn corpus_directory() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../editors/tree-sitter-orna/test/corpus")
 }
 
 fn lines_with_offsets(source: &str) -> Vec<(usize, usize)> {
@@ -196,25 +270,10 @@ fn parse_corpus_file(path: &Path, contents: &str) -> Vec<(String, CorpusCase)> {
 }
 
 fn corpus_cases() -> BTreeMap<String, CorpusCase> {
-    let mut paths = fs::read_dir(corpus_directory())
-        .unwrap_or_else(|error| panic!("read accepted corpus directory: {error}"))
-        .map(|entry| {
-            entry
-                .unwrap_or_else(|error| panic!("read accepted corpus directory entry: {error}"))
-                .path()
-        })
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension.to_str() == Some("txt"))
-        })
-        .collect::<Vec<_>>();
-    paths.sort();
-
     let mut cases = BTreeMap::new();
-    for path in paths {
-        let contents = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("read corpus file {}: {error}", path.display()));
-        for (name, case) in parse_corpus_file(&path, &contents) {
+    for &(file_name, contents) in ACCEPTED_CORPUS {
+        let path = PathBuf::from("tests/fixtures/tree-sitter-corpus").join(file_name);
+        for (name, case) in parse_corpus_file(&path, contents) {
             if let Some(previous) = cases.insert(name.clone(), case) {
                 panic!(
                     "duplicate corpus case name {name:?} in {} and {}",
@@ -744,7 +803,7 @@ fn serves_accepted_corpus_manifest_diagnostics_with_valid_utf16_ranges() {
         let case = cases.get(name).unwrap_or_else(|| {
             panic!(
                 "accepted corpus manifest case {name:?} has no source fixture under {}",
-                corpus_directory().display()
+                "tests/fixtures/tree-sitter-corpus"
             )
         });
         let uri = format!("file:///test/accepted-corpus/{:03}.orna", index + 1);

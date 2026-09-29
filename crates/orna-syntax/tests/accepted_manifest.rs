@@ -1,6 +1,5 @@
 use std::{
     collections::BTreeMap,
-    fs,
     path::{Path, PathBuf},
 };
 
@@ -11,8 +10,86 @@ use orna_syntax::{Parse, parse};
 /// this test parses only cases named by that manifest and never reads canonical
 /// proposal examples.
 const ACCEPTED_MANIFEST: &str =
-    include_str!("../../../editors/tree-sitter-orna/test/accepted-corpus.txt");
+    include_str!("../../orna-lsp/tests/fixtures/accepted-corpus.txt");
 const CORPUS_DELIMITER: &str = "====================";
+const ACCEPTED_CORPUS: &[(&str, &str)] = &[
+    (
+        "accepted_actions_inspector.txt",
+        include_str!("../../orna-lsp/tests/fixtures/tree-sitter-corpus/accepted_actions_inspector.txt"),
+    ),
+    (
+        "accepted_client_fixture.txt",
+        include_str!("../../orna-lsp/tests/fixtures/tree-sitter-corpus/accepted_client_fixture.txt"),
+    ),
+    (
+        "alter_drop.txt",
+        include_str!("../../orna-lsp/tests/fixtures/tree-sitter-corpus/alter_drop.txt"),
+    ),
+    (
+        "client_functions.txt",
+        include_str!("../../orna-lsp/tests/fixtures/tree-sitter-corpus/client_functions.txt"),
+    ),
+    (
+        "comments.txt",
+        include_str!("../../orna-lsp/tests/fixtures/tree-sitter-corpus/comments.txt"),
+    ),
+    (
+        "expressions.txt",
+        include_str!("../../orna-lsp/tests/fixtures/tree-sitter-corpus/expressions.txt"),
+    ),
+    (
+        "literals_lambda.txt",
+        include_str!("../../orna-lsp/tests/fixtures/tree-sitter-corpus/literals_lambda.txt"),
+    ),
+    (
+        "procedural.txt",
+        include_str!("../../orna-lsp/tests/fixtures/tree-sitter-corpus/procedural.txt"),
+    ),
+    (
+        "schema.txt",
+        include_str!("../../orna-lsp/tests/fixtures/tree-sitter-corpus/schema.txt"),
+    ),
+    (
+        "server_function_insert.txt",
+        include_str!("../../orna-lsp/tests/fixtures/tree-sitter-corpus/server_function_insert.txt"),
+    ),
+    (
+        "server_function_select.txt",
+        include_str!("../../orna-lsp/tests/fixtures/tree-sitter-corpus/server_function_select.txt"),
+    ),
+    (
+        "server_function_update_delete.txt",
+        include_str!("../../orna-lsp/tests/fixtures/tree-sitter-corpus/server_function_update_delete.txt"),
+    ),
+    (
+        "strings_identifiers.txt",
+        include_str!("../../orna-lsp/tests/fixtures/tree-sitter-corpus/strings_identifiers.txt"),
+    ),
+    (
+        "type_enum.txt",
+        include_str!("../../orna-lsp/tests/fixtures/tree-sitter-corpus/type_enum.txt"),
+    ),
+    (
+        "type_object.txt",
+        include_str!("../../orna-lsp/tests/fixtures/tree-sitter-corpus/type_object.txt"),
+    ),
+    (
+        "type_scalar.txt",
+        include_str!("../../orna-lsp/tests/fixtures/tree-sitter-corpus/type_scalar.txt"),
+    ),
+    (
+        "type_value.txt",
+        include_str!("../../orna-lsp/tests/fixtures/tree-sitter-corpus/type_value.txt"),
+    ),
+    (
+        "unicode_identifiers.txt",
+        include_str!("../../orna-lsp/tests/fixtures/tree-sitter-corpus/unicode_identifiers.txt"),
+    ),
+    (
+        "users_roles_grants.txt",
+        include_str!("../../orna-lsp/tests/fixtures/tree-sitter-corpus/users_roles_grants.txt"),
+    ),
+];
 
 // These accepted editor cases are intentionally retained as lossless source
 // plus diagnostics by the public parser, which does not expose declarations
@@ -177,10 +254,6 @@ fn accepted_case_names() -> Vec<String> {
     names
 }
 
-fn corpus_directory() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../editors/tree-sitter-orna/test/corpus")
-}
-
 fn lines_with_offsets(source: &str) -> Vec<(usize, usize)> {
     let mut lines = Vec::new();
     let mut start = 0;
@@ -289,24 +362,9 @@ fn parse_corpus_file(path: &Path, contents: &str) -> Vec<(String, CorpusCase)> {
 }
 
 fn corpus_cases() -> BTreeMap<String, CorpusCase> {
-    let mut paths = fs::read_dir(corpus_directory())
-        .unwrap_or_else(|error| panic!("read accepted corpus directory: {error}"))
-        .map(|entry| {
-            entry
-                .unwrap_or_else(|error| panic!("read accepted corpus directory entry: {error}"))
-                .path()
-        })
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension.to_str() == Some("txt"))
-        })
-        .collect::<Vec<_>>();
-    paths.sort();
-
     let mut cases = BTreeMap::new();
-    for path in paths {
-        let contents = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("read corpus file {}: {error}", path.display()));
+    for &(file_name, contents) in ACCEPTED_CORPUS {
+        let path = PathBuf::from("tests/fixtures/tree-sitter-corpus").join(file_name);
         for (name, case) in parse_corpus_file(&path, &contents) {
             assert!(
                 cases.insert(name.clone(), case).is_none(),
