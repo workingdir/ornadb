@@ -1,0 +1,2 @@
+pub fn import(path: Str) =
+    std.encoding.csv.rows(std.io.fs.read(path));
