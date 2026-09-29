@@ -1,0 +1,7 @@
+type UserRecord = { value: Str, };
+
+pub type UserId {
+    value: Str,
+}
+
+pub fn forge(record: UserRecord): UserId = record;
