@@ -7324,6 +7324,45 @@ fn supports_comparison_boolean_and_allowlisted_math() {
 }
 
 #[test]
+fn pinned_standard_math_source_executes_every_public_function() {
+    let (path, source) = orna_standard::reference_standard_sources_v1()
+        .into_iter()
+        .next()
+        .expect("pinned standard source");
+    assert_eq!(path, "std/math.orna");
+    let mut functions = functions_from_source(&source);
+    functions.extend(functions_from_source(include_str!(
+        "fixtures/v1_standard_math_consumer.orna"
+    )));
+    assert_eq!(
+        invoke_named("incremented", &functions, &Environment::new(), Limits::default())
+            .unwrap(),
+        Value::int(42.into())
+    );
+    assert_eq!(
+        invoke_named("decremented", &functions, &Environment::new(), Limits::default())
+            .unwrap(),
+        Value::int((-1).into())
+    );
+    assert_eq!(
+        invoke_named("zero", &functions, &Environment::new(), Limits::default()).unwrap(),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        invoke_named("minimum", &functions, &Environment::new(), Limits::default()).unwrap(),
+        Value::int(3.into())
+    );
+    assert_eq!(
+        invoke_named("maximum", &functions, &Environment::new(), Limits::default()).unwrap(),
+        Value::int(5.into())
+    );
+    assert_eq!(
+        invoke_named("clamped", &functions, &Environment::new(), Limits::default()).unwrap(),
+        Value::int(5.into())
+    );
+}
+
+#[test]
 fn evaluates_selection_indexing_named_calls_and_case_patterns() {
     assert_eq!(
         evaluate(include_str!(
