@@ -1,3 +1,6 @@
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 use orna_conformance_v1::{
     BoundedEvaluator, ConformanceAdapter, Corpus, DurableTransactionalEvaluator, EvidenceStatus,
     Harness, ProjectEnvironment, ProjectExpectations, ProjectUnit, RuntimeAdapter,
@@ -120,11 +123,7 @@ fn git(path: &Path, args: &[&str]) {
 fn durable_repository() -> (TempDir, Repository) {
     let temp = TempDir::new_in("/var/tmp").expect("temporary repository");
     git(temp.path(), &["init", "--quiet"]);
-    git(
-        temp.path(),
-        &["config", "user.email", "test@example.invalid"],
-    );
-    git(temp.path(), &["config", "user.name", "conformance test"]);
+    test_support::configure_fixture_git_identity(temp.path());
     git(temp.path(), &["config", "commit.gpgsign", "false"]);
     fs::write(temp.path().join("main.orna"), "module main;\n").expect("source");
     git(temp.path(), &["add", "main.orna"]);
