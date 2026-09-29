@@ -1,0 +1,7 @@
+
+            pub table users(id: Int) { name: Str, }
+            pub table accounts(id: Int) { user_id: Int, }
+            assert every(accounts, account =>
+                exists(users, user => user.id == account.user_id)
+            );
+        

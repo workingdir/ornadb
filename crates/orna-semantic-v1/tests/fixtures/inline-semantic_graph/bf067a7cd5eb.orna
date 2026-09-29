@@ -1,0 +1,1 @@
+fn pipeline_positional_after_named(job: sys.InvocationHandle<Int>) = job | sys.cancel(reason: "stop", null);

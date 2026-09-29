@@ -1,0 +1,1 @@
+pub table Note { text: Str, } fn invalid() = {body};

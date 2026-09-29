@@ -1,0 +1,1 @@
+table Reading(id: Int) { value: Int, } fn bad() = Reading | flat_map(predicate: reading => [reading.value]);

@@ -1,0 +1,1 @@
+fn duplicate(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Int>(function, arguments, as: Int, as: Int);

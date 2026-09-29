@@ -1,0 +1,1 @@
+pub fn coldest(values: [Float<C>]) = values | min;

@@ -1,0 +1,6 @@
+
+            table Reading(id: Int) { value: Int, }
+            pub fn positive(values: [Int]) = values | filter(value => value > 0);
+            pub fn positive_named(values: [Int]) = values | filter(predicate: value => value > 0);
+            pub fn reads(values: [Int]) = values | filter(value => Reading.count() > 0 && value > 0);
+        

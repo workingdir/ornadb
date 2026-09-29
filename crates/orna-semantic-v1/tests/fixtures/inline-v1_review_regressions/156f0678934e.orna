@@ -1,0 +1,11 @@
+
+            pub protocol P {
+                fn value(self): Int;
+            }
+            type Alias = P;
+            pub type Box {
+                impl Alias {
+                    fn value(self): Int = 1;
+                }
+            }
+        

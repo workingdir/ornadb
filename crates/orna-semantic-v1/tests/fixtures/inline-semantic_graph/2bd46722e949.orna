@@ -1,0 +1,4 @@
+
+            pub fn inside(value: Int) = value in 1..=5;
+            pub fn first_ten(values: [Int]) = values | take(0..10);
+        

@@ -1,0 +1,21 @@
+
+            table Reading(id: Int) { value: Int, }
+            table Other(id: Int) { value: Int, }
+            pub fn direct_min(rows: [Int]): Int? = min(rows);
+            pub fn direct_max(rows: [Int]): Int? = max([3, 1, 2]);
+            pub fn named_min(rows: [Int]): Int? = min(rows: rows);
+            pub fn named_max(rows: [Int]): Int? = max(rows: rows);
+            pub fn bare_pipeline_min(rows: [Int]): Int? = rows | min;
+            pub fn bare_pipeline_max(rows: [Int]): Int? = rows | std.collection.max;
+            pub fn call_pipeline_min(rows: [Int]): Int? = rows | min();
+            pub fn call_pipeline_max(rows: [Int]): Int? = rows | std.collection.max();
+            pub fn qualified_min(rows: [Int]): Int? = std.collection.min(rows);
+            pub fn qualified_max(rows: [Int]): Int? = std.collection.max(rows: rows);
+            pub fn empty_min(): Int? = min([]);
+            pub fn empty_max(): Int? = [] | max;
+            pub fn reads(rows: [Int]): Int? =
+                rows | map(transform: value => Reading.count() + value) | min();
+            assert every(Reading, reading =>
+                exists(Other, other =>
+                    min([reading.value]) == min([other.value])));
+        

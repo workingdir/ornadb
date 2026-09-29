@@ -1,0 +1,15 @@
+
+                pub protocol {protocol} {
+                    fn {member}(self): Str;
+                }
+                pub table Audit { message: Str, }
+                pub table Note(id: Int) {
+                    value: Str,
+                    impl {protocol} {
+                        fn {member}(self): Str {
+                            Audit.insert({ message: "before return" });
+                            return self.value;
+                        }
+                    }
+                }
+            

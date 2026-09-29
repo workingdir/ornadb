@@ -1,0 +1,5 @@
+
+            pub fn dedupe(values: [Int]) = values | distinct;
+            pub fn combine(left: [Int], right: [Int]) = left | union(right);
+            pub fn combine_named(left: [Int], right: [Int]) = left | union(right: right);
+        

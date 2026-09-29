@@ -1,0 +1,1 @@
+pub fn curried_add() = x => y => x + y;

@@ -1,0 +1,1 @@
+fn invalid(values: Range<Int>) { for value in values { value } }

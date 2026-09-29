@@ -1,0 +1,1 @@
+pub table Temperature(id: Int) { value: Float<C>, } pub fn total() = Temperature | map(row => row.value) | sum;

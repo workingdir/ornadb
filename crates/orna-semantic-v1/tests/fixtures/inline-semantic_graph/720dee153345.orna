@@ -1,0 +1,5 @@
+
+            table Reading(id: Int) { value: Int, }
+            pub fn first_reading() = Reading.first();
+            pub fn first_pipeline() = Reading | first();
+        

@@ -1,0 +1,1 @@
+{declaration} fn patch() = Reading.upsert({ value: 1.25, label: 42 });

@@ -1,0 +1,4 @@
+
+                pub type Vault { value: Int, }
+                pub fn expose() = Vault { value: 7 };
+            

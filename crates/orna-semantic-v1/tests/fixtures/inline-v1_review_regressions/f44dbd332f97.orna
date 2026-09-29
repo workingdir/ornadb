@@ -1,0 +1,1 @@
+pub type Vault { value: Int = 1, } pub fn forge(): Vault = Vault {};

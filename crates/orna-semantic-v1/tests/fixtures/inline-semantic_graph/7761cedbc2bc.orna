@@ -1,0 +1,15 @@
+
+            pub fn describe(values: [Int]): Str {
+                let total = 0;
+
+                for value in values {
+                    total = total + value;
+                }
+
+                if total > 100 {
+                    "large"
+                } else {
+                    "small"
+                }
+            }
+        

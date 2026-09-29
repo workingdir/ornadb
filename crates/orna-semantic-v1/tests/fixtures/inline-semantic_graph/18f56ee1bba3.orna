@@ -1,0 +1,6 @@
+
+                pub protocol Order {
+                    fn compare(self, other: Self): Ordering;
+                }
+                pub fn choose<T impl Order>(value: T) = sys.meta<T>(value);
+            

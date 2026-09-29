@@ -1,0 +1,1 @@
+fn unknown_label(job: sys.InvocationHandle<Int>) = sys.cancel(job, why: "stop");

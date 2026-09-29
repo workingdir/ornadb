@@ -1,0 +1,1 @@
+pub table sys { value: Int, }

@@ -1,0 +1,1 @@
+fn bad(values: [Int]) = values | union(1);

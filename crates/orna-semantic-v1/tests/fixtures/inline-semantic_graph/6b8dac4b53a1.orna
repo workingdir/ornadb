@@ -1,0 +1,1 @@
+pub type Port { impl TryFrom<Int> { fn from(value) = Port { value: value }; } }

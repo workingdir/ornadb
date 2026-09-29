@@ -1,0 +1,5 @@
+
+            pub fn identity<T>(value: T): T = value;
+            pub fn apply(callback: fn(Int): Int): Int = callback(1);
+            pub fn measured(value: Float<mph>): Float<mph> = value;
+        

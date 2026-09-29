@@ -1,0 +1,9 @@
+
+                pub fn maybe(values: [Str]): Str = one(values);
+                pub type Note {
+                    value: Str,
+                    impl {protocol} {
+                        fn {member}(self): Str = maybe([self.value]);
+                    }
+                }
+            

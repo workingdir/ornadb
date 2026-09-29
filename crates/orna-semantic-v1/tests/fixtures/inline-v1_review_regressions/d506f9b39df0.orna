@@ -1,0 +1,10 @@
+
+            pub table Note(id: Int) {
+                value: Int,
+                assert valid_notes;
+                assert every(note => note.value > 0);
+                assert all_unique(note => note.id);
+            }
+            pub fn valid_notes(rows: Relation<Note>): Bool =
+                rows | filter(note => note.value > 0) | count == 2;
+        

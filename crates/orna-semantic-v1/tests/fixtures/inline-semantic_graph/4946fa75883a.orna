@@ -1,0 +1,7 @@
+
+            pub table Note { text: Str, }
+            pub fn default_step() = Note | window(2);
+            pub fn named_step() = Note | window(size: 2, step: 3);
+            pub fn direct() = window(Note, 2, step: 3);
+            pub fn dynamic(size: Int, step: Int) = Note | window(size, step);
+        

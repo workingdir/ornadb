@@ -1,0 +1,9 @@
+
+                use helpers;
+                pub type Note {
+                    value: Str,
+                    impl Display {
+                        fn display(self): Str = helpers.insert();
+                    }
+                }
+            

@@ -1,0 +1,13 @@
+
+            pub protocol P {
+                fn make(): Vault;
+            }
+            pub type Vault {
+                value: Int,
+            }
+            pub type Other {
+                impl P {
+                    fn make(): Vault = Vault { value: 1 };
+                }
+            }
+        
