@@ -1,0 +1,4 @@
+let secret_name: Int = "private";
+$?
+40 + 2
+$?
