@@ -17,80 +17,21 @@ use serde_json::{Value, json};
 ///
 /// The probe type carries DOCUMENTATION clauses so the rich hover
 /// assertions can check documentation rendering.
-// The `concat!` form preserves the leading spaces of the field line, which
-// a backslash line continuation would strip.
-const VALID_SOURCE: &str = concat!(
-    "CREATE SCHEMA product_test;\n",
-    "\n",
-    "CREATE TYPE product_test.probe AS OBJECT (\n",
-    "    stored BOOLEAN NOT NULL DOCUMENTATION 'whether the probe is stored'\n",
-    ") DOCUMENTATION 'an object probe';\n",
-    "\n",
-    "CREATE SERVER FUNCTION product_test.create_probe()\n",
-    "RETURNS ROWS (created REF product_test.probe)\n",
-    "SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n",
-    "AS INSERT INTO product_test.probe AS made (stored)\n",
-    "VALUES (TRUE) RETURNING REF(made);\n",
-    "\n",
-    "CREATE SERVER FUNCTION product_test.read_probes()\n",
-    "RETURNS ROWS (stored BOOLEAN)\n",
-    "SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n",
-    "AS SELECT probe.stored FROM product_test.probe probe;\n",
-);
+const VALID_SOURCE: &str = include_str!("fixtures/lsp-e2e-001-module-valid-source.orna");
 
 /// Accepted SERVER UPDATE and DELETE mutations with declarations for every
 /// referenced schema, object type, field, alias, and parameter.
-const MUTATION_SOURCE: &str = concat!(
-    "CREATE SCHEMA mutation_test;\n",
-    "CREATE TYPE mutation_test.item AS OBJECT (\n",
-    "    stored BOOLEAN NOT NULL\n",
-    ");\n",
-    "CREATE SERVER FUNCTION mutation_test.update_item(\n",
-    "    p_item REF mutation_test.item, p_stored BOOLEAN\n",
-    ")\n",
-    "RETURNS ROWS (updated REF mutation_test.item)\n",
-    "SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n",
-    "AS UPDATE mutation_test.item AS updated\n",
-    "SET stored = p_stored\n",
-    "WHERE REF(updated) = p_item\n",
-    "RETURNING REF(updated);\n",
-    "CREATE SERVER FUNCTION mutation_test.delete_item(p_item REF mutation_test.item)\n",
-    "RETURNS ROWS (deleted BOOLEAN)\n",
-    "SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n",
-    "AS DELETE FROM mutation_test.item AS deleted\n",
-    "WHERE REF(deleted) = p_item\n",
-    "RETURNING TRUE;\n",
-);
+const MUTATION_SOURCE: &str = include_str!("fixtures/lsp-e2e-002-module-mutation-source.orna");
 
 /// The accepted identity-preserving object-field rename shape. The LSP
 /// process has no user catalogue base, so its compiler diagnostics report the
 /// missing historical object while syntax and source navigation still expose
 /// the final field declaration and use.
-const FIELD_RENAME_SOURCE: &str = concat!(
-    "CREATE SCHEMA people;\n",
-    "CREATE TYPE people.person AS OBJECT (\n",
-    "    primary_email TEXT NOT NULL\n",
-    ");\n",
-    "ALTER TYPE people.person\n",
-    "    RENAME FIELD email TO primary_email;\n",
-    "CREATE SERVER FUNCTION people.list_emails()\n",
-    "RETURNS ROWS (email TEXT)\n",
-    "AS\n",
-    "    SELECT person.primary_email\n",
-    "    FROM people.person person;\n",
-);
+const FIELD_RENAME_SOURCE: &str =
+    include_str!("fixtures/lsp-e2e-003-module-field-rename-source.orna");
 
 /// Accepted ORDER BY source used to pin ASC/DESC keyword highlighting.
-const ORDER_BY_SOURCE: &str = concat!(
-    "CREATE SCHEMA ordering;\n",
-    "CREATE TYPE ordering.item AS OBJECT (\n",
-    "    title TEXT NOT NULL\n",
-    ");\n",
-    "CREATE SERVER FUNCTION ordering.list_items()\n",
-    "RETURNS ROWS (title TEXT)\n",
-    "AS\n",
-    "/* 😀 */ SELECT item.title FROM ordering.item item ORDER BY item.title ASC, item.title DESC;\n",
-);
+const ORDER_BY_SOURCE: &str = include_str!("fixtures/lsp-e2e-004-module-order-by-source.orna");
 
 /// The accepted CLIENT source fixture shared with the syntax parser test.
 const ACCEPTED_CLIENT_SOURCE: &str =
@@ -100,21 +41,9 @@ const ACCEPTED_CLIENT_SOURCE: &str =
 const PERSISTENT_RENAME_SOURCE: &str =
     include_str!("../../orna-compiler/tests/fixtures/server-function-dogfood.orna");
 /// The broken source used for negative diagnostics tests.
-const BROKEN_SOURCE: &str = "CREATE SCHEMA broken_test;\n\
-CREATE SERVER FUNCTION broken_test.f()\n\
-RETURNS BOOLEAN\n\
-AS SELECT THIS IS NOT SQL;\n";
+const BROKEN_SOURCE: &str = include_str!("fixtures/lsp-e2e-005-module-broken-source.orna");
 /// A warning-only CLIENT source shared with the compiler and analysis tests.
-const WARNING_SOURCE: &str = concat!(
-    "CREATE SCHEMA app;\n",
-    "CREATE CLIENT FUNCTION app.unreachable()\n",
-    "RETURNS BOOLEAN\n",
-    "IS\n",
-    "BEGIN\n",
-    "RETURN TRUE;\n",
-    "LET ignored := FALSE;\n",
-    "END;",
-);
+const WARNING_SOURCE: &str = include_str!("fixtures/lsp-e2e-006-module-warning-source.orna");
 
 /// The accepted editor corpus is the one source of truth for this LSP gate.
 const ACCEPTED_MANIFEST: &str =
@@ -1015,7 +944,9 @@ fn serves_accepted_client_semantic_tokens_with_utf16_and_nested_ranges() {
     initialize(&mut client);
     let uri = "file:///test/accepted-client-semantic.orna";
     // Keep the canonical fixture intact while exercising a UTF-16 offset before CREATE.
-    let source = format!("/* 😀 */ {ACCEPTED_CLIENT_SOURCE}");
+    let source = include_str!(
+        "fixtures/lsp-e2e-007-serves-accepted-client-semantic-tokens-with-utf16-and-nested-ranges-source.orna"
+    );
 
     open_document(&mut client, uri, &source, 1);
     let diagnostics = client.read_notification("textDocument/publishDiagnostics");
@@ -1267,12 +1198,8 @@ fn serves_signature_help_and_workspace_symbols() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/extended-requests.orna";
-    let source = concat!(
-        "CREATE SCHEMA request_test;\n",
-        "CREATE SERVER FUNCTION request_test.echo(p_value INTEGER, p_other BOOLEAN)\n",
-        "RETURNS INTEGER AS SELECT p_value;\n",
-        "CREATE SERVER FUNCTION request_test.call()\n",
-        "RETURNS INTEGER AS SELECT request_test.echo(1, TRUE);\n",
+    let source = include_str!(
+        "fixtures/lsp-e2e-008-serves-signature-help-and-workspace-symbols-source.orna"
     );
     open_document(&mut client, uri, source, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
@@ -1369,8 +1296,9 @@ fn serves_standard_function_hover_signature_and_unknown_fallback() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/standard-function.orna";
-    let source =
-        "CREATE CLIENT FUNCTION app.probe() RETURNS INTEGER RETURN std.math.increment(1);\n";
+    let source = include_str!(
+        "fixtures/lsp-e2e-009-serves-standard-function-hover-signature-and-unknown-fallback-source.orna"
+    );
     open_document(&mut client, uri, source, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
 
@@ -1426,8 +1354,9 @@ fn serves_standard_function_hover_signature_and_unknown_fallback() {
     );
 
     let unknown_uri = "file:///test/unknown-standard-function.orna";
-    let unknown_source =
-        "CREATE CLIENT FUNCTION app.probe() RETURNS INTEGER RETURN std.math.unknown(1);\n";
+    let unknown_source = include_str!(
+        "fixtures/lsp-e2e-010-serves-standard-function-hover-signature-and-unknown-fallback-unknown-source.orna"
+    );
     open_document(&mut client, unknown_uri, unknown_source, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
     let unknown_signature = client.request(
@@ -1527,13 +1456,8 @@ fn serves_rich_hover_content() {
     // this document carries diagnostics; hover still serves the parsed
     // parameter documentation.
     let echo_uri = format!("file://{}/../../echo.orna", env!("CARGO_MANIFEST_DIR"));
-    let echo_source = concat!(
-        "CREATE SCHEMA echo_test;\n",
-        "CREATE SERVER FUNCTION echo_test.echo_value(p_stored BOOLEAN DOCUMENTATION 'the value to echo')\n",
-        "RETURNS BOOLEAN\n",
-        "SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n",
-        "AS SELECT p_stored;\n",
-    );
+    let echo_source =
+        include_str!("fixtures/lsp-e2e-011-serves-rich-hover-content-echo-source.orna");
     open_document(&mut client, &echo_uri, echo_source, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
 
@@ -1609,10 +1533,7 @@ fn serves_rich_hover_content() {
     // Standard-library type hover: a qualified std type reference resolves
     // through the verified standard catalogue.
     let std_uri = format!("file://{}/../../std-type.orna", env!("CARGO_MANIFEST_DIR"));
-    let std_source = concat!(
-        "CREATE SCHEMA std_test;\n",
-        "CREATE TYPE std_test.token AS VALUE (t std.types.OPAQUE_TOKEN) IMMUTABLE PERSISTABLE;\n",
-    );
+    let std_source = include_str!("fixtures/lsp-e2e-012-serves-rich-hover-content-std-source.orna");
     open_document(&mut client, &std_uri, std_source, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
     let std_hover = client.request(
@@ -1635,13 +1556,8 @@ fn serves_rich_hover_content() {
     );
 
     let collision_uri = "file:///test/hover-collision.orna";
-    let collision_source = concat!(
-        "CREATE SCHEMA status;\n",
-        "CREATE SCHEMA product_test;\n",
-        "CREATE TYPE product_test.probe AS OBJECT (status BOOLEAN DOCUMENTATION 'field status docs');\n",
-        "CREATE SERVER FUNCTION read_status() RETURNS ROWS (status BOOLEAN) AS\n",
-        "SELECT p.status FROM product_test.probe p;\n",
-    );
+    let collision_source =
+        include_str!("fixtures/lsp-e2e-013-serves-rich-hover-content-collision-source.orna");
     open_document(&mut client, collision_uri, collision_source, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
     let sql_status_hover = client.request(
@@ -2192,55 +2108,8 @@ fn scoped_navigation_resolves_owner_paths_and_fails_closed() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/scoped-navigation.orna";
-    let source = concat!(
-        "CREATE SCHEMA owners;\n",
-        "CREATE TYPE owners.first_obj AS OBJECT (stored BOOLEAN);\n",
-        "CREATE TYPE owners.second_obj AS OBJECT (stored BOOLEAN);\n",
-        "CREATE TYPE owners.quoted_obj AS OBJECT (\"display_name\" BOOLEAN);\n",
-        "CREATE TYPE owners.client_obj AS OBJECT (\"display_name\" BOOLEAN);\n",
-        "CREATE SCHEMA unicode_nav;\n",
-        "CREATE TYPE unicode_nav.café AS OBJECT (résumé BOOLEAN);\n",
-        "CREATE SERVER FUNCTION read_first() RETURNS ROWS (stored BOOLEAN) AS\n",
-        "SELECT first_alias.stored FROM owners.first_obj first_alias;\n",
-        "CREATE SERVER FUNCTION read_second() RETURNS ROWS (stored BOOLEAN) AS\n",
-        "SELECT second_alias.stored FROM owners.second_obj second_alias;\n",
-        "CREATE SERVER FUNCTION read_quoted() RETURNS ROWS (\"display_name\" BOOLEAN) AS\n",
-        "SELECT quoted_alias.\"display_name\" FROM owners.quoted_obj quoted_alias;\n",
-        "CREATE SERVER FUNCTION read_unicode() RETURNS ROWS (résumé BOOLEAN) AS\n",
-        "SELECT unicode_alias.RÉSUMÉ FROM unicode_nav.CAFÉ unicode_alias;\n",
-        "CREATE SERVER FUNCTION unresolved_property() RETURNS BOOLEAN AS\n",
-        "SELECT unknown_alias.missing FROM owners.first_obj unknown_alias;\n",
-        "CREATE CLIENT FUNCTION client_read(entry REF owners.client_obj) RETURNS BOOLEAN AS\n",
-        "entry.\"display_name\";\n",
-        "CREATE CLIENT FUNCTION client_field_shadow(entry REF owners.client_obj) RETURNS BOOLEAN IS\n",
-        "    STATE entry BOOLEAN SCOPE LOCAL DEFAULT TRUE;\n",
-        "BEGIN\n",
-        "    RETURN entry.\"display_name\";\n",
-        "END;\n",
-        "CREATE CLIENT FUNCTION client_call(entry BOOLEAN) RETURNS BOOLEAN AS entry;\n",
-        "CREATE CLIENT FUNCTION client_caller() RETURNS BOOLEAN AS\n",
-        "owners.client_call(entry => TRUE);\n",
-        "CREATE TYPE owners.child_obj AS OBJECT (stored BOOLEAN);\n",
-        "CREATE TYPE owners.parent_obj AS OBJECT (child REF owners.child_obj);\n",
-        "CREATE SERVER FUNCTION read_nested() RETURNS ROWS (stored BOOLEAN) AS\n",
-        "SELECT nested_alias.child.stored FROM owners.parent_obj nested_alias;\n",
-        "CREATE SERVER FUNCTION invalid_alias() RETURNS ROWS (stored BOOLEAN) AS\n",
-        "SELECT wrong_alias.stored FROM owners.first_obj real_alias;\n",
-        "CREATE SERVER FUNCTION unknown_insert(p_stored BOOLEAN) RETURNS ROWS (created REF owners.first_obj) AS\n",
-        "INSERT INTO owners.first_obj AS made (\"missing\") VALUES (p_stored) RETURNING REF(made);\n",
-        "CREATE SERVER FUNCTION unknown_update(p_stored BOOLEAN, p_key REF owners.first_obj) RETURNS ROWS (changed REF owners.first_obj) AS\n",
-        "UPDATE owners.first_obj AS changed SET \"missing\" = p_stored WHERE REF(changed) = p_key RETURNING REF(changed);\n",
-        "CREATE CLIENT FUNCTION shadow(entry BOOLEAN) RETURNS BOOLEAN IS\n",
-        "    STATE entry BOOLEAN SCOPE LOCAL DEFAULT TRUE;\n",
-        "BEGIN\n",
-        "    RETURN entry;\n",
-        "END;\n",
-        "CREATE CLIENT FUNCTION future() RETURNS BOOLEAN IS\n",
-        "    STATE first BOOLEAN SCOPE LOCAL DEFAULT later;\n",
-        "    STATE later BOOLEAN SCOPE LOCAL DEFAULT TRUE;\n",
-        "BEGIN\n",
-        "    RETURN first;\n",
-        "END;\n",
+    let source = include_str!(
+        "fixtures/lsp-e2e-014-scoped-navigation-resolves-owner-paths-and-fails-closed-source.orna"
     );
     open_document(&mut client, uri, source, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
@@ -2591,7 +2460,9 @@ fn semantic_token_range_includes_intersecting_multiline_comment_segments() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/semantic-range.orna";
-    let source = "/* first line\nsecond line\nthird line */\n";
+    let source = include_str!(
+        "fixtures/lsp-e2e-015-semantic-token-range-includes-intersecting-multiline-comment-segments-source.orna"
+    );
     open_document(&mut client, uri, source, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
 
@@ -2679,7 +2550,9 @@ fn serves_semantic_compiler_diagnostics_for_unknown_schema_in_push_and_pull() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/semantic-invalid.orna";
-    let source = "CREATE TYPE app.task AS OBJECT (done BOOLEAN);\n";
+    let source = include_str!(
+        "fixtures/lsp-e2e-016-serves-semantic-compiler-diagnostics-for-unknown-schema-in-push-and-pull-source.orna"
+    );
 
     open_document(&mut client, uri, source, 1);
     let pushed = client.read_notification("textDocument/publishDiagnostics");
@@ -2786,7 +2659,9 @@ fn serves_syntax_diagnostic_for_malformed_schema_in_push_and_pull() {
     let uri = "file:///test/syntax-invalid.orna";
     // The parser reports the semicolon at byte span 29..30. The emoji prefix
     // makes the corresponding LSP range use UTF-16 characters 27..28.
-    let source = "/* 😀 */ CREATE SCHEMA crm.;";
+    let source = include_str!(
+        "fixtures/lsp-e2e-017-serves-syntax-diagnostic-for-malformed-schema-in-push-and-pull-source.orna"
+    );
 
     open_document(&mut client, uri, source, 1);
     let pushed = client.read_notification("textDocument/publishDiagnostics");
@@ -2820,33 +2695,8 @@ fn qualified_name_navigation_keeps_same_final_names_in_their_namespace() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/qualified-navigation.orna";
-    let source = concat!(
-        "CREATE SCHEMA alpha;\n",
-        "CREATE SCHEMA beta;\n",
-        "CREATE TYPE alpha.item AS OBJECT (value BOOLEAN);\n",
-        "CREATE TYPE beta.item AS OBJECT (value BOOLEAN);\n",
-        "CREATE TYPE alpha.stage AS ENUM ('open');\n",
-        "CREATE TYPE beta.stage AS ENUM ('closed');\n",
-        "CREATE TYPE alpha.record AS VALUE (stage alpha.stage) IMMUTABLE PERSISTABLE;\n",
-        "CREATE TYPE beta.record AS VALUE (stage beta.stage) IMMUTABLE PERSISTABLE;\n",
-        "CREATE TYPE alpha.scalar AS VALUE PRIMITIVE KERNEL CONTRACT 'alpha.scalar@1' IMMUTABLE PERSISTABLE;\n",
-        "CREATE TYPE beta.scalar AS VALUE PRIMITIVE KERNEL CONTRACT 'beta.scalar@1' IMMUTABLE PERSISTABLE;\n",
-        "CREATE TYPE alpha.opaque AS VALUE OPAQUE KERNEL CONTRACT 'alpha.opaque@1' IMMUTABLE TRANSIENT;\n",
-        "CREATE TYPE beta.opaque AS VALUE OPAQUE KERNEL CONTRACT 'beta.opaque@1' IMMUTABLE TRANSIENT;\n",
-        "CREATE TYPE alpha.holder AS OBJECT (item alpha.item, stage alpha.stage, record alpha.record, scalar alpha.scalar, opaque alpha.opaque);\n",
-        "CREATE TYPE beta.holder AS OBJECT (item beta.item, stage beta.stage, record beta.record, scalar beta.scalar, opaque beta.opaque);\n",
-        "CREATE SERVER FUNCTION alpha.run() RETURNS BOOLEAN AS SELECT TRUE FROM alpha.holder t;\n",
-        "CREATE SERVER FUNCTION beta.run() RETURNS BOOLEAN AS SELECT TRUE FROM beta.holder t;\n",
-        "CREATE CLIENT FUNCTION alpha.client() RETURNS BOOLEAN AS TRUE;\n",
-        "CREATE CLIENT FUNCTION beta.client() RETURNS BOOLEAN AS TRUE;\n",
-        "CREATE CLIENT FUNCTION alpha.use() RETURNS BOOLEAN IS\n",
-        "BEGIN\n",
-        "    RETURN AWAIT std.data.resource(target => alpha.run, arguments => std.call.args());\n",
-        "END;\n",
-        "CREATE CLIENT FUNCTION beta.use() RETURNS BOOLEAN IS\n",
-        "BEGIN\n",
-        "    RETURN AWAIT std.data.resource(target => beta.run, arguments => std.call.args());\n",
-        "END;\n",
+    let source = include_str!(
+        "fixtures/lsp-e2e-018-qualified-name-navigation-keeps-same-final-names-in-their-namespace-source.orna"
     );
     open_document(&mut client, uri, source, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
@@ -2998,14 +2848,8 @@ fn external_client_hover_preserves_runtime_and_capability_metadata() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/external-hover.orna";
-    let source = concat!(
-        "CREATE EXTERNAL CLIENT FUNCTION inspector.render(p_snapshot sys.inspect.snapshot)\n",
-        "RETURNS std.ui.UI\n",
-        "RUNTIME CONTRACT 'std.inspect.render@1'\n",
-        "REQUIRES CAPABILITY sys.inspect.render('snapshot');\n",
-        "CREATE CLIENT FUNCTION inspector.local()\n",
-        "RETURNS BOOLEAN\n",
-        "AS TRUE;\n",
+    let source = include_str!(
+        "fixtures/lsp-e2e-019-external-client-hover-preserves-runtime-and-capability-metadata-source.orna"
     );
     open_document(&mut client, uri, source, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");

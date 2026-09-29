@@ -1,0 +1,26 @@
+CREATE SCHEMA alpha;
+CREATE SCHEMA beta;
+CREATE TYPE alpha.item AS OBJECT (value BOOLEAN);
+CREATE TYPE beta.item AS OBJECT (value BOOLEAN);
+CREATE TYPE alpha.stage AS ENUM ('open');
+CREATE TYPE beta.stage AS ENUM ('closed');
+CREATE TYPE alpha.record AS VALUE (stage alpha.stage) IMMUTABLE PERSISTABLE;
+CREATE TYPE beta.record AS VALUE (stage beta.stage) IMMUTABLE PERSISTABLE;
+CREATE TYPE alpha.scalar AS VALUE PRIMITIVE KERNEL CONTRACT 'alpha.scalar@1' IMMUTABLE PERSISTABLE;
+CREATE TYPE beta.scalar AS VALUE PRIMITIVE KERNEL CONTRACT 'beta.scalar@1' IMMUTABLE PERSISTABLE;
+CREATE TYPE alpha.opaque AS VALUE OPAQUE KERNEL CONTRACT 'alpha.opaque@1' IMMUTABLE TRANSIENT;
+CREATE TYPE beta.opaque AS VALUE OPAQUE KERNEL CONTRACT 'beta.opaque@1' IMMUTABLE TRANSIENT;
+CREATE TYPE alpha.holder AS OBJECT (item alpha.item, stage alpha.stage, record alpha.record, scalar alpha.scalar, opaque alpha.opaque);
+CREATE TYPE beta.holder AS OBJECT (item beta.item, stage beta.stage, record beta.record, scalar beta.scalar, opaque beta.opaque);
+CREATE SERVER FUNCTION alpha.run() RETURNS BOOLEAN AS SELECT TRUE FROM alpha.holder t;
+CREATE SERVER FUNCTION beta.run() RETURNS BOOLEAN AS SELECT TRUE FROM beta.holder t;
+CREATE CLIENT FUNCTION alpha.client() RETURNS BOOLEAN AS TRUE;
+CREATE CLIENT FUNCTION beta.client() RETURNS BOOLEAN AS TRUE;
+CREATE CLIENT FUNCTION alpha.use() RETURNS BOOLEAN IS
+BEGIN
+    RETURN AWAIT std.data.resource(target => alpha.run, arguments => std.call.args());
+END;
+CREATE CLIENT FUNCTION beta.use() RETURNS BOOLEAN IS
+BEGIN
+    RETURN AWAIT std.data.resource(target => beta.run, arguments => std.call.args());
+END;
