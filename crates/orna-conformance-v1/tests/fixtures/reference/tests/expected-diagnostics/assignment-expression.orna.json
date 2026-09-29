@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/assignment-expression.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "E1301",
+  "message_contains": "assignment is a statement, not an expression",
+  "status": "expected-not-executed"
+}

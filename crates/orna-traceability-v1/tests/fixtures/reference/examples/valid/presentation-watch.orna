@@ -1,0 +1,2 @@
+pub fn dashboard() =
+    std.ui.Page("/", _ => std.ui.Table(sys.rt.streams));

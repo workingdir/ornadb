@@ -1,0 +1,6 @@
+pub protocol Order {
+    fn compare(self, other: Self): Ordering;
+}
+
+pub fn maximum<T impl Order>(values: [T]): T? =
+    values | sort_by(value => value) | last();

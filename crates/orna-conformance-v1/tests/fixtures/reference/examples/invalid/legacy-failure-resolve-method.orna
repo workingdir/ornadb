@@ -1,0 +1,2 @@
+pub fn bad(failure: sys.Failure) =
+    failure.resolve();

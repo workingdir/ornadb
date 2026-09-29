@@ -6,7 +6,7 @@ const INFER_SUCCESS: &str = include_str!("fixtures/traceability-infer-success.or
 const INFER_UNDERCONSTRAINED: &str =
     include_str!("../../orna-semantic-v1/tests/fixtures/underconstrained-lambda-field.orna");
 const NUMERIC_CONTEXT: &str = include_str!(
-    "../../../../reference/Orna-1.0.0/examples/valid/numeric-literal-context.orna"
+    "fixtures/reference/examples/valid/numeric-literal-context.orna"
 );
 
 fn analyze(source: &str) -> orna_semantic_v1::Analysis {

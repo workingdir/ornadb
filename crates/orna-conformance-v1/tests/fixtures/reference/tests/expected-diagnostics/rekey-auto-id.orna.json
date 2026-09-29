@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/rekey-auto-id.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E3013",
+  "message_contains": "an automatic-key table cannot be explicitly re-keyed",
+  "status": "expected-not-executed"
+}

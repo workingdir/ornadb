@@ -1,0 +1,6 @@
+pub table Contact(id: Str) {
+    name: Str,
+}
+
+pub fn rename_key() =
+    Contact.rekey("alice-smith", "alice-jones");

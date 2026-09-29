@@ -1,0 +1,87 @@
+[
+  {
+    "name": "zero",
+    "hex": "00",
+    "canonical_roundtrip": true
+  },
+  {
+    "name": "23",
+    "hex": "17",
+    "canonical_roundtrip": true
+  },
+  {
+    "name": "24",
+    "hex": "1818",
+    "canonical_roundtrip": true
+  },
+  {
+    "name": "negative-one",
+    "hex": "20",
+    "canonical_roundtrip": true
+  },
+  {
+    "name": "negative-25",
+    "hex": "3818",
+    "canonical_roundtrip": true
+  },
+  {
+    "name": "uint64-max",
+    "hex": "1bffffffffffffffff",
+    "canonical_roundtrip": true
+  },
+  {
+    "name": "bignum",
+    "hex": "c249010000000000000000",
+    "canonical_roundtrip": true
+  },
+  {
+    "name": "negative-bignum",
+    "hex": "c349010000000000000000",
+    "canonical_roundtrip": true
+  },
+  {
+    "name": "true",
+    "hex": "f5",
+    "canonical_roundtrip": true
+  },
+  {
+    "name": "text",
+    "hex": "6161",
+    "canonical_roundtrip": true
+  },
+  {
+    "name": "blob",
+    "hex": "4200ff",
+    "canonical_roundtrip": true
+  },
+  {
+    "name": "decimal-12.34",
+    "hex": "d9ea60821904d221",
+    "canonical_roundtrip": true
+  },
+  {
+    "name": "decimal-zero",
+    "hex": "d9ea60820000",
+    "canonical_roundtrip": true
+  },
+  {
+    "name": "option-none",
+    "hex": "d9ea6d8100",
+    "canonical_roundtrip": true
+  },
+  {
+    "name": "nested-some-none",
+    "hex": "d9ea6d8201d9ea6d8100",
+    "canonical_roundtrip": true
+  },
+  {
+    "name": "unit",
+    "hex": "d9ea6e80",
+    "canonical_roundtrip": true
+  },
+  {
+    "name": "negative-zero",
+    "hex": "fb8000000000000000",
+    "canonical_roundtrip": true
+  }
+]

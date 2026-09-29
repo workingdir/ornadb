@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/missing-required-field.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E2002",
+  "message_contains": "missing required field `name`",
+  "status": "expected-not-executed"
+}
