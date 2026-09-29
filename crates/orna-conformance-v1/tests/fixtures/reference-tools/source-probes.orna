@@ -1,0 +1,42 @@
+// CASE nominal accept
+fn f(v: Str) = Name { value: v };
+
+// CASE self accept
+type Name { value: Str, impl Display { fn display(self, context) = self.value; } }
+
+// CASE keyword-label accept
+fn f(raw: Str) = codec.decode(raw, as: Message);
+
+// CASE keyword-member accept
+fn f() = sys.ObjectKind.table;
+
+// CASE tuple-value-and-type accept
+fn f(): (Str, Int) = ("name", 1);
+
+// CASE singleton-tuple accept
+fn f(): (Int,) = (1,);
+
+// CASE unit accept
+fn f(): Unit = ();
+
+// CASE comparison-chain reject
+fn f(a: Int, b: Int, c: Int) = a == b == c;
+
+// CASE mixed-chain reject
+fn f(a: Int, b: Int, c: Int) = a < b == c;
+
+// CASE explicit-snapshot accept
+fn f() = sys.snapshot("main~10");
+
+// CASE bare-snapshot reject
+fn f() = data.Table.as_of(main~10);
+
+// CASE recovery-lambda accept
+fn f() = operation() |? (e => 0);
+
+// CASE unparenthesised-pipeline-lambda reject
+fn f() = operation() |? e => 0;
+
+// CASE optional-patterns accept
+fn f(x: Int?): Int = case x { Some(v): v, null: 0, };
+
