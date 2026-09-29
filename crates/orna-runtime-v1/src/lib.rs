@@ -12569,6 +12569,11 @@ fn stream_administration_outcome(
         {
             Ok(StreamAdministrationOutcome::Paused { changed })
         }
+        CommitResult::StreamStatusChanged { state, changed }
+            if state.status == StreamStatus::Running =>
+        {
+            Ok(StreamAdministrationOutcome::Running { changed })
+        }
         CommitResult::PausePending { changed, .. } => {
             Ok(StreamAdministrationOutcome::PausePending { changed })
         }
