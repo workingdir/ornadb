@@ -1,0 +1,1 @@
+fn first(values: [Int]): Int = 1;
