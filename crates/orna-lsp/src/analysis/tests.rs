@@ -24,8 +24,9 @@ fn hover_markdown(hover: &Hover) -> &str {
 
 #[test]
 fn hover_keyword_is_preserves_procedural_and_null_contexts() {
-    let procedural_text =
-        "CREATE CLIENT FUNCTION app.probe() RETURNS BOOLEAN IS\nBEGIN\n    RETURN TRUE;\nEND;";
+    let procedural_text = include_str!(
+        "fixtures/analysis-001-hover-keyword-is-preserves-procedural-and-null-contexts-procedural-text.orna"
+    );
     let procedural_is = procedural_text.find(" IS\n").expect("procedural IS") + 1;
     let procedural_hover = hover_at(procedural_text, procedural_is).expect("procedural IS hover");
     let procedural_markdown = hover_markdown(&procedural_hover);
@@ -33,8 +34,9 @@ fn hover_keyword_is_preserves_procedural_and_null_contexts() {
     assert!(procedural_markdown.contains("IS declarations BEGIN statements END;"));
     assert!(procedural_markdown.contains("expression IS [NOT] NULL."));
 
-    let expression_text =
-        "CREATE CLIENT FUNCTION app.probe(value BOOLEAN) RETURNS BOOLEAN AS value IS NULL;";
+    let expression_text = include_str!(
+        "fixtures/analysis-002-hover-keyword-is-preserves-procedural-and-null-contexts-expression-text.orna"
+    );
     let expression_is = expression_text.find(" IS NULL").expect("expression IS") + 1;
     let expression_hover = hover_at(expression_text, expression_is).expect("expression IS hover");
     let expression_markdown = hover_markdown(&expression_hover);
@@ -45,7 +47,9 @@ fn hover_keyword_is_preserves_procedural_and_null_contexts() {
 
 #[test]
 fn hover_keyword_is_recognizes_pre_begin_declarations_as_procedural() {
-    let text = "CREATE CLIENT FUNCTION app.probe() RETURNS BOOLEAN IS\n    STATE stored BOOLEAN;\nBEGIN\n    RETURN stored;\nEND;";
+    let text = include_str!(
+        "fixtures/analysis-003-hover-keyword-is-recognizes-pre-begin-declarations-as-procedural-text.orna"
+    );
     let is = text.find(" IS\n").expect("procedural IS") + 1;
     let hover = hover_at(text, is).expect("procedural IS hover");
     let markdown = hover_markdown(&hover);
@@ -140,13 +144,8 @@ fn standard_functions_appear_in_completion() {
 
 #[test]
 fn completion_resolves_nested_client_fields_through_utf16_cursor() {
-    let text = concat!(
-        "CREATE SCHEMA expr;\n",
-        "CREATE TYPE expr.inner AS OBJECT (label TEXT);\n",
-        "CREATE TYPE expr.item AS OBJECT (nested REF expr.inner, title TEXT);\n",
-        "CREATE CLIENT FUNCTION expr.read(p_item REF expr.item)\n",
-        "RETURNS TEXT\n",
-        "AS '😀' || p_item.nested.label;\n",
+    let text = include_str!(
+        "fixtures/analysis-004-completion-resolves-nested-client-fields-through-utf16-cursor-text.orna"
     );
     let parse = orna_syntax::parse(text);
     assert!(
@@ -213,47 +212,8 @@ fn completion_resolves_nested_client_fields_through_utf16_cursor() {
 
 #[test]
 fn completion_marks_targets_only_inside_accepted_constructor_arguments() {
-    let text = concat!(
-        "CREATE SCHEMA resource_fixture;\n",
-        "CREATE SCHEMA stream_fixture;\n",
-        "CREATE SCHEMA action_fixture;\n",
-        "CREATE TYPE resource_fixture.row AS OBJECT (title TEXT, value INTEGER);\n",
-        "CREATE SERVER FUNCTION resource_fixture.scalar() RETURNS INTEGER AS\n",
-        "    SELECT r.value FROM resource_fixture.row r;\n",
-        "CREATE SERVER FUNCTION stream_fixture.stream() RETURNS STREAM<TEXT> AS\n",
-        "    SELECT r.title FROM resource_fixture.row r;\n",
-        "CREATE SERVER FUNCTION stream_fixture.unsupported() RETURNS STREAM<UUID> AS\n",
-        "    SELECT r.value FROM resource_fixture.row r;\n",
-        "CREATE CLIENT FUNCTION action_fixture.client() RETURNS INTEGER AS 1;\n",
-        "CREATE CLIENT FUNCTION resource_fixture.resource_probe() RETURNS INTEGER IS\n",
-        "BEGIN\n",
-        "    RETURN AWAIT std.data.resource(\n",
-        "        target => resource_fixture.scalar,\n",
-        "        arguments => std.call.args()\n",
-        "    );\n",
-        "END;\n",
-        "CREATE CLIENT FUNCTION stream_fixture.stream_probe() RETURNS STREAM<TEXT> IS\n",
-        "BEGIN\n",
-        "    RETURN AWAIT std.data.stream_resource(\n",
-        "        target => stream_fixture.stream,\n",
-        "        arguments => std.call.args()\n",
-        "    );\n",
-        "END;\n",
-        "CREATE CLIENT FUNCTION action_fixture.action_probe() RETURNS std.Action AS\n",
-        "    std.action.call(\n",
-        "        target => action_fixture.client,\n",
-        "        arguments => std.call.args()\n",
-        "    );\n",
-        "CREATE CLIENT FUNCTION action_fixture.shadowed() RETURNS std.Action IS\n",
-        "    LET std INTEGER := 1;\n",
-        "BEGIN\n",
-        "    RETURN std.action.call(\n",
-        "        target => std.foo,\n",
-        "        arguments => std.call.args()\n",
-        "    );\n",
-        "END;\n",
-        "CREATE CLIENT FUNCTION resource_fixture.field_probe(p_item REF resource_fixture.row)\n",
-        "RETURNS TEXT AS p_item.title;\n",
+    let text = include_str!(
+        "fixtures/analysis-005-completion-marks-targets-only-inside-accepted-constructor-arguments-text.orna"
     );
     let parse = orna_syntax::parse(text);
     assert!(
@@ -335,7 +295,9 @@ fn completion_marks_targets_only_inside_accepted_constructor_arguments() {
 #[test]
 fn standard_function_hover_and_signature_use_catalogue_data() {
     let standard = StandardLibrary::load().expect("standard library");
-    let text = "CREATE CLIENT FUNCTION app.probe() RETURNS INTEGER RETURN std.math.increment(1);";
+    let text = include_str!(
+        "fixtures/analysis-006-standard-function-hover-and-signature-use-catalogue-data-text.orna"
+    );
     let document = Document::new(
         "file:///standard-function.orna".parse().unwrap(),
         text.to_owned(),
@@ -369,11 +331,8 @@ fn standard_function_hover_and_signature_use_catalogue_data() {
 
 #[test]
 fn signature_help_accepts_unicode_and_quoted_callable_names() {
-    let text = concat!(
-        "CREATE CLIENT FUNCTION café(p_value INTEGER) RETURNS INTEGER AS p_value;\n",
-        "CREATE CLIENT FUNCTION caller() RETURNS INTEGER AS café(1);\n",
-        "CREATE CLIENT FUNCTION \"app\".\"item\"(p_value BOOLEAN) RETURNS BOOLEAN AS p_value;\n",
-        "CREATE CLIENT FUNCTION quoted_caller() RETURNS BOOLEAN AS \"app\".\"item\"(TRUE);\n",
+    let text = include_str!(
+        "fixtures/analysis-007-signature-help-accepts-unicode-and-quoted-callable-names-text.orna"
     );
     let document = Document::new(
         "file:///signature-name-forms.orna".parse().unwrap(),
@@ -409,7 +368,9 @@ fn signature_help_accepts_unicode_and_quoted_callable_names() {
 }
 #[test]
 fn hover_multiword_scalars_cover_the_complete_type_span() {
-    let text = "CREATE TYPE files.document AS OBJECT (body CHARACTER LARGE OBJECT, data BINARY LARGE OBJECT);";
+    let text = include_str!(
+        "fixtures/analysis-008-hover-multiword-scalars-cover-the-complete-type-span-text.orna"
+    );
     let mapper = PositionMapper::new(text);
     for (spelling, canonical) in [
         ("CHARACTER LARGE OBJECT", "CHARACTER_LARGE_OBJECT"),
@@ -436,7 +397,9 @@ fn hover_multiword_scalars_cover_the_complete_type_span() {
 
 #[test]
 fn hover_multiword_scalars_respect_utf16_positions_and_context() {
-    let text = "CREATE TYPE files.document AS OBJECT (\"😀body\" CHARACTER LARGE OBJECT, data BINARY LARGE OBJECT);";
+    let text = include_str!(
+        "fixtures/analysis-009-hover-multiword-scalars-respect-utf16-positions-and-context-text.orna"
+    );
     let mapper = PositionMapper::new(text);
     let character_start = text
         .find("CHARACTER LARGE OBJECT")
@@ -466,7 +429,9 @@ fn hover_multiword_scalars_respect_utf16_positions_and_context() {
     assert!(hover_at(text, character_end - 1).is_some());
     assert!(hover_at(text, character_end).is_none());
 
-    let generic_text = "CREATE TYPE files.document AS OBJECT (LARGE BOOLEAN, value OBJECT);";
+    let generic_text = include_str!(
+        "fixtures/analysis-010-hover-multiword-scalars-respect-utf16-positions-and-context-generic-text.orna"
+    );
     for word in ["LARGE", "OBJECT"] {
         let byte = generic_text.rfind(word).expect("generic word");
         if let Some(result) = hover_at(generic_text, byte) {
@@ -481,13 +446,8 @@ fn hover_multiword_scalars_respect_utf16_positions_and_context() {
 
 #[test]
 fn hover_client_local_type_sources_cover_complete_multiword_ranges() {
-    let text = concat!(
-        "CREATE CLIENT FUNCTION files.document() RETURNS TEXT IS\n",
-        "    LET body CHARACTER LARGE OBJECT := \x27body\x27;\n",
-        "BEGIN\n",
-        "    LET data BINARY LARGE OBJECT := body;\n",
-        "    RETURN body;\n",
-        "END;",
+    let text = include_str!(
+        "fixtures/analysis-011-hover-client-local-type-sources-cover-complete-multiword-ranges-text.orna"
     );
     for (spelling, canonical) in [
         ("CHARACTER LARGE OBJECT", "CHARACTER_LARGE_OBJECT"),
@@ -515,12 +475,8 @@ fn hover_client_local_type_sources_cover_complete_multiword_ranges() {
 
 #[test]
 fn hover_client_procedural_local_use_resolves_type() {
-    let text = concat!(
-        "CREATE CLIENT FUNCTION files.document() RETURNS BOOLEAN IS\n",
-        "    LET body BOOLEAN := TRUE;\n",
-        "BEGIN\n",
-        "    RETURN body;\n",
-        "END;",
+    let text = include_str!(
+        "fixtures/analysis-012-hover-client-procedural-local-use-resolves-type-text.orna"
     );
     let byte = text.rfind("body").expect("local use");
     let result = hover_at(text, byte).expect("procedural local hover");
@@ -534,14 +490,8 @@ fn hover_client_procedural_local_use_resolves_type() {
 
 #[test]
 fn hover_client_local_type_sources_reject_comment_separators() {
-    let text = concat!(
-        "CREATE CLIENT FUNCTION files.document() RETURNS TEXT IS\n",
-        "    LET body CHARACTER /* kept */ LARGE OBJECT := \x27body\x27;\n",
-        "    LET data BINARY /* kept */ LARGE OBJECT := body;\n",
-        "    LET invalid CHARACTERLARGEOBJECT := body;\n",
-        "BEGIN\n",
-        "    RETURN body;\n",
-        "END;",
+    let text = include_str!(
+        "fixtures/analysis-013-hover-client-local-type-sources-reject-comment-separators-text.orna"
     );
 
     for (spelling, canonical) in [
@@ -602,14 +552,8 @@ fn quoted_local_type_owner_allows_comment_markers_inside_identifier() {
 
 #[test]
 fn hover_client_local_initializers_and_assignments_do_not_resolve_as_scalars() {
-    let text = concat!(
-        "CREATE CLIENT FUNCTION files.document() RETURNS TEXT IS\n",
-        "    LET body CHARACTER LARGE OBJECT := std.large.object();\n",
-        "BEGIN\n",
-        "    LET data BINARY LARGE OBJECT := body;\n",
-        "    data := std.binary.large.object();\n",
-        "    RETURN body;\n",
-        "END;",
+    let text = include_str!(
+        "fixtures/analysis-014-hover-client-local-initializers-and-assignments-do-not-resolve-as-scalars-text.orna"
     );
 
     for occurrence in ["std.large.object", "std.binary.large.object"] {
@@ -630,25 +574,24 @@ fn hover_client_local_initializers_and_assignments_do_not_resolve_as_scalars() {
 
 #[test]
 fn declaration_lookup_folds_unquoted_identifier_case_but_preserves_quotes() {
-    let parse = orna_syntax::parse("CREATE SCHEMA foo;");
+    let parse = orna_syntax::parse(include_str!(
+        "fixtures/analysis-015-declaration-lookup-folds-unquoted-identifier-case-but-preserves-quotes-parse-input.orna"
+    ));
 
     assert!(declaration_at(&parse, "foo").is_some());
     assert!(declaration_at(&parse, "Foo").is_some());
 
-    let quoted = orna_syntax::parse("CREATE SCHEMA \"Foo\";");
+    let quoted = orna_syntax::parse(include_str!(
+        "fixtures/analysis-016-declaration-lookup-folds-unquoted-identifier-case-but-preserves-quotes-parse-input.orna"
+    ));
     assert!(declaration_at(&quoted, "\"Foo\"").is_some());
     assert!(declaration_at(&quoted, "\"foo\"").is_none());
     assert!(declaration_at(&quoted, "foo").is_none());
 }
 #[test]
 fn qualified_type_navigation_uses_full_path_for_hover_definition_and_references() {
-    let text = concat!(
-        "CREATE SCHEMA a;\n",
-        "CREATE SCHEMA b;\n",
-        "CREATE TYPE a.item AS OBJECT (a_value BOOLEAN);\n",
-        "CREATE TYPE b.item AS OBJECT (b_value TEXT);\n",
-        "CREATE SERVER FUNCTION use_b() RETURNS b.item AS SELECT TRUE;\n",
-        "CREATE SERVER FUNCTION use_a() RETURNS a.item AS SELECT TRUE;\n",
+    let text = include_str!(
+        "fixtures/analysis-017-qualified-type-navigation-uses-full-path-for-hover-definition-and-references-text.orna"
     );
     let document = Document::new(
         "file:///qualified-navigation.orna".parse().unwrap(),
@@ -704,14 +647,8 @@ fn qualified_type_navigation_uses_full_path_for_hover_definition_and_references(
 }
 #[test]
 fn qualified_type_navigation_consumes_line_comments_between_components() {
-    let text = concat!(
-        "CREATE SCHEMA a;\n",
-        "CREATE SCHEMA b;\n",
-        "CREATE TYPE a.item AS OBJECT (a_value BOOLEAN);\n",
-        "CREATE TYPE b.item AS OBJECT (b_value TEXT);\n",
-        "CREATE SERVER FUNCTION use_b() RETURNS b\n",
-        "-- keep the qualified path intact\n",
-        ".item AS SELECT TRUE;\n",
+    let text = include_str!(
+        "fixtures/analysis-018-qualified-type-navigation-consumes-line-comments-between-components-text.orna"
     );
     let document = Document::new(
         "file:///qualified-comment-navigation.orna".parse().unwrap(),
@@ -762,11 +699,8 @@ fn qualified_type_navigation_consumes_line_comments_between_components() {
 
 #[test]
 fn quoted_top_level_references_do_not_include_same_path_fields() {
-    let text = concat!(
-        "CREATE SCHEMA \"b\";\n",
-        "CREATE TYPE \"b\".\"item\" AS OBJECT (\"item\" BOOLEAN);\n",
-        "CREATE SERVER FUNCTION use_b() RETURNS BOOLEAN AS\n",
-        "SELECT \"b\".\"item\" FROM \"b\".\"item\" \"b\";\n",
+    let text = include_str!(
+        "fixtures/analysis-019-quoted-top-level-references-do-not-include-same-path-fields-text.orna"
     );
     let document = Document::new(
         "file:///quoted-top-level-reference-scope.orna"
@@ -815,13 +749,8 @@ fn quoted_top_level_references_do_not_include_same_path_fields() {
 }
 #[test]
 fn quoted_type_and_function_references_keep_declaration_categories() {
-    let text = concat!(
-        "CREATE SCHEMA \"app\";\n",
-        "CREATE TYPE \"app\".\"item\" AS OBJECT (\"item\" BOOLEAN);\n",
-        "CREATE CLIENT FUNCTION \"app\".\"item\"(\"item\" BOOLEAN) RETURNS BOOLEAN AS TRUE;\n",
-        "CREATE CLIENT FUNCTION caller() RETURNS BOOLEAN AS \"app\".\"item\"(TRUE);\n",
-        "CREATE SERVER FUNCTION read_items() RETURNS ROWS (\"item\" BOOLEAN) AS\n",
-        "SELECT probe.\"item\" FROM \"app\".\"item\" probe;\n",
+    let text = include_str!(
+        "fixtures/analysis-020-quoted-type-and-function-references-keep-declaration-categories-text.orna"
     );
     let document = Document::new(
         "file:///quoted-type-function-categories.orna"
@@ -958,21 +887,8 @@ fn quoted_type_and_function_references_keep_declaration_categories() {
 }
 #[test]
 fn quoted_dml_aliases_do_not_resolve_as_top_level_names() {
-    let text = concat!(
-        "CREATE SCHEMA \"app\";\n",
-        "CREATE TYPE \"app\".\"item\" AS OBJECT (\"value\" BOOLEAN);\n",
-        "CREATE SERVER FUNCTION insert_item(p_value BOOLEAN)\n",
-        "RETURNS ROWS (created REF \"app\".\"item\") AS\n",
-        "INSERT INTO \"app\".\"item\" AS \"app\" (\"value\")\n",
-        "VALUES (p_value) RETURNING REF(\"app\");\n",
-        "CREATE SERVER FUNCTION update_item(p_value BOOLEAN, p_item REF \"app\".\"item\")\n",
-        "RETURNS ROWS (updated REF \"app\".\"item\") AS\n",
-        "UPDATE \"app\".\"item\" AS \"app\" SET \"value\" = p_value\n",
-        "WHERE REF(\"app\") = p_item RETURNING REF(\"app\");\n",
-        "CREATE SERVER FUNCTION delete_item(p_item REF \"app\".\"item\")\n",
-        "RETURNS ROWS (deleted BOOLEAN) AS\n",
-        "DELETE FROM \"app\".\"item\" AS \"app\" WHERE REF(\"app\") = p_item\n",
-        "RETURNING TRUE;\n",
+    let text = include_str!(
+        "fixtures/analysis-021-quoted-dml-aliases-do-not-resolve-as-top-level-names-text.orna"
     );
     let document = Document::new(
         "file:///quoted-dml-aliases.orna".parse().unwrap(),
@@ -1036,12 +952,8 @@ fn quoted_dml_aliases_do_not_resolve_as_top_level_names() {
 }
 #[test]
 fn qualified_sql_type_path_wins_over_shadowing_parameter() {
-    let text = concat!(
-        "CREATE SCHEMA \"app\";\n",
-        "CREATE TYPE \"app\".\"item\" AS OBJECT (\"value\" BOOLEAN);\n",
-        "CREATE SERVER FUNCTION use_item(\"item\" BOOLEAN)\n",
-        "RETURNS ROWS (\"item\" BOOLEAN) AS\n",
-        "SELECT probe.value FROM \"app\".\"item\" probe;\n",
+    let text = include_str!(
+        "fixtures/analysis-022-qualified-sql-type-path-wins-over-shadowing-parameter-text.orna"
     );
     let document = Document::new(
         "file:///qualified-shadowed-type.orna".parse().unwrap(),
@@ -1082,11 +994,8 @@ fn qualified_sql_type_path_wins_over_shadowing_parameter() {
 
 #[test]
 fn quoted_sql_type_prefers_type_over_same_path_schema() {
-    let text = concat!(
-        "CREATE SCHEMA \"app\".\"item\";\n",
-        "CREATE TYPE \"app\".\"item\" AS OBJECT (\"value\" BOOLEAN);\n",
-        "CREATE SERVER FUNCTION use_item() RETURNS ROWS (value BOOLEAN) AS\n",
-        "SELECT probe.value FROM \"app\".\"item\" probe;\n",
+    let text = include_str!(
+        "fixtures/analysis-023-quoted-sql-type-prefers-type-over-same-path-schema-text.orna"
     );
     let document = Document::new(
         "file:///quoted-nested-schema-type.orna".parse().unwrap(),
@@ -1231,12 +1140,8 @@ fn quoted_sql_type_prefers_type_over_same_path_schema() {
 
 #[test]
 fn quoted_dml_target_prefers_type_over_same_path_schema() {
-    let text = concat!(
-        "CREATE SCHEMA \"app\".\"item\";\n",
-        "CREATE TYPE \"app\".\"item\" AS OBJECT (\"value\" BOOLEAN);\n",
-        "CREATE SERVER FUNCTION insert_item() RETURNS ROWS (created BOOLEAN) AS\n",
-        "INSERT INTO \"app\".\"item\" AS \"target\" (\"value\")\n",
-        "VALUES (TRUE) RETURNING REF(\"target\");\n",
+    let text = include_str!(
+        "fixtures/analysis-024-quoted-dml-target-prefers-type-over-same-path-schema-text.orna"
     );
     let document = Document::new(
         "file:///quoted-dml-target-type.orna".parse().unwrap(),
@@ -1295,11 +1200,8 @@ fn quoted_dml_target_prefers_type_over_same_path_schema() {
 
 #[test]
 fn quoted_query_object_reference_alias_is_not_a_schema_reference() {
-    let text = concat!(
-        "CREATE SCHEMA \"app\";\n",
-        "CREATE TYPE \"app\".\"item\" AS OBJECT (\"value\" BOOLEAN);\n",
-        "CREATE SERVER FUNCTION use_item() RETURNS BOOLEAN AS\n",
-        "SELECT REF(\"app\") FROM \"app\".\"item\" \"app\";\n",
+    let text = include_str!(
+        "fixtures/analysis-025-quoted-query-object-reference-alias-is-not-a-schema-reference-text.orna"
     );
     let document = Document::new(
         "file:///quoted-query-object-reference.orna"
@@ -1355,10 +1257,8 @@ fn quoted_query_object_reference_alias_is_not_a_schema_reference() {
 
 #[test]
 fn quoted_top_level_type_references_exclude_field_and_return_declarations() {
-    let text = concat!(
-        "CREATE TYPE \"item\" AS OBJECT (\"item\" BOOLEAN);\n",
-        "CREATE SERVER FUNCTION read_items() RETURNS ROWS (\"item\" BOOLEAN) AS\n",
-        "SELECT probe.\"item\" FROM \"item\" probe;\n",
+    let text = include_str!(
+        "fixtures/analysis-026-quoted-top-level-type-references-exclude-field-and-return-declarations-text.orna"
     );
     let document = Document::new(
         "file:///quoted-field-return-scope.orna".parse().unwrap(),
@@ -1394,12 +1294,8 @@ fn quoted_top_level_type_references_exclude_field_and_return_declarations() {
 
 #[test]
 fn qualified_function_navigation_uses_full_path_for_hover_definition_and_references() {
-    let text = concat!(
-        "CREATE SCHEMA a;\n",
-        "CREATE SCHEMA b;\n",
-        "CREATE CLIENT FUNCTION a.item() RETURNS BOOLEAN AS TRUE;\n",
-        "CREATE CLIENT FUNCTION b.item() RETURNS BOOLEAN AS TRUE;\n",
-        "CREATE CLIENT FUNCTION caller() RETURNS BOOLEAN AS b.item();\n",
+    let text = include_str!(
+        "fixtures/analysis-027-qualified-function-navigation-uses-full-path-for-hover-definition-and-references-text.orna"
     );
     let document = Document::new(
         "file:///qualified-function-navigation.orna"
@@ -1466,12 +1362,8 @@ fn qualified_function_navigation_uses_full_path_for_hover_definition_and_referen
 
 #[test]
 fn qualified_quoted_type_navigation_preserves_identifier_semantics() {
-    let text = concat!(
-        "CREATE SCHEMA a;\n",
-        "CREATE SCHEMA \"b\";\n",
-        "CREATE TYPE a.item AS OBJECT (a_value BOOLEAN);\n",
-        "CREATE TYPE \"b\".\"item\" AS OBJECT (b_value TEXT);\n",
-        "CREATE SERVER FUNCTION use_b() RETURNS \"b\".\"item\" AS SELECT TRUE;\n",
+    let text = include_str!(
+        "fixtures/analysis-028-qualified-quoted-type-navigation-preserves-identifier-semantics-text.orna"
     );
     let document = Document::new(
         "file:///qualified-quoted-navigation.orna".parse().unwrap(),
@@ -1533,13 +1425,8 @@ fn qualified_quoted_type_navigation_preserves_identifier_semantics() {
 
 #[test]
 fn qualified_quoted_sql_type_navigation_uses_full_path() {
-    let text = concat!(
-        "CREATE SCHEMA \"a\";\n",
-        "CREATE SCHEMA \"b\";\n",
-        "CREATE TYPE \"a\".\"item\" AS OBJECT (a_value BOOLEAN);\n",
-        "CREATE TYPE \"b\".\"item\" AS OBJECT (b_value TEXT);\n",
-        "CREATE SERVER FUNCTION use_b() RETURNS BOOLEAN AS\n",
-        "SELECT probe.b_value FROM \"b\".\"item\" probe;\n",
+    let text = include_str!(
+        "fixtures/analysis-029-qualified-quoted-sql-type-navigation-uses-full-path-text.orna"
     );
     let document = Document::new(
         "file:///qualified-quoted-sql-navigation.orna"
@@ -1600,11 +1487,8 @@ fn qualified_quoted_sql_type_navigation_uses_full_path() {
 
 #[test]
 fn mixed_qualified_type_path_preserves_schema_prefix() {
-    let text = concat!(
-        "CREATE SCHEMA app;\n",
-        "CREATE TYPE app.\"item\" AS OBJECT (value BOOLEAN);\n",
-        "CREATE SERVER FUNCTION use_item() RETURNS BOOLEAN AS\n",
-        "SELECT probe.value FROM app.\"item\" probe;\n",
+    let text = include_str!(
+        "fixtures/analysis-030-mixed-qualified-type-path-preserves-schema-prefix-text.orna"
     );
     let document = Document::new(
         "file:///mixed-qualified-navigation.orna".parse().unwrap(),
@@ -1701,10 +1585,8 @@ fn mixed_qualified_type_path_preserves_schema_prefix() {
 
 #[test]
 fn references_fold_unquoted_case_and_exclude_qualified_declaration_component() {
-    let text = concat!(
-        "CREATE SCHEMA foo;\n",
-        "CREATE TYPE foo.bar AS OBJECT (value BOOLEAN);\n",
-        "CREATE SERVER FUNCTION baz() RETURNS BOOLEAN AS SELECT Foo;\n",
+    let text = include_str!(
+        "fixtures/analysis-031-references-fold-unquoted-case-and-exclude-qualified-declaration-component-text.orna"
     );
     let document = Document::new("file:///test.orna".parse().unwrap(), text.to_owned(), 1);
     let parse = orna_syntax::parse(text);
@@ -1723,8 +1605,9 @@ fn references_fold_unquoted_case_and_exclude_qualified_declaration_component() {
         "unqualified variable must not resolve as a schema: {unqualified:?}"
     );
 
-    let qualified_text =
-        "CREATE SCHEMA product_test;\nCREATE TYPE product_test.probe AS OBJECT (value BOOLEAN);\n";
+    let qualified_text = include_str!(
+        "fixtures/analysis-032-references-fold-unquoted-case-and-exclude-qualified-declaration-component-qualified-text.orna"
+    );
     let qualified_document = Document::new(
         "file:///qualified.orna".parse().unwrap(),
         qualified_text.to_owned(),
@@ -1756,10 +1639,9 @@ fn references_fold_unquoted_case_and_exclude_qualified_declaration_component() {
 
 #[test]
 fn references_exclude_field_and_parameter_declarations() {
-    let field_text = "CREATE SCHEMA people;\n\
-              CREATE TYPE people.person AS OBJECT (stored BOOLEAN);\n\
-              CREATE SERVER FUNCTION read_value() RETURNS BOOLEAN AS \
-              SELECT probe.stored FROM people.person probe;\n";
+    let field_text = include_str!(
+        "fixtures/analysis-033-references-exclude-field-and-parameter-declarations-field-text.orna"
+    );
     let field_document = Document::new(
         "file:///field.orna".parse().unwrap(),
         field_text.to_owned(),
@@ -1796,8 +1678,9 @@ fn references_exclude_field_and_parameter_declarations() {
         field_mapper.position(field_use)
     );
 
-    let parameter_text =
-        "CREATE SERVER FUNCTION read_value(stored BOOLEAN) RETURNS BOOLEAN AS SELECT stored;\n";
+    let parameter_text = include_str!(
+        "fixtures/analysis-034-references-exclude-field-and-parameter-declarations-parameter-text.orna"
+    );
     let parameter_document = Document::new(
         "file:///parameter.orna".parse().unwrap(),
         parameter_text.to_owned(),
@@ -1838,13 +1721,8 @@ fn references_exclude_field_and_parameter_declarations() {
 
 #[test]
 fn definitions_scope_rows_columns_before_unrelated_fields() {
-    let text = concat!(
-        "CREATE SCHEMA people;\n",
-        "CREATE SCHEMA other;\n",
-        "CREATE TYPE people.person AS OBJECT (stored BOOLEAN);\n",
-        "CREATE TYPE other.person AS OBJECT (stored BOOLEAN);\n",
-        "CREATE SERVER FUNCTION read_stored() RETURNS ROWS (stored BOOLEAN) AS\n",
-        "SELECT probe.stored FROM other.person probe;\n",
+    let text = include_str!(
+        "fixtures/analysis-035-definitions-scope-rows-columns-before-unrelated-fields-text.orna"
     );
     let document = Document::new("file:///rows.orna".parse().unwrap(), text.to_owned(), 1);
     let parse = orna_syntax::parse(text);
@@ -1898,10 +1776,9 @@ fn definitions_scope_rows_columns_before_unrelated_fields() {
 
 #[test]
 fn variable_definitions_and_references_stay_within_the_containing_function() {
-    let text = "CREATE SERVER FUNCTION first(stored BOOLEAN) RETURNS BOOLEAN AS SELECT stored;
-\
-              CREATE SERVER FUNCTION second(stored BOOLEAN) RETURNS BOOLEAN AS SELECT stored;
-";
+    let text = include_str!(
+        "fixtures/analysis-036-variable-definitions-and-references-stay-within-the-containing-function-text.orna"
+    );
     let document = Document::new(
         "file:///variables.orna".parse().unwrap(),
         text.to_owned(),
@@ -1947,18 +1824,9 @@ fn variable_definitions_and_references_stay_within_the_containing_function() {
 
 #[test]
 fn client_state_definitions_stay_within_their_function() {
-    let text = "CREATE CLIENT FUNCTION first() RETURNS BOOLEAN IS
-\
-              STATE stored BOOLEAN;
-\
-              BEGIN RETURN stored; END;
-\
-              CREATE CLIENT FUNCTION second() RETURNS BOOLEAN IS
-\
-              STATE stored BOOLEAN;
-\
-              BEGIN RETURN stored; END;
-";
+    let text = include_str!(
+        "fixtures/analysis-037-client-state-definitions-stay-within-their-function-text.orna"
+    );
     let document = Document::new(
         "file:///client-variables.orna".parse().unwrap(),
         text.to_owned(),
@@ -1986,14 +1854,9 @@ fn client_state_definitions_stay_within_their_function() {
 
 #[test]
 fn client_pre_begin_local_shadows_parameter_in_navigation() {
-    let text = "CREATE CLIENT FUNCTION shadowed(p BOOLEAN) RETURNS BOOLEAN IS
-\
-              LET p BOOLEAN := TRUE;
-\
-              LET q BOOLEAN := p;
-\
-              BEGIN RETURN q; END;
-";
+    let text = include_str!(
+        "fixtures/analysis-038-client-pre-begin-local-shadows-parameter-in-navigation-text.orna"
+    );
     let document = Document::new(
         "file:///client-shadowing.orna".parse().unwrap(),
         text.to_owned(),
@@ -2021,18 +1884,9 @@ fn client_pre_begin_local_shadows_parameter_in_navigation() {
 
 #[test]
 fn client_local_definitions_stay_within_their_function() {
-    let text = "CREATE CLIENT FUNCTION first() RETURNS BOOLEAN IS
-\
-              LET marker BOOLEAN := TRUE;
-\
-              BEGIN RETURN marker; END;
-\
-              CREATE CLIENT FUNCTION second() RETURNS BOOLEAN IS
-\
-              LET marker BOOLEAN := TRUE;
-\
-              BEGIN RETURN marker; END;
-";
+    let text = include_str!(
+        "fixtures/analysis-039-client-local-definitions-stay-within-their-function-text.orna"
+    );
     let document = Document::new(
         "file:///client-locals.orna".parse().unwrap(),
         text.to_owned(),
@@ -2060,7 +1914,9 @@ fn client_local_definitions_stay_within_their_function() {
 
 #[test]
 fn references_fold_unicode_unquoted_identifier_case() {
-    let text = "CREATE SCHEMA café;\nCREATE TYPE CAFÉ.probe AS OBJECT (value BOOLEAN);\n";
+    let text = include_str!(
+        "fixtures/analysis-040-references-fold-unicode-unquoted-identifier-case-text.orna"
+    );
     let document = Document::new("file:///unicode.orna".parse().unwrap(), text.to_owned(), 1);
     let parse = orna_syntax::parse(text);
     let mapper = PositionMapper::new(text);

@@ -1,0 +1,7 @@
+CREATE CLIENT FUNCTION files.document() RETURNS TEXT IS
+    LET body CHARACTER /* kept */ LARGE OBJECT := 'body';
+    LET data BINARY /* kept */ LARGE OBJECT := body;
+    LET invalid CHARACTERLARGEOBJECT := body;
+BEGIN
+    RETURN body;
+END;
