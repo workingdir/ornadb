@@ -295,7 +295,7 @@ impl LiveClient {
     #[allow(clippy::result_large_err)]
     pub async fn reconnect_driver<R, A>(
         &self,
-        session: &LiveSession,
+        session: &mut LiveSession,
         driver: &mut LiveSessionDriver<
             PrefetchedBinaryTransport<
                 crate::live_transport::AuthenticatedWebSocketTransport<MaybeTlsStream<TcpStream>>,
@@ -319,7 +319,7 @@ impl LiveClient {
             return Err(LiveReconnectError::InvalidRequest);
         }
         let mut replacement = Some(
-            self.resume_session(session)
+            self.resume_session_with_handoff(session)
                 .await
                 .map_err(LiveReconnectError::Resume)?,
         );
@@ -376,7 +376,7 @@ impl LiveClient {
     #[allow(clippy::result_large_err)]
     pub async fn resume_driver<R, A>(
         &self,
-        session: &LiveSession,
+        session: &mut LiveSession,
         driver: &mut LiveSessionDriver<
             PrefetchedBinaryTransport<
                 crate::live_transport::AuthenticatedWebSocketTransport<MaybeTlsStream<TcpStream>>,
@@ -390,7 +390,7 @@ impl LiveClient {
         A: RequestIdAllocator,
     {
         let mut replacement = Some(
-            self.resume_session(session)
+            self.resume_session_with_handoff(session)
                 .await
                 .map_err(LiveReconnectError::Resume)?,
         );
