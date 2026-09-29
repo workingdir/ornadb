@@ -1,0 +1,12 @@
+pub protocol P {
+    fn generic<T>(self, input: T): T;
+    fn value(self): Int;
+    static label: Str;
+}
+pub type Box {
+    impl P {
+        fn generic<U>(self, input: U): U = input;
+        fn value(self): Int = 1;
+        static label = "box";
+    }
+}
