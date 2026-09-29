@@ -53,6 +53,7 @@ where
         Activation {
             runtime: self,
             overlay: BTreeMap::new(),
+            rekey_changes: Vec::new(),
             state: ActivationState::Open,
             activation_id: next_activation_id(),
             helper_managed: false,
@@ -194,10 +195,29 @@ enum ActivationState {
     RolledBack,
 }
 
+/// The logical identity of one successful explicit primary-key change.
+///
+/// This remains one change even though the candidate row overlay contains a
+/// deletion at `old_key` and an insertion at `new_key`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RekeyChange<Key> {
+    pub old_key: Key,
+    pub new_key: Key,
+}
+
+/// The logical identity of one successful explicit re-key in a named table.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DatabaseRekeyChange<Table, Key> {
+    pub table: Table,
+    pub old_key: Key,
+    pub new_key: Key,
+}
+
 /// A private copy of one activation overlay used for statement recovery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Savepoint<Key, Row> {
     overlay: BTreeMap<Key, Option<Row>>,
+    rekey_changes: Vec<RekeyChange<Key>>,
     activation_id: u64,
 }
 
@@ -205,6 +225,7 @@ pub struct Savepoint<Key, Row> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DatabaseSavepoint<Table, Key, Row> {
     overlay: BTreeMap<Table, BTreeMap<Key, Option<Row>>>,
+    rekey_changes: Vec<DatabaseRekeyChange<Table, Key>>,
     activation_id: u64,
 }
 
@@ -587,6 +608,7 @@ pub struct Activation<'runtime, Key, Row> {
     runtime: &'runtime mut TableRuntime<Key, Row>,
     /// `Some(row)` is an insert or replacement; `None` is a deletion.
     overlay: BTreeMap<Key, Option<Row>>,
+    rekey_changes: Vec<RekeyChange<Key>>,
     state: ActivationState,
     activation_id: u64,
     helper_managed: bool,
@@ -647,9 +669,19 @@ where
         if self.candidate(&new_key).is_some() {
             return Err(TableError::DuplicateKey);
         }
+        self.rekey_changes.push(RekeyChange {
+            old_key: old_key.clone(),
+            new_key: new_key.clone(),
+        });
         self.overlay.insert(old_key, None);
         self.overlay.insert(new_key, Some(row));
         Ok(())
+    }
+
+    /// Returns one logical entry for each successful explicit re-key staged
+    /// in this activation, independently of its row-overlay representation.
+    pub fn rekey_changes(&self) -> &[RekeyChange<Key>] {
+        &self.rekey_changes
     }
 
     /// Reads the candidate relation, including this activation's own writes.
@@ -716,6 +748,7 @@ where
         self.require_open()?;
         Ok(Savepoint {
             overlay: self.overlay.clone(),
+            rekey_changes: self.rekey_changes.clone(),
             activation_id: self.activation_id,
         })
     }
@@ -727,6 +760,7 @@ where
             return Err(TableError::ForeignSavepoint);
         }
         self.overlay = savepoint.overlay;
+        self.rekey_changes = savepoint.rekey_changes;
         Ok(())
     }
 
@@ -764,6 +798,7 @@ where
     pub fn rollback(&mut self) {
         if self.state == ActivationState::Open {
             self.overlay.clear();
+            self.rekey_changes.clear();
             self.state = ActivationState::RolledBack;
         }
     }
@@ -897,6 +932,7 @@ where
         DatabaseActivation {
             runtime: self,
             overlay: BTreeMap::new(),
+            rekey_changes: Vec::new(),
             state: ActivationState::Open,
             activation_id: next_activation_id(),
             helper_managed: false,
@@ -1041,6 +1077,7 @@ where
 pub struct DatabaseActivation<'runtime, Table, Key, Row> {
     runtime: &'runtime mut DatabaseRuntime<Table, Key, Row>,
     overlay: BTreeMap<Table, BTreeMap<Key, Option<Row>>>,
+    rekey_changes: Vec<DatabaseRekeyChange<Table, Key>>,
     state: ActivationState,
     activation_id: u64,
     helper_managed: bool,
@@ -1108,10 +1145,21 @@ where
         if self.candidate(&table, &new_key).is_some() {
             return Err(TableError::DuplicateKey);
         }
+        self.rekey_changes.push(DatabaseRekeyChange {
+            table: table.clone(),
+            old_key: old_key.clone(),
+            new_key: new_key.clone(),
+        });
         let overlay = self.overlay.entry(table).or_default();
         overlay.insert(old_key, None);
         overlay.insert(new_key, Some(row));
         Ok(())
+    }
+
+    /// Returns one logical entry for each successful explicit re-key staged
+    /// in this activation, independently of its row-overlay representation.
+    pub fn rekey_changes(&self) -> &[DatabaseRekeyChange<Table, Key>] {
+        &self.rekey_changes
     }
 
     /// Reads the candidate relation, including all writes staged by this root.
@@ -1207,6 +1255,7 @@ where
         self.require_open()?;
         Ok(DatabaseSavepoint {
             overlay: self.overlay.clone(),
+            rekey_changes: self.rekey_changes.clone(),
             activation_id: self.activation_id,
         })
     }
@@ -1221,6 +1270,7 @@ where
             return Err(TableError::ForeignSavepoint);
         }
         self.overlay = savepoint.overlay;
+        self.rekey_changes = savepoint.rekey_changes;
         Ok(())
     }
 
@@ -1261,6 +1311,7 @@ where
     pub fn rollback(&mut self) {
         if self.state == ActivationState::Open {
             self.overlay.clear();
+            self.rekey_changes.clear();
             self.state = ActivationState::RolledBack;
         }
     }
@@ -1410,7 +1461,20 @@ mod tests {
         assert_eq!(root.rekey(1, 2), Err(TableError::DuplicateKey));
         assert_eq!(root.rekey(1, 1), Err(TableError::DuplicateKey));
         assert_eq!(root.candidate_rows().unwrap(), original);
+        assert!(root.rekey_changes().is_empty());
+        let savepoint = root.savepoint().unwrap();
         root.rekey(1, 3).unwrap();
+        assert_eq!(
+            root.rekey_changes(),
+            &[super::RekeyChange {
+                old_key: 1,
+                new_key: 3,
+            }]
+        );
+        root.rollback_to(savepoint).unwrap();
+        assert!(root.rekey_changes().is_empty());
+        root.rekey(1, 3).unwrap();
+        assert_eq!(root.rekey_changes().len(), 1);
         assert_eq!(root.read(&1).unwrap(), None);
         assert_eq!(root.read(&3).unwrap(), Some(&"one"));
         root.commit().unwrap();
@@ -1432,12 +1496,29 @@ mod tests {
         assert_eq!(root.rekey("orders", 1, 2), Err(TableError::DuplicateKey));
         assert_eq!(root.rekey("orders", 1, 1), Err(TableError::DuplicateKey));
         assert_eq!(root.candidate_rows(&"orders").unwrap(), original);
+        assert!(root.rekey_changes().is_empty());
+        let savepoint = root.savepoint().unwrap();
         {
             let mut child = root.child().unwrap();
             child.rekey("orders", 1, 3).unwrap();
             assert_eq!(child.read(&"orders", &1).unwrap(), None);
             assert_eq!(child.read(&"orders", &3).unwrap(), Some(&"one"));
         }
+        assert_eq!(
+            root.rekey_changes(),
+            &[super::DatabaseRekeyChange {
+                table: "orders",
+                old_key: 1,
+                new_key: 3,
+            }]
+        );
+        root.rollback_to(savepoint).unwrap();
+        assert!(root.rekey_changes().is_empty());
+        {
+            let mut child = root.child().unwrap();
+            child.rekey("orders", 1, 3).unwrap();
+        }
+        assert_eq!(root.rekey_changes().len(), 1);
         root.commit().unwrap();
         assert_eq!(database.committed(&"orders", &1), None);
         assert_eq!(database.committed(&"orders", &3), Some(&"one"));
