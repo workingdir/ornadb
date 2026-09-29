@@ -1,0 +1,9 @@
+pub table Note(id: Int) {
+    value: Int,
+}
+
+fn main() {
+    Note.insert({ id: 7, value: 70 });
+    Note.insert({ id: 8, value: 80 });
+    Note.rekey(7, 8);
+}
