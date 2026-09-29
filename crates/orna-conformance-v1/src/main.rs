@@ -23,6 +23,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[path = "test_support.rs"]
+mod test_support;
+
 const FAIL_001_RUNTIME_CLAIM: &str = "FAIL-001 observes one stable keyed failure record accumulating attempts and verifies private row cardinality through the bounded runtime adapter; this is non-normative evidence, not a public sys.Failure projection";
 const CHECKPOINT_ATOMICITY_RUNTIME_CLAIM: &str = "CP-001 observes durable finite-list row/checkpoint atomicity through the bounded runtime adapter; CP-002 remains an explicit skip because the available witness exercises assertion validation rather than the immutable handler-inserts-then-errors path; this is implementation evidence, not compiler-produced Orna-engine execution or a public sys.Checkpoint projection";
 
@@ -573,9 +576,10 @@ fn run_checkpoint_atomicity_scenario(scenario: &Scenario) -> StageOutcome<Diagno
         if !status.success() {
             return None;
         }
+        test_support::configure_fixture_git_identity(&root);
         let repository = Repository::discover(&root).ok()?;
         let evaluator = DurableTransactionalEvaluator::new("main", Default::default());
-        let witness = block_on(evaluator.execute_checkpoint_atomicity_cp_001(
+        let witness_result = block_on(evaluator.execute_checkpoint_atomicity_cp_001(
             &repository,
             RuntimeIdentity {
                 database_id: [101; 16],
@@ -583,8 +587,8 @@ fn run_checkpoint_atomicity_scenario(scenario: &Scenario) -> StageOutcome<Diagno
             },
             [103; 16],
             [104; 32],
-        ))
-        .ok();
+        ));
+        let witness = witness_result.ok();
         witness
             .filter(|witness| {
                 witness.faulted_commit_rolls_back_rows_and_checkpoint
@@ -1230,7 +1234,7 @@ impl RunnerProfile {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RunnerCommand {
     Help,
-    Run(RunnerProfile),
+    Run(RunnerProfile, Option<usize>),
 }
 
 fn parse_runner_command<I>(args: I) -> Result<RunnerCommand, String>
@@ -1246,9 +1250,27 @@ where
         };
     }
     let mut profile = None;
+    let mut first_scenarios = None;
     let mut index = 0;
     while index < args.len() {
         let argument = &args[index];
+        if argument == "--first-scenarios" {
+            index += 1;
+            let value = args
+                .get(index)
+                .ok_or_else(|| "--first-scenarios requires a value".to_owned())?;
+            let count = value
+                .parse::<usize>()
+                .map_err(|_| "--first-scenarios requires a positive integer".to_owned())?;
+            if count == 0 {
+                return Err("--first-scenarios requires a positive integer".into());
+            }
+            if first_scenarios.replace(count).is_some() {
+                return Err("--first-scenarios may be supplied only once".into());
+            }
+            index += 1;
+            continue;
+        }
         let value = if argument == "--profile" {
             index += 1;
             args.get(index)
@@ -1264,21 +1286,55 @@ where
         }
         index += 1;
     }
-    RunnerProfile::parse(
+    let profile = RunnerProfile::parse(
         profile
             .as_deref()
             .unwrap_or(RunnerProfile::BoundedExpressionRuntime.name()),
-    )
-    .map(RunnerCommand::Run)
+    )?;
+    if first_scenarios.is_some() && profile == RunnerProfile::ReferenceProjectRuntimeAdapter {
+        return Err("--first-scenarios is unavailable with the reference-project profile".into());
+    }
+    Ok(RunnerCommand::Run(profile, first_scenarios))
 }
 
 fn print_usage() {
     println!(
-        "Usage: orna-conformance [--profile <syntax-parse|bounded-expression-runtime|reference-project-runtime-adapter>]"
+        "Usage: orna-conformance [--profile <syntax-parse|bounded-expression-runtime|reference-project-runtime-adapter>] [--first-scenarios <positive-count>]"
     );
 }
 
+fn runner_command(profile: RunnerProfile, first_scenarios: Option<usize>) -> String {
+    match first_scenarios {
+        Some(count) => format!(
+            "orna-conformance --profile {} --first-scenarios {count}",
+            profile.name()
+        ),
+        None => format!("orna-conformance --profile {}", profile.name()),
+    }
+}
+
 fn run_profile(corpus: Corpus, profile: RunnerProfile) -> orna_conformance_v1::RunReport {
+    run_profile_limited(corpus, profile, None)
+}
+
+fn run_profile_limited(
+    mut corpus: Corpus,
+    profile: RunnerProfile,
+    first_scenarios: Option<usize>,
+) -> orna_conformance_v1::RunReport {
+    if let Some(count) = first_scenarios {
+        let scenarios = corpus.scenarios["scenarios"]
+            .as_array_mut()
+            .expect("validated scenario array");
+        assert!(count <= scenarios.len(), "scenario prefix exceeds corpus");
+        scenarios.truncate(count);
+    }
+    let selected_scenario_ids = corpus.scenarios["scenarios"]
+        .as_array()
+        .expect("validated scenario array")
+        .iter()
+        .map(|scenario| scenario["id"].as_str().expect("scenario id").to_owned())
+        .collect::<Vec<_>>();
     match profile {
         RunnerProfile::SyntaxParse => {
             let mut adapter = SyntaxAdapter;
@@ -1286,7 +1342,7 @@ fn run_profile(corpus: Corpus, profile: RunnerProfile) -> orna_conformance_v1::R
                 .with_claim(ImplementationClaim {
                     implementation_id: "orna-conformance-v1".into(),
                     profile: profile.name().into(),
-                    command: "orna-conformance --profile syntax-parse".into(),
+                    command: runner_command(profile, first_scenarios),
                     environment: BTreeMap::from([(
                         "adapter".into(),
                         "SyntaxAdapter (parse-only)".into(),
@@ -1297,47 +1353,69 @@ fn run_profile(corpus: Corpus, profile: RunnerProfile) -> orna_conformance_v1::R
         }
         RunnerProfile::BoundedExpressionRuntime => {
             let mut adapter = RuntimeAdapter::new(CompositeEvaluator::default());
+            let mut environment = BTreeMap::from([
+                (
+                    "adapter".into(),
+                    "RuntimeAdapter (syntax, semantic analysis, and bounded expression evaluator)"
+                        .into(),
+                ),
+                (
+                    "semantic-stages".into(),
+                    "semantic stages execute through the read-only v1 analyzer".into(),
+                ),
+                (
+                    "runtime-stages".into(),
+                    match first_scenarios {
+                        Some(count) => format!(
+                            "bounded runtime adapter considered only the first {count} frozen scenarios; skipped scenarios lack an authoritative witness; this is not compiler-produced Orna-engine execution"
+                        ),
+                        None => "pure row/expression units, the authoritative duplicate-key fixture, SYS-RT-RENAME-100 system-name resolution, the LIVE-001 keyed update, LIVE-002 unkeyed fallback, LIVE-003 serving resynchronization, LIVE-004 universal subtree replacement, the CP-001 durable checkpoint atomicity contract, the ASSERT-CHECKPOINT-091 durable assertion/checkpoint rollback contract, the FAIL-001 stable failure-identity and attempts contract, and EVAL-003 durable request replay contracts execute through bounded runtime witnesses; CP-002's handler-failure retry contract remains explicitly skipped; these scenario results remain runtime-adapter evidence and are not compiler-produced or full Orna-engine execution"
+                            .into(),
+                    },
+                ),
+            ]);
+            if selected_scenario_ids
+                .iter()
+                .any(|scenario| scenario == "FAIL-001")
+            {
+                environment.insert("FAIL-001".into(), FAIL_001_RUNTIME_CLAIM.into());
+            }
+            if selected_scenario_ids.iter().any(|scenario| {
+                matches!(
+                    scenario.as_str(),
+                    "CP-001" | "CP-002" | "ASSERT-CHECKPOINT-091"
+                )
+            }) {
+                environment.insert(
+                    "CP-001/CP-002".into(),
+                    CHECKPOINT_ATOMICITY_RUNTIME_CLAIM.into(),
+                );
+            }
+            let executed_scenario_contracts = [
+                "REPL-001",
+                "TXN-001",
+                "TXN-002",
+                "CP-001",
+                "LIVE-001",
+                "LIVE-002",
+                "LIVE-003",
+                "LIVE-004",
+                "SYS-RT-RENAME-100",
+                "ASSERT-CHECKPOINT-091",
+                "FAIL-001",
+                "EVAL-003",
+            ]
+            .into_iter()
+            .filter(|scenario| selected_scenario_ids.iter().any(|id| id == scenario))
+            .map(str::to_owned)
+            .collect();
             Harness::new(corpus)
                 .with_claim(ImplementationClaim {
                     implementation_id: "orna-conformance-v1".into(),
                     profile: profile.name().into(),
-                    command: "orna-conformance --profile bounded-expression-runtime".into(),
-                    environment: [
-                        (
-                            "adapter".into(),
-                            "RuntimeAdapter (syntax, semantic analysis, and bounded expression evaluator)"
-                                .into(),
-                        ),
-                        (
-                            "semantic-stages".into(),
-                            "semantic stages execute through the read-only v1 analyzer".into(),
-                        ),
-                        (
-                            "runtime-stages".into(),
-                            "pure row/expression units, the authoritative duplicate-key fixture, SYS-RT-RENAME-100 system-name resolution, the LIVE-001 keyed update, LIVE-002 unkeyed fallback, LIVE-003 serving resynchronization, LIVE-004 universal subtree replacement, the CP-001 durable checkpoint atomicity contract, the ASSERT-CHECKPOINT-091 durable assertion/checkpoint rollback contract, the FAIL-001 stable failure-identity and attempts contract, and EVAL-003 durable request replay contracts execute through bounded runtime witnesses; CP-002's handler-failure retry contract remains explicitly skipped; these scenario results remain runtime-adapter evidence and are not compiler-produced or full Orna-engine execution".into(),
-                        ),
-                        ("FAIL-001".into(), FAIL_001_RUNTIME_CLAIM.into()),
-                        (
-                            "CP-001/CP-002".into(),
-                            CHECKPOINT_ATOMICITY_RUNTIME_CLAIM.into(),
-                        ),
-                    ]
-                    .into_iter()
-                    .collect(),
-                    executed_scenario_contracts: vec![
-                        "REPL-001".into(),
-                        "TXN-001".into(),
-                        "TXN-002".into(),
-                        "CP-001".into(),
-                        "LIVE-001".into(),
-                        "LIVE-002".into(),
-                        "LIVE-003".into(),
-                        "LIVE-004".into(),
-                        "SYS-RT-RENAME-100".into(),
-                        "ASSERT-CHECKPOINT-091".into(),
-                        "FAIL-001".into(),
-                        "EVAL-003".into(),
-                    ],
+                    command: runner_command(profile, first_scenarios),
+                    environment,
+                    executed_scenario_contracts,
                 })
                 .run(&mut adapter)
         }
@@ -1364,7 +1442,7 @@ fn main() {
         eprintln!("cannot load authoritative Orna corpus: {error}");
         std::process::exit(2)
     });
-    let RunnerCommand::Run(profile) = command else {
+    let RunnerCommand::Run(profile, first_scenarios) = command else {
         unreachable!("help returned before corpus execution");
     };
     if profile == RunnerProfile::ReferenceProjectRuntimeAdapter {
@@ -1379,7 +1457,13 @@ fn main() {
         }
         return;
     }
-    let report = run_profile(corpus, profile);
+    if let Some(count) = first_scenarios
+        && count > corpus.scenarios["scenarios"].as_array().unwrap().len()
+    {
+        eprintln!("--first-scenarios exceeds the frozen scenario count");
+        std::process::exit(2);
+    }
+    let report = run_profile_limited(corpus, profile, first_scenarios);
     println!(
         "{}",
         serde_json::to_string_pretty(&report).expect("report serializes")
@@ -1475,20 +1559,34 @@ mod tests {
     fn runner_profile_selection_is_explicit_and_defaults_to_bounded_runtime() {
         assert_eq!(
             parse_runner_command(Vec::<String>::new()),
-            Ok(RunnerCommand::Run(RunnerProfile::BoundedExpressionRuntime))
+            Ok(RunnerCommand::Run(
+                RunnerProfile::BoundedExpressionRuntime,
+                None
+            ))
         );
         assert_eq!(
             parse_runner_command(vec!["--profile".into(), "syntax-parse".into()]),
-            Ok(RunnerCommand::Run(RunnerProfile::SyntaxParse))
+            Ok(RunnerCommand::Run(RunnerProfile::SyntaxParse, None))
         );
         assert_eq!(
             parse_runner_command(vec!["--profile=bounded-expression-runtime".into()]),
-            Ok(RunnerCommand::Run(RunnerProfile::BoundedExpressionRuntime))
+            Ok(RunnerCommand::Run(
+                RunnerProfile::BoundedExpressionRuntime,
+                None
+            ))
         );
         assert_eq!(
             parse_runner_command(vec!["--profile=reference-project-runtime-adapter".into()]),
             Ok(RunnerCommand::Run(
-                RunnerProfile::ReferenceProjectRuntimeAdapter
+                RunnerProfile::ReferenceProjectRuntimeAdapter,
+                None,
+            ))
+        );
+        assert_eq!(
+            parse_runner_command(vec!["--first-scenarios".into(), "30".into()]),
+            Ok(RunnerCommand::Run(
+                RunnerProfile::BoundedExpressionRuntime,
+                Some(30)
             ))
         );
         assert_eq!(
@@ -1511,6 +1609,15 @@ mod tests {
             .is_err()
         );
         assert!(parse_runner_command(vec!["--profile".into()]).is_err());
+        assert!(parse_runner_command(vec!["--first-scenarios".into(), "0".into()]).is_err());
+        assert!(parse_runner_command(vec!["--first-scenarios".into(), "thirty".into()]).is_err());
+        assert!(parse_runner_command(vec![
+            "--profile".into(),
+            "reference-project-runtime-adapter".into(),
+            "--first-scenarios".into(),
+            "30".into(),
+        ])
+        .is_err());
     }
 
     #[test]
