@@ -13,6 +13,8 @@ const BASE: &str = include_str!("fixtures/traceability-schema-base.orna");
 const RENAMED: &str = include_str!("fixtures/traceability-schema-renamed.orna");
 const OPTIONAL: &str = include_str!("fixtures/traceability-schema-optional.orna");
 const REQUIRED: &str = include_str!("fixtures/traceability-schema-required.orna");
+const DEFAULT_GB: &str = include_str!("fixtures/traceability-schema-default-gb.orna");
+const DEFAULT_US: &str = include_str!("fixtures/traceability-schema-default-us.orna");
 
 fn id(n: u8) -> ObjectId {
     ObjectId::new([n; 16])
@@ -125,10 +127,17 @@ fn optional_addition_plans_only_metadata_change() {
 // fallback cannot change when the declaration changes later.
 #[test]
 fn introduction_fallback_is_immutable_after_schema_creation() {
+    parse_fixture(DEFAULT_GB);
+    parse_fixture(DEFAULT_US);
     let from = schema(Table {
         fields: vec![
             field(2, "id", FieldType::Int, FieldRole::Key, false),
-            field(3, "country", FieldType::Str, FieldRole::Stored, false),
+            Field {
+                introduction_fallback: Some(
+                    CanonicalValue::new(OvbRaw::Text("GB".into())).unwrap(),
+                ),
+                ..field(3, "country", FieldType::Str, FieldRole::Stored, false)
+            },
         ],
         ..base_table("Contact", 1, "name")
     });
