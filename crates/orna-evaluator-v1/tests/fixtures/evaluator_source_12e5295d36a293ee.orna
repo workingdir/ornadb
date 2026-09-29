@@ -1,0 +1,1 @@
+std.text.replace("aaaa", "a", "bb")

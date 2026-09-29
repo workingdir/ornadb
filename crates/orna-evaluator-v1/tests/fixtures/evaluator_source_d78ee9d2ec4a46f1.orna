@@ -1,0 +1,1 @@
+std.collection.last(rows: [1], callback: value => value)

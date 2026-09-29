@@ -1,0 +1,1 @@
+std.collection.last([1], value => value / 0)

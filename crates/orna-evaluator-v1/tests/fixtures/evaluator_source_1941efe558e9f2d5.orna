@@ -1,0 +1,1 @@
+[23, 21, 12, 11] | std.collection.rank(key: value => value % 10)

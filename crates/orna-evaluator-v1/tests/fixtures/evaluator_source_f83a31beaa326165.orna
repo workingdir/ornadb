@@ -1,0 +1,1 @@
+sort_by([1, 2], value => if value == 1 { value } else { "x" })

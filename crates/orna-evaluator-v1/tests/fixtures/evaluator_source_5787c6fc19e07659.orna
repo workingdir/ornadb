@@ -1,0 +1,1 @@
+fn last(value: Int) = value + 100; fn run() = last(1);

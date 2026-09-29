@@ -1,0 +1,1 @@
+fn one(value: Int) = value + 100; fn run() = one(1);

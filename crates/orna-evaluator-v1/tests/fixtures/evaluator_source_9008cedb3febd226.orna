@@ -1,0 +1,1 @@
+std.collection.first(rows: [1], callback: value => value)

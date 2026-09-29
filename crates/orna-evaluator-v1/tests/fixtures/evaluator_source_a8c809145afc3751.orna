@@ -1,0 +1,1 @@
+every(rows: [1, 2, 3], predicate: value => value > 0)

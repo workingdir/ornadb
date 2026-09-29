@@ -1,0 +1,1 @@
+case [2, 3] { [left, right] if left < right: right, _: 0 }

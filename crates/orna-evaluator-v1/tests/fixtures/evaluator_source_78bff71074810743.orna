@@ -1,0 +1,1 @@
+std.collection.min(values: [1])

@@ -1,0 +1,1 @@
+one([1, 2, 3], value => if value < 3 { true } else { 1 / 0 == 0 })
