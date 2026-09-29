@@ -701,3 +701,25 @@ historical value, action, and runtime contracts. The canonical V1-V7 standard
 snapshots and all existing raw/resource/Qt model boundaries retain their
 previous meaning. Any future virtual model, Rows stream, lossless JSON, or
 additional presenter must be a separate append-only contract.
+
+## Frozen Orna 1.0.0 conformance boundary
+
+This accepted work ADR records a repository implementation contract; it does
+not amend the frozen Orna 1.0.0 publication. That publication names `Rows` as
+one of the `std.ui` presentation-tree helpers with an Inspect-compatible
+fallback (`source/09-standard-library.md:158`). It defines Present as the
+core typed presentation tree and its read-only, deterministic, bounded
+execution and fallback obligations (ORNA-PRES-007 through ORNA-PRES-010,
+`source/13-presentation.md:97-117`). CSV is an optional codec package whose
+pins and mapping are package-defined (`source/09-standard-library.md:150`).
+
+The sealed `std.data.Rows` transport and revision behavior in this ADR is not
+specified by those requirements. A search for `std.data.Rows`,
+`std.terminal.present_table`, `std.csv.encode`, `ORNA-ROWS/1`,
+`FunctionReturn::Rows`, and Rows-specific `ValueBatch` behavior in the frozen
+publication, `source/`, `api/`, `grammar/`, `tests/`, and `examples/` returned
+no matches. Accordingly, this ADR must not be cited as normative 1.0.0
+acceptance for carrying server `ResultRows` through sealed invocation or for
+the V8/ValueBatch/presenter revision rules above. No additional runtime
+behavior is implied by the Orna 1.0.0 presentation requirements; any such
+implementation remains governed by this repository's separate work decision.
