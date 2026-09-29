@@ -1,0 +1,2 @@
+CREATE SCHEMA std_test;
+CREATE TYPE std_test.token AS VALUE (t std.types.OPAQUE_TOKEN) IMMUTABLE PERSISTABLE;
