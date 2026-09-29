@@ -1,0 +1,36 @@
+pub table Note(id: Int) {
+    text: Str,
+    assert every(note => note.text != "");
+}
+
+pub table Book(id: Int) {
+    title: Str,
+    assert every(book => book.title != "");
+}
+
+pub table Loan(id: Int) { book_id: Int, }
+
+assert every(Loan, loan => exists(Book, book => book.id == loan.book_id));
+
+fn mutate_candidate() {
+    Note.insert({ id: 1, text: "removed" });
+    Note.insert({ id: 2, text: "before update" });
+    Note.update(2, { text: "after update" });
+    Note.rekey(2, 3);
+    Note.delete(1);
+}
+
+fn candidate_failure() {
+    Note.insert({ id: 4, text: "valid" });
+    Note.insert({ id: 5, text: "" });
+}
+
+fn module_failure() {
+    Book.insert({ id: 7, title: "available" });
+    Loan.insert({ id: 8, book_id: 9 });
+}
+
+fn table_and_module_failure() {
+    Book.insert({ id: 10, title: "" });
+    Loan.insert({ id: 11, book_id: 12 });
+}
