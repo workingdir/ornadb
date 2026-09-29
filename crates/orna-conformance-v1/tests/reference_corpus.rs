@@ -1514,17 +1514,20 @@ fn reference_project_runtime_adapter_reports_exactly_separate_evidence() {
         {
             "invoke": "library.lend",
             "args": ["missing-book", "reader-2"],
-            "expect": "cross-table assertion failure; no new loan"
+            "expect": "cross-table assertion failure; no new loan",
+            "diagnostic_code": "ORNA-EVAL-MODULE-ASSERT"
         },
         {
             "invoke": "warehouse.transfer",
             "args": ["north", "south", "pencil", 100],
-            "expect": "assertion failure; both stock rows unchanged"
+            "expect": "assertion failure; both stock rows unchanged",
+            "diagnostic_code": "ORNA-EVAL-ASSERT"
         },
         {
             "invoke": "library.lend",
             "args": ["book-1", "reader-2"],
-            "expect": "duplicate key; existing loan unchanged"
+            "expect": "duplicate key; existing loan unchanged",
+            "diagnostic_code": "ORNA-EVAL-TABLE-DUPLICATE"
         }
     ]);
     let actual_negative_cases = evidence
@@ -1535,6 +1538,7 @@ fn reference_project_runtime_adapter_reports_exactly_separate_evidence() {
                 "invoke": case.invoke,
                 "args": case.args,
                 "expect": case.expected,
+                "diagnostic_code": case.diagnostic_code,
                 "status": case.status,
                 "rollback_verified": case.rollback_verified
             })
