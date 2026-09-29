@@ -7,7 +7,13 @@ license = "Apache-2.0"
 description = "Bounded, adapter-owned session security boundary for Orna"
 
 [dependencies]
+serde = { version = "1.0", features = ["derive"] }
 subtle = "2.6"
+tempfile = "3.23"
+zeroize = "1.8"
+
+[dev-dependencies]
+serde_json = "1.0"
 
 [lints.rust]
 unsafe_code = "forbid"

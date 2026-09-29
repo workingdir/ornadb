@@ -67,6 +67,17 @@ fn secret_reference_and_metadata_expose_only_stable_nonsecret_fields() {
     assert_eq!(metadata.provider(), "sops");
     assert!(metadata.available());
     assert!(!rendered.contains("secret-fixture-payload"));
+
+    let serialized_reference = serde_json::to_string(&reference).unwrap();
+    assert_eq!(serialized_reference, "\"google.personal\"");
+    assert_eq!(
+        serde_json::from_str::<SecretRef>(&serialized_reference).unwrap(),
+        reference
+    );
+    let serialized_metadata = serde_json::to_string(&metadata).unwrap();
+    assert!(serialized_metadata.contains("google.personal"));
+    assert!(serialized_metadata.contains("sops"));
+    assert!(!serialized_metadata.contains("secret-fixture-payload"));
 }
 
 #[test]

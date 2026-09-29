@@ -6,7 +6,12 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
+use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
+
+mod sops;
+
+pub use sops::{SopsFileError, SopsFileProvider};
 
 pub const CREDENTIAL_BYTES: usize = 32;
 /// Maximum session lease permitted by the live protocol profile.
@@ -17,9 +22,9 @@ pub const MAX_SESSION_LEASE: u64 = 300_000;
 
 /// A stable, non-secret name for one externally managed secret.
 ///
-/// The reference is descriptive data, not a resolution capability. Providers
-/// remain adapter-owned; in particular, this crate does not select SOPS,
-/// decryption identities, or any other external secret system from the name.
+/// The reference is descriptive data, not a resolution capability. The
+/// optional SOPS file adapter is one provider; references never select a
+/// decryption identity or grant access by themselves.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SecretRef(String);
 
@@ -48,6 +53,25 @@ impl SecretRef {
     }
 }
 
+impl Serialize for SecretRef {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SecretRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
 impl fmt::Display for SecretRef {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
@@ -55,7 +79,7 @@ impl fmt::Display for SecretRef {
 }
 
 /// Non-sensitive metadata exposed for a secret reference.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SecretMetadata {
     reference: SecretRef,
     provider: String,
@@ -903,5 +927,18 @@ mod tests {
 
         let mut callback = |secret: &[u8]| secret.len();
         assert_eq!(resolver.with_secret(&reference, &mut callback), Ok(19));
+
+        let encoded = serde_json::to_string(&reference).unwrap();
+        assert_eq!(encoded, "\"messages.inbox\"");
+        assert_eq!(
+            serde_json::from_str::<SecretRef>(&encoded).unwrap(),
+            reference
+        );
+        assert!(serde_json::from_str::<SecretRef>("\"bad\\nname\"").is_err());
+
+        let encoded_metadata = serde_json::to_string(&metadata).unwrap();
+        assert!(encoded_metadata.contains("messages.inbox"));
+        assert!(encoded_metadata.contains("sops"));
+        assert!(!encoded_metadata.contains("not-for-diagnostics"));
     }
 }
