@@ -1,0 +1,2 @@
+pub fn café() = 1;
+pub fn café() = 2;
