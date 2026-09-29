@@ -1,0 +1,4 @@
+CREATE SCHEMA "app";
+CREATE TYPE "app"."item" AS OBJECT ("value" BOOLEAN);
+CREATE SERVER FUNCTION use_item() RETURNS BOOLEAN AS
+SELECT REF("app") FROM "app"."item" "app";
