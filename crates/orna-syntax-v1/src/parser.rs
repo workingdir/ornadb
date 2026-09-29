@@ -4180,6 +4180,13 @@ impl Parser {
             let rhs = self
                 .recurse(|parser| parser.pratt(if right { prec } else { prec + 1 }, mode.nested()));
             let Some(rhs) = rhs else { break };
+            if op == "|" && matches!(rhs, Expr::Lambda { .. }) {
+                self.errors.push(Diagnostic::error(
+                    "ORNA-PARSE-001",
+                    "pipeline lambdas must be parenthesized",
+                    rhs.span(),
+                ));
+            }
             if !self.within_depth(expr_depth(&lhs).max(expr_depth(&rhs)) + 1) {
                 return Some(lhs);
             }
