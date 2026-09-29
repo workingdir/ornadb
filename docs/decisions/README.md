@@ -55,6 +55,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0103 | Studio runtime and Inspector reference boundary | Generic Orna inspection, presentation, redaction, and snapshot rules remain required; Studio-specific runtime and explorer contracts are deferred. |
 | 0105 | Deferred: Studio security/DBA page reference and authority boundary | A production page, CLIENT-to-administration authority path, and its interaction contract are not defined by the frozen reference; existing security implementation and CLI are unchanged. |
 | 0109 | Deferred: `orna-artifact` owns no PUB-1 immutable publication-object consumer | Keep executable plan codecs separate from compact segments, manifests, Git objects, and durability barriers; continue at the accepted runtime/storage/repository publication boundary. |
+| 0110 | Source-document and object-description contracts as specified by Orna 1.0.0 | A separate bounded function-declaration metadata value and `sys.source.function` API remain gated on a canonical contract; this ADR does not add identities or runtime behavior. |
 | 0101 | OrnaDB 1.0 CLIENT VM trust boundary | Host-side remote source evaluation remains normative; production CLIENT bytecode VM, artifact trust, and CLIENT sandbox contracts are deferred. |
 
 ## Current work ADRs
@@ -226,6 +227,8 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [CLIENT VM Trust and Sandbox](0091-client-vm-trust-and-sandbox.md)
 * **work ADR 0092:**
   [Function-Backed CLI Sessions](0092-function-backed-cli-sessions.md)
+* **work ADR 0093 (deferred):**
+  [Source Introspection Reference Gate](0093-source-introspection-reference-gate.md)
 * **work ADR 0093:**
   [Gateway and Protocol Contract Boundaries](0093-reflective-gateway-contracts.md)
 * **work ADR 0094:**
@@ -258,3 +261,5 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Persistent Scalar and Record Backend Parity](0108-persistent-value-backend-parity-deferral.md)
 * **work ADR 0109 (deferred):**
   [Publication Object Encoding in `orna-artifact`](0109-publication-artifact-completeness-boundary.md)
+* **work ADR 0110 (deferred):**
+  [Source Introspection Reference Gate](0110-source-introspection-reference-gate.md)
