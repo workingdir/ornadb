@@ -1373,6 +1373,7 @@ version = "1.0.0"
 dependencies = [
  "orna-foundation-v1",
  "serde_json",
+ "orna-syntax-v1",
 ]
 
 [[package]]
