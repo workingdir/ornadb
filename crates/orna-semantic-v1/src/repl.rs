@@ -265,6 +265,12 @@ mod tests {
     use crate::{ModuleInput, analyze};
     use orna_syntax_v1::parse_repl;
 
+    macro_rules! repl_fixture {
+        ($name:literal) => {
+            include_str!(concat!("fixtures/", $name, ".orna"))
+        };
+    }
+
     fn staged(context: &ReplContext, source: &str) -> ReplAdmission {
         let parsed = parse_repl(source);
         assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
@@ -291,7 +297,7 @@ mod tests {
     #[test]
     fn status_binding_matches_the_nullable_execution_status() {
         assert_eq!(
-            staged(&ReplContext::empty(), "$?").ty,
+            staged(&ReplContext::empty(), repl_fixture!("repl-status-binding")).ty,
             Some(Type::Optional(Box::new(Type::Record(BTreeMap::from([
                 ("code".into(), Type::Text),
                 ("message".into(), Type::Text),
@@ -305,19 +311,25 @@ mod tests {
     fn committed_bindings_and_last_result_are_retained() {
         let mut context = ReplContext::empty();
         context
-            .commit(staged(&context, "let count: Int = 41;"))
-            .expect("current admission commits");
-        context
             .commit(staged(
                 &context,
-                "fn twice(value: Int): Int = value + value;",
+                repl_fixture!("repl-typed-count-declaration"),
             ))
             .expect("current admission commits");
-        assert_eq!(staged(&context, "twice(count)").ty, Some(Type::Int));
         context
-            .commit(staged(&context, "count + 1"))
+            .commit(staged(&context, repl_fixture!("repl-function-declaration")))
             .expect("current admission commits");
-        assert_eq!(staged(&context, "$_").ty, Some(Type::Int));
+        assert_eq!(
+            staged(&context, repl_fixture!("repl-twice-count")).ty,
+            Some(Type::Int)
+        );
+        context
+            .commit(staged(&context, repl_fixture!("repl-count-increment")))
+            .expect("current admission commits");
+        assert_eq!(
+            staged(&context, repl_fixture!("repl-last-result")).ty,
+            Some(Type::Int)
+        );
     }
 
     #[test]
@@ -331,10 +343,13 @@ mod tests {
         ]);
         let mut context = ReplContext::from_analysis(&analysis).expect("project admitted");
         context
-            .commit(staged(&context, "use library;"))
+            .commit(staged(&context, repl_fixture!("repl-use-library")))
             .expect("current admission commits");
-        assert_eq!(staged(&context, "library.visible(1)").ty, Some(Type::Int));
-        let private = parse_repl("library.hidden(1)");
+        assert_eq!(
+            staged(&context, repl_fixture!("repl-public-library-call")).ty,
+            Some(Type::Int)
+        );
+        let private = parse_repl(repl_fixture!("repl-private-library-call"));
         assert!(private.is_ok());
         assert!(context.stage(&private.value).is_err());
     }
@@ -342,25 +357,31 @@ mod tests {
     #[test]
     fn uncommitted_or_failed_stages_do_not_escape() {
         let mut context = ReplContext::empty();
-        let pending = staged(&context, "let count = 1;");
-        let name = parse_repl("count");
+        let pending = staged(&context, repl_fixture!("repl-count-declaration"));
+        let name = parse_repl(repl_fixture!("repl-count-reference"));
         assert!(context.stage(&name.value).is_err());
         context.commit(pending).expect("current admission commits");
         let mismatch = parse_repl(include_str!("fixtures/repl-typed-let-mismatch.orna"));
         assert!(context.stage(&mismatch.value).is_err());
-        assert_eq!(staged(&context, "count").ty, Some(Type::Int));
+        assert_eq!(
+            staged(&context, repl_fixture!("repl-count-reference")).ty,
+            Some(Type::Int)
+        );
     }
 
     #[test]
     fn stale_admission_is_rejected_without_losing_the_committed_state() {
         let mut context = ReplContext::empty();
-        let first = staged(&context, "let first = 1;");
-        let second = staged(&context, "let second = 2;");
+        let first = staged(&context, repl_fixture!("repl-first-declaration"));
+        let second = staged(&context, repl_fixture!("repl-second-declaration"));
 
         context.commit(first).expect("first stage is current");
         assert_eq!(context.commit(second), Err(ReplCommitError::StaleRevision));
-        assert_eq!(staged(&context, "first").ty, Some(Type::Int));
-        let missing = parse_repl("second");
+        assert_eq!(
+            staged(&context, repl_fixture!("repl-first-reference")).ty,
+            Some(Type::Int)
+        );
+        let missing = parse_repl(repl_fixture!("repl-second-reference"));
         assert!(context.stage(&missing.value).is_err());
     }
 
@@ -368,13 +389,13 @@ mod tests {
     fn foreign_admission_is_rejected_without_cross_session_injection() {
         let first = ReplContext::empty();
         let mut second = ReplContext::empty();
-        let admission = staged(&first, "let injected = 1;");
+        let admission = staged(&first, repl_fixture!("repl-injected-declaration"));
 
         assert_eq!(
             second.commit(admission),
             Err(ReplCommitError::ForeignContext)
         );
-        let missing = parse_repl("injected");
+        let missing = parse_repl(repl_fixture!("repl-injected-reference"));
         assert!(second.stage(&missing.value).is_err());
     }
 }
