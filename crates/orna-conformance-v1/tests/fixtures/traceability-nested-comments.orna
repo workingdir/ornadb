@@ -1,0 +1,2 @@
+/* outer comment /* nested comment */ still outer */
+pub fn comment_value() = "/* string delimiters are text */";

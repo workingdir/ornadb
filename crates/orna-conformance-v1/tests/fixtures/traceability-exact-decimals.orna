@@ -1,0 +1,2 @@
+pub fn fractional() = 1.2500;
+pub fn exponent() = 1.25e2;
