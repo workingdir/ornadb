@@ -1341,6 +1341,7 @@ version = "1.0.0"
 dependencies = [
  "base64",
  "orna-value-v1",
+ "orna-syntax-v1",
  "proptest",
  "serde",
  "serde_json",
