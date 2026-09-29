@@ -11,12 +11,12 @@ mod publication_policy;
 
 pub use compact::{
     apply_migration_plan_to_compact, fold_compact_committed_base, lower_publication_freeze,
-    CompactBaseProjectionError, CompactBaseRow, CompactBaseState, CompactExactKeyIndex,
-    CompactExactKeySource,
+    CompactBaseProjectionError, CompactBaseRow, CompactBaseState, CompactEditableRekey,
+    CompactExactKeyIndex, CompactExactKeySource, CompactHybridEvolution, CompactHybridRekey,
     CompactKeyError, CompactKeyIdentity, CompactLogicalKeyError, CompactLogicalReader,
     CompactLoweringError, CompactOvbProfile, CompactWriterInput, CompactWriterMutation,
     CompactWriterMutationState, CompactWriterBatch, CompactWriterRow, COMPACT_STORAGE_PROFILE,
-    OVB_PROFILE,
+    EditableBaseRow, HybridBaseState, OVB_PROFILE,
 };
 pub use compact_parquet::{CompactParquetError, CompactParquetKeySource};
 pub use publication_policy::{
@@ -264,10 +264,10 @@ impl LooseProjection {
 
 /// One row in the logical hybrid read view.
 ///
-/// A loose row is an intentional in-progress overlay over the committed
-/// compact base. It is not a second authoritative representation in a
-/// committed snapshot; publication/recovery hides that shadow behind its
-/// generation barrier as required by ORNA-STORAGE-005.
+/// One row in a validated hybrid read view. A loose row and compact row with
+/// the same key are never silently combined; callers that need a temporary
+/// publication shadow must prove its row hash and generation barrier before
+/// reaching this logical projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HybridLogicalRow<'a> {
     Compact {
@@ -292,10 +292,10 @@ impl<'a> HybridLogicalRow<'a> {
 /// Merges one verified compact base with its pending editable projection.
 ///
 /// The resolver is schema-owned because a path stores canonical text
-/// components while compact identity is typed OVB. Compact rows are the base;
-/// one loose row for an existing compact key intentionally overrides it,
-/// tombstones suppress it, and disjoint loose rows are appended. Duplicate
-/// resolved loose identities fail closed rather than silently selecting one.
+/// components while compact identity is typed OVB. Disjoint loose rows are
+/// appended to compact rows. Any editable row or tombstone resolving to a
+/// compact key is a conflict because this boundary has no publication-shadow
+/// proof or compact mutation intent.
 pub fn merge_compact_loose<'a, F>(
     profile: &CompactOvbProfile,
     base: &'a CompactBaseState,
@@ -336,10 +336,10 @@ where
         if !resolved_loose.insert(key.clone()) {
             return Err(Error::HybridDuplicateKey { key });
         }
-        merged.insert(
-            key.clone(),
-            HybridLogicalRow::Loose { key, path, row },
-        );
+        if merged.contains_key(&key) {
+            return Err(Error::HybridDuplicateKey { key });
+        }
+        merged.insert(key.clone(), HybridLogicalRow::Loose { key, path, row });
     }
     for path in loose.tombstones() {
         let key = resolve(path)?;
@@ -349,7 +349,9 @@ where
         if !resolved_loose.insert(key.clone()) {
             return Err(Error::HybridDuplicateKey { key });
         }
-        merged.remove(&key);
+        if merged.contains_key(&key) {
+            return Err(Error::HybridDuplicateKey { key });
+        }
     }
 
     let mut result = Vec::with_capacity(merged.len());
@@ -4172,7 +4174,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hybrid_merge_uses_loose_overlay_for_existing_compact_key() {
+    async fn hybrid_merge_rejects_loose_row_for_existing_compact_key() {
         let (profile, base) = hybrid_base().await;
         let loose_path = LoosePath::for_key("Contact", &["one".into()]).unwrap();
         let compact_key = hybrid_key(&profile, 1);
@@ -4186,24 +4188,20 @@ mod tests {
             Some(row("override")),
             1,
         );
-        let rows = merge_compact_loose(&profile, &base, &projection, |path| {
-            if path == &loose_path {
-                Ok(compact_key.clone())
-            } else {
-                Err(Error::InvalidKey)
-            }
-        })
-        .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert!(matches!(
-            rows.as_slice(),
-            [HybridLogicalRow::Loose { key, path, row }]
-                if key == &compact_key && **path == loose_path && row.bytes() == b"override"
-        ));
+        assert_eq!(
+            merge_compact_loose(&profile, &base, &projection, |path| {
+                if path == &loose_path {
+                    Ok(compact_key.clone())
+                } else {
+                    Err(Error::InvalidKey)
+                }
+            }),
+            Err(Error::HybridDuplicateKey { key: compact_key })
+        );
     }
 
     #[tokio::test]
-    async fn hybrid_merge_tombstone_suppresses_compact_row() {
+    async fn hybrid_merge_rejects_tombstone_for_compact_key() {
         let (profile, base) = hybrid_base().await;
         let loose_path = LoosePath::for_key("Contact", &["one".into()]).unwrap();
         let compact_key = hybrid_key(&profile, 1);
@@ -4228,15 +4226,18 @@ mod tests {
             2,
         );
         assert!(projection.tombstones().any(|path| path == &loose_path));
-        let rows = merge_compact_loose(&profile, &base, &projection, |path| {
-            if path == &loose_path {
-                Ok(compact_key.clone())
-            } else {
-                Err(Error::InvalidKey)
-            }
-        })
-        .unwrap();
-        assert!(rows.is_empty());
+        assert_eq!(
+            merge_compact_loose(&profile, &base, &projection, |path| {
+                if path == &loose_path {
+                    Ok(compact_key.clone())
+                } else {
+                    Err(Error::InvalidKey)
+                }
+            }),
+            Err(Error::HybridDuplicateKey {
+                key: compact_key.clone()
+            })
+        );
         project_loose(
             &mut projection,
             "hybrid-tombstone-reinsert",
@@ -4247,18 +4248,16 @@ mod tests {
             3,
         );
         assert!(!projection.tombstones().any(|path| path == &loose_path));
-        let rows = merge_compact_loose(&profile, &base, &projection, |path| {
-            if path == &loose_path {
-                Ok(compact_key.clone())
-            } else {
-                Err(Error::InvalidKey)
-            }
-        })
-        .unwrap();
-        assert!(matches!(
-            rows.as_slice(),
-            [HybridLogicalRow::Loose { row, .. }] if row.bytes() == b"reinserted"
-        ));
+        assert_eq!(
+            merge_compact_loose(&profile, &base, &projection, |path| {
+                if path == &loose_path {
+                    Ok(compact_key.clone())
+                } else {
+                    Err(Error::InvalidKey)
+                }
+            }),
+            Err(Error::HybridDuplicateKey { key: compact_key })
+        );
     }
 
     #[tokio::test]
