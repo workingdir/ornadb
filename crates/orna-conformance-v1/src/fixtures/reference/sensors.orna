@@ -1,0 +1,26 @@
+pub type Sample {
+    pub sensor: Str,
+    pub sequence: Int,
+    pub value: Decimal,
+}
+
+pub table Reading(sensor: Str, sequence: Int) {
+    value: Decimal,
+    assert every(reading => reading.sequence >= 0);
+}
+
+pub fn input() = Stream.from_list([
+    Sample { sensor: "greenhouse", sequence: 0, value: 18.25 },
+    Sample { sensor: "greenhouse", sequence: 1, value: 18.50 },
+    Sample { sensor: "greenhouse", sequence: 2, value: 18.75 },
+], source_identity: "example:sensors:v1");
+
+pub fn ingest() {
+    input() | for_each(sample => {
+        Reading.insert({
+            sensor: sample.sensor,
+            sequence: sample.sequence,
+            value: sample.value,
+        });
+    });
+}

@@ -1,0 +1,23 @@
+pub table Stock(location: Str, sku: Str) {
+    quantity: Int,
+    assert every(stock => stock.quantity >= 0);
+}
+
+pub fn seed() {
+    Stock.insert({ location: "north", sku: "pencil", quantity: 12 });
+    Stock.insert({ location: "south", sku: "pencil", quantity: 4 });
+}
+
+pub fn transfer(from_location: Str, to_location: Str, sku: Str, amount: Int) {
+    assert amount > 0;
+    assert from_location != to_location;
+    let origin = Stock | filter(stock =>
+        stock.location == from_location && stock.sku == sku
+    ) | one();
+    let destination = Stock | filter(stock =>
+        stock.location == to_location && stock.sku == sku
+    ) | one();
+    assert origin.quantity >= amount;
+    Stock.update((from_location, sku), { quantity: origin.quantity - amount });
+    Stock.update((to_location, sku), { quantity: destination.quantity + amount });
+}

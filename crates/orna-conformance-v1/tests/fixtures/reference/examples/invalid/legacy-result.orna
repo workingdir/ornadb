@@ -1,0 +1,1 @@
+pub fn bad(raw: Str): Result<Message, DecodeError> = Ok(decode(raw));

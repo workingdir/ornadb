@@ -1,0 +1,6 @@
+pub table Vehicle(id: Uuid) {
+    registration: Str,
+    owner: contacts.Contact,
+}
+
+pub fn owner_name(vehicle: Vehicle) = vehicle.owner.name;

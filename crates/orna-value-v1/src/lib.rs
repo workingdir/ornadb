@@ -3510,7 +3510,7 @@ mod tests {
     #[test]
     fn values_match_supplied_vectors() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../reference/Orna-1.0.0/tests/value-vectors.json"
+            "fixtures/reference/tests/value-vectors.json"
         ))
         .unwrap();
         for vector in fixture.as_array().unwrap() {
@@ -3650,7 +3650,7 @@ mod tests {
     #[test]
     fn float_vectors() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../reference/Orna-1.0.0/tests/float-vectors.json"
+            "fixtures/reference/tests/float-vectors.json"
         ))
         .unwrap();
         let parse = |text: &str| u64::from_str_radix(text, 16).unwrap();
@@ -4493,7 +4493,7 @@ mod tests {
     #[test]
     fn snapshot_vectors() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../reference/Orna-1.0.0/tests/snapshot-vectors.json"
+            "fixtures/reference/tests/snapshot-vectors.json"
         ))
         .unwrap();
         let db = h("000102030405060708090a0b0c0d0e0f").try_into().unwrap();
@@ -4550,7 +4550,7 @@ mod tests {
     #[test]
     fn fixture_path_vectors() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../reference/Orna-1.0.0/tests/path-vectors.json"
+            "fixtures/reference/tests/path-vectors.json"
         ))
         .unwrap();
         for vector in fixture["round_trip"].as_array().unwrap() {
@@ -4623,7 +4623,7 @@ mod tests {
     #[test]
     fn fixture_numeric_vectors_are_exact() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../reference/Orna-1.0.0/tests/numeric-vectors.json"
+            "fixtures/reference/tests/numeric-vectors.json"
         ))
         .unwrap();
         assert_eq!(fixture["money_add"]["a"], "0.1");

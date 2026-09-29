@@ -19,7 +19,7 @@ fn decode_hex(value: &str) -> Vec<u8> {
 #[test]
 fn reference_protocol_vectors_decode_and_reencode_canonically() {
     let vectors: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../reference/Orna-1.0.0/tests/protocol-vectors.json"
+        "fixtures/reference/tests/protocol-vectors.json"
     ))
     .expect("valid reference protocol vectors");
     let vectors = vectors.as_array().expect("protocol vectors are an array");
