@@ -82,26 +82,35 @@ pub const STANDARD_LIBRARY_VERSION_IDENTITY: &str = "orna.std/1";
 
 /// Logical source path of the pinned Orna 1.0.0 reference math module.
 pub const REFERENCE_STANDARD_MATH_PATH_V1: &str = "std/math.orna";
+pub const REFERENCE_STANDARD_COLLECTION_PATH_V1: &str = "std/collection.orna";
 
 const REFERENCE_STANDARD_MATH_SOURCE_V1: &str = include_str!("v1/std/math.orna");
+const REFERENCE_STANDARD_COLLECTION_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/collection.orna");
 
 /// Source units for the Orna 1.0.0 reference standard dependency.
 ///
 /// This is the current source-backed standard boundary. The retained `orna.std/1`–
 /// `orna.std/11` APIs below model older, explicitly versioned snapshots.
 #[must_use]
-pub fn reference_standard_sources_v1() -> [(String, String); 1] {
-    [(
-        REFERENCE_STANDARD_MATH_PATH_V1.into(),
-        REFERENCE_STANDARD_MATH_SOURCE_V1.into(),
-    )]
+pub fn reference_standard_sources_v1() -> [(String, String); 2] {
+    [
+        (
+            REFERENCE_STANDARD_MATH_PATH_V1.into(),
+            REFERENCE_STANDARD_MATH_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_COLLECTION_PATH_V1.into(),
+            REFERENCE_STANDARD_COLLECTION_SOURCE_V1.into(),
+        ),
+    ]
 }
 
 /// Profile that pins the exact 1.0.0 reference-standard source bytes.
 #[must_use]
 pub fn reference_standard_profile_v1() -> StandardDependencyProfile {
     StandardDependencyProfile::from_sources(
-        "orna.std/v1-pure-math",
+        "orna.std/v1-reference-library",
         reference_standard_sources_v1(),
     )
     .expect("the bundled Orna 1.0.0 standard module path is valid")

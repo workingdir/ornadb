@@ -63,7 +63,7 @@ fn standard_library_loads_the_pinned_1_0_profile() {
         .standard_dependency_profile()
         .expect("source-backed standard profile");
 
-    assert_eq!(profile.snapshot(), "orna.std/v1-pure-math");
+    assert_eq!(profile.snapshot(), "orna.std/v1-reference-library");
     assert!(
         standard
             .modules
@@ -109,7 +109,7 @@ fn lsp_import_analysis_uses_pinned_1_0_standard_modules() {
     }));
     assert_eq!(
         diagnostics[0].data.as_ref().unwrap()["standardProfile"],
-        "orna.std/v1-pure-math"
+        "orna.std/v1-reference-library"
     );
 }
 
