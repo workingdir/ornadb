@@ -67,4 +67,7 @@ fn implicit_refined_subject_does_not_become_an_ordinary_module_name() {
             .collect::<Vec<_>>(),
         vec![DIAG_UNRESOLVED]
     );
+    assert!(analysis.assertions.values().flatten().any(|plan| {
+        plan.owner == AssertionOwner::RefinedType("Positive".into())
+    }));
 }

@@ -32,16 +32,16 @@ ORNA_REFERENCE_DIR=/home/pbox/dev/ornadb/reference/Orna-1.0.0 cargo test -p orna
 Captured output:
 
 ```text
-Compiling orna-semantic-v1 v1.0.0 (/home/pbox/dev/ornadb/wt-refine-evidence-batch-yhre/crates/orna-semantic-v1)
-Finished `test` profile [unoptimized] target(s) in 0.43s
-Running tests/refine_evidence_batch_yhre.rs
+    Blocking waiting for file lock on build directory
+   Compiling orna-semantic-v1 v1.0.0 (/home/pbox/dev/ornadb/wt-refine-evidence-batch-yhre/crates/orna-semantic-v1)
+    Finished `test` profile [unoptimized] target(s) in 40.35s
+     Running tests/refine_evidence_batch_yhre.rs (/var/tmp/pbox-build/cargo/debug/deps/refine_evidence_batch_yhre-8b60beac004f8196)
 
 running 2 tests
 test implicit_refined_subject_does_not_become_an_ordinary_module_name ... ok
 test refined_type_declarations_have_owner_plans_and_static_identity ... ok
 
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
-
 FOCUSED_TEST_EXIT_CODE=0
 ```
 
