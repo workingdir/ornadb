@@ -2596,34 +2596,10 @@ fn authoritative_fixture_resolves_attached_tables_connectors_and_modules() {
             ),
         ),
         (
-            "system failure replay",
+            "system observations",
             ModuleInput::new(
-                "system_runtime.orna",
-                r#"
-                    pub fn replay_mail_failure(source_identity: Str, partition: Str?, position_format: Str, position) {
-                        let failure = sys.Failure | one(failure =>
-                            failure.consumer == mail.google.sync
-                            && failure.source_identity == source_identity
-                            && failure.partition == partition
-                            && failure.position_format == position_format
-                            && failure.position == position
-                        );
-                        sys.admin.replay_failure(failure.reference, expected_version: failure.version, expected_status: failure.status)
-                    }
-                "#,
-            ),
-        ),
-        (
-            "system failure skip",
-            ModuleInput::new(
-                "system_runtime_skip.orna",
-                r#"
-                    pub fn skip_blocked_mail(reason: Str) {
-                        let stream = sys.rt.streams | one(stream => stream.consumer == mail.google.sync);
-                        let failure = sys.Failure | one(failure => failure.reference == stream.last_failure);
-                        sys.admin.skip_failure(failure.reference, expected_version: failure.version, expected_status: failure.status, reason: reason)
-                    }
-                "#,
+                "authoritative_system_observations.orna",
+                include_str!("fixtures/authoritative-system-observations.orna"),
             ),
         ),
         (
@@ -2631,18 +2607,6 @@ fn authoritative_fixture_resolves_attached_tables_connectors_and_modules() {
             ModuleInput::new(
                 "system_runtime_presentation.orna",
                 "pub fn dashboard() = std.ui.Page(\"/\", _ => std.ui.Table(sys.rt.streams));",
-            ),
-        ),
-        (
-            "historical database view",
-            ModuleInput::new(
-                "system_database.orna",
-                r#"
-                    pub fn compare_old_and_current() {
-                        let old = sys.database.as_of(sys.snapshot("HEAD~10"));
-                        { old: old.cwd, current: sys.database.cwd }
-                    }
-                "#,
             ),
         ),
         (
