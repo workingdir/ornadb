@@ -1,0 +1,1 @@
+map(transform: value => value * 10, values: [3, 1, 2])

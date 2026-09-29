@@ -1,0 +1,1 @@
+std.collection.partition(predicate: value => value >= 2, values: [1, 2, 3])

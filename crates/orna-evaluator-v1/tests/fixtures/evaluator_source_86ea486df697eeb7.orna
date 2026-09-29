@@ -1,0 +1,1 @@
+std.stats.percentile([10.0, 0.0], 1.0, interpolation: "linear")
