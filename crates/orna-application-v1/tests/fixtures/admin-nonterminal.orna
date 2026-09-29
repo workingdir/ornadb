@@ -1,0 +1,4 @@
+pub fn main(stream: sys.StreamRef) {
+  sys.admin.pause_stream(stream);
+  true
+}
