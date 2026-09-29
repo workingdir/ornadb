@@ -1,0 +1,15 @@
+// `asof_join`'s reference entry leaves the selector and result shapes open.
+// This profile applies each selector to both lists' rows and returns one
+// `(left, right?)` pair per left row. The bounded evaluator selects by nearest
+// absolute time distance, preserves left order, uses null for a missing match,
+// and resolves equal distances to the last matching right source row.
+// Its time callback returns Int, Decimal, Date, or Instant values.
+pub fn asof_join<T, Time, Key>(
+    left: [T],
+    right: [T],
+    time: fn(T): Time,
+    by: fn(T): Key
+): [(T, T?)] = fail(error(
+    code: "ORNA-EVAL-UNSUPPORTED",
+    message: "std.collection.asof_join requires its evaluator binding"
+));

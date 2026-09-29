@@ -162,10 +162,10 @@ child; an already-installed or mismatched base fails closed.
 ### Source-level pinned pure-module boundary
 
 The current v1 command-line source boundary has one smaller, executable
-standard-module profile: `orna.std/v1-pure-math`. It contains the bundled
-`std.math` module, whose public functions are `increment`, `decrement`, and
-`is_zero`. This is a pinned source bundle, not discovery of an installed or
-host-provided standard library.
+standard-module profile: `orna.std/v1-reference-library`. It contains the
+bundled `std.math` module and the `std.collection` source surface. This is a
+pinned source bundle, not discovery of an installed or host-provided standard
+library.
 
 When a project imports a standard module, `orna-cli-v1 check` first requires
 the imported logical module to be named by the selected profile. It then
