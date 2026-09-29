@@ -1,0 +1,11 @@
+
+            pub protocol P {
+                fn display(self): Str;
+            }
+            pub table Note(id: Int) {
+                value: Str,
+                impl P {
+                    fn display(self): Str = self.value;
+                }
+            }
+        

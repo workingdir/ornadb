@@ -1,0 +1,6 @@
+
+                use traits;
+                pub type Box {
+                    impl traits.P {}
+                }
+            

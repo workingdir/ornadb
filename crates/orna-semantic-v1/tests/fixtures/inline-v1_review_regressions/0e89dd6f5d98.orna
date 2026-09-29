@@ -1,0 +1,11 @@
+
+            type Number = Int;
+            pub protocol P {
+                fn value(self, input: Number): Number;
+            }
+            pub type Box {
+                impl P {
+                    fn value(self, input: Int): Int = input;
+                }
+            }
+        

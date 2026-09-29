@@ -1,0 +1,1 @@
+type T { value: Int, } fn forge() = T { value: "wrong", value: 2 };

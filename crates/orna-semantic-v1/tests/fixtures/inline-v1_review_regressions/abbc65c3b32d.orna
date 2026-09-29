@@ -1,0 +1,8 @@
+
+            pub table Reading(id: Missing) {
+                payload: Missing,
+            }
+            pub type Sample {
+                payload: Missing,
+            }
+        

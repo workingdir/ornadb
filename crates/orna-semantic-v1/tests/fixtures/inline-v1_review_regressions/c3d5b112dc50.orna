@@ -1,0 +1,7 @@
+
+            pub fn integer(): Int {
+                return 1;
+                break;
+                "ignored";
+            }
+        

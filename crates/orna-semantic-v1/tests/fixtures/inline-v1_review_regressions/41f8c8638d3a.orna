@@ -1,0 +1,8 @@
+
+            pub protocol P<T> {
+                fn value(self): Int;
+            }
+            pub type Box {
+                impl P<Int> {}
+            }
+        

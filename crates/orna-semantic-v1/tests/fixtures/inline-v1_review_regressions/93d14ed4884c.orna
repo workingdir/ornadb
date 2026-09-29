@@ -1,0 +1,8 @@
+
+            pub type Box {
+                value: Str,
+                impl Display {
+                    fn display(self): Str = self.value;
+                }
+            }
+        

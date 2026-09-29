@@ -1,0 +1,9 @@
+
+            pub fn insert(): Str = "pure";
+            pub type Note {
+                value: Str,
+                impl Display {
+                    fn display(self): Str = insert();
+                }
+            }
+        

@@ -1,0 +1,9 @@
+
+            pub fn nested(): Int {
+                if true {
+                    return 1;
+                    99
+                }
+                return 2;
+            }
+        

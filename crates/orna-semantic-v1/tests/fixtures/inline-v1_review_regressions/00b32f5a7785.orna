@@ -1,0 +1,6 @@
+
+                use traits.{P};
+                pub type Box {
+                    impl P {}
+                }
+            

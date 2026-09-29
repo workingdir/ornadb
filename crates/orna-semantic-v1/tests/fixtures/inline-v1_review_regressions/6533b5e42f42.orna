@@ -1,0 +1,7 @@
+
+                pub table Audit { message: Str, }
+                pub fn helper(): Str {
+                    Audit.insert({ message: "displayed" });
+                    "displayed"
+                }
+            
