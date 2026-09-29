@@ -1,0 +1,567 @@
+// WRAPPER_PREFIX
+fn example_context() {
+// WRAPPER_SUFFIX
+}
+
+// SOURCE_BLOCK source/03-source-modules.md 1
+use directory;
+use sensors.greenhouse as climate;
+use sensors.greenhouse.*;
+use sensors.greenhouse.{Reading, recent};
+use std.prelude as _;
+
+// SOURCE_BLOCK source/04-lexical.md 1
+// line comment
+
+/* block comment */
+
+// SOURCE_BLOCK source/04-lexical.md 2
+let xs = [1, 2, 3];
+let person = {
+    name: "Alice",
+    emails: ["alice@example.com"],
+};
+
+// SOURCE_BLOCK source/04-lexical.md 3
+pub fn pair(name: Str, count: Int): (Str, Int) = (name, count);
+pub fn singleton(value: Int): (Int,) = (value,);
+
+// SOURCE_BLOCK source/05-types.md 1
+1.decimal.divide(
+    3.decimal,
+    scale: 6,
+    rounding: half_even,
+)
+
+// SOURCE_BLOCK source/05-types.md 2
+readings | bucket_by(1.day)
+
+// SOURCE_BLOCK source/05-types.md 3
+readings | bucket_by(1.day, zone: Europe.London)
+
+// SOURCE_BLOCK source/05-types.md 4
+pub dim Length;
+pub dim Mass;
+pub dim Time;
+pub dim Temperature;
+pub dim Speed = Length / Time;
+pub dim Energy = Mass * Length^2 / Time^2;
+pub dim Power = Energy / Time;
+
+pub unit m : Length base;
+pub unit kg : Mass base;
+pub unit s : Time base;
+pub unit K : Temperature base;
+pub unit km : Length = 1000.m;
+pub unit mile : Length = 1609.344.m;
+pub unit min : Time = 60.s;
+pub unit hour : Time = 60.min;
+pub unit J : Energy = kg * m^2 / s^2;
+pub unit kWh : Energy = 3.6e6.J;
+pub unit mph : Speed = mile / hour;
+pub unit C : Temperature = K offset 273.15 affine;
+pub unit deltaC : Temperature = K;
+
+// SOURCE_BLOCK source/05-types.md 5
+rates.convert(invoice.total, GBP, on: invoice.date)
+
+// SOURCE_BLOCK source/05-types.md 6
+fn square(x) = x * x;
+
+pub fn total(items: [LineItem]): Money<GBP> =
+    items | map(item => item.price * item.quantity) | sum();
+
+// SOURCE_BLOCK source/05-types.md 7
+type UserId = Uuid;
+
+// SOURCE_BLOCK source/05-types.md 8
+pub type EmailAddress {
+    value: Str,
+
+    impl From<Str> {
+        fn from(value) {
+            if !valid_email(value) {
+                fail(error(
+                    code: "email.invalid",
+                    message: "invalid email address",
+                ));
+            }
+
+            EmailAddress { value: value }
+        }
+    }
+
+    impl Display {
+        fn display(self, context) = self.value;
+    }
+}
+
+// SOURCE_BLOCK source/05-types.md 9
+type Meter = Int {
+    assert >= 0;
+    assert <= 100;
+}
+
+// SOURCE_BLOCK source/05-types.md 10
+pub type EmailAddress {
+    value: Str,
+
+    impl From<Str> {
+        fn from(value) {
+            if !valid_email(value) {
+                fail(error(code: "email.invalid", message: "invalid email"));
+            }
+            EmailAddress { value: value }
+        }
+    }
+
+    impl From<EmailHeader> {
+        fn from(header) = EmailAddress.from(header.address);
+    }
+}
+
+// SOURCE_BLOCK source/05-types.md 11
+pub type Username {
+    value: Str,
+
+    impl Display {
+        fn display(self, context) = self.value;
+    }
+}
+
+// SOURCE_BLOCK source/06-expressions.md 1
+http.get("https://example.com");
+
+// SOURCE_BLOCK source/06-expressions.md 2
+assert every(Invoice, invoice =>
+    exists(Customer, customer => customer.id == invoice.customer_id)
+);
+
+// SOURCE_BLOCK source/06-expressions.md 3
+pub fn square(x: Int) = x * x;
+
+// SOURCE_BLOCK source/06-expressions.md 4
+pub fn square(x: Int): Int = x * x;
+
+// SOURCE_BLOCK source/06-expressions.md 5
+pub fn create_note(text: Str): Note {
+    let note = Note.insert({
+        created: now(),
+        text: text,
+    });
+
+    note
+}
+
+// SOURCE_BLOCK source/06-expressions.md 6
+pub fn recent(rows, duration = 7.days) =
+    rows | filter(row => row.time >= now() - duration);
+
+// SOURCE_BLOCK source/06-expressions.md 7
+pub enum SyncResult {
+    ok { count: Int },
+    failed { reason: Str, retryable: Bool },
+}
+
+pub fn count(result: SyncResult): Int =
+    case result {
+        SyncResult.ok { count }: count,
+        SyncResult.failed { reason: _, retryable: _ }: 0,
+    };
+
+// SOURCE_BLOCK source/06-expressions.md 8
+pub protocol Display {
+    fn display(self, context: DisplayContext): Str;
+}
+
+pub protocol Currency {
+    static code: Str;
+    static minor_digits: Int;
+}
+
+pub fn maximum<T impl Order>(values: [T]): T? =
+    values | sort_by(value => value) | last();
+
+// SOURCE_BLOCK source/06-expressions.md 9
+pub type EmailAddress {
+    value: Str,
+
+    impl Display {
+        fn display(self, context) = self.value;
+    }
+}
+
+// SOURCE_BLOCK source/06-expressions.md 10
+let label =
+    if total > 100.GBP {
+        "large"
+    } else {
+        "small"
+    };
+
+let total = 0;
+for item in items {
+    total = total + item;
+}
+
+// SOURCE_BLOCK source/06-expressions.md 11
+let count = 0;
+count = count + 1;
+count += 1;
+
+// SOURCE_BLOCK source/06-expressions.md 12
+parallel([
+    messages.sync,
+    ledger.sync,
+])
+
+// SOURCE_BLOCK source/06-expressions.md 13
+raw
+    | decode
+    | validate
+    |? recover_invalid_message
+    | store
+
+// SOURCE_BLOCK source/06-expressions.md 14
+let decoded = std.encoding.json.decode(raw, as: Message);
+let stored = Message.insert(decoded);
+
+// SOURCE_BLOCK source/06-expressions.md 15
+let decoded =
+    std.encoding.json.decode(raw, as: Message)
+    |? (failure => Message.default());
+
+// SOURCE_BLOCK source/06-expressions.md 16
+fn parse_port(raw: Str): Port =
+    raw
+        | Int.parse
+        | Port.from
+        |? (failure => {
+            log.warn(failure);
+            8080 | Port.from
+        });
+
+// SOURCE_BLOCK source/06-expressions.md 17
+fn require_message(raw: Str): Message =
+    raw
+        | std.encoding.json.decode(as: Message)
+        |? (failure => fail(error(
+            code: "message.invalid",
+            message: "could not decode message",
+            cause: failure,
+        )));
+
+// SOURCE_BLOCK source/07-tables.md 1
+pub table Contact(id: Str) {
+    name: Str,
+    emails: [Str],
+}
+
+// SOURCE_BLOCK source/07-tables.md 2
+pub table Reading(sensor: Uuid, time: Instant) {
+    temperature: Decimal,
+    humidity: Decimal,
+}
+
+// SOURCE_BLOCK source/07-tables.md 3
+pub table Note {
+    created: Instant,
+    text: Str,
+}
+
+// SOURCE_BLOCK source/07-tables.md 4
+pub table Event(id: Uuid = uuid7()) {
+    time: Instant,
+    value: Str,
+}
+
+// SOURCE_BLOCK source/07-tables.md 5
+pub table Contact(
+    id: Uuid = uuid7()
+) {
+    name: Str,
+    emails: [Str],
+}
+
+// SOURCE_BLOCK source/07-tables.md 6
+pub table Contact(id: Str) {
+    first: Str,
+    last: Str,
+    country: Str = "GB",
+    full_name: Str => "{first} {last}",
+}
+
+// SOURCE_BLOCK source/07-tables.md 7
+pub table User(id: Uuid) {
+    username: Username,
+    email: EmailAddress?,
+    role: Role,
+
+    assert all_unique(user => user.username);
+}
+
+// SOURCE_BLOCK source/07-tables.md 8
+pub table Booking(id: Uuid) {
+    starts: Instant,
+    ends: Instant,
+    cancelled: Bool,
+
+    assert every(booking =>
+        booking.cancelled || booking.ends > booking.starts
+    );
+}
+
+// SOURCE_BLOCK source/07-tables.md 9
+assert every(Invoice, invoice =>
+    exists(Customer, customer => customer.id == invoice.customer_id)
+);
+
+// SOURCE_BLOCK source/07-tables.md 10
+{
+    name: "Alice Smith",
+    emails: ["alice@example.com"],
+}
+
+// SOURCE_BLOCK source/07-tables.md 11
+let alice = Contact.insert({
+    name: "Alice Smith",
+    emails: ["alice@example.com"],
+});
+
+Contact.update(alice.id, {
+    emails: ["alice@new.example"],
+});
+
+Contact.delete(alice.id);
+
+// SOURCE_BLOCK source/07-tables.md 12
+pub table Vehicle(id: Uuid) {
+    owner: directory.Contact,
+}
+
+// SOURCE_BLOCK source/08-relations.md 1
+directory.Contact
+    | filter(c => c.name.starts_with("A"))
+    | sort_by(c => c.name)
+
+// SOURCE_BLOCK source/08-relations.md 2
+pub fn readings_above(limit: Decimal) =
+    energy.Reading
+        | filter(reading => reading.value > limit);
+
+// SOURCE_BLOCK source/08-relations.md 3
+energy.Reading.as_of(sys.snapshot("HEAD~10"))
+
+// SOURCE_BLOCK source/08-relations.md 4
+let before = Contact | count;
+Contact.insert({ name: "Alice" });
+let after = Contact | count;       // sees the write; cannot reuse `before`
+
+// SOURCE_BLOCK source/09-standard-library.md 1
+pub table Account(id: Str) {
+    handle: Str,
+    assert all_unique(account => account.handle);
+}
+
+// SOURCE_BLOCK source/10-execution.md 1
+let job = sys.start(worker, arguments, as: Int);
+sys.await(job)
+
+// SOURCE_BLOCK source/11-streams.md 1
+pub fn ingest(samples: Stream<Sample>) =
+    samples | for_each(sample => {
+        Reading.insert({
+            sensor: sample.sensor,
+            sequence: sample.sequence,
+            value: sample.value,
+        });
+    });
+
+// SOURCE_BLOCK source/13-presentation.md 1
+Table(rows, columns: {
+    duration: Column(display: std.time.duration.clock),
+})
+
+// SOURCE_BLOCK source/13-presentation.md 2
+pub type FriendlyDuration = Duration {
+    impl Display {
+        fn display(self, context: DisplayContext): Str =
+            std.time.duration.compact(self, context);
+    }
+}
+
+pub table Contact(id: Uuid) {
+    name: Str,
+    emails: [Str],
+
+    impl Present {
+        fn present(self, context: PresentContext): PresentTree =
+            std.ui.Details([
+                ("Name", self.name),
+                ("Emails", self.emails),
+            ]);
+    }
+}
+
+// SOURCE_BLOCK source/13-presentation.md 3
+{
+    id: "alice-smith",
+    name: "Alice Smith",
+    emails: ["alice@example.com"],
+}
+
+// SOURCE_BLOCK source/15-system.md 1
+sys.catalog.objects
+    | map(object => object.qualified_name)
+
+// SOURCE_BLOCK source/19-repository.md 1
+directory.Contact
+
+// SOURCE_BLOCK source/19-repository.md 2
+directory.Contact.as_of(CWD)
+
+// SOURCE_BLOCK source/23-storage.md 1
+Contact.rekey("alice-smith", "alice-jones")
+
+// SOURCE_BLOCK source/27-secrets.md 1
+let credential = std.secret.ref("messages.inbox");
+google.mail(account: credential)
+
+// SOURCE_BLOCK source/31-examples.md 1
+use library;
+use warehouse;
+use sensors;
+use values;
+
+pub fn seed() {
+    library.seed();
+    warehouse.seed();
+}
+
+pub fn exercise() {
+    library.lend("book-1", "reader-1");
+    warehouse.transfer("north", "south", "pencil", 3);
+}
+
+// SOURCE_BLOCK source/31-examples.md 2
+pub table Book(id: Str) {
+    title: Str,
+    assert every(book => book.title != "");
+}
+
+pub table Loan(book_id: Str) {
+    borrower: Str,
+    assert every(loan => loan.borrower != "");
+}
+
+assert every(Loan, loan =>
+    exists(Book, book => book.id == loan.book_id)
+);
+
+pub fn seed() {
+    Book.insert({ id: "book-1", title: "The Night Garden" });
+    Book.insert({ id: "book-2", title: "A Map of Small Things" });
+}
+
+pub fn lend(book_id: Str, borrower: Str) {
+    Loan.insert({ book_id: book_id, borrower: borrower });
+}
+
+pub fn return_book(book_id: Str) {
+    Loan.delete(book_id);
+}
+
+pub fn available() =
+    Book | filter(book => !exists(Loan, loan => loan.book_id == book.id));
+
+// SOURCE_BLOCK source/31-examples.md 3
+pub table Stock(location: Str, sku: Str) {
+    quantity: Int,
+    assert every(stock => stock.quantity >= 0);
+}
+
+pub fn seed() {
+    Stock.insert({ location: "north", sku: "pencil", quantity: 12 });
+    Stock.insert({ location: "south", sku: "pencil", quantity: 4 });
+}
+
+pub fn transfer(from_location: Str, to_location: Str, sku: Str, amount: Int) {
+    assert amount > 0;
+    assert from_location != to_location;
+    let origin = Stock | filter(stock =>
+        stock.location == from_location && stock.sku == sku
+    ) | one();
+    let destination = Stock | filter(stock =>
+        stock.location == to_location && stock.sku == sku
+    ) | one();
+    assert origin.quantity >= amount;
+    Stock.update((from_location, sku), { quantity: origin.quantity - amount });
+    Stock.update((to_location, sku), { quantity: destination.quantity + amount });
+}
+
+// SOURCE_BLOCK source/31-examples.md 4
+pub type Sample {
+    pub sensor: Str,
+    pub sequence: Int,
+    pub value: Decimal,
+}
+
+pub table Reading(sensor: Str, sequence: Int) {
+    value: Decimal,
+    assert every(reading => reading.sequence >= 0);
+}
+
+pub fn input() = Stream.from_list([
+    Sample { sensor: "greenhouse", sequence: 0, value: 18.25 },
+    Sample { sensor: "greenhouse", sequence: 1, value: 18.50 },
+    Sample { sensor: "greenhouse", sequence: 2, value: 18.75 },
+], source_identity: "example:sensors:v1");
+
+pub fn ingest() {
+    input() | for_each(sample => {
+        Reading.insert({
+            sensor: sample.sensor,
+            sequence: sample.sequence,
+            value: sample.value,
+        });
+    });
+}
+
+// SOURCE_BLOCK source/31-examples.md 5
+pub type Score = Int {
+    assert >= 0;
+    assert <= 100;
+}
+
+pub enum Availability {
+    ready,
+    waiting { reason: Str },
+}
+
+pub fn describe(value: Availability): Str = case value {
+    Availability.ready: "ready",
+    Availability.waiting { reason }: "waiting: {reason}",
+};
+
+pub fn optional_name(value: Str?): Str = case value {
+    Some(name): name,
+    null: "anonymous",
+};
+
+pub fn add(left: Int, right: Int): Int = left + right;
+
+// SOURCE_BLOCK source/31-examples.md 6
+let previous = sys.snapshot("HEAD~1");
+library.Book.as_of(previous)
+
+// SOURCE_BLOCK source/31-examples.md 7
+pub fn wait_for_int(job: sys.InvocationHandle<Int>): sys.InvocationResult<Int> =
+    sys.await(job, timeout: 1.s) |? (failure => {
+        if failure.code == "sys.invoke.await_timeout" {
+            sys.await(job)
+        } else {
+            fail(failure)
+        }
+    });
+
+// SOURCE_BLOCKS_END
