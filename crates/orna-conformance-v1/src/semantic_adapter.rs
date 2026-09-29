@@ -11556,8 +11556,6 @@ fn assertion_checkpoint_091_project() -> ProjectUnit {
 }
 
 fn checkpoint_atomicity_project(fixture_id: &str) -> ProjectUnit {
-    let mut values = vec!["0"; 41];
-    values.push("42");
     ProjectUnit {
         fixture_id: fixture_id.into(),
         project_id: fixture_id.into(),
@@ -11566,16 +11564,7 @@ fn checkpoint_atomicity_project(fixture_id: &str) -> ProjectUnit {
             fixture_id: fixture_id.into(),
             source_id: "main.orna".into(),
             parse_as: "module_unit".into(),
-            source: format!(
-                r#"
-                    pub table Email(id: Int) {{ value: Int, }}
-                    pub fn input() = Stream.from_list([{}], source_identity: "fixture:{fixture_id}");
-                    pub fn ingest() {{ input() | for_each(value => {{
-                        Email.insert({{ id: value, value: value }});
-                    }}); }}
-                "#,
-                values.join(", "),
-            ),
+            source: include_str!("../tests/fixtures/scenario-cp-001.orna").into(),
         }],
         loose_rows: Vec::new(),
         expectations: ProjectExpectations {

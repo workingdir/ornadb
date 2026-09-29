@@ -23,6 +23,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[path = "test_support.rs"]
+mod test_support;
+
 const FAIL_001_RUNTIME_CLAIM: &str = "FAIL-001 observes one stable keyed failure record accumulating attempts and verifies private row cardinality through the bounded runtime adapter; this is non-normative evidence, not a public sys.Failure projection";
 const CHECKPOINT_ATOMICITY_RUNTIME_CLAIM: &str = "CP-001 observes durable finite-list row/checkpoint atomicity through the bounded runtime adapter; CP-002 remains an explicit skip because the available witness exercises assertion validation rather than the immutable handler-inserts-then-errors path; this is implementation evidence, not compiler-produced Orna-engine execution or a public sys.Checkpoint projection";
 
@@ -573,9 +576,10 @@ fn run_checkpoint_atomicity_scenario(scenario: &Scenario) -> StageOutcome<Diagno
         if !status.success() {
             return None;
         }
+        test_support::configure_fixture_git_identity(&root);
         let repository = Repository::discover(&root).ok()?;
         let evaluator = DurableTransactionalEvaluator::new("main", Default::default());
-        let witness = block_on(evaluator.execute_checkpoint_atomicity_cp_001(
+        let witness_result = block_on(evaluator.execute_checkpoint_atomicity_cp_001(
             &repository,
             RuntimeIdentity {
                 database_id: [101; 16],
@@ -583,8 +587,8 @@ fn run_checkpoint_atomicity_scenario(scenario: &Scenario) -> StageOutcome<Diagno
             },
             [103; 16],
             [104; 32],
-        ))
-        .ok();
+        ));
+        let witness = witness_result.ok();
         witness
             .filter(|witness| {
                 witness.faulted_commit_rolls_back_rows_and_checkpoint
