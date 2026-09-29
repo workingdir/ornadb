@@ -1,3 +1,31 @@
+//! Evidence-graded expression audit against the frozen 1.0.0 chapter.
+//!
+//! - **A, observed runtime limitation:** `ORNA-OP-001`
+//!   (`source/06-expressions.md:301-305`) includes right-associative `^` in
+//!   the precedence table, but evaluating the fixture returns
+//!   `ORNA-EVAL-UNSUPPORTED`. The chapter does not define exponent operand,
+//!   result, or overflow semantics, so this audit records the gap without
+//!   assigning semantics.
+//! - **B, coverage gap:** `ORNA-CFLOW-002`
+//!   (`source/06-expressions.md:211`) requires left-to-right list and record
+//!   expression evaluation. The evaluator has ordered collection evaluation;
+//!   these fixtures distinguish it from evaluating a later failing expression
+//!   first. Existing function-argument coverage did not cover these forms.
+//! - **B, coverage gap:** `ORNA-CASE-003/005`
+//!   (`source/06-expressions.md:121-125`) require source-order arm selection
+//!   and guards only after a pattern match. The fixtures cover pattern misses,
+//!   a successful earlier arm, and a false guard followed by a matching arm.
+//! - **B, coverage gap:** `ORNA-COALESCE-002`
+//!   (`source/06-expressions.md:346`) specifies right association. Existing
+//!   coverage checked laziness, while this fixture distinguishes a chained
+//!   expression's grouping.
+//! - **B, coverage gap:** `ORNA-PIPE-007/008`
+//!   (`source/06-expressions.md:324-326`) and `ORNA-ERR-011/012`
+//!   (`source/06-expressions.md:413-415`) define failure short-circuiting,
+//!   one-shot recovery, and continuation after successful recovery. Existing
+//!   recovery tests covered re-emission and nested boundaries; these fixtures
+//!   exercise an enclosing expression and skipped work after recovery.
+
 use orna_evaluator_v1::{Environment, EvaluationError, Limits, evaluate_expression};
 use orna_value_v1::{Raw, Value};
 
