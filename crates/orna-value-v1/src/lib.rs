@@ -3516,8 +3516,14 @@ mod tests {
         for vector in fixture.as_array().unwrap() {
             let x = vector["hex"].as_str().unwrap();
             let b = h(x);
-            let decoded = Value::decode(&b).unwrap_or_else(|e| panic!("{x}: {e}"));
-            assert_eq!(decoded.encode().unwrap(), b, "{x}")
+            let canonical_roundtrip = Value::decode(&b)
+                .and_then(|decoded| decoded.encode())
+                .is_ok_and(|encoded| encoded == b);
+            assert_eq!(
+                canonical_roundtrip,
+                vector["canonical_roundtrip"].as_bool().unwrap(),
+                "{x}"
+            );
         }
     }
     #[test]
@@ -4556,6 +4562,22 @@ mod tests {
                 path_decode_key_components(&[format!("{encoded}.orna")]).unwrap(),
                 vec![source]
             );
+        }
+        for vector in fixture["composite"].as_array().unwrap() {
+            let values: Vec<String> = vector["values"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap().to_owned())
+                .collect();
+            let components: Vec<String> = vector["components"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|component| component.as_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(path_encode_key_components(&values).unwrap(), components);
+            assert_eq!(path_decode_key_components(&components).unwrap(), values);
         }
         for vector in fixture["reject_encoded"].as_array().unwrap() {
             assert!(path_decode_component(vector["encoded"].as_str().unwrap()).is_err());
