@@ -315,6 +315,11 @@ pub fn convert_cli_string(
             .parse::<f64>()
             .map_err(|_| InvocationConversionError::InvalidFloat)
             .and_then(|value| {
+                // CLI text arguments accept finite numeric spellings only;
+                // RuntimeFloat itself retains the full IEEE-754 value domain.
+                if !value.is_finite() {
+                    return Err(InvocationConversionError::InvalidFloat);
+                }
                 RuntimeFloat::new(value)
                     .map(RuntimeValue::Float)
                     .map_err(|_| InvocationConversionError::InvalidFloat)
