@@ -677,9 +677,10 @@ fn binary_run_without_a_target_executes_root_main() {
 #[tokio::test(flavor = "current_thread")]
 async fn binary_run_reads_both_publication_relations_from_runtime_state() {
     let directory = tempfile::tempdir().expect("project directory");
-    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../orna-runtime-v1/tests/fixtures/publication_metadata.orna");
-    std::fs::copy(fixture, directory.path().join("main.orna"))
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("../../orna-runtime-v1/tests/fixtures/publication_metadata.orna"),
+    )
         .expect("publication metadata fixture");
     initialize_project(directory.path());
 
