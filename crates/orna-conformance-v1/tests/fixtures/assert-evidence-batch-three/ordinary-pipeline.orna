@@ -1,0 +1,3 @@
+pub table Alpha(id: Int) { value: Int, }
+
+fn alpha_count() = Alpha | count;
