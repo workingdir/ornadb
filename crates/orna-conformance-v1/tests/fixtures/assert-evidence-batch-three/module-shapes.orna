@@ -1,0 +1,6 @@
+pub table Alpha(id: Int) { value: Int, }
+pub table Beta(id: Int) { value: Int, }
+pub table Gamma(id: Int) { value: Int, }
+
+assert every(Alpha, alpha => exists(Beta, beta => alpha.id == beta.id));
+assert every(Alpha, alpha => exists(Gamma, gamma => alpha.id == gamma.id));
