@@ -2576,17 +2576,6 @@ fn authoritative_fixture_resolves_attached_tables_connectors_and_modules() {
             ),
         ),
         (
-            "attached csv",
-            ModuleInput::new(
-                "attached_csv.orna",
-                r#"
-                    pub fn import(path: Str) =
-                        std.encoding.csv.rows(std.io.fs.read(path))
-                        | for_each(row => Contact.insert(row));
-                "#,
-            ),
-        ),
-        (
             "named attached row",
             ModuleInput::new(
                 "named_row.orna",
@@ -2675,6 +2664,16 @@ fn authoritative_fixture_resolves_attached_tables_connectors_and_modules() {
         let result = analyze_with_catalogue(&[source], &Catalogue::authoritative_fixture());
         assert!(result.is_ok(), "{name}: {:?}", result.diagnostics);
     }
+}
+
+#[test]
+fn authoritative_fixture_resolves_attached_csv_without_inventing_a_schema() {
+    let source = include_str!("fixtures/attached_csv.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new("attached_csv.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
 }
 
 #[test]
