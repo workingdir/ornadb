@@ -1,0 +1,3 @@
+use std.ui.*;
+
+pub fn values_page(values: [Str]) = Page("/values", _ => List(values));

@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/float-key.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E3003",
+  "message_contains": "Float is not a valid primary-key type",
+  "status": "expected-not-executed"
+}

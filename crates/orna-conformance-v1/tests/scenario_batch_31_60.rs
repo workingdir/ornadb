@@ -1,6 +1,6 @@
 use std::process::Command;
 
-const REFERENCE_SCENARIOS: &str = include_str!("../../../../reference/Orna-1.0.0/tests/scenarios.json");
+const REFERENCE_SCENARIOS: &str = include_str!("fixtures/reference/tests/scenarios.json");
 const BATCH_31_60: &[&str] = &[
     "CP-003",
     "CP-004",

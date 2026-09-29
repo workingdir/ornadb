@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/range-key-overlap-magic.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E3010",
+  "message_contains": "Range<T> is not a primary-key type in version 1.0",
+  "status": "expected-not-executed"
+}

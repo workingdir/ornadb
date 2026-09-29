@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-constraints-block.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "ORNA-A091-010",
+  "message_contains": "`constraints` is not a declaration; use owner-local `assert`",
+  "status": "expected-not-executed"
+}

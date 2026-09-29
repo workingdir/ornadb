@@ -5,7 +5,7 @@ use serde_json::json;
 
 const SOURCE_PROBES: &str = include_str!("fixtures/reference-tools/source-probes.orna");
 const SOURCE_BLOCKS: &str = include_str!("fixtures/reference-tools/source-blocks.orna");
-const INDEX_HTML: &str = include_str!("../../../../reference/Orna-1.0.0/index.html");
+const INDEX_HTML: &str = include_str!("fixtures/reference/index.html");
 
 const NAVIGATION_HARNESS: &str = r#"
 const fs = require('fs'), vm = require('vm');
@@ -196,11 +196,11 @@ fn frozen_source_probe_cases_match_parser_acceptance() {
 #[test]
 fn reference_project_modules_parse_as_module_units() {
     let modules = [
-        include_str!("../../../../reference/Orna-1.0.0/examples/reference/main.orna"),
-        include_str!("../../../../reference/Orna-1.0.0/examples/reference/library.orna"),
-        include_str!("../../../../reference/Orna-1.0.0/examples/reference/sensors.orna"),
-        include_str!("../../../../reference/Orna-1.0.0/examples/reference/values.orna"),
-        include_str!("../../../../reference/Orna-1.0.0/examples/reference/warehouse.orna"),
+        include_str!("fixtures/reference/examples/reference/main.orna"),
+        include_str!("fixtures/reference/examples/reference/library.orna"),
+        include_str!("fixtures/reference/examples/reference/sensors.orna"),
+        include_str!("fixtures/reference/examples/reference/values.orna"),
+        include_str!("fixtures/reference/examples/reference/warehouse.orna"),
     ];
     assert_eq!(modules.len(), 5);
     for (index, source) in modules.iter().enumerate() {

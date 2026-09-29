@@ -10099,23 +10099,23 @@ mod durable_tests {
         project(vec![
             (
                 "library.orna",
-                include_str!("../../../../reference/Orna-1.0.0/examples/reference/library.orna"),
+                include_str!("fixtures/reference/library.orna"),
             ),
             (
                 "main.orna",
-                include_str!("../../../../reference/Orna-1.0.0/examples/reference/main.orna"),
+                include_str!("fixtures/reference/main.orna"),
             ),
             (
                 "sensors.orna",
-                include_str!("../../../../reference/Orna-1.0.0/examples/reference/sensors.orna"),
+                include_str!("fixtures/reference/sensors.orna"),
             ),
             (
                 "values.orna",
-                include_str!("../../../../reference/Orna-1.0.0/examples/reference/values.orna"),
+                include_str!("fixtures/reference/values.orna"),
             ),
             (
                 "warehouse.orna",
-                include_str!("../../../../reference/Orna-1.0.0/examples/reference/warehouse.orna"),
+                include_str!("fixtures/reference/warehouse.orna"),
             ),
         ])
     }

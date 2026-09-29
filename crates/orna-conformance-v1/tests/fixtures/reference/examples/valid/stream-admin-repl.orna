@@ -1,0 +1,14 @@
+pub fn skip_blocked_mail(reason: Str) {
+    let stream =
+        sys.rt.streams
+        | one(stream => stream.consumer == mail.google.sync);
+
+    let failure = sys.Failure
+        | one(failure => failure.reference == stream.last_failure);
+
+    sys.admin.skip_failure(
+        failure.reference,
+        expected_status: failure.status,
+        reason: reason,
+    )
+}

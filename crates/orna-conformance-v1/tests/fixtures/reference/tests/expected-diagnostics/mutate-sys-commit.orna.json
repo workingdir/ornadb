@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/mutate-sys-commit.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E7001",
+  "message_contains": "sys.Commit is read-only",
+  "status": "expected-not-executed"
+}
