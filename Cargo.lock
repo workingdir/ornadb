@@ -1260,6 +1260,7 @@ dependencies = [
  "orna-conformance-v1",
  "orna-evaluator-v1",
  "orna-foundation-v1",
+ "orna-live-v1",
  "orna-project-v1",
  "orna-repository-v1",
  "orna-runtime-v1",
