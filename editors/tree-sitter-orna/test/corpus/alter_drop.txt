@@ -1,0 +1,142 @@
+====================
+alter type rename field
+====================
+
+ALTER TYPE product_test.probe
+    RENAME FIELD stored TO retained;
+
+---
+
+(source_file
+  (alter_statement
+    (alter_type_statement
+      (kw_alter)
+      (kw_type)
+      name: (qualified_name
+        (qualified_name
+          (identifier))
+        (dot)
+        (identifier))
+      (kw_rename)
+      (kw_field)
+      old_name: (identifier)
+      (kw_to)
+      new_name: (identifier)
+      (semicolon))))
+
+====================
+alter type rename to / add field / drop field
+====================
+
+ALTER TYPE app.account RENAME TO app_user;
+ALTER TYPE app.account ADD FIELD nickname TEXT;
+ALTER TYPE app.account DROP FIELD legacy_flag;
+
+---
+
+(source_file
+  (alter_statement
+    (alter_type_statement
+      (kw_alter)
+      (kw_type)
+      name: (qualified_name
+        (qualified_name
+          (identifier))
+        (dot)
+        (identifier))
+      (kw_rename)
+      (kw_to)
+      new_name: (identifier)
+      (semicolon)))
+  (alter_statement
+    (alter_type_statement
+      (kw_alter)
+      (kw_type)
+      name: (qualified_name
+        (qualified_name
+          (identifier))
+        (dot)
+        (identifier))
+      (kw_add)
+      (kw_field)
+      field: (field_definition
+        name: (identifier)
+        type: (type_spec
+          (scalar_type
+            (kw_text))))
+      (semicolon)))
+  (alter_statement
+    (alter_type_statement
+      (kw_alter)
+      (kw_type)
+      name: (qualified_name
+        (qualified_name
+          (identifier))
+        (dot)
+        (identifier))
+      (kw_drop)
+      (kw_field)
+      name: (identifier)
+      (semicolon))))
+
+====================
+alter function rename
+====================
+
+ALTER FUNCTION tasks.old_name RENAME TO new_name;
+
+---
+
+(source_file
+  (alter_statement
+    (alter_function_statement
+      (kw_alter)
+      (kw_function)
+      name: (qualified_name
+        (qualified_name
+          (identifier))
+        (dot)
+        (identifier))
+      (kw_rename)
+      (kw_to)
+      new_name: (identifier)
+      (semicolon))))
+
+====================
+drop statements
+====================
+
+DROP TYPE app.account;
+DROP FUNCTION app.cleanup CASCADE;
+DROP SCHEMA legacy RESTRICT;
+
+---
+
+(source_file
+  (drop_statement
+    (kw_drop)
+    (kw_type)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    (semicolon))
+  (drop_statement
+    (kw_drop)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    (kw_cascade)
+    (semicolon))
+  (drop_statement
+    (kw_drop)
+    (kw_schema)
+    name: (qualified_name
+      (identifier))
+    (kw_restrict)
+    (semicolon)))
+
