@@ -1411,26 +1411,6 @@ fn local_protocol_aliases_resolve_to_the_declared_protocol_surface() {
 }
 
 #[test]
-fn generic_protocol_members_remain_outside_this_validator() {
-    let result = analyze_main(
-        r#"
-            pub protocol P {
-                fn value<T>(self, input: T): T;
-            }
-            pub type Box {
-                impl P {
-                    fn value<T>(self, input: T): T = input;
-                }
-            }
-        "#,
-    );
-    // This is deliberately not a conformance acceptance claim. Generic
-    // member support remains a separate residual; the narrow validator must
-    // not report its own missing-member diagnostic for this protocol.
-    assert!(result.is_ok(), "{:#?}", result.diagnostics);
-}
-
-#[test]
 fn unsupported_generic_protocol_instantiations_fail_closed() {
     for source in [
         r#"
@@ -1462,53 +1442,21 @@ fn unsupported_generic_protocol_instantiations_fail_closed() {
     }
 }
 
+// ORNA-GENERIC-011 (source/06-expressions.md:181): required generic and
+// non-generic members each need exactly one compatible implementation.
 #[test]
 fn mixed_generic_protocol_members_keep_their_checkable_surface() {
-    let accepted = analyze_main(
-        r#"
-            pub protocol P {
-                fn generic<T>(self, input: T): T;
-                fn value(self): Int;
-                static label: Str;
-            }
-            pub type Box {
-                impl P {
-                    fn value(self): Int = 1;
-                    static label = "box";
-                }
-            }
-        "#,
-    );
+    let accepted = analyze_main(include_str!(
+        "fixtures/mixed-generic-protocol-accepted.orna"
+    ));
     expect_accepted(&accepted);
 
-    let rejected = analyze_main(
-        r#"
-            pub protocol P {
-                fn generic<T>(self, input: T): T;
-                fn value(self): Int;
-                static label: Str;
-            }
-            pub type Box {
-                impl P {
-                    fn value(self): Int = 1;
-                }
-            }
-        "#,
-    );
+    let rejected = analyze_main(include_str!("fixtures/mixed-generic-protocol-missing.orna"));
     expect_diagnostics(&rejected, &[DIAG_TYPE]);
 
-    let generic_implementation = analyze_main(
-        r#"
-            pub protocol P {
-                fn value(self): Int;
-            }
-            pub type Box {
-                impl P {
-                    fn value<T>(self): T = 1;
-                }
-            }
-        "#,
-    );
+    let generic_implementation = analyze_main(include_str!(
+        "fixtures/generic-implementation-does-not-satisfy.orna"
+    ));
     // A generic implementation member cannot satisfy a non-generic required
     // member merely by sharing its name; otherwise substitution is being
     // guessed instead of checked.

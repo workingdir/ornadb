@@ -2792,21 +2792,7 @@ fn resolve_imports_with_dependencies(
                     generics,
                     members,
                 } if generics.is_empty() => {
-                    // Keep the checkable surface of a mixed protocol. Only a
-                    // genuinely generic member is omitted; treating the
-                    // whole protocol as generic would skip its static and
-                    // non-generic members as well.
-                    let members = members
-                        .iter()
-                        .filter(|member| match member {
-                            ProtocolMember::Function { signature, .. } => {
-                                signature.generics.is_empty()
-                            }
-                            ProtocolMember::Static { .. } => true,
-                        })
-                        .cloned()
-                        .collect();
-                    Some((name.clone(), members))
+                    Some((name.clone(), members.clone()))
                 }
                 _ => None,
             })
@@ -3771,9 +3757,9 @@ fn resolve_local_protocol_name(name: &str, scope: &Scope) -> Option<String> {
 /// conversion dispatch remain outside this validator. Unsupported generic,
 /// qualified, imported, unresolved, and non-protocol identities fail closed.
 /// Only the builtin Display/Present names retain a missing-member-surface
-/// residual. Mixed protocols still check every non-generic member; only generic
-/// members are omitted. `From<Source>` checks the closed source/member shape
-/// below, but does not implement conversion selection or runtime dispatch.
+/// residual. Mixed protocols check generic and non-generic members alike.
+/// `From<Source>` checks the closed source/member shape below, but does not
+/// implement conversion selection or runtime dispatch.
 /// Default compatibility uses the conservative proof described below for
 /// expression behaviour; arbitrary semantic default equivalence is residual.
 fn validate_nested_implementation_members(
@@ -3949,16 +3935,6 @@ fn validate_nested_implementation_members(
 
     let mut implemented_names = BTreeSet::new();
     for member in &implementation.members {
-        // A generic implementation member belongs to the same unresolved
-        // substitution surface as a generic protocol member. Do not let the
-        // checkable non-generic subset reject it as "unknown".
-        if matches!(
-            member,
-            orna_syntax_v1::ImplMember::Function { signature, .. }
-                if !signature.generics.is_empty()
-        ) {
-            continue;
-        }
         let name = match member {
             orna_syntax_v1::ImplMember::Function { signature, .. } => &signature.name,
             orna_syntax_v1::ImplMember::Static { name, .. } => name,
@@ -4010,15 +3986,17 @@ fn validate_nested_implementation_members(
                         "protocol implementation function signature is incompatible",
                     ));
                 } else {
-                    validate_nested_implementation_function(
-                        signature,
-                        implementation_signature,
-                        body,
-                        scope,
-                        target,
-                        target_shape,
-                        diagnostics,
-                    );
+                    if signature.generics.is_empty() {
+                        validate_nested_implementation_function(
+                            signature,
+                            implementation_signature,
+                            body,
+                            scope,
+                            target,
+                            target_shape,
+                            diagnostics,
+                        );
+                    }
                 }
             }
             (
@@ -4048,13 +4026,6 @@ fn validate_nested_implementation_members(
 
     for required in required_members {
         let implemented = implementation.members.iter().any(|member| {
-            if matches!(
-                member,
-                orna_syntax_v1::ImplMember::Function { signature, .. }
-                    if !signature.generics.is_empty()
-            ) {
-                return false;
-            }
             match (required, member) {
                 (
                     ProtocolMember::Function { signature, .. },
@@ -4352,14 +4323,56 @@ fn compatible_protocol_function_signature(
     implementation: &orna_syntax_v1::FunctionSignature,
     scope: &Scope,
 ) -> bool {
-    if !implementation.generics.is_empty()
+    if required.generics.len() != implementation.generics.len()
         || required.parameters.len() != implementation.parameters.len()
-        || !compatible_protocol_type_annotation(
-            required.result.as_ref(),
-            implementation.result.as_ref(),
-            scope,
-        )
     {
+        return false;
+    }
+
+    let mut generic_scope = scope.clone();
+    for (index, (required_generic, implementation_generic)) in required
+        .generics
+        .iter()
+        .zip(&implementation.generics)
+        .enumerate()
+    {
+        let placeholder = format!("__protocol_member_generic_{index}");
+        generic_scope.type_aliases.remove(&required_generic.name);
+        generic_scope
+            .type_aliases
+            .remove(&implementation_generic.name);
+        generic_scope.generic_type_parameters.insert(placeholder.clone());
+        generic_scope.type_aliases.insert(
+            required_generic.name.clone(),
+            Type::Named(placeholder.clone()),
+        );
+        generic_scope.type_aliases.insert(
+            implementation_generic.name.clone(),
+            Type::Named(placeholder),
+        );
+
+        if required_generic.bounds.len() != implementation_generic.bounds.len()
+            || !required_generic
+                .bounds
+                .iter()
+                .zip(&implementation_generic.bounds)
+                .all(|(required, implementation)| {
+                    compatible_protocol_type_annotation(
+                        Some(required),
+                        Some(implementation),
+                        &generic_scope,
+                    )
+                })
+        {
+            return false;
+        }
+    }
+
+    if !compatible_protocol_type_annotation(
+        required.result.as_ref(),
+        implementation.result.as_ref(),
+        &generic_scope,
+    ) {
         return false;
     }
     required
@@ -4371,7 +4384,7 @@ fn compatible_protocol_function_signature(
                 && compatible_protocol_type_annotation(
                     required.annotation.as_ref(),
                     implementation.annotation.as_ref(),
-                    scope,
+                    &generic_scope,
                 )
                 && compatible_protocol_defaults(
                     required.default.as_ref(),
