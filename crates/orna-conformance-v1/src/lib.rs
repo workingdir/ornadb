@@ -33,6 +33,8 @@ pub mod catalogue_projection;
 pub mod row_admission;
 mod semantic_adapter;
 mod syntax_adapter;
+#[cfg(test)]
+mod test_support;
 pub use admitted_repl::{AdmittedReplSession, ReplError};
 pub use catalogue_projection::{
     CatalogueProjectionError, SourceCatalogueActivationError,
