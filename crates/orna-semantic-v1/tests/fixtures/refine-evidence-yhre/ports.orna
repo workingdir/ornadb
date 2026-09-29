@@ -1,0 +1,12 @@
+type Port = Int {
+    assert >= 1;
+    assert <= 65_535;
+
+    impl Display {
+        fn display(self): Str = "port";
+    }
+}
+
+pub fn default_port(): Port = Port.from(8080);
+pub fn raw_port(): Int = 8080;
+pub fn rejected_candidate(): Port = Port.from(0);
