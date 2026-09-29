@@ -1,0 +1,1 @@
+let value = (add => add + 1)(41);
