@@ -896,10 +896,7 @@ mod tests {
                     panic!("function expected")
                 };
                 (
-                    format!(
-                        include_str!("fixtures/repl-inline-library-afc039a8.orna"),
-                        signature.name
-                    ),
+                    format!("library.{}", signature.name),
                     PureFunction {
                         parameters: signature.parameters,
                         body,
