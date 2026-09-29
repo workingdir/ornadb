@@ -63,6 +63,9 @@ pub(super) fn requested_color_mode(arguments: &[String]) -> ColorMode {
     let mut words = arguments.iter().map(String::as_str).peekable();
     while let Some(option) = words.peek().copied() {
         match option {
+            "--debug" => {
+                words.next();
+            }
             "--db" => {
                 words.next();
                 if words.next().is_none() {
@@ -91,6 +94,27 @@ pub(super) fn requested_color_mode(arguments: &[String]) -> ColorMode {
     color
 }
 
+pub(super) fn requested_debug_mode(arguments: &[String]) -> bool {
+    let mut enabled = false;
+    let mut words = arguments.iter().map(String::as_str).peekable();
+    while let Some(option) = words.peek().copied() {
+        match option {
+            "--debug" => {
+                words.next();
+                enabled = true;
+            }
+            "--db" | "--color" | "--format" => {
+                words.next();
+                if words.next().is_none() {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    enabled
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the command grammar deliberately keeps validation precedence in one auditable parser"
@@ -101,8 +125,12 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
     let mut color = ColorMode::Auto;
     let mut output_format = None;
     let mut words = arguments.iter().map(String::as_str).peekable();
-    while matches!(words.peek(), Some(&"--db") | Some(&"--color") | Some(&"--format")) {
+    while matches!(
+        words.peek(),
+        Some(&"--db") | Some(&"--color") | Some(&"--format") | Some(&"--debug")
+    ) {
         match words.next() {
+            Some("--debug") => {}
             Some("--db") => {
                 has_explicit_endpoint = true;
                 endpoint = Endpoint::parse(words.next().ok_or_else(|| {
