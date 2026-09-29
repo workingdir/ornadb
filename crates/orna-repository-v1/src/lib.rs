@@ -30,6 +30,8 @@ pub use uuid::Uuid;
 mod compact;
 mod init;
 mod transport;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use compact::{
     COMPACT_MANIFEST_SHARD_LIMIT, COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactCommittedRow,
@@ -6987,11 +6989,7 @@ mod tests {
     fn runtime_owner_lock_excludes_a_second_owner_until_drop() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "owner-lock@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Owner lock test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -7337,11 +7335,7 @@ mod tests {
     fn recovery_reclaims_a_dead_publisher_index_lock() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         fs::write(root.path().join("ordinary.txt"), "base\n").unwrap();
@@ -7432,11 +7426,7 @@ mod tests {
     fn fresh_recovery_resumes_persisted_index_and_completion_phases() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "."]);
@@ -7556,11 +7546,7 @@ mod tests {
     fn recovery_fences_runtime_completion_after_head_moves() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         fs::write(root.path().join("ordinary.txt"), "base\n").unwrap();
@@ -7633,11 +7619,7 @@ mod tests {
     fn checkout_preflight_rejects_same_commit_branch_attachment_drift() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -7676,11 +7658,7 @@ mod tests {
     fn checkout_force_witness_rejects_same_status_content_drift() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join(".gitignore"), "ignored.txt\n").unwrap();
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
@@ -7752,11 +7730,7 @@ mod tests {
     fn journaled_materialization_replaces_and_deletes_without_quarantine_leaks() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -7841,11 +7815,7 @@ mod tests {
     fn journaled_materialization_preserves_quarantine_on_install_conflict_and_deletion_cleanup() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -7953,11 +7923,7 @@ mod tests {
     fn final_quarantine_replacement_is_preserved_and_reports_conflict() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -8002,11 +7968,7 @@ mod tests {
     fn journaled_materialization_recovers_a_persisted_quarantine_phase() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -8083,11 +8045,7 @@ mod tests {
     fn replacement_preserves_editor_race_after_final_check() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -8136,11 +8094,7 @@ mod tests {
     fn quarantine_restore_preserves_newer_editor_race_after_absence_check() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -8173,11 +8127,7 @@ mod tests {
     fn quarantine_replacement_race_preserves_both_files() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -8217,11 +8167,7 @@ mod tests {
     fn quarantine_deletion_race_preserves_both_files() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -8260,11 +8206,7 @@ mod tests {
     fn fresh_materialization_invokes_before_install_once_at_absence_boundary() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -8297,11 +8239,7 @@ mod tests {
     fn deletion_revalidates_editor_race_and_retries_idempotently() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -8345,11 +8283,7 @@ mod tests {
     fn deletion_preserves_editor_race_after_final_check() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);

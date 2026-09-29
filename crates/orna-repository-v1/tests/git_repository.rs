@@ -1,3 +1,6 @@
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 use std::{
     collections::BTreeMap,
     fs,
@@ -71,11 +74,7 @@ fn repository_with_object_format(format: &str) -> Option<TempDir> {
     if !output.status.success() {
         return None;
     }
-    git(
-        temp.path(),
-        &["config", "user.email", "test@example.invalid"],
-    );
-    git(temp.path(), &["config", "user.name", "Repository test"]);
+    test_support::configure_fixture_git_identity(temp.path());
     git(temp.path(), &["config", "commit.gpgsign", "false"]);
     fs::write(
         temp.path().join("main.orna"),
@@ -90,11 +89,7 @@ fn repository_with_object_format(format: &str) -> Option<TempDir> {
 fn repository() -> TempDir {
     let temp = TempDir::new().unwrap();
     git(temp.path(), &["init", "-b", "main"]);
-    git(
-        temp.path(),
-        &["config", "user.email", "test@example.invalid"],
-    );
-    git(temp.path(), &["config", "user.name", "Repository test"]);
+    test_support::configure_fixture_git_identity(temp.path());
     git(temp.path(), &["config", "commit.gpgsign", "false"]);
     fs::write(
         temp.path().join("main.orna"),
@@ -112,8 +107,7 @@ fn repository() -> TempDir {
 fn repository_with_checked_in_orna_fixture() -> TempDir {
     let temp = TempDir::new().unwrap();
     git(temp.path(), &["init", "-b", "main"]);
-    git(temp.path(), &["config", "user.email", "kieran@drewett.dev"]);
-    git(temp.path(), &["config", "user.name", "kierandrewett"]);
+    test_support::configure_fixture_git_identity(temp.path());
     git(temp.path(), &["config", "commit.gpgsign", "false"]);
     fs::write(
         temp.path().join("main.orna"),
@@ -1115,8 +1109,7 @@ fn filtered_clone() -> Option<(TempDir, PathBuf, String)> {
     let clone = fixture.path().join("partial");
     git(fixture.path(), &["init", "--bare", "origin.git"]);
     git(fixture.path(), &["clone", "origin.git", "seed"]);
-    git(&seed, &["config", "user.email", "test@example.invalid"]);
-    git(&seed, &["config", "user.name", "Repository test"]);
+    test_support::configure_fixture_git_identity(&seed);
     git(&seed, &["config", "commit.gpgsign", "false"]);
     fs::write(seed.join("visible.txt"), "visible\n").ok()?;
     fs::write(seed.join("promised.txt"), "promised\n").ok()?;
@@ -1179,8 +1172,7 @@ fn filtered_compact_clone() -> Option<FilteredCompactClone> {
     let clone = fixture.path().join("partial");
     git(fixture.path(), &["init", "--bare", "origin.git"]);
     git(fixture.path(), &["init", "-b", "main", "seed"]);
-    git(&seed, &["config", "user.email", "test@example.invalid"]);
-    git(&seed, &["config", "user.name", "Repository test"]);
+    test_support::configure_fixture_git_identity(&seed);
     git(&seed, &["config", "commit.gpgsign", "false"]);
     fs::write(seed.join("main.orna"), "module main;\n").ok()?;
     fs::write(seed.join("ordinary.txt"), "base\n").ok()?;
