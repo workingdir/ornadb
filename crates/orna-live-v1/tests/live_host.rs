@@ -3914,6 +3914,68 @@ fn dispatch_computes_fingerprints_and_replays_terminal_results() {
 }
 
 #[test]
+fn subscribe_request_identity_replays_only_the_original_watch() {
+    // ORNA-PROTO-002 retains a session's terminal request outcomes; a new
+    // ORNA-WIRE-006 resubscription therefore needs a fresh request identity.
+    let mut host = host();
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = WatchEventApplication {
+        mode: WatchEventMode::Pure,
+        subscriptions: 0,
+    };
+
+    let original_request = subscribe_request([41; 16]);
+    let original = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(original_request.clone()),
+        &mut application,
+    ))
+    .unwrap();
+    assert_eq!(application.subscriptions, 1);
+    assert!(matches!(
+        original.response.as_ref().map(|response| &response.message),
+        Some(Message::Snapshot { revision: 0, .. })
+    ));
+
+    let replay = block_on(host.dispatch_frame(
+        [5; 16],
+        3,
+        Frame::Binary(original_request),
+        &mut application,
+    ))
+    .unwrap();
+    assert_eq!(replay, original);
+    assert_eq!(application.subscriptions, 1);
+
+    let resubscription = block_on(host.dispatch_frame(
+        [5; 16],
+        4,
+        Frame::Binary(subscribe_request([42; 16])),
+        &mut application,
+    ))
+    .unwrap();
+    assert_eq!(application.subscriptions, 2);
+    assert!(matches!(
+        resubscription.response.as_ref().map(|response| &response.message),
+        Some(Message::Snapshot { revision: 0, .. })
+    ));
+    assert_ne!(
+        resubscription.response.unwrap().watch,
+        original.response.unwrap().watch
+    );
+}
+
+#[test]
 fn rejected_requests_retain_failure_identity_and_do_not_reexecute() {
     let mut host = host();
     let mut issuer = Issuer(1, None);
