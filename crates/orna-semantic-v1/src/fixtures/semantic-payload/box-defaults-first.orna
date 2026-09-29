@@ -1,0 +1,1 @@
+pub type Box { secret: Int = 1, } fn value(x: Int = 1): Int = x + 1;

@@ -1479,9 +1479,15 @@ mod tests {
 
     #[test]
     fn canonical_bytes_ignore_whitespace_but_retain_signature_changes() {
-        let compact = produce("pub fn choose(first: Int, second: Int): Int = first;");
-        let spaced = produce("\n pub fn choose( first: Int,\n second: Int ): Int = first ;\n");
-        let changed = produce("pub fn choose(first: Int, second: Bool): Int = first;");
+        let compact = produce(include_str!(
+            "fixtures/semantic-payload/canonical-choose-compact.orna"
+        ));
+        let spaced = produce(include_str!(
+            "fixtures/semantic-payload/canonical-choose-spaced.orna"
+        ));
+        let changed = produce(include_str!(
+            "fixtures/semantic-payload/canonical-choose-signature-change.orna"
+        ));
         let a = named(&compact, "payload.choose");
         let b = named(&spaced, "payload.choose");
         let c = named(&changed, "payload.choose");
@@ -1497,7 +1503,7 @@ mod tests {
         let error = analyze_semantic_payloads(
             &[ModuleInput::new(
                 "payload.orna",
-                "fn first(values: [Int]): Int = 1;",
+                include_str!("fixtures/semantic-payload/unsupported-list-type.orna"),
             )],
             &Catalogue::empty(),
         )
@@ -1512,7 +1518,7 @@ mod tests {
 
     #[test]
     fn parameter_names_preserve_declaration_order() {
-        let result = produce("fn choose(zebra: Int, alpha: Int = 2): Int = zebra;");
+        let result = produce(include_str!("fixtures/semantic-payload/parameter-order.orna"));
         let parameters = named(&result, "payload.choose").parameters();
         assert_eq!(
             parameters
@@ -1525,8 +1531,8 @@ mod tests {
 
     #[test]
     fn annotation_explicitness_is_retained_outside_semantic_bytes() {
-        let inferred = produce("fn increment(value) = value + 1;");
-        let explicit = produce("fn increment(value: Int): Int = value + 1;");
+        let inferred = produce(include_str!("fixtures/semantic-payload/increment-inferred.orna"));
+        let explicit = produce(include_str!("fixtures/semantic-payload/increment-explicit.orna"));
         let a = named(&inferred, "payload.increment");
         let b = named(&explicit, "payload.increment");
         assert_eq!(a.canonical_payload(), b.canonical_payload());
@@ -1540,9 +1546,8 @@ mod tests {
 
     #[test]
     fn body_defaults_and_private_fields_change_meaning() {
-        let first = produce("pub type Box { secret: Int = 1, } fn value(x: Int = 1): Int = x + 1;");
-        let second =
-            produce("pub type Box { secret: Int = 2, } fn value(x: Int = 2): Int = x + 2;");
+        let first = produce(include_str!("fixtures/semantic-payload/box-defaults-first.orna"));
+        let second = produce(include_str!("fixtures/semantic-payload/box-defaults-second.orna"));
         for name in ["payload.Box", "payload.value"] {
             assert_ne!(
                 named(&first, name).canonical_payload(),
@@ -1553,22 +1558,28 @@ mod tests {
 
     #[test]
     fn resolved_call_targets_include_dependency_meaning_not_import_aliases() {
-        let project = |alias: &str, value: i32| {
+        let project = |library_source: &str, client_source: &str| {
             analyze_semantic_payloads(
                 &[
-                    ModuleInput::new("library.orna", format!("pub fn value(): Int = {value};")),
-                    ModuleInput::new(
-                        "client.orna",
-                        format!("use library as {alias}; fn call(): Int = {alias}.value();"),
-                    ),
+                    ModuleInput::new("library.orna", library_source),
+                    ModuleInput::new("client.orna", client_source),
                 ],
                 &Catalogue::empty(),
             )
             .unwrap()
         };
-        let first = project("one", 1);
-        let renamed_import = project("two", 1);
-        let changed_body = project("one", 2);
+        let first = project(
+            include_str!("fixtures/semantic-payload/library-value-one.orna"),
+            include_str!("fixtures/semantic-payload/client-alias-one.orna"),
+        );
+        let renamed_import = project(
+            include_str!("fixtures/semantic-payload/library-value-one.orna"),
+            include_str!("fixtures/semantic-payload/client-alias-two.orna"),
+        );
+        let changed_body = project(
+            include_str!("fixtures/semantic-payload/library-value-two.orna"),
+            include_str!("fixtures/semantic-payload/client-alias-one.orna"),
+        );
         assert_eq!(
             named(&first, "client.call").canonical_payload(),
             named(&renamed_import, "client.call").canonical_payload()
@@ -1689,7 +1700,7 @@ mod tests {
 
         let inputs = vec![ModuleInput::new(
             "payload.orna",
-            "pub type Point { pub x: Int, pub y: Int, }",
+            include_str!("fixtures/semantic-payload/point-declaration.orna"),
         )];
         let (analysis, contexts) = analyze_retaining_context(&inputs, &Catalogue::empty(), true);
         assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
@@ -1783,7 +1794,7 @@ mod tests {
 
     #[test]
     fn stage_two_cannot_manufacture_identity() {
-        let result = produce("fn value(): Int = 1;");
+        let result = produce(include_str!("fixtures/semantic-payload/value-function.orna"));
         let value = named(&result, "payload.value");
         assert_eq!(
             value.revision_id().unwrap_err().kind,
