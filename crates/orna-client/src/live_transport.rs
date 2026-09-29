@@ -196,6 +196,18 @@ impl LiveClient {
         Ok(replacement)
     }
 
+    pub(crate) async fn resume_session_with_handoff(
+        &self,
+        session: &mut LiveSession,
+    ) -> Result<LiveSession, LiveTransportError> {
+        let replacement = self.resume_session(session).await?;
+        // Keep the caller-owned session usable even if a higher-level
+        // reconnect future is cancelled at its next await point.
+        session.resume_token.clone_from(&replacement.resume_token);
+        session.cookie.clone_from(&replacement.cookie);
+        Ok(replacement)
+    }
+
     /// Deletes a session using its current bearer credential. Cookies are
     /// intentionally not sent on this destructive HTTP operation.
     pub async fn delete_session(&self, session: &LiveSession) -> Result<(), LiveTransportError> {
