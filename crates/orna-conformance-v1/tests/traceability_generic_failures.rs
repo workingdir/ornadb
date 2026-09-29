@@ -36,7 +36,8 @@ fn incomplete_nested_protocol_implementation_is_rejected() {
 }
 
 // Specified: ORNA-GENERIC-014. Exists: a fixture with duplicate identical
-// implementations. Passed: overlap is rejected independent of selection.
+// implementations. Passed: this source order is rejected; reverse ordering is
+// not exercised here.
 #[test]
 fn overlapping_protocol_implementations_are_rejected() {
     let diagnostics = diagnostics();
