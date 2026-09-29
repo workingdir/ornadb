@@ -252,6 +252,8 @@ pub struct CompactCommittedSegmentProjection {
     table_id: Uuid,
     schema_id: [u8; 32],
     schema: SchemaDescriptor,
+    source_schema_id: [u8; 32],
+    source_schema: SchemaDescriptor,
     profile: &'static str,
     encoder_version: String,
     generation: u64,
@@ -268,11 +270,20 @@ impl CompactCommittedSegmentProjection {
         self.schema_id
     }
 
-    /// The verified descriptor used to encode this segment. A caller may use
-    /// it to validate history projection by stable field identity; the
-    /// repository does not infer compatibility from the fingerprint alone.
+    /// The logical schema of the projected rows. It equals the encoded schema
+    /// on the exact-schema read path.
     pub fn schema(&self) -> &SchemaDescriptor {
         &self.schema
+    }
+
+    /// The verified descriptor and fingerprint used to encode the physical
+    /// segment, retained after a history-aware projection.
+    pub fn source_schema(&self) -> &SchemaDescriptor {
+        &self.source_schema
+    }
+
+    pub const fn source_schema_id(&self) -> [u8; 32] {
+        self.source_schema_id
     }
 
     pub const fn profile(&self) -> &'static str {
@@ -1400,7 +1411,9 @@ fn decode_compact_segment_projection(
     Ok(CompactCommittedSegmentProjection {
         table_id: table,
         schema_id: entry.schema_id(),
-        schema: descriptor,
+        schema: descriptor.clone(),
+        source_schema_id: entry.schema_id(),
+        source_schema: descriptor,
         profile: COMPACT_PROFILE,
         encoder_version: entry.encoder_version().to_owned(),
         generation: entry.generation(),
@@ -1417,13 +1430,13 @@ fn project_compact_segment_schema(
     projection: &CompactCommittedSegmentProjection,
     target: &SchemaDescriptor,
 ) -> Result<CompactCommittedSegmentProjection, RepositoryError> {
-    let source_fp = schema_descriptor_fingerprint(&projection.schema)?;
+    let source_fp = schema_descriptor_fingerprint(&projection.source_schema)?;
     let target_fp = schema_descriptor_fingerprint(target)?;
     if source_fp != projection.schema_id || schema_descriptor_table(target)? != projection.table_id
     {
         return Err(RepositoryError::InvalidCompactManifest);
     }
-    let source = schema_projection_parts(&projection.schema)?;
+    let source = schema_projection_parts(&projection.source_schema)?;
     let destination = schema_projection_parts(target)?;
     if source.table != destination.table
         || source.keys != destination.keys
@@ -1479,6 +1492,8 @@ fn project_compact_segment_schema(
         table_id: projection.table_id,
         schema_id: target_fp,
         schema: target.clone(),
+        source_schema_id: projection.source_schema_id,
+        source_schema: projection.source_schema.clone(),
         profile: projection.profile,
         encoder_version: projection.encoder_version.clone(),
         generation: projection.generation,
@@ -6476,7 +6491,9 @@ mod tests {
         let projection = CompactCommittedSegmentProjection {
             table_id: table,
             schema_id: source_id,
-            schema: source,
+            schema: source.clone(),
+            source_schema_id: source_id,
+            source_schema: source,
             profile: COMPACT_PROFILE,
             encoder_version: "test-encoder-v1".into(),
             generation: 1,
