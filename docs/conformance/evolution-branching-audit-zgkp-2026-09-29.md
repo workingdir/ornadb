@@ -80,6 +80,16 @@ exit code: 0
 
 This run executes the new planner integration tests only. Existing branching and implementation-gap classifications above are based on static inspection of the named tests and code; this command does not execute the repository checkout suite.
 
+Final post-rebase crate run:
+
+```text
+$ cargo test --locked --offline -p orna-evolution-v1
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+exit code: 0
+```
+
 ## Targeted source-search evidence and scope limits
 
 Audit searches at the stated base included `rg -n 'merge.?[0-9]?|CheckpointConflict|SemanticDiff|semantic_diff|physical.*logical|logical.*physical|three.?way|digest.*subtree|conflict_count'` across evolution, repository, CLI, application and storage implementation, plus focused test-name searches in repository and CLI integration suites. Results found schema planning, compact storage-level key merging/budgets, checkout tests, and native Git diff; they did not find a branch-aware semantic three-way merge or user-facing semantic diff layer. This is a bounded source audit, not a claim that no related code exists anywhere in the repository.
