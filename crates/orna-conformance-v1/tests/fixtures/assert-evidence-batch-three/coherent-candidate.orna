@@ -1,0 +1,15 @@
+pub table Book(id: Int) {
+    title: Str,
+    assert every(book => book.title != "");
+}
+
+pub table Loan(id: Int) {
+    book_id: Int,
+}
+
+assert every(Loan, loan => exists(Book, book => book.id == loan.book_id));
+
+fn coherent_candidate() {
+    Book.insert({ id: 1, title: "reference" });
+    Loan.insert({ id: 2, book_id: 1 });
+}
