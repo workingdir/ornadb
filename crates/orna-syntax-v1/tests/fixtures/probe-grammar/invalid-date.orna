@@ -1,0 +1,1 @@
+pub fn invalid_date() = 2026-02-30;
