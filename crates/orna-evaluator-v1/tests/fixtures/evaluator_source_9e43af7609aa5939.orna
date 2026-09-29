@@ -1,0 +1,1 @@
+if true { let map = value => value + 100; map(1) } else { 0 }

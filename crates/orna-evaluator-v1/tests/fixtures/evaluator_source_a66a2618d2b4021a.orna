@@ -1,0 +1,1 @@
+10 | std.math.clamp(min: 1, max: 5)

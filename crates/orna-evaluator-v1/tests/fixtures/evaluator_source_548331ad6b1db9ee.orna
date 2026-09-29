@@ -1,0 +1,1 @@
+[1, 2, 3] | std.collection.partition(predicate: value => value > 1)

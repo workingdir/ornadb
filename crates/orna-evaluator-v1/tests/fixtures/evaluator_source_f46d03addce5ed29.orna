@@ -1,0 +1,1 @@
+std.collection.flat_map(1, value => [value])

@@ -2,18 +2,17 @@ use std::collections::BTreeMap;
 
 use num_bigint::BigInt;
 use orna_evaluator_v1::{
-    EffectHandler, Environment, EvaluationError, Functions, Limits, NominalDefinition,
-    NominalDefinitions, NominalField, NominalVariant, PureFunction, RelationPage, StepBudget,
-    evaluate_expression,
-    evaluate_function, evaluate_parsed, evaluate_parsed_with_nominals, evaluate_repl,
-    evaluate_with_functions_and_nominals, invoke_named, invoke_named_with_effects,
-    invoke_named_with_effects_and_budget, invoke_named_with_nominals,
+    evaluate_expression, evaluate_function, evaluate_parsed, evaluate_parsed_with_nominals,
+    evaluate_repl, evaluate_with_functions_and_nominals, invoke_named, invoke_named_with_effects,
+    invoke_named_with_effects_and_budget, invoke_named_with_nominals, EffectHandler, Environment,
+    EvaluationError, Functions, Limits, NominalDefinition, NominalDefinitions, NominalField,
+    NominalVariant, PureFunction, RelationPage, StepBudget,
 };
 use orna_syntax_v1::{
-    AssignmentOperator, AssignmentTarget, Expr, NameSegment, Pattern, RecordField, Statement,
-    SyntaxSpan, TokenKind, lex,
+    lex, AssignmentOperator, AssignmentTarget, Expr, NameSegment, Pattern, RecordField, Statement,
+    SyntaxSpan, TokenKind,
 };
-use orna_value_v1::{CANONICAL_NAN_BITS, Raw, Value};
+use orna_value_v1::{Raw, Value, CANONICAL_NAN_BITS};
 
 fn evaluate(source: &str) -> Value {
     evaluate_expression(source, &Environment::new(), Limits::default())
@@ -21,6 +20,121 @@ fn evaluate(source: &str) -> Value {
 }
 fn code(result: Result<Value, EvaluationError>) -> String {
     result.unwrap_err().code().to_owned()
+}
+
+#[derive(Clone, Copy)]
+enum MinMaxSourceFixtureProfile {
+    FloatZero,
+    Rows,
+    Dates,
+    Instants,
+    Integers,
+}
+
+fn min_max_source_fixtures(profile: MinMaxSourceFixtureProfile, name: &str) -> [&'static str; 8] {
+    match (profile, name) {
+        (MinMaxSourceFixtureProfile::FloatZero, "min") => [
+            include_str!("fixtures/evaluator_source_2979c79553dd622a.orna"),
+            include_str!("fixtures/evaluator_source_0840b1f2a059502e.orna"),
+            include_str!("fixtures/evaluator_source_44c493ef1a38d2f7.orna"),
+            include_str!("fixtures/evaluator_source_85d792007f6150ec.orna"),
+            include_str!("fixtures/evaluator_source_5d0352000306b1f0.orna"),
+            include_str!("fixtures/evaluator_source_c455f74f1c3bb88a.orna"),
+            include_str!("fixtures/evaluator_source_bd677eae14166585.orna"),
+            include_str!("fixtures/evaluator_source_57cb351de1d5b752.orna"),
+        ],
+        (MinMaxSourceFixtureProfile::FloatZero, "max") => [
+            include_str!("fixtures/evaluator_source_c770bd73b34202c7.orna"),
+            include_str!("fixtures/evaluator_source_70f712e8348dd46a.orna"),
+            include_str!("fixtures/evaluator_source_c43d56b30393963e.orna"),
+            include_str!("fixtures/evaluator_source_4b371d3700bfe9e6.orna"),
+            include_str!("fixtures/evaluator_source_1f41969a9a6fee15.orna"),
+            include_str!("fixtures/evaluator_source_a861cefbd0543c98.orna"),
+            include_str!("fixtures/evaluator_source_f06cdd11db7a0614.orna"),
+            include_str!("fixtures/evaluator_source_0ef97d25a4949337.orna"),
+        ],
+        (MinMaxSourceFixtureProfile::Rows, "min") => [
+            include_str!("fixtures/evaluator_source_767f07d17295b186.orna"),
+            include_str!("fixtures/evaluator_source_c6ea7851dc7a0d00.orna"),
+            include_str!("fixtures/evaluator_source_d1bb823348f69642.orna"),
+            include_str!("fixtures/evaluator_source_bf38c9cde16fc38e.orna"),
+            include_str!("fixtures/evaluator_source_06bb49b9e706e6b6.orna"),
+            include_str!("fixtures/evaluator_source_099c851a5484b99b.orna"),
+            include_str!("fixtures/evaluator_source_3848120ab89ed54b.orna"),
+            include_str!("fixtures/evaluator_source_7f2aab0febab6852.orna"),
+        ],
+        (MinMaxSourceFixtureProfile::Rows, "max") => [
+            include_str!("fixtures/evaluator_source_522fd6a43762eaba.orna"),
+            include_str!("fixtures/evaluator_source_5fcd75ea8c2dad4b.orna"),
+            include_str!("fixtures/evaluator_source_a0d3016a724d5529.orna"),
+            include_str!("fixtures/evaluator_source_de76ac69b637b487.orna"),
+            include_str!("fixtures/evaluator_source_6bd6099520370d6c.orna"),
+            include_str!("fixtures/evaluator_source_89bb9af05ec8e89b.orna"),
+            include_str!("fixtures/evaluator_source_27840ba8100b469e.orna"),
+            include_str!("fixtures/evaluator_source_521ddcaa7ba9896b.orna"),
+        ],
+        (MinMaxSourceFixtureProfile::Dates, "min") => [
+            include_str!("fixtures/evaluator_source_0294540bdac86ab6.orna"),
+            include_str!("fixtures/evaluator_source_d82941ecf9ade188.orna"),
+            include_str!("fixtures/evaluator_source_93deab8333bc90b0.orna"),
+            include_str!("fixtures/evaluator_source_d6f55240cd82ef6a.orna"),
+            include_str!("fixtures/evaluator_source_cd733d8a56a01e3e.orna"),
+            include_str!("fixtures/evaluator_source_e7b46377701dfb99.orna"),
+            include_str!("fixtures/evaluator_source_94daad8c17db356c.orna"),
+            include_str!("fixtures/evaluator_source_00e1dbc9ca3c3eb9.orna"),
+        ],
+        (MinMaxSourceFixtureProfile::Dates, "max") => [
+            include_str!("fixtures/evaluator_source_77bd25632a298088.orna"),
+            include_str!("fixtures/evaluator_source_1623e875982514aa.orna"),
+            include_str!("fixtures/evaluator_source_3a69914e39e5f4bc.orna"),
+            include_str!("fixtures/evaluator_source_e5003768aa77963f.orna"),
+            include_str!("fixtures/evaluator_source_2a9967a7d9b3392c.orna"),
+            include_str!("fixtures/evaluator_source_9d99e3d9ebd37e70.orna"),
+            include_str!("fixtures/evaluator_source_2de2bb2107e2cfa9.orna"),
+            include_str!("fixtures/evaluator_source_e108a79d9726a874.orna"),
+        ],
+        (MinMaxSourceFixtureProfile::Instants, "min") => [
+            include_str!("fixtures/evaluator_source_94a266fb71ae55b2.orna"),
+            include_str!("fixtures/evaluator_source_57fb172a38fb0bd6.orna"),
+            include_str!("fixtures/evaluator_source_80265be66077ab68.orna"),
+            include_str!("fixtures/evaluator_source_0ae4ea75eaec5318.orna"),
+            include_str!("fixtures/evaluator_source_f44abe07ab627f54.orna"),
+            include_str!("fixtures/evaluator_source_80d65fd9d05586b0.orna"),
+            include_str!("fixtures/evaluator_source_f67583071a0bd638.orna"),
+            include_str!("fixtures/evaluator_source_b3abe0f591dccd36.orna"),
+        ],
+        (MinMaxSourceFixtureProfile::Instants, "max") => [
+            include_str!("fixtures/evaluator_source_6963d86c80d4d0b9.orna"),
+            include_str!("fixtures/evaluator_source_224225bd178ac9b6.orna"),
+            include_str!("fixtures/evaluator_source_52424b813d1aef35.orna"),
+            include_str!("fixtures/evaluator_source_ddf2549ed0a7ecb0.orna"),
+            include_str!("fixtures/evaluator_source_bfe8e74f5bc6108d.orna"),
+            include_str!("fixtures/evaluator_source_241b6dec97ac7a88.orna"),
+            include_str!("fixtures/evaluator_source_fe9555ba82a8c073.orna"),
+            include_str!("fixtures/evaluator_source_43c8051b5e1e6fb0.orna"),
+        ],
+        (MinMaxSourceFixtureProfile::Integers, "min") => [
+            include_str!("fixtures/evaluator_source_c970c457a115af64.orna"),
+            include_str!("fixtures/evaluator_source_1adaacf52ecd916e.orna"),
+            include_str!("fixtures/evaluator_source_be9f09f79341d61d.orna"),
+            include_str!("fixtures/evaluator_source_d16c9e502105a540.orna"),
+            include_str!("fixtures/evaluator_source_e7ee918d950403da.orna"),
+            include_str!("fixtures/evaluator_source_4d497de51c72050d.orna"),
+            include_str!("fixtures/evaluator_source_08af8b01467e6072.orna"),
+            include_str!("fixtures/evaluator_source_922c3c285def8d2f.orna"),
+        ],
+        (MinMaxSourceFixtureProfile::Integers, "max") => [
+            include_str!("fixtures/evaluator_source_58f496753613466c.orna"),
+            include_str!("fixtures/evaluator_source_a5439c79f3d5d61a.orna"),
+            include_str!("fixtures/evaluator_source_4b03efcc13423665.orna"),
+            include_str!("fixtures/evaluator_source_a4cb10bea3b3f18e.orna"),
+            include_str!("fixtures/evaluator_source_82aa9b05654afe2e.orna"),
+            include_str!("fixtures/evaluator_source_13f9f99a2678ffe7.orna"),
+            include_str!("fixtures/evaluator_source_4eb9274d7dddd3e8.orna"),
+            include_str!("fixtures/evaluator_source_c3a8ac78ee6aa21c.orna"),
+        ],
+        _ => unreachable!("only min/max source fixtures are registered"),
+    }
 }
 
 fn float_rows(bits: &[u64]) -> Value {
@@ -32,7 +146,10 @@ fn money_raw(coefficient: BigInt, exponent10: BigInt, currency: [u8; 16]) -> Raw
         Box::new(Raw::Array(vec![
             Raw::Tag(
                 60000,
-                Box::new(Raw::Array(vec![Raw::Int(coefficient), Raw::Int(exponent10)])),
+                Box::new(Raw::Array(vec![
+                    Raw::Int(coefficient),
+                    Raw::Int(exponent10),
+                ])),
             ),
             Raw::Tag(37, Box::new(Raw::Bytes(currency.to_vec()))),
         ])),
@@ -182,7 +299,11 @@ fn relation_pair(left: i64, right: i64) -> Value {
 }
 fn relation_window_row(values: &[i64]) -> Value {
     Value::new(Raw::Array(
-        values.iter().copied().map(|value| Raw::Int(value.into())).collect(),
+        values
+            .iter()
+            .copied()
+            .map(|value| Raw::Int(value.into()))
+            .collect(),
     ))
     .unwrap()
 }
@@ -237,11 +358,7 @@ fn relation_named_window_direct(source: Expr, size: Expr, step: Option<Expr>) ->
     }
 }
 
-fn relation_named_window_pipeline(
-    input: Expr,
-    size: Expr,
-    step: Option<Expr>,
-) -> Expr {
+fn relation_named_window_pipeline(input: Expr, size: Expr, step: Option<Expr>) -> Expr {
     let span = relation_span();
     let mut arguments = vec![orna_syntax_v1::Argument {
         name: Some("size".into()),
@@ -296,11 +413,7 @@ impl DistinctRelationEffects {
 }
 
 impl EffectHandler for DistinctRelationEffects {
-    fn handle(
-        &mut self,
-        _: &Expr,
-        _: &[Value],
-    ) -> Result<Option<Value>, EvaluationError> {
+    fn handle(&mut self, _: &Expr, _: &[Value]) -> Result<Option<Value>, EvaluationError> {
         Ok(None)
     }
 
@@ -342,11 +455,7 @@ impl UnionRelationEffects {
 }
 
 impl EffectHandler for UnionRelationEffects {
-    fn handle(
-        &mut self,
-        _: &Expr,
-        _: &[Value],
-    ) -> Result<Option<Value>, EvaluationError> {
+    fn handle(&mut self, _: &Expr, _: &[Value]) -> Result<Option<Value>, EvaluationError> {
         Ok(None)
     }
 
@@ -489,7 +598,13 @@ fn nominal_input_with_fields(fields: Vec<(Raw, Raw)>) -> orna_foundation_v1::Can
 fn evaluator_decode_rejects_nominal_text_field_keys() {
     let environment = BTreeMap::from([("value".into(), nominal_input(Raw::Text("value".into())))]);
 
-    let result = evaluate_parsed(&parsed_expression("value"), &environment, Limits::default());
+    let result = evaluate_parsed(
+        &parsed_expression(include_str!(
+            "fixtures/evaluator_source_cd42404d52ad55cc.orna"
+        )),
+        &environment,
+        Limits::default(),
+    );
 
     assert_eq!(code(result), "ORNA-EVAL-VALUE");
 }
@@ -499,8 +614,14 @@ fn evaluator_decode_accepts_nominal_object_id_field_keys() {
     let input = nominal_input(field_id_raw("value"));
     let environment = BTreeMap::from([("value".into(), input.clone())]);
 
-    let result = evaluate_parsed(&parsed_expression("value"), &environment, Limits::default())
-        .expect("canonical ObjectId nominal field keys should decode");
+    let result = evaluate_parsed(
+        &parsed_expression(include_str!(
+            "fixtures/evaluator_source_cd42404d52ad55cc.orna"
+        )),
+        &environment,
+        Limits::default(),
+    )
+    .expect("canonical ObjectId nominal field keys should decode");
 
     assert_eq!(result.raw(), input.raw());
 }
@@ -525,7 +646,9 @@ fn nominal_field_selection_rejects_missing_unknown_and_ambiguous_metadata() {
     )]);
     assert_eq!(
         code(evaluate_parsed_with_nominals(
-            &parsed_expression("value.unknown"),
+            &parsed_expression(include_str!(
+                "fixtures/evaluator_source_81c26d6628d1ca4a.orna"
+            )),
             &environment,
             &definitions,
             Limits::default(),
@@ -549,7 +672,9 @@ fn nominal_field_selection_rejects_missing_unknown_and_ambiguous_metadata() {
     )]);
     assert_eq!(
         code(evaluate_parsed_with_nominals(
-            &parsed_expression("value.value"),
+            &parsed_expression(include_str!(
+                "fixtures/evaluator_source_9dd4086bbd93e865.orna"
+            )),
             &unknown_type,
             &definitions,
             Limits::default(),
@@ -569,7 +694,9 @@ fn nominal_field_selection_rejects_missing_unknown_and_ambiguous_metadata() {
     let environment = BTreeMap::from([("value".into(), nominal_input(field_id_raw("value")))]);
     assert_eq!(
         code(evaluate_parsed_with_nominals(
-            &parsed_expression("value.value"),
+            &parsed_expression(include_str!(
+                "fixtures/evaluator_source_9dd4086bbd93e865.orna"
+            )),
             &environment,
             &ambiguous,
             Limits::default(),
@@ -604,7 +731,9 @@ fn nominal_field_selection_rejects_extra_and_missing_payload_members() {
     for environment in [extra, missing] {
         assert_eq!(
             code(evaluate_parsed_with_nominals(
-                &parsed_expression("value.value"),
+                &parsed_expression(include_str!(
+                    "fixtures/evaluator_source_9dd4086bbd93e865.orna"
+                )),
                 &environment,
                 &definitions,
                 Limits::default(),
@@ -632,7 +761,9 @@ fn nominal_admission_rejects_malformed_matching_payload_without_field_selection(
 
     assert_eq!(
         code(evaluate_parsed_with_nominals(
-            &parsed_expression("value"),
+            &parsed_expression(include_str!(
+                "fixtures/evaluator_source_cd42404d52ad55cc.orna"
+            )),
             &environment,
             &definitions,
             Limits::default(),
@@ -662,7 +793,9 @@ fn nominal_admission_rejects_malformed_nominals_in_recursive_containers() {
 
     assert_eq!(
         code(evaluate_parsed_with_nominals(
-            &parsed_expression("value"),
+            &parsed_expression(include_str!(
+                "fixtures/evaluator_source_cd42404d52ad55cc.orna"
+            )),
             &environment,
             &definitions,
             Limits::default(),
@@ -717,7 +850,9 @@ fn nominal_admission_rejects_malformed_named_call_captures() {
             "run".into(),
             PureFunction {
                 parameters: Vec::new(),
-                body: parsed_expression("helper()"),
+                body: parsed_expression(include_str!(
+                    "fixtures/evaluator_source_9f70e25cadc7ce9e.orna"
+                )),
                 environment: Environment::new(),
             },
         ),
@@ -725,7 +860,9 @@ fn nominal_admission_rejects_malformed_named_call_captures() {
             "helper".into(),
             PureFunction {
                 parameters: Vec::new(),
-                body: parsed_expression("1"),
+                body: parsed_expression(include_str!(
+                    "fixtures/evaluator_source_6b86b273ff34fce1.orna"
+                )),
                 environment: Environment::from([("captured".into(), malformed)]),
             },
         ),
@@ -757,7 +894,9 @@ fn nominal_definition_admission_enforces_total_limits_before_allocation() {
     ]);
     assert_eq!(
         code(evaluate_parsed_with_nominals(
-            &parsed_expression("1"),
+            &parsed_expression(include_str!(
+                "fixtures/evaluator_source_6b86b273ff34fce1.orna"
+            )),
             &Environment::new(),
             &oversized_definitions,
             Limits {
@@ -779,7 +918,9 @@ fn nominal_definition_admission_enforces_total_limits_before_allocation() {
     );
     assert_eq!(
         code(evaluate_parsed_with_nominals(
-            &parsed_expression("1"),
+            &parsed_expression(include_str!(
+                "fixtures/evaluator_source_6b86b273ff34fce1.orna"
+            )),
             &Environment::new(),
             &oversized_fields,
             Limits {
@@ -798,7 +939,9 @@ fn nominal_definition_admission_enforces_total_limits_before_allocation() {
     );
     assert_eq!(
         code(evaluate_parsed_with_nominals(
-            &parsed_expression("1"),
+            &parsed_expression(include_str!(
+                "fixtures/evaluator_source_6b86b273ff34fce1.orna"
+            )),
             &Environment::new(),
             &oversized_name,
             Limits {
@@ -816,7 +959,9 @@ fn nominal_definition_admission_rejects_oversized_owner_before_cloning() {
 
     assert_eq!(
         code(evaluate_parsed_with_nominals(
-            &parsed_expression("1"),
+            &parsed_expression(include_str!(
+                "fixtures/evaluator_source_6b86b273ff34fce1.orna"
+            )),
             &Environment::new(),
             &definitions,
             Limits {
@@ -851,7 +996,9 @@ fn nominal_construction_rejects_ambiguous_declared_fields() {
 
     assert_eq!(
         code(evaluate_parsed_with_nominals(
-            &parsed_expression("Thing { value: 7 }"),
+            &parsed_expression(include_str!(
+                "fixtures/evaluator_source_b7e70e0c52b91be1.orna"
+            )),
             &Environment::new(),
             &duplicate_names,
             Limits::default(),
@@ -860,7 +1007,9 @@ fn nominal_construction_rejects_ambiguous_declared_fields() {
     );
     assert_eq!(
         code(evaluate_parsed_with_nominals(
-            &parsed_expression("Thing { left: 1, right: 2 }"),
+            &parsed_expression(include_str!(
+                "fixtures/evaluator_source_8a912f6862713b26.orna"
+            )),
             &Environment::new(),
             &duplicate_ids,
             Limits::default(),
@@ -892,7 +1041,9 @@ fn nominal_construction_rejects_duplicate_type_ids_in_active_scope() {
 
     assert_eq!(
         code(evaluate_parsed_with_nominals(
-            &parsed_expression("Thing { value: 7 }"),
+            &parsed_expression(include_str!(
+                "fixtures/evaluator_source_b7e70e0c52b91be1.orna"
+            )),
             &Environment::new(),
             &definitions,
             Limits::default(),
@@ -910,7 +1061,9 @@ fn nominal_public_field_selection_reads_the_declared_value() {
         vec![nominal_field("value", true, None)],
     );
     let result = evaluate_parsed_with_nominals(
-        &parsed_expression("Thing { value: 7 }.value"),
+        &parsed_expression(include_str!(
+            "fixtures/evaluator_source_903d97fbd7c57964.orna"
+        )),
         &Environment::new(),
         &definitions,
         Limits::default(),
@@ -932,7 +1085,9 @@ fn nominal_private_field_selection_is_owner_scoped() {
         "vault.read".into(),
         PureFunction {
             parameters: Vec::new(),
-            body: parsed_expression("Vault { secret: 7 }.secret"),
+            body: parsed_expression(include_str!(
+                "fixtures/evaluator_source_e622366d50fead9c.orna"
+            )),
             environment: Environment::new(),
         },
     )]);
@@ -961,7 +1116,9 @@ fn nominal_private_field_selection_is_rejected_outside_owner() {
         "vault.make".into(),
         PureFunction {
             parameters: Vec::new(),
-            body: parsed_expression("Vault { secret: 7 }"),
+            body: parsed_expression(include_str!(
+                "fixtures/evaluator_source_daa861163cdbfc28.orna"
+            )),
             environment: Environment::new(),
         },
     )]);
@@ -977,7 +1134,9 @@ fn nominal_private_field_selection_is_rejected_outside_owner() {
 
     assert_eq!(
         code(evaluate_with_functions_and_nominals(
-            &parsed_expression("value.secret"),
+            &parsed_expression(include_str!(
+                "fixtures/evaluator_source_b054fcd571d69b72.orna"
+            )),
             &environment,
             &BTreeMap::new(),
             &definitions,
@@ -999,7 +1158,9 @@ fn nominal_private_field_selection_works_in_owner_created_direct_closure() {
         "vault.read".into(),
         PureFunction {
             parameters: Vec::new(),
-            body: parsed_expression("(() => Vault { secret: 7 }.secret)()"),
+            body: parsed_expression(include_str!(
+                "fixtures/evaluator_source_8d756a2c60c35c1f.orna"
+            )),
             environment: Environment::new(),
         },
     )]);
@@ -1028,9 +1189,9 @@ fn nominal_private_field_selection_works_in_owner_created_collection_closure() {
         "vault.map".into(),
         PureFunction {
             parameters: Vec::new(),
-            body: parsed_expression(
-                "std.collection.map([1, 2], value => Vault { secret: value }.secret)",
-            ),
+            body: parsed_expression(include_str!(
+                "fixtures/evaluator_source_dce4414336a87f81.orna"
+            )),
             environment: Environment::new(),
         },
     )]);
@@ -1075,7 +1236,9 @@ fn nominal_field_selection_uses_stable_field_identity_not_text_key() {
     let environment = BTreeMap::from([("value".into(), input)]);
 
     let result = evaluate_parsed_with_nominals(
-        &parsed_expression("value.value"),
+        &parsed_expression(include_str!(
+            "fixtures/evaluator_source_9dd4086bbd93e865.orna"
+        )),
         &environment,
         &definitions,
         Limits::default(),
@@ -1120,7 +1283,9 @@ fn nominal_construction_materializes_supplied_and_default_fields_in_declaration_
         ],
     );
     let result = evaluate_parsed_with_nominals(
-        &parsed_expression("Thing { left: 3, right: left + 1 }"),
+        &parsed_expression(include_str!(
+            "fixtures/evaluator_source_16e497097d7c8ca9.orna"
+        )),
         &Environment::new(),
         &definitions,
         Limits::default(),
@@ -1256,7 +1421,9 @@ fn nominal_supplied_values_bypass_omitted_defaults() {
         vec![nominal_field("value", true, Some("1 / 0"))],
     );
     let result = evaluate_parsed_with_nominals(
-        &parsed_expression("Thing { value: 9 }"),
+        &parsed_expression(include_str!(
+            "fixtures/evaluator_source_20a1b6e25e5cc7b0.orna"
+        )),
         &Environment::new(),
         &definitions,
         Limits::default(),
@@ -1281,12 +1448,16 @@ fn external_nominal_public_default_runs_in_declaration_owner_namespace() {
         "vault.helper".into(),
         PureFunction {
             parameters: Vec::new(),
-            body: parsed_expression("7"),
+            body: parsed_expression(include_str!(
+                "fixtures/evaluator_source_7902699be42c8a8e.orna"
+            )),
             environment: Environment::new(),
         },
     )]);
     let result = evaluate_with_functions_and_nominals(
-        &parsed_expression("vault.Vault {}"),
+        &parsed_expression(include_str!(
+            "fixtures/evaluator_source_407ebfd8b1b347d5.orna"
+        )),
         &Environment::new(),
         &functions,
         &definitions,
@@ -1312,7 +1483,9 @@ fn nominal_defaults_run_once_in_declaration_order() {
         ],
     );
     let result = evaluate_parsed_with_nominals(
-        &parsed_expression("Thing {}"),
+        &parsed_expression(include_str!(
+            "fixtures/evaluator_source_c5680747744f836e.orna"
+        )),
         &Environment::new(),
         &definitions,
         Limits {
@@ -1342,7 +1515,10 @@ fn nominal_construction_rejects_duplicate_unknown_missing_and_failing_fields() {
             nominal_field("failing", true, Some("1 / 0")),
         ],
     );
-    for source in ["Thing { required: 1, required: 2 }", "Thing { unknown: 1 }"] {
+    for source in [
+        include_str!("fixtures/evaluator_source_7ca05863848cfa37.orna"),
+        include_str!("fixtures/evaluator_source_8ba6f8428b3bcbe6.orna"),
+    ] {
         assert_eq!(
             evaluate_parsed_with_nominals(
                 &parsed_expression(source),
@@ -1358,7 +1534,9 @@ fn nominal_construction_rejects_duplicate_unknown_missing_and_failing_fields() {
     }
     assert_eq!(
         evaluate_parsed_with_nominals(
-            &parsed_expression("Thing {}"),
+            &parsed_expression(include_str!(
+                "fixtures/evaluator_source_c5680747744f836e.orna"
+            )),
             &Environment::new(),
             &definitions,
             Limits::default(),
@@ -1369,7 +1547,9 @@ fn nominal_construction_rejects_duplicate_unknown_missing_and_failing_fields() {
     );
     assert_eq!(
         evaluate_parsed_with_nominals(
-            &parsed_expression("Thing { required: 1 }"),
+            &parsed_expression(include_str!(
+                "fixtures/evaluator_source_92e08454f1d9908c.orna"
+            )),
             &Environment::new(),
             &definitions,
             Limits::default(),
@@ -1388,7 +1568,9 @@ fn external_nominal_construction_rejects_private_fields_but_owner_namespace_can_
         Some("vault"),
         vec![nominal_field("secret", false, None)],
     );
-    let expression = parsed_expression("vault.Vault { secret: 7 }");
+    let expression = parsed_expression(include_str!(
+        "fixtures/evaluator_source_5007e6666ea5dc3c.orna"
+    ));
     assert_eq!(
         evaluate_parsed_with_nominals(
             &expression,
@@ -1408,7 +1590,9 @@ fn external_nominal_construction_rejects_private_fields_but_owner_namespace_can_
         vec![nominal_field("secret", false, Some("7"))],
     );
     let result = evaluate_parsed_with_nominals(
-        &parsed_expression("vault.Defaulted {}"),
+        &parsed_expression(include_str!(
+            "fixtures/evaluator_source_611645faa7eca082.orna"
+        )),
         &Environment::new(),
         &defaulted_private,
         Limits::default(),
@@ -1436,7 +1620,9 @@ fn external_nominal_construction_rejects_private_fields_but_owner_namespace_can_
             "vault.make".into(),
             PureFunction {
                 parameters: Vec::new(),
-                body: parsed_expression("vault.inner()"),
+                body: parsed_expression(include_str!(
+                    "fixtures/evaluator_source_572943b08b8333ca.orna"
+                )),
                 environment: Environment::new(),
             },
         ),
@@ -1444,7 +1630,9 @@ fn external_nominal_construction_rejects_private_fields_but_owner_namespace_can_
             "vault.inner".into(),
             PureFunction {
                 parameters: Vec::new(),
-                body: parsed_expression("Vault { secret: 7 }"),
+                body: parsed_expression(include_str!(
+                    "fixtures/evaluator_source_daa861163cdbfc28.orna"
+                )),
                 environment: Environment::new(),
             },
         ),
@@ -1471,7 +1659,9 @@ fn external_nominal_construction_rejects_private_fields_but_owner_namespace_can_
         vec![nominal_field("secret", false, None)],
     );
     evaluate_parsed_with_nominals(
-        &parsed_expression("RootThing { secret: 7 }"),
+        &parsed_expression(include_str!(
+            "fixtures/evaluator_source_1cb340a13ff58ff9.orna"
+        )),
         &Environment::new(),
         &root_owned,
         Limits::default(),
@@ -1731,8 +1921,7 @@ fn host_invocation_uses_the_same_named_function_namespace() {
 
 #[test]
 fn effect_handler_runs_for_a_nested_non_pure_field_call_with_once_evaluated_arguments() {
-    let functions =
-        functions_from_source(include_str!("fixtures/effect_nested_field_call.orna"));
+    let functions = functions_from_source(include_str!("fixtures/effect_nested_field_call.orna"));
     let mut effects = NoteEffects::default();
 
     assert_eq!(
@@ -1751,8 +1940,7 @@ fn effect_handler_runs_for_a_nested_non_pure_field_call_with_once_evaluated_argu
 
 #[test]
 fn dynamic_field_calls_evaluate_callee_before_effectful_arguments() {
-    let functions =
-        functions_from_source(include_str!("fixtures/effect_dynamic_field_call.orna"));
+    let functions = functions_from_source(include_str!("fixtures/effect_dynamic_field_call.orna"));
     let mut effects = NoteEffects::default();
 
     assert_eq!(
@@ -1770,8 +1958,7 @@ fn dynamic_field_calls_evaluate_callee_before_effectful_arguments() {
 
 #[test]
 fn effect_handler_none_falls_through_without_intercepting_pure_calls() {
-    let functions =
-        functions_from_source(include_str!("fixtures/effect_pure_call.orna"));
+    let functions = functions_from_source(include_str!("fixtures/effect_pure_call.orna"));
     let mut effects = NoteEffects::default();
 
     assert_eq!(
@@ -1807,10 +1994,10 @@ fn invoke_named_remains_effect_free_for_non_pure_field_calls() {
 fn source_calls_bind_positional_named_and_nested_defaults() {
     let source = include_str!("fixtures/source_calls_defaults.orna");
     for expression in [
-        "add(10)",
-        "add(value: 10)",
-        "add(10, extra: 6)",
-        "add(extra: 6, value: 10)",
+        include_str!("fixtures/evaluator_source_2e638be6187005ca.orna"),
+        include_str!("fixtures/evaluator_source_acc804efc010ae0e.orna"),
+        include_str!("fixtures/evaluator_source_7ab067d2194e6002.orna"),
+        include_str!("fixtures/evaluator_source_6f1a3950367c5a51.orna"),
     ] {
         assert_eq!(
             call_module(source, expression, Limits::default()).unwrap(),
@@ -1818,15 +2005,20 @@ fn source_calls_bind_positional_named_and_nested_defaults() {
         );
     }
     assert_eq!(
-        call_module(source, "add(twice(5))", Limits::default()).unwrap(),
+        call_module(
+            source,
+            include_str!("fixtures/evaluator_source_b4ea53a692925b5c.orna"),
+            Limits::default()
+        )
+        .unwrap(),
         Value::int(16.into())
     );
     for expression in [
-        "add()",
-        "add(1, 2, 3)",
-        "add(1, value: 2)",
-        "add(value: 1, 2)",
-        "add(unknown: 1)",
+        include_str!("fixtures/evaluator_source_b400fd9acba0d377.orna"),
+        include_str!("fixtures/evaluator_source_b0decf233432a63b.orna"),
+        include_str!("fixtures/evaluator_source_4963fa6bc26f7aac.orna"),
+        include_str!("fixtures/evaluator_source_d19d0923b599c0e0.orna"),
+        include_str!("fixtures/evaluator_source_d9fc4ace3f1292d8.orna"),
     ] {
         assert_eq!(
             code(call_module(source, expression, Limits::default())),
@@ -1840,14 +2032,18 @@ fn source_calls_bind_positional_named_and_nested_defaults() {
 fn source_calls_are_lexical_and_respect_value_shadowing() {
     let source = include_str!("fixtures/source_calls_lexical.orna");
     assert_eq!(
-        code(call_module(source, "outer(7)", Limits::default())),
+        code(call_module(
+            source,
+            include_str!("fixtures/evaluator_source_de073b4131c0ec19.orna"),
+            Limits::default()
+        )),
         "ORNA-EVAL-NAME"
     );
     let source = include_str!("fixtures/source_calls_identity.orna");
     assert_eq!(
         code(call_module(
             source,
-            "if true { let identity = 1; identity(2) } else { 0 }",
+            include_str!("fixtures/evaluator_source_26a3b30ad90dc771.orna"),
             Limits::default()
         )),
         "ORNA-EVAL-TYPE"
@@ -1858,7 +2054,12 @@ fn source_calls_are_lexical_and_respect_value_shadowing() {
 fn source_call_arguments_evaluate_in_source_order() {
     let source = include_str!("fixtures/source_calls_order.orna");
     assert_eq!(
-        call_module(source, "caller()", Limits::default()).unwrap(),
+        call_module(
+            source,
+            include_str!("fixtures/evaluator_source_2f617360b224b133.orna"),
+            Limits::default()
+        )
+        .unwrap(),
         Value::int(21.into())
     );
 }
@@ -1866,13 +2067,36 @@ fn source_call_arguments_evaluate_in_source_order() {
 #[test]
 fn wildcard_and_structured_lambda_parameters_bind_by_position() {
     for (expression, expected) in [
-        (include_str!("fixtures/wildcard_structured_lambda/wildcard-single-argument.orna").trim(), 7),
-        (include_str!("fixtures/wildcard_structured_lambda/wildcard-two-arguments.orna").trim(), 7),
-        (include_str!("fixtures/wildcard_structured_lambda/wildcard-pipeline.orna").trim(), 7),
-        (include_str!("fixtures/wildcard_structured_lambda/tuple-destructure-call.orna").trim(), 3),
-        (include_str!("fixtures/wildcard_structured_lambda/array-destructure-call.orna").trim(), 3),
-        (include_str!("fixtures/wildcard_structured_lambda/record-destructure-call.orna").trim(), 3),
-        (include_str!("fixtures/wildcard_structured_lambda/tuple-destructure-pipeline.orna").trim(), 3),
+        (
+            include_str!("fixtures/wildcard_structured_lambda/wildcard-single-argument.orna")
+                .trim(),
+            7,
+        ),
+        (
+            include_str!("fixtures/wildcard_structured_lambda/wildcard-two-arguments.orna").trim(),
+            7,
+        ),
+        (
+            include_str!("fixtures/wildcard_structured_lambda/wildcard-pipeline.orna").trim(),
+            7,
+        ),
+        (
+            include_str!("fixtures/wildcard_structured_lambda/tuple-destructure-call.orna").trim(),
+            3,
+        ),
+        (
+            include_str!("fixtures/wildcard_structured_lambda/array-destructure-call.orna").trim(),
+            3,
+        ),
+        (
+            include_str!("fixtures/wildcard_structured_lambda/record-destructure-call.orna").trim(),
+            3,
+        ),
+        (
+            include_str!("fixtures/wildcard_structured_lambda/tuple-destructure-pipeline.orna")
+                .trim(),
+            3,
+        ),
     ] {
         assert_eq!(
             evaluate(expression),
@@ -1889,8 +2113,10 @@ fn wildcard_and_structured_lambda_parameters_bind_by_position() {
         "ORNA-EVAL-DIVIDE-BY-ZERO"
     );
     for expression in [
-        include_str!("fixtures/wildcard_structured_lambda/tuple-destructure-wrong-arity.orna").trim(),
-        include_str!("fixtures/wildcard_structured_lambda/array-destructure-wrong-arity.orna").trim(),
+        include_str!("fixtures/wildcard_structured_lambda/tuple-destructure-wrong-arity.orna")
+            .trim(),
+        include_str!("fixtures/wildcard_structured_lambda/array-destructure-wrong-arity.orna")
+            .trim(),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -1903,8 +2129,12 @@ fn wildcard_and_structured_lambda_parameters_bind_by_position() {
     }
     for expression in [
         include_str!("fixtures/wildcard_structured_lambda/wildcard-wrong-arity.orna").trim(),
-        include_str!("fixtures/wildcard_structured_lambda/tuple-destructure-named-arguments.orna").trim(),
-        include_str!("fixtures/wildcard_structured_lambda/record-destructure-duplicate-binding.orna").trim(),
+        include_str!("fixtures/wildcard_structured_lambda/tuple-destructure-named-arguments.orna")
+            .trim(),
+        include_str!(
+            "fixtures/wildcard_structured_lambda/record-destructure-duplicate-binding.orna"
+        )
+        .trim(),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -1921,10 +2151,22 @@ fn wildcard_and_structured_lambda_parameters_bind_by_position() {
 fn named_functions_share_structured_parameter_binding_and_defaults() {
     let source = include_str!("fixtures/structured_function_parameters.orna");
     for (expression, expected) in [
-        ("add()", 3),
-        ("add((10, 20))", 30),
-        ("(10, 20) | add", 30),
-        ("ignore(1, 2)", 7),
+        (
+            include_str!("fixtures/evaluator_source_b400fd9acba0d377.orna"),
+            3,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_758d0a174816854a.orna"),
+            30,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_d99ff0bdf7f314ce.orna"),
+            30,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_c70bdb6eeeb63d33.orna"),
+            7,
+        ),
     ] {
         assert_eq!(
             call_module(source, expression, Limits::default()).unwrap(),
@@ -1937,12 +2179,30 @@ fn named_functions_share_structured_parameter_binding_and_defaults() {
 fn closures_capture_immutable_snapshots_and_support_nested_calls() {
     let source = include_str!("fixtures/closures.orna");
     for (expression, expected) in [
-        ("make(10)(5)", 15),
-        ("read_after_reassignment()", 1),
-        ("parameter_shadow()", 11),
-        ("make_nested(1)(2)(3)", 6),
-        ("local_block_shadow()", 11),
-        ("parameter_block_shadow(0)", 11),
+        (
+            include_str!("fixtures/evaluator_source_c0598d2d3a1d871b.orna"),
+            15,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_cfb38676d13892bf.orna"),
+            1,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_4c50533cd41cd46c.orna"),
+            11,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_0e55ed56079d1723.orna"),
+            6,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_b9fae42520af2a33.orna"),
+            11,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_b7616ebb36378f81.orna"),
+            11,
+        ),
     ] {
         assert_eq!(
             call_module(source, expression, Limits::default()).unwrap(),
@@ -1950,7 +2210,11 @@ fn closures_capture_immutable_snapshots_and_support_nested_calls() {
         );
     }
     assert_eq!(
-        code(call_module(source, "mutate_capture()", Limits::default())),
+        code(call_module(
+            source,
+            include_str!("fixtures/evaluator_source_78d0929c1d040ba0.orna"),
+            Limits::default()
+        )),
         "ORNA-EVAL-IMMUTABLE-CAPTURE"
     );
 }
@@ -1959,11 +2223,26 @@ fn closures_capture_immutable_snapshots_and_support_nested_calls() {
 fn function_values_pass_through_locals_arguments_and_collections() {
     let source = include_str!("fixtures/function_values.orna");
     assert_eq!(
-        call_module(source, "run()", Limits::default()).unwrap(),
+        call_module(
+            source,
+            include_str!("fixtures/evaluator_source_02fcae88bd120f59.orna"),
+            Limits::default()
+        )
+        .unwrap(),
         Value::int(41.into())
     );
-    assert_eq!(evaluate("(value => value)(2)"), Value::int(2.into()));
-    assert_eq!(evaluate("((a, b) => a + b)(1, 2)"), Value::int(3.into()));
+    assert_eq!(
+        evaluate(include_str!(
+            "fixtures/evaluator_source_685bc38c4f17eb80.orna"
+        )),
+        Value::int(2.into())
+    );
+    assert_eq!(
+        evaluate(include_str!(
+            "fixtures/evaluator_source_19cfb859212309a9.orna"
+        )),
+        Value::int(3.into())
+    );
 }
 
 #[test]
@@ -1973,9 +2252,7 @@ fn anonymous_pipeline_stages_share_callable_binding_and_limits() {
         Value::int(12.into())
     );
     assert_eq!(
-        evaluate(
-            include_str!("fixtures/anonymous_pipeline_stages/chained_stages.orna").trim()
-        ),
+        evaluate(include_str!("fixtures/anonymous_pipeline_stages/chained_stages.orna").trim()),
         Value::int(24.into())
     );
     assert_eq!(
@@ -2023,11 +2300,11 @@ fn anonymous_pipeline_stages_share_callable_binding_and_limits() {
 fn pipelines_insert_the_input_before_explicit_arguments_and_defaults() {
     let source = include_str!("fixtures/pipelines.orna");
     for expression in [
-        "10 | add",
-        "10 | add()",
-        "10 | add(extra: 6)",
-        "10 | add(6)",
-        "5 | double | add",
+        include_str!("fixtures/evaluator_source_fd648c04c11072ae.orna"),
+        include_str!("fixtures/evaluator_source_9082051926ca0bec.orna"),
+        include_str!("fixtures/evaluator_source_4e7943f782f24c54.orna"),
+        include_str!("fixtures/evaluator_source_ad239d05428395cc.orna"),
+        include_str!("fixtures/evaluator_source_ddb5f09c4cbde42e.orna"),
     ] {
         assert_eq!(
             call_module(source, expression, Limits::default()).unwrap(),
@@ -2036,9 +2313,9 @@ fn pipelines_insert_the_input_before_explicit_arguments_and_defaults() {
         );
     }
     for expression in [
-        "10 | add(value: 1)",
-        "10 | add(extra: 1, extra: 2)",
-        "10 | add(1, 2)",
+        include_str!("fixtures/evaluator_source_a1d63d16b00948ea.orna"),
+        include_str!("fixtures/evaluator_source_265b00cf2432573a.orna"),
+        include_str!("fixtures/evaluator_source_e112a82ebac1e312.orna"),
     ] {
         assert_eq!(
             code(call_module(source, expression, Limits::default())),
@@ -2047,7 +2324,11 @@ fn pipelines_insert_the_input_before_explicit_arguments_and_defaults() {
         );
     }
     assert_eq!(
-        code(call_module(source, "10 | no_input", Limits::default())),
+        code(call_module(
+            source,
+            include_str!("fixtures/evaluator_source_db44d791471583f2.orna"),
+            Limits::default()
+        )),
         "ORNA-EVAL-ARGUMENT"
     );
 }
@@ -2056,17 +2337,26 @@ fn pipelines_insert_the_input_before_explicit_arguments_and_defaults() {
 fn pipeline_input_runs_once_and_before_stage_arguments() {
     let source = include_str!("fixtures/pipelines.orna");
     assert_eq!(
-        call_module(source, "pipeline_caller()", Limits::default()).unwrap(),
+        call_module(
+            source,
+            include_str!("fixtures/evaluator_source_a4be610b944962ef.orna"),
+            Limits::default()
+        )
+        .unwrap(),
         Value::int(12.into())
     );
     assert_eq!(
-        code(call_module(source, "(1 / 0) | add(missing)", Limits::default())),
+        code(call_module(
+            source,
+            include_str!("fixtures/evaluator_source_9a8c27fc51333935.orna"),
+            Limits::default()
+        )),
         "ORNA-EVAL-DIVIDE-BY-ZERO"
     );
     assert_eq!(
         code(call_module(
             source,
-            "1 | recurse",
+            include_str!("fixtures/evaluator_source_09585cab38f58f17.orna"),
             Limits {
                 max_steps: 12,
                 ..Limits::default()
@@ -2079,11 +2369,26 @@ fn pipeline_input_runs_once_and_before_stage_arguments() {
 #[test]
 fn math_pipelines_and_mixed_named_calls_share_argument_positions() {
     for (expression, expected) in [
-        ("41 | std.math.increment", 42),
-        ("41 | std.math.increment()", 42),
-        ("3 | std.math.max(right: 7)", 7),
-        ("std.math.max(3, right: 7)", 7),
-        ("10 | std.math.clamp(min: 1, max: 5)", 5),
+        (
+            include_str!("fixtures/evaluator_source_422c602ef0806cdb.orna"),
+            42,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_885a07a88dfe8f80.orna"),
+            42,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_48a9d5a263c215c6.orna"),
+            7,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_ea0e9cd5bc48ff80.orna"),
+            7,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_a66a2618d2b4021a.orna"),
+            5,
+        ),
     ] {
         assert_eq!(
             evaluate(expression),
@@ -2092,9 +2397,9 @@ fn math_pipelines_and_mixed_named_calls_share_argument_positions() {
         );
     }
     for expression in [
-        "3 | std.math.max(left: 7)",
-        "std.math.max(left: 3, 7)",
-        "std.math.max(left: 3, left: 7)",
+        include_str!("fixtures/evaluator_source_f92ebbd6f609538f.orna"),
+        include_str!("fixtures/evaluator_source_ffe6483d34803114.orna"),
+        include_str!("fixtures/evaluator_source_02f85be894cc2a37.orna"),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -2110,15 +2415,42 @@ fn math_pipelines_and_mixed_named_calls_share_argument_positions() {
 #[test]
 fn std_bits_preserves_unbounded_signed_twos_complement_semantics() {
     for (expression, expected) in [
-        ("std.bits.bit_or(0b1010, 0b0110)", 14),
-        ("std.bits.bit_and(0b1010, 0b0110)", 2),
-        ("std.bits.bit_xor(0b1010, 0b0110)", 12),
-        ("std.bits.bit_not(0)", -1),
-        ("std.bits.bit_not(-1)", 0),
-        ("1 | std.bits.shift_left(80)", 1_i128 << 80),
-        ("-5 | std.bits.shift_right(1)", -3),
-        ("1 | std.bits.shift_right(100000000000000000000)", 0),
-        ("-1 | std.bits.shift_right(100000000000000000000)", -1),
+        (
+            include_str!("fixtures/evaluator_source_525122f16c2e379f.orna"),
+            14,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_8f93aa349b9d84ab.orna"),
+            2,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_4e94aec7b783105d.orna"),
+            12,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_dd4462a246d0b409.orna"),
+            -1,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_b8a04b95ca2267bd.orna"),
+            0,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_2dcfbebe7af0187f.orna"),
+            1_i128 << 80,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_aa719e233adb155f.orna"),
+            -3,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_10c741a4f045874a.orna"),
+            0,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_56ce50733810a0bd.orna"),
+            -1,
+        ),
     ] {
         assert_eq!(
             evaluate(expression),
@@ -2127,13 +2459,28 @@ fn std_bits_preserves_unbounded_signed_twos_complement_semantics() {
         );
     }
     for (expression, expected) in [
-        ("std.bits.shift_left(1, -1)", "ORNA-EVAL-VALUE"),
-        ("std.bits.shift_right(1, -1)", "ORNA-EVAL-VALUE"),
-        ("std.bits.bit_or(1, true)", "ORNA-EVAL-TYPE"),
-        ("std.bits.bit_not(1, 2)", "ORNA-EVAL-UNSUPPORTED"),
-        ("std.bits.shift_left(1, 999999)", "ORNA-EVAL-LIMIT"),
         (
-            "std.bits.bit_or(left: 1, right: 2)",
+            include_str!("fixtures/evaluator_source_46d89922f621024b.orna"),
+            "ORNA-EVAL-VALUE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_377c2a174befceaf.orna"),
+            "ORNA-EVAL-VALUE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_3d0d101431dc3aa1.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_8367e9dcfc6c3d3c.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_ac55dad4bba9ad9c.orna"),
+            "ORNA-EVAL-LIMIT",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_46ee2ded56c3f4e7.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
     ] {
@@ -2160,12 +2507,15 @@ fn std_text_fallback_preserves_unicode_scalar_and_field_semantics() {
     .unwrap();
     for (expression, expected) in [
         (
-            "std.text.trim(\"  café  \")",
+            include_str!("fixtures/evaluator_source_2e5b587c6e0bf1cc.orna"),
             Value::new(Raw::Text("café".into())).unwrap(),
         ),
-        ("std.text.split(\"alpha,,β,\", \",\")", fields),
         (
-            "std.text.split(\"aβ\", \"\")",
+            include_str!("fixtures/evaluator_source_35ceb6112451a000.orna"),
+            fields,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_692ad3018e762104.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Text("a".into()),
                 Raw::Text("β".into()),
@@ -2173,39 +2523,39 @@ fn std_text_fallback_preserves_unicode_scalar_and_field_semantics() {
             .unwrap(),
         ),
         (
-            "std.text.join([\"a\", \"β\", \"\"], \":\")",
+            include_str!("fixtures/evaluator_source_8552b05fc3b6797d.orna"),
             Value::new(Raw::Text("a:β:".into())).unwrap(),
         ),
         (
-            "std.text.starts_with(\"βeta\", \"βe\")",
+            include_str!("fixtures/evaluator_source_4f5061f25d0d0ac2.orna"),
             Value::new(Raw::Bool(true)).unwrap(),
         ),
         (
-            "std.text.ends_with(\"βeta\", \"ta\")",
+            include_str!("fixtures/evaluator_source_342d3dacd0b38e72.orna"),
             Value::new(Raw::Bool(true)).unwrap(),
         ),
         (
-            "std.text.contains(\"aβa\", \"β\")",
+            include_str!("fixtures/evaluator_source_db29611950c345aa.orna"),
             Value::new(Raw::Bool(true)).unwrap(),
         ),
         (
-            "std.text.replace(\"aaaa\", \"aa\", \"b\")",
+            include_str!("fixtures/evaluator_source_44549c78b636d31e.orna"),
             Value::new(Raw::Text("bb".into())).unwrap(),
         ),
         (
-            "std.text.normalise(\"Cafe\u{301}\", \"NFC\")",
+            include_str!("fixtures/evaluator_source_2d213433a8546a30.orna"),
             Value::new(Raw::Text("Café".into())).unwrap(),
         ),
         (
-            "std.text.normalise(\"Café\", \"NFD\")",
+            include_str!("fixtures/evaluator_source_3a6a05eb210818fc.orna"),
             Value::new(Raw::Text("Cafe\u{301}".into())).unwrap(),
         ),
         (
-            "std.text.lower(\"İΣ\")",
+            include_str!("fixtures/evaluator_source_a9a9a6831ee0e3f9.orna"),
             Value::new(Raw::Text("i̇ς".into())).unwrap(),
         ),
         (
-            "std.text.upper(\"ß\")",
+            include_str!("fixtures/evaluator_source_7ce7c77b079a21d6.orna"),
             Value::new(Raw::Text("SS".into())).unwrap(),
         ),
     ] {
@@ -2216,18 +2566,42 @@ fn std_text_fallback_preserves_unicode_scalar_and_field_semantics() {
 #[test]
 fn std_text_fallback_rejects_invalid_arguments_and_enforces_existing_limits() {
     for (expression, expected) in [
-        ("std.text.trim(1)", "ORNA-EVAL-TYPE"),
-        ("std.text.trim([\"a\"])", "ORNA-EVAL-TYPE"),
-        ("std.text.join([\"a\", 1], \",\")", "ORNA-EVAL-TYPE"),
-        ("std.text.join([\"a\"], [\",\"])", "ORNA-EVAL-TYPE"),
-        ("std.text.replace(\"a\", \"a\")", "ORNA-EVAL-UNSUPPORTED"),
         (
-            "std.text.split(value: \"a\", separator: \",\", extra: \"x\")",
+            include_str!("fixtures/evaluator_source_eb886627f3b15b5b.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_7ec2d6f988af2ed6.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_e710b25432589584.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_0a171a3a5635d6c3.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_82473c16f3a83ef9.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
-        ("std.text.normalise(\"a\")", "ORNA-EVAL-UNSUPPORTED"),
-        ("std.text.normalise(1, \"NFC\")", "ORNA-EVAL-TYPE"),
-        ("std.text.normalise(\"a\", \"NFKC\")", "ORNA-EVAL-VALUE"),
+        (
+            include_str!("fixtures/evaluator_source_ab5594fbd82d3ca2.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_bae813212315fafb.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_3efcb9a07d3bf9dd.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_85f1751d57b1765c.orna"),
+            "ORNA-EVAL-VALUE",
+        ),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -2241,7 +2615,7 @@ fn std_text_fallback_rejects_invalid_arguments_and_enforces_existing_limits() {
     }
     assert_eq!(
         code(evaluate_expression(
-            "std.text.replace(\"aaaa\", \"a\", \"bb\")",
+            include_str!("fixtures/evaluator_source_12e5295d36a293ee.orna"),
             &Environment::new(),
             Limits {
                 max_string_bytes: 7,
@@ -2252,7 +2626,7 @@ fn std_text_fallback_rejects_invalid_arguments_and_enforces_existing_limits() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.text.split(\"abc\", \"\")",
+            include_str!("fixtures/evaluator_source_298fe829a138f6a3.orna"),
             &Environment::new(),
             Limits {
                 max_collection_items: 2,
@@ -2267,7 +2641,7 @@ fn std_text_fallback_rejects_invalid_arguments_and_enforces_existing_limits() {
 fn std_text_split_and_join_charge_step_budget_without_changing_outputs() {
     assert_eq!(
         evaluate_expression(
-            "std.text.split(\"aβ\", \"\")",
+            include_str!("fixtures/evaluator_source_692ad3018e762104.orna"),
             &Environment::new(),
             Limits::default(),
         )
@@ -2280,7 +2654,7 @@ fn std_text_split_and_join_charge_step_budget_without_changing_outputs() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.text.split(\"aβ\", \"\")",
+            include_str!("fixtures/evaluator_source_692ad3018e762104.orna"),
             &Environment::new(),
             Limits {
                 max_steps: 3,
@@ -2292,7 +2666,7 @@ fn std_text_split_and_join_charge_step_budget_without_changing_outputs() {
 
     assert_eq!(
         evaluate_expression(
-            "std.text.split(\"alpha,,β,\", \",\")",
+            include_str!("fixtures/evaluator_source_35ceb6112451a000.orna"),
             &Environment::new(),
             Limits::default(),
         )
@@ -2307,7 +2681,7 @@ fn std_text_split_and_join_charge_step_budget_without_changing_outputs() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.text.split(\"alpha,,β,\", \",\")",
+            include_str!("fixtures/evaluator_source_35ceb6112451a000.orna"),
             &Environment::new(),
             Limits {
                 max_steps: 3,
@@ -2319,7 +2693,7 @@ fn std_text_split_and_join_charge_step_budget_without_changing_outputs() {
 
     assert_eq!(
         evaluate_expression(
-            "std.text.join([\"a\", \"β\", \"\"], \":\")",
+            include_str!("fixtures/evaluator_source_8552b05fc3b6797d.orna"),
             &Environment::new(),
             Limits::default(),
         )
@@ -2328,7 +2702,7 @@ fn std_text_split_and_join_charge_step_budget_without_changing_outputs() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.text.join([\"a\", \"β\", \"\"], \":\")",
+            include_str!("fixtures/evaluator_source_8552b05fc3b6797d.orna"),
             &Environment::new(),
             Limits {
                 max_steps: 6,
@@ -2343,7 +2717,7 @@ fn std_text_split_and_join_charge_step_budget_without_changing_outputs() {
 fn std_collection_fallback_preserves_finite_list_ordering() {
     for (expression, expected) in [
         (
-            "std.collection.chunk([1, 2, 3, 4, 5], 2)",
+            include_str!("fixtures/evaluator_source_1da7cc611b76a427.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())]),
                 Raw::Array(vec![Raw::Int(3.into()), Raw::Int(4.into())]),
@@ -2352,11 +2726,11 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
-            "std.collection.chunk([], 2)",
+            include_str!("fixtures/evaluator_source_29da9ba0fa022bbe.orna"),
             Value::new(Raw::Array(vec![])).unwrap(),
         ),
         (
-            "std.collection.flatten([[1, 2], [], [3]])",
+            include_str!("fixtures/evaluator_source_473df9177d8c6620.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Int(1.into()),
                 Raw::Int(2.into()),
@@ -2365,7 +2739,7 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
-            "std.collection.unique([2, 1, 2, [3], [3], 1, []])",
+            include_str!("fixtures/evaluator_source_bb074f5ce7aa1a36.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Int(2.into()),
                 Raw::Int(1.into()),
@@ -2375,11 +2749,11 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
-            "[2, 1, 2, 1] | std.collection.unique()",
+            include_str!("fixtures/evaluator_source_38cb974bc808c771.orna"),
             Value::new(Raw::Array(vec![Raw::Int(2.into()), Raw::Int(1.into())])).unwrap(),
         ),
         (
-            "std.collection.unique([1.0, 1.00, 2.0])",
+            include_str!("fixtures/evaluator_source_3b0d2c957f6a09a6.orna"),
             Value::new(Raw::Array(vec![
                 Value::decimal(1.into(), 0.into()).unwrap().raw().clone(),
                 Value::decimal(2.into(), 0.into()).unwrap().raw().clone(),
@@ -2387,7 +2761,7 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
-            "std.collection.distinct([2, 1, 2, [3], [3], 1, []])",
+            include_str!("fixtures/evaluator_source_e6fbcdd13b1df03c.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Int(2.into()),
                 Raw::Int(1.into()),
@@ -2397,11 +2771,11 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
-            "[2, 1, 2, 1] | std.collection.distinct()",
+            include_str!("fixtures/evaluator_source_18c4d173e48642d3.orna"),
             Value::new(Raw::Array(vec![Raw::Int(2.into()), Raw::Int(1.into())])).unwrap(),
         ),
         (
-            "std.collection.distinct(values: [1.0, 1.00, 2.0])",
+            include_str!("fixtures/evaluator_source_1747c9635729f75e.orna"),
             Value::new(Raw::Array(vec![
                 Value::decimal(1.into(), 0.into()).unwrap().raw().clone(),
                 Value::decimal(2.into(), 0.into()).unwrap().raw().clone(),
@@ -2409,7 +2783,7 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
-            "std.collection.union([1, 2], [2, 3])",
+            include_str!("fixtures/evaluator_source_96e313a524b19b8b.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Int(1.into()),
                 Raw::Int(2.into()),
@@ -2419,7 +2793,7 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
-            "[1, 2] | std.collection.union(right: [2, 3])",
+            include_str!("fixtures/evaluator_source_8ccb4737d8a770d2.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Int(1.into()),
                 Raw::Int(2.into()),
@@ -2429,7 +2803,7 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
-            "std.collection.union(right: [2, 3], left: [1, 2])",
+            include_str!("fixtures/evaluator_source_4377a1fc8627a5b3.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Int(1.into()),
                 Raw::Int(2.into()),
@@ -2438,22 +2812,28 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             ]))
             .unwrap(),
         ),
-        ("std.collection.count([1, 2, 3])", Value::int(3.into())),
-        ("[1, 2, 3] | std.collection.count()", Value::int(3.into())),
         (
-            "std.collection.count(values: [1, 2, 3, 4])",
+            include_str!("fixtures/evaluator_source_b11204c3745b0c6b.orna"),
+            Value::int(3.into()),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_79a3255fb556fb1c.orna"),
+            Value::int(3.into()),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_0b32468e1f6c81bb.orna"),
             Value::int(4.into()),
         ),
         (
-            "std.collection.take([1, 2, 3], 2)",
+            include_str!("fixtures/evaluator_source_5aa8b8b7d2054b34.orna"),
             Value::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())])).unwrap(),
         ),
         (
-            "[1, 2, 3] | std.collection.take(count: 0)",
+            include_str!("fixtures/evaluator_source_5c763104fa1b6e4d.orna"),
             Value::new(Raw::Array(vec![])).unwrap(),
         ),
         (
-            "std.collection.take(count: 9, values: [1, 2, 3])",
+            include_str!("fixtures/evaluator_source_2551f3c29e2ca7ec.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Int(1.into()),
                 Raw::Int(2.into()),
@@ -2462,19 +2842,19 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
-            "std.collection.drop([1, 2, 3], 1)",
+            include_str!("fixtures/evaluator_source_cfde0e3812c2207f.orna"),
             Value::new(Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())])).unwrap(),
         ),
         (
-            "[1, 2, 3] | std.collection.drop(count: 2)",
+            include_str!("fixtures/evaluator_source_0799835ee0699292.orna"),
             Value::new(Raw::Array(vec![Raw::Int(3.into())])).unwrap(),
         ),
         (
-            "std.collection.drop(count: 9, values: [1, 2, 3])",
+            include_str!("fixtures/evaluator_source_289e024fc4750126.orna"),
             Value::new(Raw::Array(vec![])).unwrap(),
         ),
         (
-            "std.collection.partition([1, 2, 3, 4], value => value % 2 == 0)",
+            include_str!("fixtures/evaluator_source_e952ff55c7ba1f89.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())]),
                 Raw::Array(vec![Raw::Int(1.into()), Raw::Int(3.into())]),
@@ -2482,7 +2862,7 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
-            "[1, 2, 3] | std.collection.partition(predicate: value => value > 1)",
+            include_str!("fixtures/evaluator_source_548331ad6b1db9ee.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
                 Raw::Array(vec![Raw::Int(1.into())]),
@@ -2490,7 +2870,7 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
-            "std.collection.partition(predicate: value => value >= 2, values: [1, 2, 3])",
+            include_str!("fixtures/evaluator_source_8f029c7e1408a962.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
                 Raw::Array(vec![Raw::Int(1.into())]),
@@ -2498,7 +2878,7 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
-            "std.collection.split_when([1, 2, 3, 4, 5], value => value % 2 == 0)",
+            include_str!("fixtures/evaluator_source_02cdd36defc1ecc6.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Array(vec![Raw::Int(1.into())]),
                 Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
@@ -2507,7 +2887,7 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
-            "[1, 2, 3] | std.collection.split_when(predicate: value => value == 1)",
+            include_str!("fixtures/evaluator_source_1adb305c2d0dcf5e.orna"),
             Value::new(Raw::Array(vec![Raw::Array(vec![
                 Raw::Int(1.into()),
                 Raw::Int(2.into()),
@@ -2516,7 +2896,7 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
-            "std.collection.split_when(predicate: value => value == 2, values: [1, 2, 3])",
+            include_str!("fixtures/evaluator_source_fb3a8062b215e5d9.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Array(vec![Raw::Int(1.into())]),
                 Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
@@ -2524,7 +2904,7 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
-            "std.collection.group_by([31, 12, 22, 13, 33], value => value % 10)",
+            include_str!("fixtures/evaluator_source_e6dbd68a5c438388.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Array(vec![
                     Raw::Int(1.into()),
@@ -2542,7 +2922,7 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
-            "[3, 1, 2, 4] | std.collection.group_by(key: value => value % 2)",
+            include_str!("fixtures/evaluator_source_3b27fcd5cbfa74f8.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Array(vec![
                     Raw::Int(0.into()),
@@ -2556,7 +2936,7 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
-            "std.collection.zip([1, 2, 3], [\"a\", \"b\"])",
+            include_str!("fixtures/evaluator_source_45deb8bac9e61cb1.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Array(vec![Raw::Int(1.into()), Raw::Text("a".into())]),
                 Raw::Array(vec![Raw::Int(2.into()), Raw::Text("b".into())]),
@@ -2564,7 +2944,7 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
-            "std.collection.zip_exact([1, 2], [\"a\", \"b\"])",
+            include_str!("fixtures/evaluator_source_ee15980ee5277d75.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Array(vec![Raw::Int(1.into()), Raw::Text("a".into())]),
                 Raw::Array(vec![Raw::Int(2.into()), Raw::Text("b".into())]),
@@ -2572,7 +2952,7 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
-            "std.collection.pairs([1, 2, 3])",
+            include_str!("fixtures/evaluator_source_c6e97c62fc248d86.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())]),
                 Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
@@ -2580,7 +2960,7 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
-            "std.collection.window([1, 2, 3, 4, 5], 3, 2)",
+            include_str!("fixtures/evaluator_source_311fc8f110eeffc8.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Array(vec![
                     Raw::Int(1.into()),
@@ -2596,7 +2976,7 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
-            "std.collection.window([1, 2, 3, 4], 3, 2)",
+            include_str!("fixtures/evaluator_source_473a00182e524d9c.orna"),
             Value::new(Raw::Array(vec![Raw::Array(vec![
                 Raw::Int(1.into()),
                 Raw::Int(2.into()),
@@ -2605,7 +2985,7 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
-            "[1, 2, 3] | std.collection.window(size: 2)",
+            include_str!("fixtures/evaluator_source_39e52c1c05eb7b2e.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())]),
                 Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
@@ -2650,7 +3030,7 @@ fn std_collection_structural_operations_charge_step_budget_without_changing_fini
     ]);
     let cases = [
         (
-            "std.collection.chunk(rows, 2)",
+            include_str!("fixtures/evaluator_source_a09ad458ef217069.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())]),
                 Raw::Array(vec![Raw::Int(3.into()), Raw::Int(4.into())]),
@@ -2658,7 +3038,7 @@ fn std_collection_structural_operations_charge_step_budget_without_changing_fini
             .unwrap(),
         ),
         (
-            "std.collection.flatten(nested)",
+            include_str!("fixtures/evaluator_source_1098c20c2f7e7599.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Int(1.into()),
                 Raw::Int(2.into()),
@@ -2667,7 +3047,7 @@ fn std_collection_structural_operations_charge_step_budget_without_changing_fini
             .unwrap(),
         ),
         (
-            "std.collection.pairs(rows)",
+            include_str!("fixtures/evaluator_source_f8a5b9cb5cf89552.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())]),
                 Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
@@ -2676,7 +3056,7 @@ fn std_collection_structural_operations_charge_step_budget_without_changing_fini
             .unwrap(),
         ),
         (
-            "std.collection.window(rows, 2, 2)",
+            include_str!("fixtures/evaluator_source_9d379cb7abdad559.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())]),
                 Raw::Array(vec![Raw::Int(3.into()), Raw::Int(4.into())]),
@@ -2684,7 +3064,7 @@ fn std_collection_structural_operations_charge_step_budget_without_changing_fini
             .unwrap(),
         ),
         (
-            "std.collection.distinct(rows)",
+            include_str!("fixtures/evaluator_source_36062799d8380230.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Int(1.into()),
                 Raw::Int(2.into()),
@@ -2694,7 +3074,7 @@ fn std_collection_structural_operations_charge_step_budget_without_changing_fini
             .unwrap(),
         ),
         (
-            "std.collection.unique(rows)",
+            include_str!("fixtures/evaluator_source_b1cd8e80ace16f6b.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Int(1.into()),
                 Raw::Int(2.into()),
@@ -2704,7 +3084,7 @@ fn std_collection_structural_operations_charge_step_budget_without_changing_fini
             .unwrap(),
         ),
         (
-            "std.collection.union(left, right)",
+            include_str!("fixtures/evaluator_source_fea550c600fd9b6f.orna"),
             Value::new(Raw::Array(vec![
                 Raw::Int(1.into()),
                 Raw::Int(2.into()),
@@ -2713,7 +3093,10 @@ fn std_collection_structural_operations_charge_step_budget_without_changing_fini
             ]))
             .unwrap(),
         ),
-        ("std.collection.count(rows)", Value::int(4.into())),
+        (
+            include_str!("fixtures/evaluator_source_1220c59d913e5a8b.orna"),
+            Value::int(4.into()),
+        ),
     ];
     for (expression, expected) in cases {
         assert_eq!(
@@ -2778,7 +3161,7 @@ fn std_collection_take_drop_and_zip_charge_steps_for_copied_results() {
 
     assert_eq!(
         evaluate_expression(
-            "std.collection.take(rows, 1)",
+            include_str!("fixtures/evaluator_source_bfaa6e5fc9aaa7ba.orna"),
             &environment,
             Limits {
                 max_steps: 4,
@@ -2790,7 +3173,7 @@ fn std_collection_take_drop_and_zip_charge_steps_for_copied_results() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.take(rows, 1)",
+            include_str!("fixtures/evaluator_source_bfaa6e5fc9aaa7ba.orna"),
             &environment,
             Limits {
                 max_steps: 3,
@@ -2801,7 +3184,7 @@ fn std_collection_take_drop_and_zip_charge_steps_for_copied_results() {
     );
     assert_eq!(
         evaluate_expression(
-            "std.collection.drop(rows, 2)",
+            include_str!("fixtures/evaluator_source_ea3ca9ceed50e07b.orna"),
             &environment,
             Limits {
                 max_steps: 4,
@@ -2813,7 +3196,7 @@ fn std_collection_take_drop_and_zip_charge_steps_for_copied_results() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.drop(rows, 2)",
+            include_str!("fixtures/evaluator_source_ea3ca9ceed50e07b.orna"),
             &environment,
             Limits {
                 max_steps: 3,
@@ -2830,7 +3213,7 @@ fn std_collection_take_drop_and_zip_charge_steps_for_copied_results() {
     .unwrap();
     assert_eq!(
         evaluate_expression(
-            "std.collection.zip(left, right)",
+            include_str!("fixtures/evaluator_source_b9b15ebd72753f25.orna"),
             &environment,
             Limits {
                 max_steps: 5,
@@ -2842,7 +3225,7 @@ fn std_collection_take_drop_and_zip_charge_steps_for_copied_results() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.zip(left, right)",
+            include_str!("fixtures/evaluator_source_b9b15ebd72753f25.orna"),
             &environment,
             Limits {
                 max_steps: 3,
@@ -2860,7 +3243,7 @@ fn std_collection_take_drop_and_zip_charge_steps_for_copied_results() {
     .unwrap();
     assert_eq!(
         evaluate_expression(
-            "std.collection.zip_exact(left, equal_right)",
+            include_str!("fixtures/evaluator_source_4469ac9e0962f9f9.orna"),
             &environment,
             Limits {
                 max_steps: 6,
@@ -2872,7 +3255,7 @@ fn std_collection_take_drop_and_zip_charge_steps_for_copied_results() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.zip_exact(left, equal_right)",
+            include_str!("fixtures/evaluator_source_4469ac9e0962f9f9.orna"),
             &environment,
             Limits {
                 max_steps: 3,
@@ -2883,7 +3266,7 @@ fn std_collection_take_drop_and_zip_charge_steps_for_copied_results() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.zip_exact(left, right)",
+            include_str!("fixtures/evaluator_source_810fb4741568d06b.orna"),
             &environment,
             Limits::default(),
         )),
@@ -2894,14 +3277,32 @@ fn std_collection_take_drop_and_zip_charge_steps_for_copied_results() {
 #[test]
 fn std_collection_first_returns_only_the_head_of_a_finite_list() {
     for (expression, expected) in [
-        ("first([0, 1, 2])", Value::int(0.into())),
-        ("std.collection.first([1, 2, 3])", Value::int(1.into())),
-        ("std.collection.first([])", Value::new(Raw::Null).unwrap()),
-        ("[3, 4, 5] | first()", Value::int(3.into())),
-        ("[4, 5, 6] | std.collection.first()", Value::int(4.into())),
-        ("first(rows: [7, 8, 9])", Value::int(7.into())),
         (
-            "std.collection.first(rows: [8, 9, 10])",
+            include_str!("fixtures/evaluator_source_17712d6ff995e8f8.orna"),
+            Value::int(0.into()),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_07a8406e20b1d251.orna"),
+            Value::int(1.into()),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_2d2b18fe280307a5.orna"),
+            Value::new(Raw::Null).unwrap(),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_740be6f753e31180.orna"),
+            Value::int(3.into()),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_8ec13e149b873c82.orna"),
+            Value::int(4.into()),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_c7d672edd6d3968a.orna"),
+            Value::int(7.into()),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_fc1ead4f7d1e57c2.orna"),
             Value::int(8.into()),
         ),
     ] {
@@ -2913,8 +3314,8 @@ fn std_collection_first_returns_only_the_head_of_a_finite_list() {
     }
     assert_eq!(
         call_module(
-            "fn pick(rows: [Int]) = first(rows);",
-            "pick([10, 11, 12])",
+            include_str!("fixtures/evaluator_source_0a92efd950865e70.orna"),
+            include_str!("fixtures/evaluator_source_f0cd89f40dca9771.orna"),
             Limits::default(),
         )
         .unwrap(),
@@ -2925,17 +3326,26 @@ fn std_collection_first_returns_only_the_head_of_a_finite_list() {
 #[test]
 fn std_collection_first_is_callback_free_and_bounded() {
     for (expression, expected) in [
-        ("std.collection.first(1)", "ORNA-EVAL-TYPE"),
         (
-            "std.collection.first([1], value => value / 0)",
+            include_str!("fixtures/evaluator_source_d06f72238e332b7f.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_ef740ac1161a03c9.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
         (
-            "std.collection.first(rows: [1], callback: value => value)",
+            include_str!("fixtures/evaluator_source_9008cedb3febd226.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
-        ("std.collection.first(values: [1])", "ORNA-EVAL-UNSUPPORTED"),
-        ("std.collection.first()", "ORNA-EVAL-UNSUPPORTED"),
+        (
+            include_str!("fixtures/evaluator_source_8149266b97333702.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_38c3021f57aaad23.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -2949,7 +3359,7 @@ fn std_collection_first_is_callback_free_and_bounded() {
     }
     assert_eq!(
         evaluate_expression(
-            "std.collection.first([13])",
+            include_str!("fixtures/evaluator_source_3cf318fba35aff23.orna"),
             &Environment::new(),
             Limits {
                 max_collection_items: 1,
@@ -2961,7 +3371,7 @@ fn std_collection_first_is_callback_free_and_bounded() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.first([13])",
+            include_str!("fixtures/evaluator_source_3cf318fba35aff23.orna"),
             &Environment::new(),
             Limits {
                 max_steps: 1,
@@ -2975,12 +3385,12 @@ fn std_collection_first_is_callback_free_and_bounded() {
 fn std_collection_last_returns_option_for_direct_pipeline_named_and_function_calls() {
     let expected = Value::option(Some(Value::int(3.into()))).expect("option is canonical");
     for expression in [
-        "last([0, 1, 2, 3])",
-        "std.collection.last([0, 1, 2, 3])",
-        "[0, 1, 2, 3] | last()",
-        "[0, 1, 2, 3] | std.collection.last()",
-        "last(rows: [0, 1, 2, 3])",
-        "std.collection.last(rows: [0, 1, 2, 3])",
+        include_str!("fixtures/evaluator_source_e6f17b2f65609800.orna"),
+        include_str!("fixtures/evaluator_source_00cb7a5c01611a59.orna"),
+        include_str!("fixtures/evaluator_source_a15ba8d41db1927e.orna"),
+        include_str!("fixtures/evaluator_source_ab2b2051b9830d02.orna"),
+        include_str!("fixtures/evaluator_source_9d486a2736455d8e.orna"),
+        include_str!("fixtures/evaluator_source_91b81d10da018815.orna"),
     ] {
         assert_eq!(
             evaluate_expression(expression, &Environment::new(), Limits::default()).unwrap(),
@@ -2990,8 +3400,8 @@ fn std_collection_last_returns_option_for_direct_pipeline_named_and_function_cal
     }
     assert_eq!(
         call_module(
-            "fn pick(rows: [Int]) = last(rows);",
-            "pick([0, 1, 2, 3])",
+            include_str!("fixtures/evaluator_source_58ce67545aaa8127.orna"),
+            include_str!("fixtures/evaluator_source_14002e9b0dc65fff.orna"),
             Limits::default(),
         )
         .unwrap(),
@@ -3003,12 +3413,12 @@ fn std_collection_last_returns_option_for_direct_pipeline_named_and_function_cal
 fn std_collection_last_returns_option_none_for_empty_finite_inputs() {
     let expected = Value::option(None).expect("option is canonical");
     for expression in [
-        "last([])",
-        "std.collection.last([])",
-        "[] | last()",
-        "[] | std.collection.last()",
-        "last(rows: [])",
-        "std.collection.last(rows: [])",
+        include_str!("fixtures/evaluator_source_21ffa7509a45f612.orna"),
+        include_str!("fixtures/evaluator_source_7d53e9a0c8b2c849.orna"),
+        include_str!("fixtures/evaluator_source_ab0ba67183c0f3c0.orna"),
+        include_str!("fixtures/evaluator_source_06eb587796948df1.orna"),
+        include_str!("fixtures/evaluator_source_79af027b63586629.orna"),
+        include_str!("fixtures/evaluator_source_4cf7a0e46e0a0515.orna"),
     ] {
         assert_eq!(
             evaluate_expression(expression, &Environment::new(), Limits::default()).unwrap(),
@@ -3021,17 +3431,26 @@ fn std_collection_last_returns_option_none_for_empty_finite_inputs() {
 #[test]
 fn std_collection_last_is_callback_free_and_respects_collection_bounds() {
     for (expression, expected) in [
-        ("std.collection.last(1)", "ORNA-EVAL-TYPE"),
         (
-            "std.collection.last([1], value => value / 0)",
+            include_str!("fixtures/evaluator_source_8f9ff585c3397bd3.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_621d44d09cd5af25.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
         (
-            "std.collection.last(rows: [1], callback: value => value)",
+            include_str!("fixtures/evaluator_source_d78ee9d2ec4a46f1.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
-        ("std.collection.last(values: [1])", "ORNA-EVAL-UNSUPPORTED"),
-        ("std.collection.last()", "ORNA-EVAL-UNSUPPORTED"),
+        (
+            include_str!("fixtures/evaluator_source_895445bd33a0cfd0.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_39deb2b100b1fa93.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -3045,7 +3464,7 @@ fn std_collection_last_is_callback_free_and_respects_collection_bounds() {
     }
     assert_eq!(
         evaluate_expression(
-            "std.collection.last([13])",
+            include_str!("fixtures/evaluator_source_d615b7dc3024e98e.orna"),
             &Environment::new(),
             Limits {
                 max_collection_items: 1,
@@ -3057,7 +3476,7 @@ fn std_collection_last_is_callback_free_and_respects_collection_bounds() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.last([13, 14])",
+            include_str!("fixtures/evaluator_source_020450168a94c294.orna"),
             &Environment::new(),
             Limits {
                 max_collection_items: 1,
@@ -3072,8 +3491,8 @@ fn std_collection_last_is_callback_free_and_respects_collection_bounds() {
 fn root_last_dispatch_respects_local_function_and_relation_shadowing() {
     assert_eq!(
         call_module(
-            "fn last(value: Int) = value + 100; fn run() = last(1);",
-            "run()",
+            include_str!("fixtures/evaluator_source_5787c6fc19e07659.orna"),
+            include_str!("fixtures/evaluator_source_02fcae88bd120f59.orna"),
             Limits::default(),
         )
         .unwrap(),
@@ -3081,7 +3500,7 @@ fn root_last_dispatch_respects_local_function_and_relation_shadowing() {
     );
     assert_eq!(
         evaluate_expression(
-            "if true { let last = value => value + 100; last(1) } else { 0 }",
+            include_str!("fixtures/evaluator_source_d6625d5301b77178.orna"),
             &Environment::new(),
             Limits::default(),
         )
@@ -3090,7 +3509,7 @@ fn root_last_dispatch_respects_local_function_and_relation_shadowing() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "Note.last()",
+            include_str!("fixtures/evaluator_source_fb050fdefa193785.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -3098,19 +3517,18 @@ fn root_last_dispatch_respects_local_function_and_relation_shadowing() {
     );
 }
 
-
 #[test]
 fn std_collection_sum_accepts_direct_named_pipeline_and_function_calls() {
     let expected = Value::int(6.into());
     for expression in [
-        "sum([3, 1, 2])",
-        "std.collection.sum([3, 1, 2])",
-        "sum(rows: [3, 1, 2])",
-        "std.collection.sum(rows: [3, 1, 2])",
-        "[3, 1, 2] | sum",
-        "[3, 1, 2] | sum()",
-        "[3, 1, 2] | std.collection.sum",
-        "[3, 1, 2] | std.collection.sum()",
+        include_str!("fixtures/evaluator_source_480d2447907674da.orna"),
+        include_str!("fixtures/evaluator_source_2b3be3a59910290c.orna"),
+        include_str!("fixtures/evaluator_source_ee34ba9ea91794f2.orna"),
+        include_str!("fixtures/evaluator_source_69ee8cf60004a033.orna"),
+        include_str!("fixtures/evaluator_source_c83df2542a8438e4.orna"),
+        include_str!("fixtures/evaluator_source_8be0606efba1643e.orna"),
+        include_str!("fixtures/evaluator_source_e453f0ce16457161.orna"),
+        include_str!("fixtures/evaluator_source_01669bdc72a7a7ff.orna"),
     ] {
         assert_eq!(
             evaluate_expression(expression, &Environment::new(), Limits::default()).unwrap(),
@@ -3120,8 +3538,8 @@ fn std_collection_sum_accepts_direct_named_pipeline_and_function_calls() {
     }
     assert_eq!(
         call_module(
-            "fn total(rows: [Int]) = sum(rows);",
-            "total([3, 1, 2])",
+            include_str!("fixtures/evaluator_source_d7df2acd9740a695.orna"),
+            include_str!("fixtures/evaluator_source_762fdc7d9f416fbb.orna"),
             Limits::default(),
         )
         .unwrap(),
@@ -3131,9 +3549,16 @@ fn std_collection_sum_accepts_direct_named_pipeline_and_function_calls() {
 
 #[test]
 fn std_collection_sum_accumulates_exactly_in_order_and_returns_integer_zero() {
-    assert_eq!(evaluate("sum([])"), Value::int(0.into()),);
     assert_eq!(
-        evaluate("sum([9007199254740993, 1])"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_fa17ca6e5f2d47be.orna"
+        )),
+        Value::int(0.into()),
+    );
+    assert_eq!(
+        evaluate(include_str!(
+            "fixtures/evaluator_source_10e79c406edbe43d.orna"
+        )),
         Value::int(9007199254740994_u64.into()),
     );
 
@@ -3143,7 +3568,7 @@ fn std_collection_sum_accumulates_exactly_in_order_and_returns_integer_zero() {
     };
     assert_eq!(
         code(evaluate_expression(
-            "sum([999, 1, -99, -99, -99, -99, -99, -99, -99, -99, -99, -10])",
+            include_str!("fixtures/evaluator_source_2a99d49049a80b2d.orna"),
             &Environment::new(),
             limited,
         )),
@@ -3151,7 +3576,7 @@ fn std_collection_sum_accumulates_exactly_in_order_and_returns_integer_zero() {
     );
     assert_eq!(
         evaluate_expression(
-            "sum([999, -99, 1, -99, -99, -99, -99, -99, -99, -99, -99, -99, -10])",
+            include_str!("fixtures/evaluator_source_d53f00bd8ae1668b.orna"),
             &Environment::new(),
             limited,
         )
@@ -3165,11 +3590,7 @@ fn std_collection_sum_debits_one_step_per_scanned_typed_value() {
     let cases = vec![
         (
             "Int",
-            Value::new(Raw::Array(vec![
-                Raw::Int(3.into()),
-                Raw::Int(1.into()),
-            ]))
-            .unwrap(),
+            Value::new(Raw::Array(vec![Raw::Int(3.into()), Raw::Int(1.into())])).unwrap(),
             Value::int(4.into()),
         ),
         (
@@ -3205,13 +3626,18 @@ fn std_collection_sum_debits_one_step_per_scanned_typed_value() {
     for (kind, rows, expected) in cases {
         let environment = Environment::from([("rows".into(), rows)]);
         assert_eq!(
-            evaluate_expression("sum(rows)", &environment, Limits::default()).unwrap(),
+            evaluate_expression(
+                include_str!("fixtures/evaluator_source_75f9858c5500f123.orna"),
+                &environment,
+                Limits::default()
+            )
+            .unwrap(),
             expected,
             "{kind} sum should preserve its exact typed result",
         );
         assert_eq!(
             code(evaluate_expression(
-                "sum(rows)",
+                include_str!("fixtures/evaluator_source_75f9858c5500f123.orna"),
                 &environment,
                 Limits {
                     // Call setup and the rows binding consume two steps;
@@ -3225,7 +3651,7 @@ fn std_collection_sum_debits_one_step_per_scanned_typed_value() {
         );
         assert_eq!(
             evaluate_expression(
-                "sum(rows)",
+                include_str!("fixtures/evaluator_source_75f9858c5500f123.orna"),
                 &environment,
                 Limits {
                     // Exactly enough for setup plus one debit per scanned value.
@@ -3254,15 +3680,30 @@ fn std_collection_money_addition_and_sum_preserve_exact_decimal_amounts() {
     let expected = money_value(3.into(), (-1).into(), currency);
 
     assert_eq!(
-        evaluate_expression("left + right", &environment, Limits::default()).unwrap(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_ec38218c8ac89b84.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
         expected
     );
     assert_eq!(
-        evaluate_expression("left - right", &environment, Limits::default()).unwrap(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_26a0ab53a98abac7.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
         money_value((-1).into(), (-1).into(), currency)
     );
     assert_eq!(
-        evaluate_expression("sum(rows)", &environment, Limits::default()).unwrap(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_75f9858c5500f123.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
         expected
     );
 }
@@ -3283,15 +3724,30 @@ fn std_collection_money_aggregates_preserve_currency_and_exact_extrema() {
         Value::option(Some(money_value(2003.into(), (-3).into(), currency))).unwrap();
 
     assert_eq!(
-        evaluate_expression("sum(rows)", &environment, Limits::default()).unwrap(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_75f9858c5500f123.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
         expected_sum
     );
     assert_eq!(
-        evaluate_expression("min(rows)", &environment, Limits::default()).unwrap(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_767f07d17295b186.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
         expected_min
     );
     assert_eq!(
-        evaluate_expression("max(rows)", &environment, Limits::default()).unwrap(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_522fd6a43762eaba.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
         expected_max
     );
 }
@@ -3302,8 +3758,12 @@ fn canonical_money_round_trip_requires_nested_decimal_and_currency_witness() {
     let raw = money_raw(1234.into(), (-2).into(), currency);
     let environment = Environment::from([("money".into(), Value::new(raw.clone()).unwrap())]);
 
-    let result =
-        evaluate_expression("money", &environment, Limits::default()).expect("Money should decode");
+    let result = evaluate_expression(
+        include_str!("fixtures/evaluator_source_8d2ac8b58ead9744.orna"),
+        &environment,
+        Limits::default(),
+    )
+    .expect("Money should decode");
     assert_eq!(result.raw(), &raw);
     assert!(matches!(
         result.raw(),
@@ -3328,7 +3788,10 @@ fn money_aggregates_fail_closed_for_cross_currency_float_mixing_and_limits() {
     let two = money_raw(2.into(), 0.into(), currency);
     let foreign = money_raw(3.into(), 0.into(), other_currency);
     let environment = Environment::from([
-        ("cross_currency".into(), money_rows(vec![one.clone(), foreign])),
+        (
+            "cross_currency".into(),
+            money_rows(vec![one.clone(), foreign]),
+        ),
         (
             "float_mixed".into(),
             money_rows(vec![two, Raw::Float(1.5f64.to_bits())]),
@@ -3336,12 +3799,12 @@ fn money_aggregates_fail_closed_for_cross_currency_float_mixing_and_limits() {
     ]);
 
     for expression in [
-        "sum(cross_currency)",
-        "min(cross_currency)",
-        "max(cross_currency)",
-        "sum(float_mixed)",
-        "min(float_mixed)",
-        "max(float_mixed)",
+        include_str!("fixtures/evaluator_source_a94e83638f51b549.orna"),
+        include_str!("fixtures/evaluator_source_257e8a99d279a338.orna"),
+        include_str!("fixtures/evaluator_source_f7d98b135c71c255.orna"),
+        include_str!("fixtures/evaluator_source_7fd851d4bbf47a55.orna"),
+        include_str!("fixtures/evaluator_source_ccf8478145719732.orna"),
+        include_str!("fixtures/evaluator_source_28cde0e40ef4a061.orna"),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -3364,7 +3827,7 @@ fn money_aggregates_fail_closed_for_cross_currency_float_mixing_and_limits() {
     )]);
     assert_eq!(
         code(evaluate_expression(
-            "sum(rows)",
+            include_str!("fixtures/evaluator_source_75f9858c5500f123.orna"),
             &limited,
             Limits {
                 max_collection_items: 2,
@@ -3379,7 +3842,7 @@ fn money_aggregates_fail_closed_for_cross_currency_float_mixing_and_limits() {
         Environment::from([("money".into(), money_value(oversized, 0.into(), currency))]);
     assert_eq!(
         code(evaluate_expression(
-            "money",
+            include_str!("fixtures/evaluator_source_8d2ac8b58ead9744.orna"),
             &environment,
             Limits {
                 max_integer_digits: 3,
@@ -3396,10 +3859,7 @@ fn malformed_or_noncanonical_money_is_rejected_before_evaluation() {
     let malformed = [
         Raw::Tag(
             60007,
-            Box::new(Raw::Array(vec![
-                Raw::Int(1.into()),
-                currency.clone(),
-            ])),
+            Box::new(Raw::Array(vec![Raw::Int(1.into()), currency.clone()])),
         ),
         Raw::Tag(
             60007,
@@ -3435,15 +3895,15 @@ fn std_collection_decimal_sum_preserves_exact_canonical_arithmetic() {
     let large_coefficient = BigInt::parse_bytes(b"12345678901234567891", 10).unwrap();
     for (expression, expected) in [
         (
-            "sum([1.20, 2.003])",
+            include_str!("fixtures/evaluator_source_3ed610a00dc59b58.orna"),
             Value::decimal(3203.into(), (-3).into()).unwrap(),
         ),
         (
-            "sum([12345678901234567890.1, 0.9])",
+            include_str!("fixtures/evaluator_source_6e1d42511211a848.orna"),
             Value::decimal(large_coefficient, 0.into()).unwrap(),
         ),
         (
-            "sum([999.999, -999.99, 0.001])",
+            include_str!("fixtures/evaluator_source_6fb4dd14703389eb.orna"),
             Value::decimal(1.into(), (-2).into()).unwrap(),
         ),
     ] {
@@ -3455,7 +3915,7 @@ fn std_collection_decimal_sum_preserves_exact_canonical_arithmetic() {
 fn std_collection_decimal_sum_rejects_mixed_numeric_kinds() {
     assert_eq!(
         code(evaluate_expression(
-            "sum([1.0, 2])",
+            include_str!("fixtures/evaluator_source_58184e07766453ca.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -3465,7 +3925,10 @@ fn std_collection_decimal_sum_rejects_mixed_numeric_kinds() {
 
 #[test]
 fn std_collection_sum_rejects_unsupported_numeric_kinds_and_shapes() {
-    for expression in ["sum([1, true])", "sum(values: [1])"] {
+    for expression in [
+        include_str!("fixtures/evaluator_source_e1ba4fa7c3937d2c.orna"),
+        include_str!("fixtures/evaluator_source_a92c58c6d0b15cfc.orna"),
+    ] {
         assert_eq!(
             code(evaluate_expression(
                 expression,
@@ -3478,7 +3941,7 @@ fn std_collection_sum_rejects_unsupported_numeric_kinds_and_shapes() {
     }
     assert_eq!(
         code(evaluate_expression(
-            "sum(1)",
+            include_str!("fixtures/evaluator_source_fb832f2380a2ebed.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -3486,7 +3949,7 @@ fn std_collection_sum_rejects_unsupported_numeric_kinds_and_shapes() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "sum()",
+            include_str!("fixtures/evaluator_source_ed2b5b56e0258424.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -3498,11 +3961,13 @@ fn std_collection_sum_rejects_unsupported_numeric_kinds_and_shapes() {
         60006,
         Box::new(Raw::Array(vec![Raw::Int(1.into()), currency.clone()])),
     );
-    let environment =
-        Environment::from([("values".into(), Value::new(Raw::Array(vec![affine])).unwrap())]);
+    let environment = Environment::from([(
+        "values".into(),
+        Value::new(Raw::Array(vec![affine])).unwrap(),
+    )]);
     assert_eq!(
         code(evaluate_expression(
-            "sum(values)",
+            include_str!("fixtures/evaluator_source_697cdad8ddab1535.orna"),
             &environment,
             Limits::default(),
         )),
@@ -3514,22 +3979,22 @@ fn std_collection_sum_rejects_unsupported_numeric_kinds_and_shapes() {
 fn std_collection_float_sum_accepts_direct_named_pipeline_and_function_calls() {
     let expected = Value::float_bits(3.75f64.to_bits());
     for expression in [
-        "sum([1.5f, 2.25f])",
-        "std.collection.sum([1.5f, 2.25f])",
-        "sum(rows: [1.5f, 2.25f])",
-        "std.collection.sum(rows: [1.5f, 2.25f])",
-        "[1.5f, 2.25f] | sum",
-        "[1.5f, 2.25f] | sum()",
-        "[1.5f, 2.25f] | std.collection.sum",
-        "[1.5f, 2.25f] | std.collection.sum()",
+        include_str!("fixtures/evaluator_source_8b9ebe3425360f46.orna"),
+        include_str!("fixtures/evaluator_source_dfe063db5cfab4c2.orna"),
+        include_str!("fixtures/evaluator_source_c8068c545b77d421.orna"),
+        include_str!("fixtures/evaluator_source_3653934c46e340a0.orna"),
+        include_str!("fixtures/evaluator_source_b4cb8fce95032665.orna"),
+        include_str!("fixtures/evaluator_source_c465e99508638f6f.orna"),
+        include_str!("fixtures/evaluator_source_4d468d08196d9d31.orna"),
+        include_str!("fixtures/evaluator_source_5fc6b32fd4463b72.orna"),
     ] {
         assert_eq!(evaluate(expression), expected, "{expression}");
     }
 
     assert_eq!(
         call_module(
-            "fn total(rows: [Float]) = sum(rows);",
-            "total([1.5f, 2.25f])",
+            include_str!("fixtures/evaluator_source_27bdf6a99114b900.orna"),
+            include_str!("fixtures/evaluator_source_e8ebb1a987a2adc6.orna"),
             Limits::default(),
         )
         .unwrap(),
@@ -3546,7 +4011,12 @@ fn std_collection_float_sum_folds_left_to_right_and_propagates_canonical_nan() {
     ]);
     let environment = Environment::from([("rows".into(), rows)]);
     assert_eq!(
-        evaluate_expression("sum(rows)", &environment, Limits::default()).unwrap(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_75f9858c5500f123.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
         Value::float_bits(1.0f64.to_bits())
     );
 
@@ -3555,14 +4025,14 @@ fn std_collection_float_sum_folds_left_to_right_and_propagates_canonical_nan() {
         float_rows(&[1.0f64.to_bits(), CANONICAL_NAN_BITS, 2.0f64.to_bits()]),
     )]);
     for expression in [
-        "sum(rows)",
-        "std.collection.sum(rows)",
-        "sum(rows: rows)",
-        "std.collection.sum(rows: rows)",
-        "rows | sum",
-        "rows | sum()",
-        "rows | std.collection.sum",
-        "rows | std.collection.sum()",
+        include_str!("fixtures/evaluator_source_75f9858c5500f123.orna"),
+        include_str!("fixtures/evaluator_source_d237f2138f4268bd.orna"),
+        include_str!("fixtures/evaluator_source_f2fde970cadbfb14.orna"),
+        include_str!("fixtures/evaluator_source_4351438b311f244a.orna"),
+        include_str!("fixtures/evaluator_source_66f2c8cf631bd8c7.orna"),
+        include_str!("fixtures/evaluator_source_9cb965cefb403adc.orna"),
+        include_str!("fixtures/evaluator_source_1183d245d3868a6f.orna"),
+        include_str!("fixtures/evaluator_source_f68e9c204598105c.orna"),
     ] {
         assert_eq!(
             evaluate_expression(expression, &nan_environment, Limits::default()).unwrap(),
@@ -3579,27 +4049,28 @@ fn std_collection_float_min_and_max_use_total_order_and_ordinary_equality_separa
     let expected_min = Value::option(Some(negative_zero.clone())).unwrap();
     let expected_max = Value::option(Some(positive_zero.clone())).unwrap();
     for (name, expected) in [("min", expected_min), ("max", expected_max)] {
-        for expression in [
-            format!("{name}([-0.0f, 0.0f])"),
-            format!("std.collection.{name}([-0.0f, 0.0f])"),
-            format!("{name}(rows: [-0.0f, 0.0f])"),
-            format!("std.collection.{name}(rows: [-0.0f, 0.0f])"),
-            format!("[-0.0f, 0.0f] | {name}"),
-            format!("[-0.0f, 0.0f] | {name}()"),
-            format!("[-0.0f, 0.0f] | std.collection.{name}"),
-            format!("[-0.0f, 0.0f] | std.collection.{name}()"),
-        ] {
+        for expression in min_max_source_fixtures(MinMaxSourceFixtureProfile::FloatZero, name) {
             assert_eq!(evaluate(&expression), expected, "{expression}");
         }
     }
 
     let source = include_str!("fixtures/collection_min_max_float.orna");
     assert_eq!(
-        call_module(source, "lowest([-3.0f, 2.0f])", Limits::default()).unwrap(),
+        call_module(
+            source,
+            include_str!("fixtures/evaluator_source_ae3b31615534e05b.orna"),
+            Limits::default()
+        )
+        .unwrap(),
         Value::option(Some(Value::float_bits((-3.0f64).to_bits()))).unwrap()
     );
     assert_eq!(
-        call_module(source, "highest([-3.0f, 2.0f])", Limits::default()).unwrap(),
+        call_module(
+            source,
+            include_str!("fixtures/evaluator_source_acfa4eb4df6d8a37.orna"),
+            Limits::default()
+        )
+        .unwrap(),
         Value::option(Some(Value::float_bits(2.0f64.to_bits()))).unwrap()
     );
 
@@ -3610,7 +4081,7 @@ fn std_collection_float_min_and_max_use_total_order_and_ordinary_equality_separa
     ]);
     assert_eq!(
         evaluate_expression(
-            "negative_zero == positive_zero",
+            include_str!("fixtures/evaluator_source_5e0b338a7be7031e.orna"),
             &environment,
             Limits::default(),
         )
@@ -3618,7 +4089,12 @@ fn std_collection_float_min_and_max_use_total_order_and_ordinary_equality_separa
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
-        evaluate_expression("nan == nan", &environment, Limits::default()).unwrap(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_0d5ca0adcf527f22.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
         Value::new(Raw::Bool(false)).unwrap()
     );
 }
@@ -3631,16 +4107,7 @@ fn std_collection_float_min_and_max_propagate_nan_and_return_empty_identity() {
     )]);
     let expected = Value::option(Some(Value::float_bits(CANONICAL_NAN_BITS))).unwrap();
     for (name, expected) in [("min", expected.clone()), ("max", expected)] {
-        for expression in [
-            format!("{name}(rows)"),
-            format!("std.collection.{name}(rows)"),
-            format!("{name}(rows: rows)"),
-            format!("std.collection.{name}(rows: rows)"),
-            format!("rows | {name}"),
-            format!("rows | {name}()"),
-            format!("rows | std.collection.{name}"),
-            format!("rows | std.collection.{name}()"),
-        ] {
+        for expression in min_max_source_fixtures(MinMaxSourceFixtureProfile::Rows, name) {
             assert_eq!(
                 evaluate_expression(&expression, &environment, Limits::default()).unwrap(),
                 expected,
@@ -3650,12 +4117,12 @@ fn std_collection_float_min_and_max_propagate_nan_and_return_empty_identity() {
     }
 
     for expression in [
-        "min([])",
-        "max([])",
-        "std.collection.min(rows: [])",
-        "std.collection.max(rows: [])",
-        "[] | min()",
-        "[] | max()",
+        include_str!("fixtures/evaluator_source_e4fbc5a7f8bcdff2.orna"),
+        include_str!("fixtures/evaluator_source_8adb66ef790ded9a.orna"),
+        include_str!("fixtures/evaluator_source_00f5a9ee37c3ba7b.orna"),
+        include_str!("fixtures/evaluator_source_360365f29248d539.orna"),
+        include_str!("fixtures/evaluator_source_1c0996fbd85dc748.orna"),
+        include_str!("fixtures/evaluator_source_8a31e61da5d3c73b.orna"),
     ] {
         assert_eq!(
             evaluate(expression),
@@ -3668,12 +4135,12 @@ fn std_collection_float_min_and_max_propagate_nan_and_return_empty_identity() {
 #[test]
 fn std_collection_float_aggregates_reject_mixed_inputs_callbacks_and_limits() {
     for expression in [
-        "sum([1.0f, 2])",
-        "sum([1, 2.0f])",
-        "min([1.0f, 2])",
-        "std.collection.max([1, 2.0f])",
-        "sum([1.0f], value => value)",
-        "std.collection.min(rows: [1.0f], callback: value => value)",
+        include_str!("fixtures/evaluator_source_cdab6ecfce425b19.orna"),
+        include_str!("fixtures/evaluator_source_fe5013414b733c91.orna"),
+        include_str!("fixtures/evaluator_source_672569f1e425be8a.orna"),
+        include_str!("fixtures/evaluator_source_4636ea68fc901968.orna"),
+        include_str!("fixtures/evaluator_source_21e98e42a38aa4ca.orna"),
+        include_str!("fixtures/evaluator_source_f9bcdc1230a9faa4.orna"),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -3687,7 +4154,7 @@ fn std_collection_float_aggregates_reject_mixed_inputs_callbacks_and_limits() {
     }
     assert_eq!(
         code(evaluate_expression(
-            "sum([1.0f, 1.0f / 0.0f])",
+            include_str!("fixtures/evaluator_source_4513747d05260e45.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -3696,14 +4163,14 @@ fn std_collection_float_aggregates_reject_mixed_inputs_callbacks_and_limits() {
 
     for (expression, limits) in [
         (
-            "sum([1.0f, 2.0f])",
+            include_str!("fixtures/evaluator_source_db6064c68b0cfbd9.orna"),
             Limits {
                 max_collection_items: 1,
                 ..Limits::default()
             },
         ),
         (
-            "std.collection.max([1.0f])",
+            include_str!("fixtures/evaluator_source_582a71e211744730.orna"),
             Limits {
                 max_steps: 1,
                 ..Limits::default()
@@ -3720,20 +4187,16 @@ fn std_collection_float_aggregates_reject_mixed_inputs_callbacks_and_limits() {
 
 #[test]
 fn std_collection_date_min_and_max_accept_all_call_forms_and_preserve_order() {
-    let values = "[2024-02-29, 2024-01-01, 2024-12-31]";
-    let expected_min = Value::option(Some(evaluate("2024-01-01"))).unwrap();
-    let expected_max = Value::option(Some(evaluate("2024-12-31"))).unwrap();
+    let expected_min = Value::option(Some(evaluate(include_str!(
+        "fixtures/evaluator_source_41b62fb4518505d3.orna"
+    ))))
+    .unwrap();
+    let expected_max = Value::option(Some(evaluate(include_str!(
+        "fixtures/evaluator_source_dd82365333c66bc5.orna"
+    ))))
+    .unwrap();
     for (name, expected) in [("min", expected_min), ("max", expected_max)] {
-        for expression in [
-            format!("{name}({values})"),
-            format!("std.collection.{name}({values})"),
-            format!("{name}(rows: {values})"),
-            format!("std.collection.{name}(rows: {values})"),
-            format!("{values} | {name}"),
-            format!("{values} | {name}()"),
-            format!("{values} | std.collection.{name}"),
-            format!("{values} | std.collection.{name}()"),
-        ] {
+        for expression in min_max_source_fixtures(MinMaxSourceFixtureProfile::Dates, name) {
             assert_eq!(evaluate(&expression), expected, "{expression}");
         }
     }
@@ -3742,75 +4205,81 @@ fn std_collection_date_min_and_max_accept_all_call_forms_and_preserve_order() {
     assert_eq!(
         call_module(
             source,
-            "earliest([2024-03-01, 2024-02-01])",
+            include_str!("fixtures/evaluator_source_de5babb1333d7094.orna"),
             Limits::default()
         )
         .unwrap(),
-        Value::option(Some(evaluate("2024-02-01"))).unwrap()
+        Value::option(Some(evaluate(include_str!(
+            "fixtures/evaluator_source_cc9ba4ec6973cfea.orna"
+        ))))
+        .unwrap()
     );
     assert_eq!(
         call_module(
             source,
-            "latest([2024-03-01, 2024-02-01])",
+            include_str!("fixtures/evaluator_source_eda774d78648c4c1.orna"),
             Limits::default()
         )
         .unwrap(),
-        Value::option(Some(evaluate("2024-03-01"))).unwrap()
+        Value::option(Some(evaluate(include_str!(
+            "fixtures/evaluator_source_498af307718168a4.orna"
+        ))))
+        .unwrap()
     );
 }
 
 #[test]
 fn std_collection_instant_min_and_max_use_normalized_utc_order() {
-    let values =
-        "[2024-02-29T05:30:00+05:30, 2024-02-29T00:00:00Z, 2024-02-28T23:59:59.999999999Z]";
-    let expected_min = Value::option(Some(evaluate("2024-02-28T23:59:59.999999999Z"))).unwrap();
-    let expected_max = Value::option(Some(evaluate("2024-02-29T05:30:00+05:30"))).unwrap();
+    let expected_min = Value::option(Some(evaluate(include_str!(
+        "fixtures/evaluator_source_48b712c92518a91e.orna"
+    ))))
+    .unwrap();
+    let expected_max = Value::option(Some(evaluate(include_str!(
+        "fixtures/evaluator_source_f6bc804093ad8575.orna"
+    ))))
+    .unwrap();
     for (name, expected) in [("min", expected_min), ("max", expected_max)] {
-        for expression in [
-            format!("{name}({values})"),
-            format!("std.collection.{name}({values})"),
-            format!("{name}(rows: {values})"),
-            format!("std.collection.{name}(rows: {values})"),
-            format!("{values} | {name}"),
-            format!("{values} | {name}()"),
-            format!("{values} | std.collection.{name}"),
-            format!("{values} | std.collection.{name}()"),
-        ] {
+        for expression in min_max_source_fixtures(MinMaxSourceFixtureProfile::Instants, name) {
             assert_eq!(evaluate(&expression), expected, "{expression}");
         }
     }
 
-    let source =
-        include_str!("fixtures/collection_min_max_instant.orna");
+    let source = include_str!("fixtures/collection_min_max_instant.orna");
     assert_eq!(
         call_module(
             source,
-            "earliest([1970-01-01T00:00:01Z, 1970-01-01T00:00:00Z])",
+            include_str!("fixtures/evaluator_source_07c8ffa3b40113f6.orna"),
             Limits::default(),
         )
         .unwrap(),
-        Value::option(Some(evaluate("1970-01-01T00:00:00Z"))).unwrap()
+        Value::option(Some(evaluate(include_str!(
+            "fixtures/evaluator_source_d239cae45de9eb86.orna"
+        ))))
+        .unwrap()
     );
     assert_eq!(
         call_module(
             source,
-            "latest([1970-01-01T00:00:00Z, 1970-01-01T01:00:00+01:00])",
+            include_str!("fixtures/evaluator_source_455f710e6ea42403.orna"),
             Limits::default(),
         )
         .unwrap(),
-        Value::option(Some(evaluate("1970-01-01T00:00:00Z"))).unwrap()
+        Value::option(Some(evaluate(include_str!(
+            "fixtures/evaluator_source_d239cae45de9eb86.orna"
+        ))))
+        .unwrap()
     );
 }
 
 #[test]
 fn std_collection_temporal_min_and_max_keep_empty_null_and_reject_mixed_types() {
     for expression in [
-        "min([])",
-        "max([])",
-        "std.collection.min(rows: [])",
-        "std.collection.max(rows: [])",
-        "[] | min()",
-        "[] | max()",
+        include_str!("fixtures/evaluator_source_e4fbc5a7f8bcdff2.orna"),
+        include_str!("fixtures/evaluator_source_8adb66ef790ded9a.orna"),
+        include_str!("fixtures/evaluator_source_00f5a9ee37c3ba7b.orna"),
+        include_str!("fixtures/evaluator_source_360365f29248d539.orna"),
+        include_str!("fixtures/evaluator_source_1c0996fbd85dc748.orna"),
+        include_str!("fixtures/evaluator_source_8a31e61da5d3c73b.orna"),
     ] {
         assert_eq!(
             evaluate(expression),
@@ -3820,11 +4289,11 @@ fn std_collection_temporal_min_and_max_keep_empty_null_and_reject_mixed_types() 
     }
 
     for expression in [
-        "min([2024-01-01, 1])",
-        "max([1, 2024-01-01])",
-        "std.collection.min([1970-01-01T00:00:00Z, 1])",
-        "std.collection.max([1, 1970-01-01T00:00:00Z])",
-        "min([2024-01-01, 1970-01-01T00:00:00Z])",
+        include_str!("fixtures/evaluator_source_9258e0be3437ee98.orna"),
+        include_str!("fixtures/evaluator_source_3931e25afab11f97.orna"),
+        include_str!("fixtures/evaluator_source_f161492124b657b2.orna"),
+        include_str!("fixtures/evaluator_source_9801f2909c9f459a.orna"),
+        include_str!("fixtures/evaluator_source_b1c5771e7b53d151.orna"),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -3840,33 +4309,32 @@ fn std_collection_temporal_min_and_max_keep_empty_null_and_reject_mixed_types() 
 
 #[test]
 fn std_collection_min_and_max_accept_integer_lists_in_all_call_forms() {
-    let values = "[9007199254740993, -9007199254740993, 7, -9007199254740993]";
     let expected_min = Value::option(Some(Value::int((-9007199254740993_i64).into()))).unwrap();
     let expected_max = Value::option(Some(Value::int(9007199254740993_i64.into()))).unwrap();
 
     for (name, expected) in [("min", expected_min), ("max", expected_max)] {
-        for expression in [
-            format!("{name}({values})"),
-            format!("std.collection.{name}({values})"),
-            format!("{name}(rows: {values})"),
-            format!("std.collection.{name}(rows: {values})"),
-            format!("{values} | {name}"),
-            format!("{values} | {name}()"),
-            format!("{values} | std.collection.{name}"),
-            format!("{values} | std.collection.{name}()"),
-        ] {
+        for expression in min_max_source_fixtures(MinMaxSourceFixtureProfile::Integers, name) {
             assert_eq!(evaluate(&expression), expected, "{expression}");
         }
     }
 
-    let source =
-        include_str!("fixtures/collection_min_max_int.orna");
+    let source = include_str!("fixtures/collection_min_max_int.orna");
     assert_eq!(
-        call_module(source, "lowest([3, 1, 2])", Limits::default()).unwrap(),
+        call_module(
+            source,
+            include_str!("fixtures/evaluator_source_4491b470e7f0b243.orna"),
+            Limits::default()
+        )
+        .unwrap(),
         Value::option(Some(Value::int(1.into()))).unwrap()
     );
     assert_eq!(
-        call_module(source, "highest([3, 1, 2])", Limits::default()).unwrap(),
+        call_module(
+            source,
+            include_str!("fixtures/evaluator_source_8005c4858ae7d4f2.orna"),
+            Limits::default()
+        )
+        .unwrap(),
         Value::option(Some(Value::int(3.into()))).unwrap()
     );
 }
@@ -3874,18 +4342,39 @@ fn std_collection_min_and_max_accept_integer_lists_in_all_call_forms() {
 #[test]
 fn std_collection_min_and_max_use_exact_integer_order_and_first_ties() {
     assert_eq!(
-        evaluate("min([5, 1, 1, 9])"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_189c89b09adbc00b.orna"
+        )),
         Value::option(Some(Value::int(1.into()))).unwrap()
     );
     assert_eq!(
-        evaluate("max([5, 9, 9, 1])"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_6488237a3e13f65c.orna"
+        )),
         Value::option(Some(Value::int(9.into()))).unwrap()
     );
-    assert_eq!(evaluate("min([])"), Value::new(Raw::Null).unwrap());
-    assert_eq!(evaluate("max([])"), Value::new(Raw::Null).unwrap());
-    assert_eq!(evaluate("[] | min()"), Value::new(Raw::Null).unwrap());
     assert_eq!(
-        evaluate("std.collection.max(rows: [])"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_e4fbc5a7f8bcdff2.orna"
+        )),
+        Value::new(Raw::Null).unwrap()
+    );
+    assert_eq!(
+        evaluate(include_str!(
+            "fixtures/evaluator_source_8adb66ef790ded9a.orna"
+        )),
+        Value::new(Raw::Null).unwrap()
+    );
+    assert_eq!(
+        evaluate(include_str!(
+            "fixtures/evaluator_source_1c0996fbd85dc748.orna"
+        )),
+        Value::new(Raw::Null).unwrap()
+    );
+    assert_eq!(
+        evaluate(include_str!(
+            "fixtures/evaluator_source_360365f29248d539.orna"
+        )),
         Value::new(Raw::Null).unwrap()
     );
 }
@@ -3894,27 +4383,45 @@ fn std_collection_min_and_max_use_exact_integer_order_and_first_ties() {
 fn std_collection_min_and_max_optional_results_match_some_null_and_coalesce() {
     for (expression, expected) in [
         (
-            "case min([3, 1, 2]) { Some(value): value, null: 0 }",
+            include_str!("fixtures/evaluator_source_3535dca0a571e57d.orna"),
             Value::int(1.into()),
         ),
         (
-            "case max([3, 1, 2]) { Some(value): value, null: 0 }",
+            include_str!("fixtures/evaluator_source_9eb41229f2527422.orna"),
             Value::int(3.into()),
         ),
         (
-            "case min([]) { Some(value): value, null: 10 }",
+            include_str!("fixtures/evaluator_source_e22a8c11b26adade.orna"),
             Value::int(10.into()),
         ),
         (
-            "case max([]) { Some(value): value, null: 10 }",
+            include_str!("fixtures/evaluator_source_5f4a2a14c43f665d.orna"),
             Value::int(10.into()),
         ),
-        ("min([3, 1, 2]) ?? 10", Value::int(1.into())),
-        ("max([3, 1, 2]) ?? 10", Value::int(3.into())),
-        ("min([]) ?? 10", Value::int(10.into())),
-        ("max([]) ?? 10", Value::int(10.into())),
-        ("min([3, 1, 2]) ?? (1 / 0)", Value::int(1.into())),
-        ("max([3]) ?? (1 / 0)", Value::int(3.into())),
+        (
+            include_str!("fixtures/evaluator_source_b36287c26c0e33f2.orna"),
+            Value::int(1.into()),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_4db0508633b2c0c3.orna"),
+            Value::int(3.into()),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_a32ffd2f48dbda78.orna"),
+            Value::int(10.into()),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_f64d961b687ebcfa.orna"),
+            Value::int(10.into()),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_b68868e1331b5b05.orna"),
+            Value::int(1.into()),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_3e2a232c1babf59d.orna"),
+            Value::int(3.into()),
+        ),
     ] {
         assert_eq!(evaluate(expression), expected, "{expression}");
     }
@@ -3923,26 +4430,43 @@ fn std_collection_min_and_max_optional_results_match_some_null_and_coalesce() {
 #[test]
 fn std_collection_min_and_max_fail_closed_for_unsupported_kinds_shapes_and_limits() {
     assert_eq!(
-        evaluate("min([1.0])"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_2dca5c2db4197987.orna"
+        )),
         Value::option(Some(Value::decimal(1.into(), 0.into()).unwrap())).unwrap()
     );
     assert_eq!(
-        evaluate("std.collection.max([1.0])"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_1d442aae3b2f35d3.orna"
+        )),
         Value::option(Some(Value::decimal(1.into(), 0.into()).unwrap())).unwrap()
     );
-    for expression in [
-        "std.collection.max([1, true])",
-        "min(1)",
-        "std.collection.max(1)",
-        "std.collection.max()",
-        "std.collection.min(values: [1])",
-        "min([1], value => value / 0)",
+    for (expression, expected) in [
+        (
+            include_str!("fixtures/evaluator_source_525c395e4f9e73ad.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_fe4ea82d41fb542a.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_a5009cbc7594b656.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_331bc5638c483c02.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_78bff71074810743.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_20e4478c67c97afe.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
     ] {
-        let expected = if matches!(expression, "min(1)" | "std.collection.max(1)") {
-            "ORNA-EVAL-TYPE"
-        } else {
-            "ORNA-EVAL-UNSUPPORTED"
-        };
         assert_eq!(
             code(evaluate_expression(
                 expression,
@@ -3964,7 +4488,7 @@ fn std_collection_min_and_max_fail_closed_for_unsupported_kinds_shapes_and_limit
     for operation in ["min", "max"] {
         assert_eq!(
             code(evaluate_expression(
-                &format!("{operation}(rows)"),
+                min_max_source_fixtures(MinMaxSourceFixtureProfile::Rows, operation)[0],
                 &environment,
                 Limits::default(),
             )),
@@ -3974,21 +4498,21 @@ fn std_collection_min_and_max_fail_closed_for_unsupported_kinds_shapes_and_limit
 
     for (expression, limits) in [
         (
-            "min([3, 2, 1])",
+            include_str!("fixtures/evaluator_source_ad86da454953469e.orna"),
             Limits {
                 max_collection_items: 2,
                 ..Limits::default()
             },
         ),
         (
-            "std.collection.max([1])",
+            include_str!("fixtures/evaluator_source_1a51744a13d58dcb.orna"),
             Limits {
                 max_steps: 1,
                 ..Limits::default()
             },
         ),
         (
-            "min([1000])",
+            include_str!("fixtures/evaluator_source_238c1b56550eb462.orna"),
             Limits {
                 max_integer_digits: 3,
                 ..Limits::default()
@@ -4029,7 +4553,10 @@ fn std_collection_min_and_max_debit_steps_for_each_scanned_value() {
                     .unwrap()
                     .raw()
                     .clone(),
-                Value::decimal(50.into(), (-2).into()).unwrap().raw().clone(),
+                Value::decimal(50.into(), (-2).into())
+                    .unwrap()
+                    .raw()
+                    .clone(),
             ]))
             .unwrap(),
             Value::option(Some(Value::decimal(50.into(), (-2).into()).unwrap())).unwrap(),
@@ -4043,17 +4570,31 @@ fn std_collection_min_and_max_debit_steps_for_each_scanned_value() {
         ),
         (
             "Date",
-            evaluate("[2024-02-29, 2024-01-01, 2024-12-31]"),
-            Value::option(Some(evaluate("2024-01-01"))).unwrap(),
-            Value::option(Some(evaluate("2024-12-31"))).unwrap(),
+            evaluate(include_str!(
+                "fixtures/evaluator_source_6eaf8336d3e43511.orna"
+            )),
+            Value::option(Some(evaluate(include_str!(
+                "fixtures/evaluator_source_41b62fb4518505d3.orna"
+            ))))
+            .unwrap(),
+            Value::option(Some(evaluate(include_str!(
+                "fixtures/evaluator_source_dd82365333c66bc5.orna"
+            ))))
+            .unwrap(),
         ),
         (
             "Instant",
-            evaluate(
-                "[2024-02-29T05:30:00+05:30, 2024-02-29T00:00:00Z, 2024-02-28T23:59:59.999999999Z]",
-            ),
-            Value::option(Some(evaluate("2024-02-28T23:59:59.999999999Z"))).unwrap(),
-            Value::option(Some(evaluate("2024-02-29T05:30:00+05:30"))).unwrap(),
+            evaluate(include_str!(
+                "fixtures/evaluator_source_1a048668ff3dec54.orna"
+            )),
+            Value::option(Some(evaluate(include_str!(
+                "fixtures/evaluator_source_48b712c92518a91e.orna"
+            ))))
+            .unwrap(),
+            Value::option(Some(evaluate(include_str!(
+                "fixtures/evaluator_source_f6bc804093ad8575.orna"
+            ))))
+            .unwrap(),
         ),
         (
             "Money",
@@ -4070,7 +4611,7 @@ fn std_collection_min_and_max_debit_steps_for_each_scanned_value() {
     for (kind, rows, expected_min, expected_max) in cases {
         let environment = Environment::from([("rows".into(), rows)]);
         for (name, expected) in [("min", expected_min), ("max", expected_max)] {
-            let expression = format!("{name}(rows)");
+            let expression = min_max_source_fixtures(MinMaxSourceFixtureProfile::Rows, name)[0];
             assert_eq!(
                 evaluate_expression(&expression, &environment, Limits::default()).unwrap(),
                 expected,
@@ -4098,12 +4639,12 @@ fn std_collection_min_and_max_debit_steps_for_each_scanned_value() {
 fn std_collection_one_accepts_predicate_free_direct_pipeline_named_and_function_calls() {
     let expected = Value::int(7.into());
     for expression in [
-        "one([7])",
-        "std.collection.one([7])",
-        "[7] | one()",
-        "[7] | std.collection.one()",
-        "one(rows: [7])",
-        "std.collection.one(rows: [7])",
+        include_str!("fixtures/evaluator_source_c39f2e51072b49ef.orna"),
+        include_str!("fixtures/evaluator_source_8f626ee7b36527ce.orna"),
+        include_str!("fixtures/evaluator_source_885fd52dd3567ae3.orna"),
+        include_str!("fixtures/evaluator_source_4d37367cc8d22852.orna"),
+        include_str!("fixtures/evaluator_source_7c7ff487191821e2.orna"),
+        include_str!("fixtures/evaluator_source_5ded068288e45d8d.orna"),
     ] {
         assert_eq!(
             evaluate_expression(expression, &Environment::new(), Limits::default()).unwrap(),
@@ -4113,8 +4654,8 @@ fn std_collection_one_accepts_predicate_free_direct_pipeline_named_and_function_
     }
     assert_eq!(
         call_module(
-            "fn pick(rows: [Int]) = one(rows);",
-            "pick([7])",
+            include_str!("fixtures/evaluator_source_0b9b5f806dce52f6.orna"),
+            include_str!("fixtures/evaluator_source_7043fb1efe341b29.orna"),
             Limits::default(),
         )
         .unwrap(),
@@ -4126,13 +4667,13 @@ fn std_collection_one_accepts_predicate_free_direct_pipeline_named_and_function_
 fn std_collection_one_accepts_predicate_overloads_in_input_order() {
     let expected = Value::int(2.into());
     for expression in [
-        "one([1, 2, 3], value => value == 2)",
-        "std.collection.one([1, 2, 3], value => value == 2)",
-        "[1, 2, 3] | one(predicate: value => value == 2)",
-        "[1, 2, 3] | std.collection.one(predicate: value => value == 2)",
-        "one(rows: [1, 2, 3], predicate: value => value == 2)",
-        "std.collection.one(predicate: value => value == 2, rows: [1, 2, 3])",
-        "one([1, 2, 3], predicate: value => value == 2)",
+        include_str!("fixtures/evaluator_source_b21b2e012186dd0b.orna"),
+        include_str!("fixtures/evaluator_source_bde8240e51ca8c9a.orna"),
+        include_str!("fixtures/evaluator_source_080a11b9386edb70.orna"),
+        include_str!("fixtures/evaluator_source_2e383b7c67bc4f50.orna"),
+        include_str!("fixtures/evaluator_source_ee58449e42e9f082.orna"),
+        include_str!("fixtures/evaluator_source_0bb80ebf6fa63488.orna"),
+        include_str!("fixtures/evaluator_source_42d7b12158836932.orna"),
     ] {
         assert_eq!(
             evaluate_expression(expression, &Environment::new(), Limits::default()).unwrap(),
@@ -4142,8 +4683,8 @@ fn std_collection_one_accepts_predicate_overloads_in_input_order() {
     }
     assert_eq!(
         call_module(
-            "fn is_two(value: Int) = value == 2; fn pick(rows: [Int]) = one(rows, is_two);",
-            "pick([1, 2, 3])",
+            include_str!("fixtures/evaluator_source_223844a9b355e4a8.orna"),
+            include_str!("fixtures/evaluator_source_4e7b71ee74593ccd.orna"),
             Limits::default(),
         )
         .unwrap(),
@@ -4151,8 +4692,8 @@ fn std_collection_one_accepts_predicate_overloads_in_input_order() {
     );
     assert_eq!(
         call_module(
-            "fn is_two(value: Int) = value == 2; fn pick(rows: [Int]) = one(predicate: is_two, rows: rows);",
-            "pick([1, 2, 3])",
+            include_str!("fixtures/evaluator_source_40f25f17f1873001.orna"),
+            include_str!("fixtures/evaluator_source_4e7b71ee74593ccd.orna"),
             Limits::default(),
         )
         .unwrap(),
@@ -4163,12 +4704,12 @@ fn std_collection_one_accepts_predicate_overloads_in_input_order() {
 #[test]
 fn std_collection_one_distinguishes_zero_and_multiple_matches() {
     for expression in [
-        "one([])",
-        "std.collection.one([])",
-        "[] | one()",
-        "one(rows: [])",
-        "one([1, 2], value => value > 3)",
-        "[1, 2] | std.collection.one(predicate: value => value > 3)",
+        include_str!("fixtures/evaluator_source_1386cbfe7c986256.orna"),
+        include_str!("fixtures/evaluator_source_5f642767d6c21dc9.orna"),
+        include_str!("fixtures/evaluator_source_ff52023ea0a7a181.orna"),
+        include_str!("fixtures/evaluator_source_3274017ddf90a922.orna"),
+        include_str!("fixtures/evaluator_source_8a500b81dc90d7de.orna"),
+        include_str!("fixtures/evaluator_source_19fc177e21f2d3d7.orna"),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -4181,12 +4722,12 @@ fn std_collection_one_distinguishes_zero_and_multiple_matches() {
         );
     }
     for expression in [
-        "one([1, 2])",
-        "std.collection.one([1, 2])",
-        "[1, 2] | one()",
-        "one(rows: [1, 2])",
-        "one([1, 2], value => value > 0)",
-        "std.collection.one(predicate: value => value > 0, rows: [1, 2])",
+        include_str!("fixtures/evaluator_source_d4b04fb179392d0d.orna"),
+        include_str!("fixtures/evaluator_source_4e33dd900e29214a.orna"),
+        include_str!("fixtures/evaluator_source_396d97222890595b.orna"),
+        include_str!("fixtures/evaluator_source_3ba3bc0533551618.orna"),
+        include_str!("fixtures/evaluator_source_ea9c82a6965cc3d4.orna"),
+        include_str!("fixtures/evaluator_source_7386c54f0bda2cd2.orna"),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -4204,7 +4745,7 @@ fn std_collection_one_distinguishes_zero_and_multiple_matches() {
 fn std_collection_one_evaluates_predicates_in_order_and_stops_after_second_match() {
     assert_eq!(
         code(evaluate_expression(
-            "one([0, 2, 3], value => if value == 0 { 1 / 0 == 0 } else { value > 1 })",
+            include_str!("fixtures/evaluator_source_e89ac240ee943553.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -4212,7 +4753,7 @@ fn std_collection_one_evaluates_predicates_in_order_and_stops_after_second_match
     );
     assert_eq!(
         code(evaluate_expression(
-            "one([1, 0, 2], value => 1 / value == 1)",
+            include_str!("fixtures/evaluator_source_9b0fda60e9527110.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -4220,7 +4761,7 @@ fn std_collection_one_evaluates_predicates_in_order_and_stops_after_second_match
     );
     assert_eq!(
         code(evaluate_expression(
-            "one([1, 2, 3], value => if value < 3 { true } else { 1 / 0 == 0 })",
+            include_str!("fixtures/evaluator_source_6ebc4169378d1d0f.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -4231,25 +4772,52 @@ fn std_collection_one_evaluates_predicates_in_order_and_stops_after_second_match
 #[test]
 fn std_collection_one_rejects_invalid_inputs_propagates_callback_failures_and_keeps_limits() {
     for (expression, expected) in [
-        ("one()", "ORNA-EVAL-UNSUPPORTED"),
-        ("one(1)", "ORNA-EVAL-TYPE"),
-        ("one([1], 1)", "ORNA-EVAL-TYPE"),
-        ("one([1], value => 1)", "ORNA-EVAL-TYPE"),
-        ("one([1], () => true)", "ORNA-EVAL-ARGUMENT"),
         (
-            "one([1], value => value, value => value)",
-            "ORNA-EVAL-UNSUPPORTED",
-        ),
-        ("one(values: [1])", "ORNA-EVAL-UNSUPPORTED"),
-        ("one(rows: [1], rows: [2])", "ORNA-EVAL-UNSUPPORTED"),
-        ("[1] | one(1)", "ORNA-EVAL-TYPE"),
-        ("[1] | one(rows: [2])", "ORNA-EVAL-UNSUPPORTED"),
-        (
-            "std.collection.one(predicate: value => true)",
+            include_str!("fixtures/evaluator_source_1d1ee269ab24f5d6.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
         (
-            "one([1, 0], value => 1 / value == 1)",
+            include_str!("fixtures/evaluator_source_d0b24f624ede6ddd.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_2ac6f95a450fbb76.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_a6f5d7b8c613881c.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_1129a313d3b5240a.orna"),
+            "ORNA-EVAL-ARGUMENT",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_3b12e77acdec5c03.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_4c6049668a352465.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_cb483b969c37a673.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_5640621da2951f80.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_267b7ad4c5228024.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_e7709598c4df10dd.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_7a6238a33b332bec.orna"),
             "ORNA-EVAL-DIVIDE-BY-ZERO",
         ),
     ] {
@@ -4265,7 +4833,7 @@ fn std_collection_one_rejects_invalid_inputs_propagates_callback_failures_and_ke
     }
     assert_eq!(
         evaluate_expression(
-            "one([13])",
+            include_str!("fixtures/evaluator_source_8df4d22196b8c720.orna"),
             &Environment::new(),
             Limits {
                 max_collection_items: 1,
@@ -4287,7 +4855,7 @@ fn std_collection_one_rejects_invalid_inputs_propagates_callback_failures_and_ke
     ] {
         assert_eq!(
             code(evaluate_expression(
-                "one([1, 2, 3])",
+                include_str!("fixtures/evaluator_source_53388f558ca316b0.orna"),
                 &Environment::new(),
                 limits
             )),
@@ -4298,7 +4866,7 @@ fn std_collection_one_rejects_invalid_inputs_propagates_callback_failures_and_ke
 
 #[test]
 fn std_collection_one_debits_one_step_per_scanned_predicate_value() {
-    let expression = "one([1, 2], value => value == 1)";
+    let expression = include_str!("fixtures/evaluator_source_23ef9999aa5f51f9.orna");
     assert_eq!(
         code(evaluate_expression(
             expression,
@@ -4335,13 +4903,13 @@ fn std_collection_every_and_exists_accept_all_call_forms_and_function_callbacks(
     let true_value = Value::new(Raw::Bool(true)).unwrap();
     let false_value = Value::new(Raw::Bool(false)).unwrap();
     for expression in [
-        "every([1, 2, 3], value => value > 0)",
-        "std.collection.every([1, 2, 3], value => value > 0)",
-        "[1, 2, 3] | every(predicate: value => value > 0)",
-        "[1, 2, 3] | std.collection.every(predicate: value => value > 0)",
-        "every(rows: [1, 2, 3], predicate: value => value > 0)",
-        "std.collection.every(predicate: value => value > 0, rows: [1, 2, 3])",
-        "every([], value => value > 0)",
+        include_str!("fixtures/evaluator_source_db8cca293b8a5975.orna"),
+        include_str!("fixtures/evaluator_source_648c0ce86a31dc65.orna"),
+        include_str!("fixtures/evaluator_source_1e55f13aee38196e.orna"),
+        include_str!("fixtures/evaluator_source_3000004840cda745.orna"),
+        include_str!("fixtures/evaluator_source_a8c809145afc3751.orna"),
+        include_str!("fixtures/evaluator_source_ebb18e422cc395d5.orna"),
+        include_str!("fixtures/evaluator_source_217b755f5445b938.orna"),
     ] {
         assert_eq!(
             evaluate_expression(expression, &Environment::new(), Limits::default()).unwrap(),
@@ -4350,13 +4918,13 @@ fn std_collection_every_and_exists_accept_all_call_forms_and_function_callbacks(
         );
     }
     for expression in [
-        "exists([1, 2, 3], value => value == 2)",
-        "std.collection.exists([1, 2, 3], value => value == 2)",
-        "[1, 2, 3] | exists(predicate: value => value == 2)",
-        "[1, 2, 3] | std.collection.exists(predicate: value => value == 2)",
-        "exists(rows: [1, 2, 3], predicate: value => value == 2)",
-        "std.collection.exists(predicate: value => value == 2, rows: [1, 2, 3])",
-        "exists([], value => value == 2)",
+        include_str!("fixtures/evaluator_source_e3a666d313a86711.orna"),
+        include_str!("fixtures/evaluator_source_c5d81d1c011f2d44.orna"),
+        include_str!("fixtures/evaluator_source_915cef763c92cd02.orna"),
+        include_str!("fixtures/evaluator_source_06d1374122c805f7.orna"),
+        include_str!("fixtures/evaluator_source_705a0a1fe8acb7b1.orna"),
+        include_str!("fixtures/evaluator_source_e9047e6b4baef6b3.orna"),
+        include_str!("fixtures/evaluator_source_0ba3c5112c167531.orna"),
     ] {
         assert_eq!(
             evaluate_expression(expression, &Environment::new(), Limits::default()).unwrap(),
@@ -4370,7 +4938,7 @@ fn std_collection_every_and_exists_accept_all_call_forms_and_function_callbacks(
     }
     assert_eq!(
         evaluate_expression(
-            "exists([1, 2, 3], value => value > 3)",
+            include_str!("fixtures/evaluator_source_12a3c3ac2d2512a6.orna"),
             &Environment::new(),
             Limits::default(),
         )
@@ -4380,11 +4948,21 @@ fn std_collection_every_and_exists_accept_all_call_forms_and_function_callbacks(
 
     let source = include_str!("fixtures/every_exists_named_callbacks.orna");
     assert_eq!(
-        call_module(source, "all([1, 2, 3])", Limits::default()).unwrap(),
+        call_module(
+            source,
+            include_str!("fixtures/evaluator_source_d989b35eb24afcfe.orna"),
+            Limits::default()
+        )
+        .unwrap(),
         true_value
     );
     assert_eq!(
-        call_module(source, "any([1, 2, 3])", Limits::default()).unwrap(),
+        call_module(
+            source,
+            include_str!("fixtures/evaluator_source_663bf635c6c3c0ce.orna"),
+            Limits::default()
+        )
+        .unwrap(),
         true_value
     );
 }
@@ -4392,16 +4970,20 @@ fn std_collection_every_and_exists_accept_all_call_forms_and_function_callbacks(
 #[test]
 fn std_collection_every_and_exists_short_circuit_in_order_and_require_bool_callbacks() {
     assert_eq!(
-        evaluate("every([1, 2, 3], value => if value <= 2 { value == 1 } else { 1 / 0 == 0 })"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_7effd445f9b4fc43.orna"
+        )),
         Value::new(Raw::Bool(false)).unwrap()
     );
     assert_eq!(
-        evaluate("exists([1, 2, 3], value => if value <= 2 { value == 2 } else { 1 / 0 == 0 })"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_2f226b401055790c.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
         code(evaluate_expression(
-            "every([0, 1], value => if value == 0 { 1 / 0 == 0 } else { true })",
+            include_str!("fixtures/evaluator_source_9e6b83e645fcedbe.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -4409,7 +4991,7 @@ fn std_collection_every_and_exists_short_circuit_in_order_and_require_bool_callb
     );
     assert_eq!(
         code(evaluate_expression(
-            "exists([1], value => 1)",
+            include_str!("fixtures/evaluator_source_f3e5b76f1c5cb566.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -4417,7 +4999,7 @@ fn std_collection_every_and_exists_short_circuit_in_order_and_require_bool_callb
     );
     assert_eq!(
         code(evaluate_expression(
-            "every([1], () => true)",
+            include_str!("fixtures/evaluator_source_d2ffa16d7b565904.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -4425,7 +5007,7 @@ fn std_collection_every_and_exists_short_circuit_in_order_and_require_bool_callb
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.exists(1, value => true)",
+            include_str!("fixtures/evaluator_source_c787a2f5875bed9f.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -4433,7 +5015,7 @@ fn std_collection_every_and_exists_short_circuit_in_order_and_require_bool_callb
     );
     assert_eq!(
         code(evaluate_expression(
-            "every([1, 2, 3], value => true)",
+            include_str!("fixtures/evaluator_source_147844ef75f2aa78.orna"),
             &Environment::new(),
             Limits {
                 max_collection_items: 2,
@@ -4446,20 +5028,28 @@ fn std_collection_every_and_exists_short_circuit_in_order_and_require_bool_callb
 #[test]
 fn std_collection_every_and_exists_empty_identity_and_first_match_short_circuit() {
     assert_eq!(
-        evaluate("every([], value => value > 0)"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_217b755f5445b938.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
-        evaluate("exists([], value => value > 0)"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_64e5563712f54441.orna"
+        )),
         Value::new(Raw::Bool(false)).unwrap()
     );
 
     assert_eq!(
-        evaluate("every([1, 2], value => if value == 1 { false } else { 1 / 0 == 0 })"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_67b9bff00dcbe444.orna"
+        )),
         Value::new(Raw::Bool(false)).unwrap()
     );
     assert_eq!(
-        evaluate("exists([1, 2], value => if value == 1 { true } else { 1 / 0 == 0 })"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_2ca9d58da6e0d360.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
 }
@@ -4508,13 +5098,12 @@ fn std_collection_every_and_exists_debit_each_scanned_predicate_value() {
     }
 }
 
-
 #[test]
 fn root_every_and_exists_remain_shadowable_by_admitted_functions_and_locals() {
     assert_eq!(
         call_module(
-            "fn every(value: Int) = value + 100; fn run() = every(1);",
-            "run()",
+            include_str!("fixtures/evaluator_source_572adaf61fc695b1.orna"),
+            include_str!("fixtures/evaluator_source_02fcae88bd120f59.orna"),
             Limits::default(),
         )
         .unwrap(),
@@ -4522,7 +5111,7 @@ fn root_every_and_exists_remain_shadowable_by_admitted_functions_and_locals() {
     );
     assert_eq!(
         evaluate_expression(
-            "if true { let exists = value => value + 100; exists(1) } else { 0 }",
+            include_str!("fixtures/evaluator_source_6a5ee5d4e3d4901a.orna"),
             &Environment::new(),
             Limits::default(),
         )
@@ -4535,8 +5124,8 @@ fn root_every_and_exists_remain_shadowable_by_admitted_functions_and_locals() {
 fn admitted_function_named_fail_shadows_the_intrinsic() {
     assert_eq!(
         call_module(
-            "fn fail(value: Int) = value + 1; fn run() = fail(1);",
-            "run()",
+            include_str!("fixtures/evaluator_source_5346d0799bb60c73.orna"),
+            include_str!("fixtures/evaluator_source_02fcae88bd120f59.orna"),
             Limits::default(),
         )
         .unwrap(),
@@ -4548,8 +5137,8 @@ fn admitted_function_named_fail_shadows_the_intrinsic() {
 fn root_one_remains_shadowable_and_does_not_change_relation_member_behavior() {
     assert_eq!(
         call_module(
-            "fn one(value: Int) = value + 100; fn run() = one(1);",
-            "run()",
+            include_str!("fixtures/evaluator_source_f04ae0d9ccf249bb.orna"),
+            include_str!("fixtures/evaluator_source_02fcae88bd120f59.orna"),
             Limits::default(),
         )
         .unwrap(),
@@ -4557,7 +5146,7 @@ fn root_one_remains_shadowable_and_does_not_change_relation_member_behavior() {
     );
     assert_eq!(
         evaluate_expression(
-            "if true { let one = value => value + 100; one(1) } else { 0 }",
+            include_str!("fixtures/evaluator_source_3f6b1cba6cf45042.orna"),
             &Environment::new(),
             Limits::default(),
         )
@@ -4566,7 +5155,7 @@ fn root_one_remains_shadowable_and_does_not_change_relation_member_behavior() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "Note.one()",
+            include_str!("fixtures/evaluator_source_808b085ab198e887.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -4578,8 +5167,8 @@ fn root_one_remains_shadowable_and_does_not_change_relation_member_behavior() {
 fn root_first_dispatch_respects_local_function_and_relation_shadowing() {
     assert_eq!(
         call_module(
-            "fn first(value: Int) = value + 100; fn run() = first(1);",
-            "run()",
+            include_str!("fixtures/evaluator_source_099ce81ac5ce9426.orna"),
+            include_str!("fixtures/evaluator_source_02fcae88bd120f59.orna"),
             Limits::default(),
         )
         .unwrap(),
@@ -4587,7 +5176,7 @@ fn root_first_dispatch_respects_local_function_and_relation_shadowing() {
     );
     assert_eq!(
         evaluate_expression(
-            "if true { let first = value => value + 100; first(1) } else { 0 }",
+            include_str!("fixtures/evaluator_source_f00bc26c13d3ef2e.orna"),
             &Environment::new(),
             Limits::default(),
         )
@@ -4596,7 +5185,7 @@ fn root_first_dispatch_respects_local_function_and_relation_shadowing() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "Note.first()",
+            include_str!("fixtures/evaluator_source_013d8359befd516a.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -4607,108 +5196,192 @@ fn root_first_dispatch_respects_local_function_and_relation_shadowing() {
 #[test]
 fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
     for (expression, expected) in [
-        ("std.collection.chunk([1], 0)", "ORNA-EVAL-VALUE"),
-        ("std.collection.chunk([1], -1)", "ORNA-EVAL-VALUE"),
-        ("std.collection.flatten([1])", "ORNA-EVAL-TYPE"),
-        ("std.collection.unique(1)", "ORNA-EVAL-TYPE"),
-        ("std.collection.unique([1], 2)", "ORNA-EVAL-UNSUPPORTED"),
-        ("std.collection.distinct(1)", "ORNA-EVAL-TYPE"),
-        ("std.collection.distinct([1], 2)", "ORNA-EVAL-UNSUPPORTED"),
         (
-            "std.collection.distinct([1.0f, 1.0f])",
-            "ORNA-EVAL-UNSUPPORTED",
-        ),
-        ("std.collection.union(1, [2])", "ORNA-EVAL-TYPE"),
-        ("std.collection.union([1])", "ORNA-EVAL-UNSUPPORTED"),
-        (
-            "std.collection.union(left: [1], right: [2], extra: [3])",
-            "ORNA-EVAL-UNSUPPORTED",
-        ),
-        ("std.collection.count(1)", "ORNA-EVAL-TYPE"),
-        ("std.collection.count([1], 2)", "ORNA-EVAL-TYPE"),
-        (
-            "std.collection.count(values: [1], extra: 2)",
-            "ORNA-EVAL-UNSUPPORTED",
-        ),
-        ("std.collection.take(1, 1)", "ORNA-EVAL-TYPE"),
-        ("std.collection.take([1], 1.0)", "ORNA-EVAL-TYPE"),
-        ("std.collection.take([1], -1)", "ORNA-EVAL-VALUE"),
-        (
-            "std.collection.take([1], 1, extra: 2)",
-            "ORNA-EVAL-UNSUPPORTED",
-        ),
-        ("std.collection.drop(1, 1)", "ORNA-EVAL-TYPE"),
-        ("std.collection.drop([1], 1.0)", "ORNA-EVAL-TYPE"),
-        ("std.collection.drop([1], -1)", "ORNA-EVAL-VALUE"),
-        (
-            "std.collection.drop([1], 1, extra: 2)",
-            "ORNA-EVAL-UNSUPPORTED",
+            include_str!("fixtures/evaluator_source_c501c12a4fa9340b.orna"),
+            "ORNA-EVAL-VALUE",
         ),
         (
-            "std.collection.partition(1, value => true)",
-            "ORNA-EVAL-TYPE",
+            include_str!("fixtures/evaluator_source_e935e90db861b518.orna"),
+            "ORNA-EVAL-VALUE",
         ),
-        ("std.collection.partition([1], 1)", "ORNA-EVAL-TYPE"),
         (
-            "std.collection.partition([1], value => 1)",
+            include_str!("fixtures/evaluator_source_6b7a0037a35c3bfa.orna"),
             "ORNA-EVAL-TYPE",
         ),
         (
-            "std.collection.partition([1], () => true)",
+            include_str!("fixtures/evaluator_source_a5d018fea4ffde2a.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_ebc3b408a58b7de8.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_300b6a61f049d356.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_6ab379aada45358b.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_7ce9e92f29470278.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_66e5f3818dac940a.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_e08d790ff251ea70.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_35abf157b5b65eab.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_071b52f994b551fa.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_ba2a34cc36a35d9b.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_ab881a2a9a6736f4.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_9112ff23ad11b00c.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_c82fb43d7a527910.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_858d6ad020dc7cb3.orna"),
+            "ORNA-EVAL-VALUE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_764ce620d4d59b9a.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_eada79f20e33a496.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_6743d55af8cd6949.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_9b3916433d7d8950.orna"),
+            "ORNA-EVAL-VALUE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_707df93422d5461a.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_1982df28d4eb1da3.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_21a2d12a9de61f4a.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_77685929ab56e796.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_269e48b076b25d70.orna"),
             "ORNA-EVAL-ARGUMENT",
         ),
         (
-            "std.collection.partition([1], value => true, extra: value => true)",
+            include_str!("fixtures/evaluator_source_7096824d475d52a7.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
-        ("std.collection.filter(1, value => true)", "ORNA-EVAL-TYPE"),
-        ("std.collection.filter([1], 1)", "ORNA-EVAL-TYPE"),
-        ("std.collection.filter([1], value => 1)", "ORNA-EVAL-TYPE"),
         (
-            "std.collection.filter([1], () => true)",
+            include_str!("fixtures/evaluator_source_7165309594b939ba.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_95a62b978dcc55f8.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_4a6ad95846a84a2b.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_398fa31e9eedfd31.orna"),
             "ORNA-EVAL-ARGUMENT",
         ),
         (
-            "std.collection.filter([1], value => true, extra: value => true)",
+            include_str!("fixtures/evaluator_source_3ff2e7e2941445fc.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
         (
-            "std.collection.split_when(1, value => true)",
-            "ORNA-EVAL-TYPE",
-        ),
-        ("std.collection.split_when([1], 1)", "ORNA-EVAL-TYPE"),
-        (
-            "std.collection.split_when([1], value => 1)",
+            include_str!("fixtures/evaluator_source_37666509336abd7c.orna"),
             "ORNA-EVAL-TYPE",
         ),
         (
-            "std.collection.split_when([1], () => true)",
+            include_str!("fixtures/evaluator_source_45020944b36df878.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_6ffc217c04553727.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_3c5d0cf8f5261c1b.orna"),
             "ORNA-EVAL-ARGUMENT",
         ),
         (
-            "std.collection.split_when([1], value => true, extra: value => true)",
+            include_str!("fixtures/evaluator_source_36899f86314248a6.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
         (
-            "std.collection.group_by(1, value => value)",
-            "ORNA-EVAL-TYPE",
-        ),
-        ("std.collection.group_by([1], 1)", "ORNA-EVAL-TYPE"),
-        (
-            "std.collection.group_by([1], value => [value])",
+            include_str!("fixtures/evaluator_source_9245c15ead8f3a84.orna"),
             "ORNA-EVAL-TYPE",
         ),
         (
-            "std.collection.group_by([1], value => value, extra: value => value)",
+            include_str!("fixtures/evaluator_source_ae088a56abcac281.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_9d340d60cb125d0f.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_9a2536bd652142f9.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
-        ("std.collection.zip_exact([1], [2, 3])", "ORNA-EVAL-VALUE"),
-        ("std.collection.pairs(1)", "ORNA-EVAL-TYPE"),
-        ("std.collection.window([1, 2], 0)", "ORNA-EVAL-VALUE"),
-        ("std.collection.window([1, 2], 1, 0)", "ORNA-EVAL-VALUE"),
-        ("std.collection.window([1, 2], 1, -1)", "ORNA-EVAL-VALUE"),
         (
-            "std.collection.window([1, 2], 1, 1, 1)",
+            include_str!("fixtures/evaluator_source_759b06c9d00a5d2d.orna"),
+            "ORNA-EVAL-VALUE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_14f5bde7749a9c3f.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_3a6f7d70035cba27.orna"),
+            "ORNA-EVAL-VALUE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_76a989a0c699b554.orna"),
+            "ORNA-EVAL-VALUE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_e60dd9cfc6c145db.orna"),
+            "ORNA-EVAL-VALUE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_7cc77886cbeb3a68.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
     ] {
@@ -4724,7 +5397,7 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
     }
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.unique([1, 2, 3])",
+            include_str!("fixtures/evaluator_source_b9cc1b6b7e8dca0b.orna"),
             &Environment::new(),
             Limits {
                 max_collection_items: 2,
@@ -4735,7 +5408,7 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.distinct([1, 2, 3])",
+            include_str!("fixtures/evaluator_source_c17f9955f4f09925.orna"),
             &Environment::new(),
             Limits {
                 max_collection_items: 2,
@@ -4746,7 +5419,7 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.union([1, 2], [3])",
+            include_str!("fixtures/evaluator_source_0e1b3d2550408a9d.orna"),
             &Environment::new(),
             Limits {
                 max_collection_items: 2,
@@ -4757,7 +5430,7 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.count([1, 2, 3])",
+            include_str!("fixtures/evaluator_source_b11204c3745b0c6b.orna"),
             &Environment::new(),
             Limits {
                 max_collection_items: 2,
@@ -4768,7 +5441,7 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.window([1, 2, 3], 2)",
+            include_str!("fixtures/evaluator_source_dff1b602231fe5f9.orna"),
             &Environment::new(),
             Limits {
                 max_collection_items: 1,
@@ -4788,7 +5461,7 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
     )]);
     assert_eq!(
         evaluate_expression(
-            "std.collection.take(rows, 1)",
+            include_str!("fixtures/evaluator_source_bfaa6e5fc9aaa7ba.orna"),
             &rows,
             Limits {
                 max_collection_items: 3,
@@ -4800,7 +5473,7 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.take(rows, 2)",
+            include_str!("fixtures/evaluator_source_a88833e1fe656dd4.orna"),
             &rows,
             Limits {
                 max_collection_items: 1,
@@ -4811,7 +5484,7 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
     );
     assert_eq!(
         evaluate_expression(
-            "std.collection.drop(rows, 1)",
+            include_str!("fixtures/evaluator_source_d859635789532adb.orna"),
             &rows,
             Limits {
                 max_collection_items: 3,
@@ -4823,7 +5496,7 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.drop(rows, 1)",
+            include_str!("fixtures/evaluator_source_d859635789532adb.orna"),
             &rows,
             Limits {
                 max_collection_items: 1,
@@ -4838,7 +5511,12 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
 fn std_collection_partition_accepts_lawful_predicates_and_enforces_limits() {
     let source = include_str!("fixtures/partition_callbacks.orna");
     assert_eq!(
-        call_module(source, "run()", Limits::default()).unwrap(),
+        call_module(
+            source,
+            include_str!("fixtures/evaluator_source_02fcae88bd120f59.orna"),
+            Limits::default()
+        )
+        .unwrap(),
         Value::new(Raw::Array(vec![
             Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())]),
             Raw::Array(vec![Raw::Int(1.into()), Raw::Int(3.into())]),
@@ -4846,12 +5524,16 @@ fn std_collection_partition_accepts_lawful_predicates_and_enforces_limits() {
         .unwrap()
     );
     assert_eq!(
-        code(call_module(source, "bad_arity()", Limits::default())),
+        code(call_module(
+            source,
+            include_str!("fixtures/evaluator_source_a4d25a618149ef10.orna"),
+            Limits::default()
+        )),
         "ORNA-EVAL-ARGUMENT"
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.partition([1, 2, 3], value => true)",
+            include_str!("fixtures/evaluator_source_c35b2d46626c7672.orna"),
             &Environment::new(),
             Limits {
                 max_collection_items: 2,
@@ -4864,7 +5546,9 @@ fn std_collection_partition_accepts_lawful_predicates_and_enforces_limits() {
 #[test]
 fn std_collection_partition_preserves_order_empty_and_invokes_predicate_once_per_value() {
     assert_eq!(
-        evaluate("std.collection.partition([3, 1, 2, 4], value => value % 2 == 0)"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_038bd297fe41baa8.orna"
+        )),
         Value::new(Raw::Array(vec![
             Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())]),
             Raw::Array(vec![Raw::Int(3.into()), Raw::Int(1.into())]),
@@ -4872,9 +5556,10 @@ fn std_collection_partition_preserves_order_empty_and_invokes_predicate_once_per
         .unwrap()
     );
     assert_eq!(
-        evaluate("std.collection.partition([], value => 1 / 0 == 0)"),
-        Value::new(Raw::Array(vec![Raw::Array(vec![]), Raw::Array(vec![])]))
-            .unwrap()
+        evaluate(include_str!(
+            "fixtures/evaluator_source_e84c7e377e3a0b41.orna"
+        )),
+        Value::new(Raw::Array(vec![Raw::Array(vec![]), Raw::Array(vec![])])).unwrap()
     );
 
     let functions = functions_from_source(include_str!("fixtures/partition_effect_callback.orna"));
@@ -4919,7 +5604,7 @@ fn std_collection_partition_preserves_order_empty_and_invokes_predicate_once_per
 fn std_collection_partition_requires_bool_and_propagates_callback_failures() {
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.partition([1], value => value)",
+            include_str!("fixtures/evaluator_source_a81e8566cff8b527.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -4927,7 +5612,7 @@ fn std_collection_partition_requires_bool_and_propagates_callback_failures() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.partition([1, 0, 2], value => 10 / value > 0)",
+            include_str!("fixtures/evaluator_source_0b34d95903b4a161.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -4936,8 +5621,9 @@ fn std_collection_partition_requires_bool_and_propagates_callback_failures() {
 }
 
 #[test]
-fn std_collection_partition_debits_one_step_per_scanned_value_without_duplicate_traversal_charging() {
-    let expression = "std.collection.partition([1, 2], value => true)";
+fn std_collection_partition_debits_one_step_per_scanned_value_without_duplicate_traversal_charging()
+{
+    let expression = include_str!("fixtures/evaluator_source_bfe85646d0b577d7.orna");
     assert_eq!(
         code(evaluate_expression(
             expression,
@@ -4978,7 +5664,7 @@ fn std_collection_filter_accepts_direct_pipeline_and_named_calls() {
     let expected = Value::new(Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())])).unwrap();
     assert_eq!(
         evaluate_expression(
-            "std.collection.filter([1, 2, 3, 4], value => value % 2 == 0)",
+            include_str!("fixtures/evaluator_source_b46bc6cf97599665.orna"),
             &Environment::new(),
             Limits::default(),
         )
@@ -4987,7 +5673,7 @@ fn std_collection_filter_accepts_direct_pipeline_and_named_calls() {
     );
     assert_eq!(
         evaluate_expression(
-            "[1, 2, 3, 4] | std.collection.filter(predicate: value => value % 2 == 0)",
+            include_str!("fixtures/evaluator_source_ac4bc1e6faf41022.orna"),
             &Environment::new(),
             Limits::default(),
         )
@@ -4996,7 +5682,7 @@ fn std_collection_filter_accepts_direct_pipeline_and_named_calls() {
     );
     assert_eq!(
         evaluate_expression(
-            "std.collection.filter(predicate: value => value % 2 == 0, values: [1, 2, 3, 4])",
+            include_str!("fixtures/evaluator_source_71444e85b934eb10.orna"),
             &Environment::new(),
             Limits::default(),
         )
@@ -5006,7 +5692,7 @@ fn std_collection_filter_accepts_direct_pipeline_and_named_calls() {
     assert_eq!(
         call_module(
             include_str!("fixtures/collection_filter_named_callback.orna"),
-            "run()",
+            include_str!("fixtures/evaluator_source_02fcae88bd120f59.orna"),
             Limits::default(),
         )
         .unwrap(),
@@ -5018,7 +5704,7 @@ fn std_collection_filter_accepts_direct_pipeline_and_named_calls() {
 fn std_collection_filter_enforces_limits() {
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.filter([1, 2, 3], value => true)",
+            include_str!("fixtures/evaluator_source_206213dcd55c3601.orna"),
             &Environment::new(),
             Limits {
                 max_collection_items: 2,
@@ -5032,11 +5718,15 @@ fn std_collection_filter_enforces_limits() {
 #[test]
 fn std_collection_filter_preserves_input_order_and_skips_empty_callbacks() {
     assert_eq!(
-        evaluate("std.collection.filter([3, 1, 2, 4], value => value % 2 == 0)"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_f128faed729e3af5.orna"
+        )),
         Value::new(Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())])).unwrap()
     );
     assert_eq!(
-        evaluate("std.collection.filter([], value => 1 / 0 == 0)"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_b4b807e7621234e5.orna"
+        )),
         Value::new(Raw::Array(vec![])).unwrap()
     );
 }
@@ -5045,7 +5735,7 @@ fn std_collection_filter_preserves_input_order_and_skips_empty_callbacks() {
 fn std_collection_filter_requires_bool_and_propagates_callback_failures() {
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.filter([1], value => value)",
+            include_str!("fixtures/evaluator_source_5069ec707b897d91.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -5053,7 +5743,7 @@ fn std_collection_filter_requires_bool_and_propagates_callback_failures() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.filter([1, 0, 2], value => 10 / value > 0)",
+            include_str!("fixtures/evaluator_source_4bef1e73f1e6face.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -5063,7 +5753,7 @@ fn std_collection_filter_requires_bool_and_propagates_callback_failures() {
 
 #[test]
 fn std_collection_filter_debits_one_step_per_scanned_value_without_duplicate_traversal_charging() {
-    let expression = "std.collection.filter([1, 2], value => true)";
+    let expression = include_str!("fixtures/evaluator_source_cf68cfe5cd9192c2.orna");
     assert_eq!(
         code(evaluate_expression(
             expression,
@@ -5102,12 +5792,12 @@ fn std_collection_map_preserves_order_for_direct_pipeline_named_and_function_cal
     ]))
     .unwrap();
     for expression in [
-        "std.collection.map([3, 1, 2], value => value * 10)",
-        "[3, 1, 2] | std.collection.map(transform: value => value * 10)",
-        "std.collection.map(transform: value => value * 10, values: [3, 1, 2])",
-        "map([3, 1, 2], value => value * 10)",
-        "[3, 1, 2] | map(transform: value => value * 10)",
-        "map(transform: value => value * 10, values: [3, 1, 2])",
+        include_str!("fixtures/evaluator_source_849dc3054148dafa.orna"),
+        include_str!("fixtures/evaluator_source_41e8d81cae734680.orna"),
+        include_str!("fixtures/evaluator_source_e479c13a5fc5025b.orna"),
+        include_str!("fixtures/evaluator_source_b1d259e238471a75.orna"),
+        include_str!("fixtures/evaluator_source_c27251a957a095f5.orna"),
+        include_str!("fixtures/evaluator_source_a09bb2414a23cdd2.orna"),
     ] {
         assert_eq!(
             evaluate_expression(expression, &Environment::new(), Limits::default()).unwrap(),
@@ -5118,7 +5808,7 @@ fn std_collection_map_preserves_order_for_direct_pipeline_named_and_function_cal
     assert_eq!(
         call_module(
             include_str!("fixtures/collection_map_named_callback.orna"),
-            "run()",
+            include_str!("fixtures/evaluator_source_02fcae88bd120f59.orna"),
             Limits::default(),
         )
         .unwrap(),
@@ -5138,12 +5828,12 @@ fn std_collection_flat_map_preserves_outer_and_inner_order_for_all_call_forms() 
     ]))
     .unwrap();
     for expression in [
-        "std.collection.flat_map([3, 1, 2], value => [value, value + 10])",
-        "[3, 1, 2] | std.collection.flat_map(transform: value => [value, value + 10])",
-        "std.collection.flat_map(transform: value => [value, value + 10], values: [3, 1, 2])",
-        "flat_map([3, 1, 2], value => [value, value + 10])",
-        "[3, 1, 2] | flat_map(transform: value => [value, value + 10])",
-        "flat_map(transform: value => [value, value + 10], values: [3, 1, 2])",
+        include_str!("fixtures/evaluator_source_cc125453b57cba02.orna"),
+        include_str!("fixtures/evaluator_source_41f621d91c4df82f.orna"),
+        include_str!("fixtures/evaluator_source_01a8e7291f99a5b9.orna"),
+        include_str!("fixtures/evaluator_source_5e2847bd3a5e80cc.orna"),
+        include_str!("fixtures/evaluator_source_f3ece6b229a40a22.orna"),
+        include_str!("fixtures/evaluator_source_c611188980d178a9.orna"),
     ] {
         assert_eq!(
             evaluate_expression(expression, &Environment::new(), Limits::default()).unwrap(),
@@ -5154,7 +5844,7 @@ fn std_collection_flat_map_preserves_outer_and_inner_order_for_all_call_forms() 
     assert_eq!(
         call_module(
             include_str!("fixtures/collection_flat_map_named_callback.orna"),
-            "run()",
+            include_str!("fixtures/evaluator_source_02fcae88bd120f59.orna"),
             Limits::default(),
         )
         .unwrap(),
@@ -5171,13 +5861,13 @@ fn std_collection_sort_by_accepts_all_call_forms_and_preserves_stable_ties() {
     ]))
     .unwrap();
     for expression in [
-        "sort_by([3, 1, 2], value => value)",
-        "std.collection.sort_by([3, 1, 2], value => value)",
-        "sort_by(rows: [3, 1, 2], key: value => value)",
-        "std.collection.sort_by(rows: [3, 1, 2], key: value => value)",
-        "std.collection.sort_by(key: value => value, rows: [3, 1, 2])",
-        "[3, 1, 2] | sort_by(key: value => value)",
-        "[3, 1, 2] | std.collection.sort_by(key: value => value)",
+        include_str!("fixtures/evaluator_source_52fed55685dbcd12.orna"),
+        include_str!("fixtures/evaluator_source_5c126e65c02652d4.orna"),
+        include_str!("fixtures/evaluator_source_eb2201c3e8f978ed.orna"),
+        include_str!("fixtures/evaluator_source_808360074891541e.orna"),
+        include_str!("fixtures/evaluator_source_19712f849ab49586.orna"),
+        include_str!("fixtures/evaluator_source_6c745483dd021e92.orna"),
+        include_str!("fixtures/evaluator_source_8bdc841cdaeb5c5f.orna"),
     ] {
         assert_eq!(
             evaluate_expression(expression, &Environment::new(), Limits::default()).unwrap(),
@@ -5188,7 +5878,7 @@ fn std_collection_sort_by_accepts_all_call_forms_and_preserves_stable_ties() {
     assert_eq!(
         call_module(
             include_str!("fixtures/collection_sort_by_named_callback.orna"),
-            "run()",
+            include_str!("fixtures/evaluator_source_02fcae88bd120f59.orna"),
             Limits::default(),
         )
         .unwrap(),
@@ -5200,7 +5890,9 @@ fn std_collection_sort_by_accepts_all_call_forms_and_preserves_stable_ties() {
         .unwrap()
     );
     assert_eq!(
-        evaluate("sort_by([3, 2, 1, 4], value => value % 2)"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_d523aa5e07593df6.orna"
+        )),
         Value::new(Raw::Array(vec![
             Raw::Int(2.into()),
             Raw::Int(4.into()),
@@ -5222,9 +5914,9 @@ fn std_collection_rank_preserves_stable_ties_and_assigns_competition_ranks() {
     .unwrap();
 
     for expression in [
-        "std.collection.rank([23, 21, 12, 11], value => value % 10)",
-        "std.collection.rank(values: [23, 21, 12, 11], key: value => value % 10)",
-        "[23, 21, 12, 11] | std.collection.rank(key: value => value % 10)",
+        include_str!("fixtures/evaluator_source_e69396414a4c6472.orna"),
+        include_str!("fixtures/evaluator_source_baed8ba182346656.orna"),
+        include_str!("fixtures/evaluator_source_1941efe558e9f2d5.orna"),
     ] {
         assert_eq!(evaluate(expression), expected, "{expression}");
     }
@@ -5232,7 +5924,7 @@ fn std_collection_rank_preserves_stable_ties_and_assigns_competition_ranks() {
     assert_eq!(
         call_module(
             include_str!("fixtures/collection_rank_named_callback.orna"),
-            "run()",
+            include_str!("fixtures/evaluator_source_02fcae88bd120f59.orna"),
             Limits::default(),
         )
         .unwrap(),
@@ -5243,7 +5935,9 @@ fn std_collection_rank_preserves_stable_ties_and_assigns_competition_ranks() {
 #[test]
 fn std_collection_rank_uses_lawful_callbacks_and_rejects_malformed_keys() {
     assert_eq!(
-        evaluate("std.collection.rank([3, 1, 2], value => value * value)"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_c6427a9b8d15b5b6.orna"
+        )),
         Value::new(Raw::Array(vec![
             Raw::Array(vec![Raw::Int(1.into()), Raw::Int(1.into())]),
             Raw::Array(vec![Raw::Int(2.into()), Raw::Int(2.into())]),
@@ -5253,7 +5947,7 @@ fn std_collection_rank_uses_lawful_callbacks_and_rejects_malformed_keys() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.rank([1, 0, 2], value => 10 / value)",
+            include_str!("fixtures/evaluator_source_6d0c0d8b23f04cc9.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -5261,23 +5955,32 @@ fn std_collection_rank_uses_lawful_callbacks_and_rejects_malformed_keys() {
     );
 
     for (expression, expected) in [
-        ("std.collection.rank(1, value => value)", "ORNA-EVAL-TYPE"),
-        ("std.collection.rank([1], 1)", "ORNA-EVAL-TYPE"),
         (
-            "std.collection.rank([1, 2], value => [value])",
+            include_str!("fixtures/evaluator_source_0aa05c965484f95b.orna"),
             "ORNA-EVAL-TYPE",
         ),
         (
-            "std.collection.rank([1, 2], value => if value == 1 { value } else { \"two\" })",
+            include_str!("fixtures/evaluator_source_2659b34390efac96.orna"),
             "ORNA-EVAL-TYPE",
         ),
-        ("std.collection.rank([1])", "ORNA-EVAL-UNSUPPORTED"),
         (
-            "std.collection.rank([1, 2], value => value, extra: 0)",
+            include_str!("fixtures/evaluator_source_3b9b1765b86170a9.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_e48e5c9fd411d732.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_b8e6718bb5ac38ac.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
         (
-            "std.collection.rank(rows: [1, 2], key: value => value)",
+            include_str!("fixtures/evaluator_source_e6c7a19cdd1cc1ad.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_cfaedaa113673e92.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
     ] {
@@ -5297,7 +6000,7 @@ fn std_collection_rank_uses_lawful_callbacks_and_rejects_malformed_keys() {
 fn std_collection_rank_honors_collection_and_step_limits() {
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.rank([4, 3, 2, 1], value => value)",
+            include_str!("fixtures/evaluator_source_6fb283d272d0d94f.orna"),
             &Environment::new(),
             Limits {
                 max_collection_items: 3,
@@ -5308,7 +6011,7 @@ fn std_collection_rank_honors_collection_and_step_limits() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.rank([1], value => value)",
+            include_str!("fixtures/evaluator_source_785a914205de5563.orna"),
             &Environment::new(),
             Limits {
                 max_steps: 1,
@@ -5319,12 +6022,11 @@ fn std_collection_rank_honors_collection_and_step_limits() {
     );
 }
 
-
 #[test]
 fn std_collection_sort_by_orders_dates_and_preserves_equal_key_source_order() {
-    let result = evaluate(
-        "sort_by([{key: 2024-02-29, label: \"later\"}, {key: 2024-01-01, label: \"first\"}, {key: 2024-01-01, label: \"second\"}], row => row.key)",
-    );
+    let result = evaluate(include_str!(
+        "fixtures/evaluator_source_14e95693b4ba167a.orna"
+    ));
     assert_eq!(
         result,
         Value::new(Raw::Array(vec![
@@ -5356,9 +6058,9 @@ fn std_collection_sort_by_orders_dates_and_preserves_equal_key_source_order() {
 
 #[test]
 fn std_collection_sort_by_orders_normalized_instants_and_nanoseconds_stably() {
-    let result = evaluate(
-        "sort_by([{key: 1970-01-01T00:00:00.000000002Z, label: \"nano\"}, {key: 1970-01-01T05:30:00+05:30, label: \"offset-first\"}, {key: 1970-01-01T00:00:00Z, label: \"epoch-first\"}, {key: 1970-01-01T05:30:00+05:30, label: \"offset-second\"}], row => row.key)",
-    );
+    let result = evaluate(include_str!(
+        "fixtures/evaluator_source_250219cb9eb7e4de.orna"
+    ));
     assert_eq!(
         result,
         Value::new(Raw::Array(vec![
@@ -5418,7 +6120,7 @@ fn std_collection_sort_by_uses_float_total_order() {
     let environment = Environment::from([("rows".into(), rows)]);
     assert_eq!(
         evaluate_expression(
-            "std.collection.sort_by(rows: rows, key: value => value)",
+            include_str!("fixtures/evaluator_source_7d1ab5016e7a2c88.orna"),
             &environment,
             Limits::default(),
         )
@@ -5436,18 +6138,27 @@ fn std_collection_sort_by_uses_float_total_order() {
 fn std_collection_sort_by_evaluates_callbacks_before_sorting_and_fails_closed() {
     assert_eq!(
         code(evaluate_expression(
-            "sort_by([1, 0, 2], value => 10 / value)",
+            include_str!("fixtures/evaluator_source_ce4a9188149661ea.orna"),
             &Environment::new(),
             Limits::default(),
         )),
         "ORNA-EVAL-DIVIDE-BY-ZERO"
     );
     for (expression, expected) in [
-        ("sort_by([1], 1)", "ORNA-EVAL-TYPE"),
-        ("sort_by([1], value => [value])", "ORNA-EVAL-TYPE"),
-        ("sort_by([1])", "ORNA-EVAL-UNSUPPORTED"),
         (
-            "sort_by([1, 2], value => if value == 1 { value } else { \"x\" })",
+            include_str!("fixtures/evaluator_source_4690c4ca94c8f086.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_079f95753cbecd2a.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_b774925ab66747b8.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_f83a31beaa326165.orna"),
             "ORNA-EVAL-TYPE",
         ),
     ] {
@@ -5463,7 +6174,7 @@ fn std_collection_sort_by_evaluates_callbacks_before_sorting_and_fails_closed() 
     }
     assert_eq!(
         code(evaluate_expression(
-            "sort_by([1, 2, 3], value => value)",
+            include_str!("fixtures/evaluator_source_bdafaea55e8b59fc.orna"),
             &Environment::new(),
             Limits {
                 max_collection_items: 2,
@@ -5474,7 +6185,7 @@ fn std_collection_sort_by_evaluates_callbacks_before_sorting_and_fails_closed() 
     );
     assert_eq!(
         code(evaluate_expression(
-            "sort_by([1], value => value)",
+            include_str!("fixtures/evaluator_source_5031c805969a8477.orna"),
             &Environment::new(),
             Limits {
                 max_steps: 1,
@@ -5508,7 +6219,7 @@ fn root_map_names_remain_shadowable_by_admitted_functions_and_locals() {
     assert_eq!(
         call_module(
             include_str!("fixtures/root_map_shadow_function.orna"),
-            "run()",
+            include_str!("fixtures/evaluator_source_02fcae88bd120f59.orna"),
             Limits::default(),
         )
         .unwrap(),
@@ -5516,7 +6227,7 @@ fn root_map_names_remain_shadowable_by_admitted_functions_and_locals() {
     );
     assert_eq!(
         evaluate_expression(
-            "if true { let map = value => value + 100; map(1) } else { 0 }",
+            include_str!("fixtures/evaluator_source_9e43af7609aa5939.orna"),
             &Environment::new(),
             Limits::default(),
         )
@@ -5528,8 +6239,8 @@ fn root_map_names_remain_shadowable_by_admitted_functions_and_locals() {
 #[test]
 fn std_collection_map_and_flat_map_propagate_callback_errors() {
     for expression in [
-        "std.collection.map([1, 0, 2], value => 10 / value)",
-        "std.collection.flat_map([1, 0, 2], value => [10 / value])",
+        include_str!("fixtures/evaluator_source_910365d3ce0990a5.orna"),
+        include_str!("fixtures/evaluator_source_1bd54413846d6ace.orna"),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -5544,7 +6255,7 @@ fn std_collection_map_and_flat_map_propagate_callback_errors() {
     assert_eq!(
         code(call_module(
             include_str!("fixtures/map_invalid_callback.orna"),
-            "run()",
+            include_str!("fixtures/evaluator_source_02fcae88bd120f59.orna"),
             Limits::default(),
         )),
         "ORNA-EVAL-ARGUMENT"
@@ -5554,20 +6265,38 @@ fn std_collection_map_and_flat_map_propagate_callback_errors() {
 #[test]
 fn std_collection_map_and_flat_map_reject_invalid_inputs_and_outputs() {
     for (expression, expected) in [
-        ("std.collection.map(1, value => value)", "ORNA-EVAL-TYPE"),
-        ("std.collection.map([1], 1)", "ORNA-EVAL-TYPE"),
-        ("std.collection.map([1])", "ORNA-EVAL-UNSUPPORTED"),
-        ("std.collection.map([1], () => 1)", "ORNA-EVAL-ARGUMENT"),
         (
-            "std.collection.flat_map(1, value => [value])",
+            include_str!("fixtures/evaluator_source_432e15781f64c7e8.orna"),
             "ORNA-EVAL-TYPE",
         ),
-        ("std.collection.flat_map([1], 1)", "ORNA-EVAL-TYPE"),
         (
-            "std.collection.flat_map([1], value => value)",
+            include_str!("fixtures/evaluator_source_418f8868f06bcdb4.orna"),
             "ORNA-EVAL-TYPE",
         ),
-        ("std.collection.flat_map([1])", "ORNA-EVAL-UNSUPPORTED"),
+        (
+            include_str!("fixtures/evaluator_source_0a9431506042fe49.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_201b020420f0627c.orna"),
+            "ORNA-EVAL-ARGUMENT",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_f46d03addce5ed29.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_e50bb995e1ac2af6.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_d1da638edbdc9c3f.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_8a6e8511aa5ff923.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -5585,7 +6314,7 @@ fn std_collection_map_and_flat_map_reject_invalid_inputs_and_outputs() {
 fn std_collection_map_and_flat_map_enforce_collection_limits() {
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.map([1, 2, 3], value => value)",
+            include_str!("fixtures/evaluator_source_401a69f4eaecb1c1.orna"),
             &Environment::new(),
             Limits {
                 max_collection_items: 2,
@@ -5596,7 +6325,7 @@ fn std_collection_map_and_flat_map_enforce_collection_limits() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.flat_map([1, 2], value => [value, value])",
+            include_str!("fixtures/evaluator_source_b8a9d85181583c56.orna"),
             &Environment::new(),
             Limits {
                 max_collection_items: 3,
@@ -5611,7 +6340,12 @@ fn std_collection_map_and_flat_map_enforce_collection_limits() {
 fn std_collection_split_when_accepts_functions_and_enforces_limits() {
     let source = include_str!("fixtures/split_when_callbacks.orna");
     assert_eq!(
-        call_module(source, "function_callback()", Limits::default()).unwrap(),
+        call_module(
+            source,
+            include_str!("fixtures/evaluator_source_202b94d3ded70909.orna"),
+            Limits::default()
+        )
+        .unwrap(),
         Value::new(Raw::Array(vec![
             Raw::Array(vec![Raw::Int(1.into())]),
             Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
@@ -5622,7 +6356,7 @@ fn std_collection_split_when_accepts_functions_and_enforces_limits() {
     assert_eq!(
         code(call_module(
             source,
-            "callback_arity_is_checked()",
+            include_str!("fixtures/evaluator_source_88b5c516109064c8.orna"),
             Limits::default(),
         )),
         "ORNA-EVAL-ARGUMENT"
@@ -5650,14 +6384,22 @@ fn std_collection_split_when_rejects_invalid_callback_calls() {
         ("callback_arity_is_checked()", "ORNA-EVAL-ARGUMENT"),
         ("extra_argument()", "ORNA-EVAL-UNSUPPORTED"),
     ] {
-        assert_eq!(code(call_module(source, function, Limits::default())), expected);
+        assert_eq!(
+            code(call_module(source, function, Limits::default())),
+            expected
+        );
     }
 }
 #[test]
 fn std_collection_split_when_preserves_order_and_omits_empty_groups() {
     let source = include_str!("fixtures/split_when_callbacks.orna");
     assert_eq!(
-        call_module(source, "odd_runs()", Limits::default()).unwrap(),
+        call_module(
+            source,
+            include_str!("fixtures/evaluator_source_b04f6c9572c80d12.orna"),
+            Limits::default()
+        )
+        .unwrap(),
         Value::new(Raw::Array(vec![
             Raw::Array(vec![Raw::Int(3.into()), Raw::Int(1.into())]),
             Raw::Array(vec![Raw::Int(2.into())]),
@@ -5666,7 +6408,12 @@ fn std_collection_split_when_preserves_order_and_omits_empty_groups() {
         .unwrap()
     );
     assert_eq!(
-        call_module(source, "begins_with_boundary()", Limits::default()).unwrap(),
+        call_module(
+            source,
+            include_str!("fixtures/evaluator_source_e70131b920965fe2.orna"),
+            Limits::default()
+        )
+        .unwrap(),
         Value::new(Raw::Array(vec![
             Raw::Array(vec![Raw::Int(2.into())]),
             Raw::Array(vec![Raw::Int(4.into()), Raw::Int(5.into())]),
@@ -5674,7 +6421,12 @@ fn std_collection_split_when_preserves_order_and_omits_empty_groups() {
         .unwrap()
     );
     assert_eq!(
-        call_module(source, "empty_skips_callback()", Limits::default()).unwrap(),
+        call_module(
+            source,
+            include_str!("fixtures/evaluator_source_ff7d258da6b05c0e.orna"),
+            Limits::default()
+        )
+        .unwrap(),
         Value::new(Raw::Array(vec![])).unwrap()
     );
 }
@@ -5683,7 +6435,12 @@ fn std_collection_split_when_preserves_order_and_omits_empty_groups() {
 fn std_collection_split_when_requires_bool_and_propagates_callback_failures() {
     let source = include_str!("fixtures/split_when_callbacks.orna");
     assert_eq!(
-        call_module(source, "splits_at_two()", Limits::default()).unwrap(),
+        call_module(
+            source,
+            include_str!("fixtures/evaluator_source_edd19653a14ea50e.orna"),
+            Limits::default()
+        )
+        .unwrap(),
         Value::new(Raw::Array(vec![
             Raw::Array(vec![Raw::Int(1.into())]),
             Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
@@ -5693,7 +6450,7 @@ fn std_collection_split_when_requires_bool_and_propagates_callback_failures() {
     assert_eq!(
         code(call_module(
             source,
-            "callback_result_must_be_bool()",
+            include_str!("fixtures/evaluator_source_74445860bb3f4f2d.orna"),
             Limits::default(),
         )),
         "ORNA-EVAL-TYPE"
@@ -5701,7 +6458,7 @@ fn std_collection_split_when_requires_bool_and_propagates_callback_failures() {
     assert_eq!(
         code(call_module(
             source,
-            "callback_failure_propagates()",
+            include_str!("fixtures/evaluator_source_4325fc3987edad59.orna"),
             Limits::default(),
         )),
         "ORNA-EVAL-DIVIDE-BY-ZERO"
@@ -5709,7 +6466,8 @@ fn std_collection_split_when_requires_bool_and_propagates_callback_failures() {
 }
 
 #[test]
-fn std_collection_split_when_debits_one_step_per_scanned_value_without_duplicate_traversal_charging() {
+fn std_collection_split_when_debits_one_step_per_scanned_value_without_duplicate_traversal_charging(
+) {
     let expression = include_str!("fixtures/split_when_step_budget.orna").trim();
     assert_eq!(
         code(evaluate_expression(
@@ -5750,7 +6508,12 @@ fn std_collection_split_when_debits_one_step_per_scanned_value_without_duplicate
 fn std_collection_group_by_accepts_functions_and_enforces_limits() {
     let source = include_str!("fixtures/group_by_callbacks.orna");
     assert_eq!(
-        call_module(source, "function_callback()", Limits::default()).unwrap(),
+        call_module(
+            source,
+            include_str!("fixtures/evaluator_source_202b94d3ded70909.orna"),
+            Limits::default()
+        )
+        .unwrap(),
         Value::new(Raw::Array(vec![
             Raw::Array(vec![
                 Raw::Int(0.into()),
@@ -5785,14 +6548,22 @@ fn std_collection_group_by_rejects_invalid_callback_calls() {
         ("array_key_is_rejected()", "ORNA-EVAL-TYPE"),
         ("extra_argument()", "ORNA-EVAL-UNSUPPORTED"),
     ] {
-        assert_eq!(code(call_module(source, function, Limits::default())), expected);
+        assert_eq!(
+            code(call_module(source, function, Limits::default())),
+            expected
+        );
     }
 }
 #[test]
 fn std_collection_group_by_sorts_keys_and_preserves_input_row_order() {
     let source = include_str!("fixtures/group_by_callbacks.orna");
     assert_eq!(
-        call_module(source, "sorted_keys_and_stable_rows()", Limits::default()).unwrap(),
+        call_module(
+            source,
+            include_str!("fixtures/evaluator_source_513a93d1e303cb37.orna"),
+            Limits::default()
+        )
+        .unwrap(),
         Value::new(Raw::Array(vec![
             Raw::Array(vec![
                 Raw::Int(0.into()),
@@ -5820,7 +6591,7 @@ fn std_collection_group_by_empty_input_does_not_invoke_key_callback() {
     assert_eq!(
         call_module(
             include_str!("fixtures/group_by_callbacks.orna"),
-            "empty_skips_callback()",
+            include_str!("fixtures/evaluator_source_ff7d258da6b05c0e.orna"),
             Limits::default(),
         )
         .unwrap(),
@@ -5832,8 +6603,8 @@ fn std_collection_group_by_empty_input_does_not_invoke_key_callback() {
 fn std_collection_group_by_requires_lawful_keys_and_propagates_callback_failures() {
     let source = include_str!("fixtures/group_by_callbacks.orna");
     for expression in [
-        "array_key_is_rejected()",
-        "mixed_key_is_rejected()",
+        include_str!("fixtures/evaluator_source_7a273d73456bb1dc.orna"),
+        include_str!("fixtures/evaluator_source_4ae33d119b7ce637.orna"),
     ] {
         assert_eq!(
             code(call_module(source, expression, Limits::default())),
@@ -5842,13 +6613,18 @@ fn std_collection_group_by_requires_lawful_keys_and_propagates_callback_failures
         );
     }
     assert_eq!(
-        code(call_module(source, "callback_failure_propagates()", Limits::default())),
+        code(call_module(
+            source,
+            include_str!("fixtures/evaluator_source_4325fc3987edad59.orna"),
+            Limits::default()
+        )),
         "ORNA-EVAL-DIVIDE-BY-ZERO"
     );
 }
 
 #[test]
-fn std_collection_group_by_debits_one_step_per_scanned_value_without_duplicate_traversal_charging() {
+fn std_collection_group_by_debits_one_step_per_scanned_value_without_duplicate_traversal_charging()
+{
     let expression = include_str!("fixtures/group_by_step_budget.orna").trim();
     assert_eq!(
         code(evaluate_expression(
@@ -5895,7 +6671,12 @@ fn std_collection_group_by_debits_one_step_per_scanned_value_without_duplicate_t
 fn recursive_calls_terminate_or_hit_shared_limits() {
     let source = include_str!("fixtures/recursive_calls_limits.orna");
     assert_eq!(
-        call_module(source, "factorial(5)", Limits::default()).unwrap(),
+        call_module(
+            source,
+            include_str!("fixtures/evaluator_source_cd601da1e7790ede.orna"),
+            Limits::default()
+        )
+        .unwrap(),
         Value::int(120.into())
     );
     for limits in [
@@ -5909,7 +6690,11 @@ fn recursive_calls_terminate_or_hit_shared_limits() {
         },
     ] {
         assert_eq!(
-            code(call_module(source, "recur()", limits)),
+            code(call_module(
+                source,
+                include_str!("fixtures/evaluator_source_8d21addf01057c91.orna"),
+                limits
+            )),
             "ORNA-EVAL-LIMIT"
         );
     }
@@ -5917,7 +6702,7 @@ fn recursive_calls_terminate_or_hit_shared_limits() {
     assert_eq!(
         code(call_module(
             source,
-            "combined()",
+            include_str!("fixtures/evaluator_source_7c4d08bed4062b43.orna"),
             Limits {
                 max_steps: 6,
                 ..Limits::default()
@@ -6008,9 +6793,9 @@ fn function_argument_admission_precedes_default_evaluation_and_redacts_errors() 
 
 #[test]
 fn evaluates_literals_collections_bindings_and_math() {
-    let value = evaluate(
-        "if true { let point = (std.math.increment(1), 2.5, 3.0f); { label: \"ok\", values: [point, null, true] } }",
-    );
+    let value = evaluate(include_str!(
+        "fixtures/evaluator_source_f515a0858442de8e.orna"
+    ));
     assert_eq!(
         value.raw(),
         &Raw::Map(vec![
@@ -6037,10 +6822,22 @@ fn evaluates_literals_collections_bindings_and_math() {
 #[test]
 fn evaluates_canonical_date_literals_at_boundaries_and_leap_days() {
     for (source, expected) in [
-        ("0001-01-01", "0001-01-01"),
-        ("2000-02-29", "2000-02-29"),
-        ("2024-02-29", "2024-02-29"),
-        ("9999-12-31", "9999-12-31"),
+        (
+            include_str!("fixtures/evaluator_source_adc54d5a38b33a0c.orna"),
+            "0001-01-01",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_ca1d2f9066774e9f.orna"),
+            "2000-02-29",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_2b65ec6936440686.orna"),
+            "2024-02-29",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_524be55b2827968f.orna"),
+            "9999-12-31",
+        ),
     ] {
         assert_eq!(
             evaluate(source).raw(),
@@ -6053,7 +6850,10 @@ fn evaluates_canonical_date_literals_at_boundaries_and_leap_days() {
 #[test]
 fn date_literals_preserve_the_canonical_value_inside_collections_and_records() {
     assert_eq!(
-        evaluate("[2024-02-29, {day: 9999-12-31}]").raw(),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_826acb6aac0f18ac.orna"
+        ))
+        .raw(),
         &Raw::Array(vec![
             Raw::Tag(60001, Box::new(Raw::Text("2024-02-29".into()))),
             Raw::Map(vec![(
@@ -6063,14 +6863,21 @@ fn date_literals_preserve_the_canonical_value_inside_collections_and_records() {
         ])
     );
     assert_eq!(
-        evaluate("2024-02-29 == 2024-02-29"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_3cd5997caf2fd8a1.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
 }
 
 #[test]
 fn malformed_date_is_rejected_lexically_before_evaluator_execution() {
-    for source in ["0000-01-01", "2024-02-30", "2023-02-29", "2024-13-01"] {
+    for source in [
+        include_str!("fixtures/evaluator_source_f7ed140174423d1f.orna"),
+        include_str!("fixtures/evaluator_source_1ff48d7df09be03f.orna"),
+        include_str!("fixtures/evaluator_source_468dbb10858c5ece.orna"),
+        include_str!("fixtures/evaluator_source_3e40fb8129a17400.orna"),
+    ] {
         let errors = lex(source).expect_err("calendar-invalid input must fail lexing");
         assert!(
             errors.iter().any(|error| error.code == "ORNA-LEX-007"),
@@ -6103,7 +6910,10 @@ fn malformed_date_is_rejected_lexically_before_evaluator_execution() {
 
 #[test]
 fn date_token_class_is_disjoint_from_decimal_and_float_tokens() {
-    let tokens = lex("2024-02-29 1.0 1.0f").unwrap();
+    let tokens = lex(include_str!(
+        "fixtures/evaluator_source_b3fec7d3630420af.orna"
+    ))
+    .unwrap();
     assert_eq!(tokens[0].kind, TokenKind::Date);
     assert_eq!(tokens[1].kind, TokenKind::Decimal);
     assert_eq!(tokens[2].kind, TokenKind::Float);
@@ -6112,10 +6922,26 @@ fn date_token_class_is_disjoint_from_decimal_and_float_tokens() {
 #[test]
 fn instant_literals_normalize_offsets_and_emit_canonical_utc_components() {
     for (source, seconds, nanosecond) in [
-        ("2024-02-29T00:00:00Z", 1_709_164_800, 0),
-        ("2024-02-29T00:00:00.1+05:30", 1_709_145_000, 100_000_000),
-        ("2024-02-28T18:30:00-05:30", 1_709_164_800, 0),
-        ("1969-12-31T23:59:59.1Z", -1, 100_000_000),
+        (
+            include_str!("fixtures/evaluator_source_a7e105d1baa0abd2.orna"),
+            1_709_164_800,
+            0,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_56329e5f93b4688d.orna"),
+            1_709_145_000,
+            100_000_000,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_ac37e0796e6bf49a.orna"),
+            1_709_164_800,
+            0,
+        ),
+        (
+            include_str!("fixtures/evaluator_source_d6e461af6345c009.orna"),
+            -1,
+            100_000_000,
+        ),
     ] {
         assert_eq!(
             evaluate(source).raw(),
@@ -6134,15 +6960,21 @@ fn instant_literals_normalize_offsets_and_emit_canonical_utc_components() {
 #[test]
 fn instant_literals_compare_by_normalized_utc_second_and_nanosecond() {
     assert_eq!(
-        evaluate("2024-02-29T00:00:00Z == 2024-02-29T05:30:00+05:30"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_1a4b3242a98785a8.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
-        evaluate("1970-01-01T00:00:00.000000001Z < 1970-01-01T00:00:01Z"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_8ae6482c2e672359.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
-        evaluate("1970-01-01T00:00:00.123456789Z > 1970-01-01T00:00:00.123456788Z"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_34252f22d4a11ef5.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
 }
@@ -6150,7 +6982,10 @@ fn instant_literals_compare_by_normalized_utc_second_and_nanosecond() {
 #[test]
 fn instant_literals_preserve_precision_nesting_and_canonical_environment_values() {
     assert_eq!(
-        evaluate("[1970-01-01T00:00:00Z, {instant: 1970-01-01T00:00:00.123456789Z}]").raw(),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_bccef0376f2ce331.orna"
+        ))
+        .raw(),
         &Raw::Array(vec![
             Raw::Tag(
                 60002,
@@ -6178,9 +7013,13 @@ fn instant_literals_preserve_precision_nesting_and_canonical_environment_values(
         .unwrap(),
     )]);
     assert_eq!(
-        evaluate_expression("instant", &environment, Limits::default())
-            .unwrap()
-            .raw(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_618dc58379dda348.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap()
+        .raw(),
         &Raw::Tag(
             60002,
             Box::new(Raw::Array(vec![Raw::Int((-1).into()), Raw::Int(1.into())])),
@@ -6191,11 +7030,11 @@ fn instant_literals_preserve_precision_nesting_and_canonical_environment_values(
 #[test]
 fn malformed_instant_literals_and_canonical_components_fail_closed() {
     for source in [
-        "2024-02-29T24:00:00Z",
-        "2024-02-29T12:60:00Z",
-        "2024-02-29T12:00:60Z",
-        "2024-02-29T12:00:00.1234567890Z",
-        "2024-02-29T12:00:00+24:00",
+        include_str!("fixtures/evaluator_source_ae0f16f72284adc0.orna"),
+        include_str!("fixtures/evaluator_source_74c08e61c3723b36.orna"),
+        include_str!("fixtures/evaluator_source_c3b7dc7899695f11.orna"),
+        include_str!("fixtures/evaluator_source_f2a71bd8fb5ee40a.orna"),
+        include_str!("fixtures/evaluator_source_43a5c745044ab627.orna"),
     ] {
         let errors = lex(source).expect_err("malformed instant must fail lexing");
         assert!(
@@ -6255,7 +7094,7 @@ fn malformed_instant_literals_and_canonical_components_fail_closed() {
     )]);
     assert_eq!(
         code(evaluate_expression(
-            "instant",
+            include_str!("fixtures/evaluator_source_618dc58379dda348.orna"),
             &environment,
             Limits::default()
         )),
@@ -6286,17 +7125,31 @@ fn canonical_duration_environment_values_round_trip_and_compare() {
     ]);
 
     assert_eq!(
-        evaluate_expression("duration", &environment, Limits::default())
-            .unwrap()
-            .raw(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_caa79af4db67695c.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap()
+        .raw(),
         &duration
     );
     assert_eq!(
-        evaluate_expression("duration == same", &environment, Limits::default()).unwrap(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_6c13657c58f566b6.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
-        evaluate_expression("duration < later", &environment, Limits::default()).unwrap(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_63cc6ed61ba3449e.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
         Value::new(Raw::Bool(true)).unwrap()
     );
 }
@@ -6329,15 +7182,24 @@ fn uses_environment_and_short_circuiting_deterministically() {
     let mut environment = BTreeMap::new();
     environment.insert("count".into(), Value::int(41.into()));
     assert_eq!(
-        evaluate_expression("count + 1", &environment, Limits::default()).unwrap(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_bce879f251fac0a3.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
         Value::int(42.into())
     );
     assert_eq!(
-        evaluate("false && missing"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_44973f0f388fe157.orna"
+        )),
         Value::new(Raw::Bool(false)).unwrap()
     );
     assert_eq!(
-        evaluate("true || missing"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_cfe289350b2c847e.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
 }
@@ -6349,39 +7211,64 @@ fn coalesces_present_and_missing_optional_values_without_evaluating_dead_rhs() {
         Value::option(Some(Value::int(7.into()))).unwrap(),
     )]);
     assert_eq!(
-        evaluate_expression("present ?? missing", &environment, Limits::default()).unwrap(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_422a520b9411f989.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
         Value::int(7.into())
     );
 
     environment.insert("missing".into(), Value::option(None).unwrap());
     assert_eq!(
-        evaluate_expression("missing ?? 9", &environment, Limits::default()).unwrap(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_8773b21b48928663.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
         Value::int(9.into())
     );
-    assert_eq!(evaluate("null ?? 11"), Value::int(11.into()));
+    assert_eq!(
+        evaluate(include_str!(
+            "fixtures/evaluator_source_55d19da6881f03fa.orna"
+        )),
+        Value::int(11.into())
+    );
 }
 
 #[test]
 fn supports_comparison_boolean_and_allowlisted_math() {
     assert_eq!(
-        evaluate(
-            "std.math.clamp(9, 0, 5) == std.math.max(3, 5) && std.math.is_zero(std.math.decrement(1))"
-        ),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_72f3fbd4b9a83d7f.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
-        evaluate("1.25 + 0.75"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_26c4e6931ce2f32d.orna"
+        )),
         Value::decimal(2.into(), 0.into()).unwrap()
     );
     assert_eq!(
-        evaluate("{ alphabet: 1, z: 2 }").raw(),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_deaea0aa29364d80.orna"
+        ))
+        .raw(),
         &Raw::Map(vec![
             (Raw::Text("z".into()), Raw::Int(2.into())),
             (Raw::Text("alphabet".into()), Raw::Int(1.into())),
         ])
     );
     assert_eq!(
-        evaluate_repl("std.math.min(7, 3)", &Environment::new(), Limits::default()).unwrap(),
+        evaluate_repl(
+            include_str!("fixtures/evaluator_source_a74cde488702839d.orna"),
+            &Environment::new(),
+            Limits::default()
+        )
+        .unwrap(),
         Value::int(3.into())
     );
 }
@@ -6389,17 +7276,21 @@ fn supports_comparison_boolean_and_allowlisted_math() {
 #[test]
 fn evaluates_selection_indexing_named_calls_and_case_patterns() {
     assert_eq!(
-        evaluate(
-            "{ point: { x: 7 }, values: [3, 5] }.point.x + { point: { x: 7 }, values: [3, 5] }.values[1]"
-        ),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_27d35071af18c124.orna"
+        )),
         Value::int(12.into())
     );
     assert_eq!(
-        evaluate("std.math.clamp(max: 5, value: 9, min: 0)"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_1f7dca301d1c5d0c.orna"
+        )),
         Value::int(5.into())
     );
     assert_eq!(
-        evaluate("case [2, 3] { [left, right] if left < right: right, _: 0 }"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_677e65e055b673ad.orna"
+        )),
         Value::int(3.into())
     );
     let span = SyntaxSpan::new(0, 0);
@@ -6445,17 +7336,26 @@ fn evaluates_selection_indexing_named_calls_and_case_patterns() {
 #[test]
 fn evaluates_local_assignments_and_finite_list_for_mutations() {
     assert_eq!(
-        evaluate("if true { let total = 0; for value in [1, 2, 3] { total += value; }; total }"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_106867567dd44a96.orna"
+        )),
         Value::int(6.into())
     );
     assert_eq!(
-        evaluate("if true { let total = 0; if true { total = 4; }; total }"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_7c11be126271719b.orna"
+        )),
         Value::int(4.into())
     );
-    assert_eq!(evaluate("if true { assert true; 5 }"), Value::int(5.into()));
+    assert_eq!(
+        evaluate(include_str!(
+            "fixtures/evaluator_source_6da1c113b573586a.orna"
+        )),
+        Value::int(5.into())
+    );
     assert_eq!(
         code(evaluate_expression(
-            "if true { assert false; 5 }",
+            include_str!("fixtures/evaluator_source_b35b624ee9f77627.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -6463,7 +7363,7 @@ fn evaluates_local_assignments_and_finite_list_for_mutations() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "if true { let total = 0; for value in 1 { total += value; }; total }",
+            include_str!("fixtures/evaluator_source_8c330863e501bce6.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -6475,7 +7375,7 @@ fn evaluates_local_assignments_and_finite_list_for_mutations() {
 fn executes_function_and_finite_for_control_transfers() {
     assert_eq!(
         invoke(
-            "fn early() { return 7; 9 }",
+            include_str!("fixtures/evaluator_source_463da97844a9a28a.orna"),
             &Environment::new(),
             Limits::default(),
         )
@@ -6483,21 +7383,21 @@ fn executes_function_and_finite_for_control_transfers() {
         Value::int(7.into())
     );
     assert_eq!(
-        evaluate(
-            "if true { let total = 0; for value in [1, 2, 3, 4] { total += value; if value == 2 { break; }; }; total }"
-        ),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_43c5f3a105661ef7.orna"
+        )),
         Value::int(3.into())
     );
     assert_eq!(
-        evaluate(
-            "if true { let total = 0; for value in 1..=4 { if value == 2 { continue; }; total += value; }; total }"
-        ),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_2d9db4436a6b54da.orna"
+        )),
         Value::int(8.into())
     );
     assert_eq!(
-        evaluate(
-            "if true { let total = 0; for outer in [1, 2] { for inner in [1, 2] { if inner == 1 { continue; }; total += outer; break; }; }; total }"
-        ),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_2a81ac3000595682.orna"
+        )),
         Value::int(3.into())
     );
 }
@@ -6505,25 +7405,27 @@ fn executes_function_and_finite_for_control_transfers() {
 #[test]
 fn finite_for_break_values_stop_iteration_and_preserve_loop_boundaries() {
     assert_eq!(
-        evaluate(
-            "if true { let total = 0; let result = for value in [1, 2, 3] { if value == 2 { break value * 10; }; total += value; }; [result, total] }"
-        ),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_9da6c1c2e096c068.orna"
+        )),
         Value::new(Raw::Array(vec![Raw::Int(20.into()), Raw::Int(1.into())])).unwrap()
     );
     assert_eq!(
-        evaluate(
-            "if true { let total = 0; for outer in [1, 2] { let inner = for value in [1, 2] { if value == 2 { break outer * 10; }; total += 1; }; total += inner; }; total }"
-        ),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_7d54e4bbec351331.orna"
+        )),
         Value::int(32.into())
     );
     assert_eq!(
-        evaluate("if true { let result = for value in [1, 2, 3] { value; }; result }"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_78fd575f097b5db7.orna"
+        )),
         Value::unit()
     );
     assert_eq!(
-        evaluate(
-            "if true { let result = for value in [1, 2, 3] { if value == 2 { break; }; }; result }"
-        ),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_5dbc29f7fd954a1b.orna"
+        )),
         Value::unit()
     );
     assert_eq!(
@@ -6544,15 +7446,15 @@ fn finite_for_break_values_stop_iteration_and_preserve_loop_boundaries() {
 fn transfer_boundaries_reject_loop_transfers_from_a_called_lambda() {
     assert_eq!(
         code(call_module(
-            "fn outer() { for value in [1] { let stop = () => { break; }; stop(); }; 0 }",
-            "outer()",
+            include_str!("fixtures/evaluator_source_75b90831c0aec9b8.orna"),
+            include_str!("fixtures/evaluator_source_71b55c11c5bc130b.orna"),
             Limits::default(),
         )),
         "ORNA-EVAL-UNSUPPORTED"
     );
     assert_eq!(
         code(evaluate_expression(
-            "if true { return 1; 0 }",
+            include_str!("fixtures/evaluator_source_c08c8fecfa405906.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -6564,7 +7466,7 @@ fn transfer_boundaries_reject_loop_transfers_from_a_called_lambda() {
 fn fail_argument_propagates_a_return_transfer_before_error_matching() {
     assert_eq!(
         invoke(
-            "fn run() = fail(if true { return 7; } else { 0 });",
+            include_str!("fixtures/evaluator_source_9c3cfdf2de7cb949.orna"),
             &Environment::new(),
             Limits::default(),
         )
@@ -6590,14 +7492,46 @@ fn integer_ranges_are_canonical_membership_values_and_finite_iterables() {
         ])),
     ))
     .unwrap();
-    assert_eq!(evaluate("1..5"), half_open);
-    assert_eq!(evaluate("1 in 1..5"), Value::new(Raw::Bool(true)).unwrap());
-    assert_eq!(evaluate("5 in 1..5"), Value::new(Raw::Bool(false)).unwrap());
-    assert_eq!(evaluate("5 in 1..=5"), Value::new(Raw::Bool(true)).unwrap());
-    assert_eq!(evaluate("-1 in ..5"), Value::new(Raw::Bool(true)).unwrap());
-    assert_eq!(evaluate("5 in 5.."), Value::new(Raw::Bool(true)).unwrap());
     assert_eq!(
-        evaluate("5..1"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_37b73cdcf7d53e07.orna"
+        )),
+        half_open
+    );
+    assert_eq!(
+        evaluate(include_str!(
+            "fixtures/evaluator_source_17ed6c2a56eae7c1.orna"
+        )),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate(include_str!(
+            "fixtures/evaluator_source_452a79b3d5b67727.orna"
+        )),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    assert_eq!(
+        evaluate(include_str!(
+            "fixtures/evaluator_source_9a0520b884def24f.orna"
+        )),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate(include_str!(
+            "fixtures/evaluator_source_3980c88d94c7835d.orna"
+        )),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate(include_str!(
+            "fixtures/evaluator_source_43f964c89131535f.orna"
+        )),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate(include_str!(
+            "fixtures/evaluator_source_ed7bad50b35c8d9e.orna"
+        )),
         Value::new(Raw::Tag(
             60019,
             Box::new(Raw::Array(vec![
@@ -6615,22 +7549,31 @@ fn integer_ranges_are_canonical_membership_values_and_finite_iterables() {
         .unwrap()
     );
     assert_eq!(
-        evaluate("if true { let total = 0; for value in 1..5 { total += value; }; total }"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_ce844aa56351e69f.orna"
+        )),
         Value::int(10.into())
     );
     assert_eq!(
-        evaluate("if true { let total = 0; for value in 1..=5 { total += value; }; total }"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_9f7828018a344680.orna"
+        )),
         Value::int(15.into())
     );
     assert_eq!(
-        evaluate("if true { let total = 0; for value in 5..1 { total += value; }; total }"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_23ea1d8e02403498.orna"
+        )),
         Value::int(0.into())
     );
 }
 
 #[test]
 fn integer_ranges_reject_unsupported_forms_and_obey_finite_limits() {
-    for source in ["1 in 1.0f..5.0f", "1 in 1..5.0f"] {
+    for source in [
+        include_str!("fixtures/evaluator_source_470fd21e4087497e.orna"),
+        include_str!("fixtures/evaluator_source_abb2071d9454b942.orna"),
+    ] {
         assert_eq!(
             code(evaluate_expression(
                 source,
@@ -6643,7 +7586,7 @@ fn integer_ranges_reject_unsupported_forms_and_obey_finite_limits() {
     }
     assert_eq!(
         code(evaluate_expression(
-            "if true { for value in 0..3 { value }; 0 }",
+            include_str!("fixtures/evaluator_source_2644008e0118307d.orna"),
             &Environment::new(),
             Limits {
                 max_collection_items: 2,
@@ -6666,19 +7609,26 @@ fn integer_ranges_reject_unsupported_forms_and_obey_finite_limits() {
     .unwrap();
     let environment = Environment::from([("range".into(), unbounded)]);
     assert_eq!(
-        evaluate_expression("-1 in range", &environment, Limits::default()).unwrap(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_943497eb7d9e7718.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
         code(evaluate_expression(
-            "if true { for value in range { value }; 0 }",
+            include_str!("fixtures/evaluator_source_396ee5df0322c5ae.orna"),
             &environment,
             Limits::default(),
         )),
         "ORNA-EVAL-TYPE"
     );
     assert_eq!(
-        evaluate("..5"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_02c5ba4d3acff059.orna"
+        )),
         Value::new(Raw::Tag(
             60019,
             Box::new(Raw::Array(vec![
@@ -6855,36 +7805,58 @@ fn duration_range_big(
 #[test]
 fn decimal_ranges_are_canonical_membership_values_with_optional_bounds_and_ordering() {
     let half_open = decimal_range(Some((125, -2)), Some((25, -1)), false);
-    assert_eq!(evaluate("1.25..2.5"), half_open);
     assert_eq!(
-        evaluate("1.25 in 1.25..2.5"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_af97fb51fa47b448.orna"
+        )),
+        half_open
+    );
+    assert_eq!(
+        evaluate(include_str!(
+            "fixtures/evaluator_source_169881bf25db61e3.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
-        evaluate("2.5 in 1.25..2.5"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_021e12f0e8a9ba60.orna"
+        )),
         Value::new(Raw::Bool(false)).unwrap()
     );
     assert_eq!(
-        evaluate("2.5 in 1.25..=2.5"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_c5a7e544a08bd7c1.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
-        evaluate("-1.0 in ..1.25"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_a3062491c8ab5903.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
-        evaluate("3.0 in 2.5.."),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_405044db70183153.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
-        evaluate("(1.25..2.5) < (1.5..2.5)"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_60965ca413f04340.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
 
     let environment =
         Environment::from([("range".into(), decimal_range(None, Some((125, -2)), false))]);
     assert_eq!(
-        evaluate_expression("range", &environment, Limits::default()).unwrap(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_2269c0be009b610c.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
         decimal_range(None, Some((125, -2)), false)
     );
 }
@@ -6892,21 +7864,25 @@ fn decimal_ranges_are_canonical_membership_values_with_optional_bounds_and_order
 #[test]
 fn decimal_ranges_allow_empty_values_but_reject_mixed_types_and_iteration() {
     assert_eq!(
-        evaluate("1.25 in 1.25..1.25"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_3dc021a26396f62d.orna"
+        )),
         Value::new(Raw::Bool(false)).unwrap()
     );
     assert_eq!(
-        evaluate("1.25 in 2.5..1.25"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_6988f6da1bbac15c.orna"
+        )),
         Value::new(Raw::Bool(false)).unwrap()
     );
     for source in [
-        "1.25..2",
-        "1.25 in 1.25..2",
-        "1 in 1.25..2.5",
-        "2024-02-01..2.5",
-        "2024-02-01T00:00:00Z..2.5",
-        "(..1.25) < (1..)",
-        "sort_by([(..1.25), (1..)], value => value)",
+        include_str!("fixtures/evaluator_source_8a624a4f56bc08d4.orna"),
+        include_str!("fixtures/evaluator_source_6a6456f040c1501e.orna"),
+        include_str!("fixtures/evaluator_source_a0ce09ead08ccbe2.orna"),
+        include_str!("fixtures/evaluator_source_145a9ee6e3d386e0.orna"),
+        include_str!("fixtures/evaluator_source_9e5de317f77b6b72.orna"),
+        include_str!("fixtures/evaluator_source_e1e683920b7fd8fd.orna"),
+        include_str!("fixtures/evaluator_source_a2f239357c679d28.orna"),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -6924,7 +7900,7 @@ fn decimal_ranges_allow_empty_values_but_reject_mixed_types_and_iteration() {
     )]);
     assert_eq!(
         code(evaluate_expression(
-            "if true { for value in range { value }; 0 }",
+            include_str!("fixtures/evaluator_source_396ee5df0322c5ae.orna"),
             &environment,
             Limits::default(),
         )),
@@ -6935,25 +7911,40 @@ fn decimal_ranges_allow_empty_values_but_reject_mixed_types_and_iteration() {
 #[test]
 fn float_ranges_support_finite_membership_with_optional_bounds() {
     let half_open = float_range(Some(1.25), Some(2.5), false);
-    assert_eq!(evaluate("1.25f..2.5f"), half_open);
     assert_eq!(
-        evaluate("1.25f in 1.25f..2.5f"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_6f42ab83be960be6.orna"
+        )),
+        half_open
+    );
+    assert_eq!(
+        evaluate(include_str!(
+            "fixtures/evaluator_source_16ddba339251d381.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
-        evaluate("2.5f in 1.25f..2.5f"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_9e74380c98a17b47.orna"
+        )),
         Value::new(Raw::Bool(false)).unwrap()
     );
     assert_eq!(
-        evaluate("2.5f in 1.25f..=2.5f"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_2264374d4deaf570.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
-        evaluate("-1.0f in ..1.25f"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_f07db4073bd5a245.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
-        evaluate("3.0f in 2.5f.."),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_8946a13e512805af.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
 }
@@ -6961,14 +7952,22 @@ fn float_ranges_support_finite_membership_with_optional_bounds() {
 #[test]
 fn float_ranges_reject_mixed_types_and_iteration_and_nan_is_not_a_member() {
     assert_eq!(
-        evaluate("1.25f in 1.25f..1.25f"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_7be12b09d179b095.orna"
+        )),
         Value::new(Raw::Bool(false)).unwrap()
     );
     assert_eq!(
-        evaluate("1.25f in 2.5f..1.25f"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_735b5a8ac63b0add.orna"
+        )),
         Value::new(Raw::Bool(false)).unwrap()
     );
-    for source in ["1.25f..2", "1.25f in 1.25f..2", "1 in 1.25f..2.5f"] {
+    for source in [
+        include_str!("fixtures/evaluator_source_5a3023a64699bb7c.orna"),
+        include_str!("fixtures/evaluator_source_0889111b6079f39d.orna"),
+        include_str!("fixtures/evaluator_source_ae50818f3a2bd4e8.orna"),
+    ] {
         assert_eq!(
             code(evaluate_expression(
                 source,
@@ -6985,12 +7984,17 @@ fn float_ranges_reject_mixed_types_and_iteration_and_nan_is_not_a_member() {
         ("nan".into(), Value::float_bits(CANONICAL_NAN_BITS)),
     ]);
     assert_eq!(
-        evaluate_expression("nan in range", &environment, Limits::default()).unwrap(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_42d44d13883ccafe.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
         Value::new(Raw::Bool(false)).unwrap()
     );
     assert_eq!(
         code(evaluate_expression(
-            "if true { for value in range { value }; 0 }",
+            include_str!("fixtures/evaluator_source_396ee5df0322c5ae.orna"),
             &environment,
             Limits::default(),
         )),
@@ -7014,34 +8018,54 @@ fn float_ranges_allow_non_finite_endpoints_and_total_ordering() {
         ("nan".into(), Value::float_bits(CANONICAL_NAN_BITS)),
     ]);
     assert_eq!(
-        evaluate_expression("1.0f in whole", &environment, Limits::default()).unwrap(),
-        Value::new(Raw::Bool(true)).unwrap()
-    );
-    assert_eq!(
-        evaluate_expression("nan in whole", &environment, Limits::default()).unwrap(),
-        Value::new(Raw::Bool(false)).unwrap()
-    );
-    assert_eq!(
-        evaluate_expression("1.0f in nan_lower", &environment, Limits::default()).unwrap(),
-        Value::new(Raw::Bool(false)).unwrap()
-    );
-    assert_eq!(
-        evaluate_expression("nan in nan_lower", &environment, Limits::default()).unwrap(),
-        Value::new(Raw::Bool(false)).unwrap()
-    );
-    assert_eq!(
-        evaluate_expression("nan in 1..2", &environment, Limits::default())
-            .unwrap_err()
-            .code(),
-        "ORNA-EVAL-TYPE"
-    );
-    assert_eq!(
-        evaluate_expression("finite_lower < nan_lower", &environment, Limits::default(),).unwrap(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_068770aabc459d7c.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
         evaluate_expression(
-            "negative_zero < positive_zero",
+            include_str!("fixtures/evaluator_source_db29d1951356e23e.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    assert_eq!(
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_9f760ea8c46eaba3.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    assert_eq!(
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_2187fa8aa8606056.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    assert_eq!(
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_09b7f91fb8d6e238.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap_err()
+        .code(),
+        "ORNA-EVAL-TYPE"
+    );
+    assert_eq!(
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_aa36cd8ecaf97539.orna"),
             &environment,
             Limits::default(),
         )
@@ -7049,11 +8073,30 @@ fn float_ranges_allow_non_finite_endpoints_and_total_ordering() {
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
-        evaluate_expression("whole", &environment, Limits::default()).unwrap(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_885dee17c1914dab.orna"),
+            &environment,
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_5d5766cf2d787016.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
         whole
     );
     assert_eq!(
-        evaluate_expression("nan_lower", &environment, Limits::default()).unwrap(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_a759d4630b8b2a8c.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
         nan_lower
     );
 }
@@ -7061,32 +8104,52 @@ fn float_ranges_allow_non_finite_endpoints_and_total_ordering() {
 #[test]
 fn date_ranges_are_canonical_membership_values_with_optional_bounds() {
     let half_open = date_range(Some("2024-02-01"), Some("2024-02-03"), false);
-    assert_eq!(evaluate("2024-02-01..2024-02-03"), half_open);
     assert_eq!(
-        evaluate("2024-02-01 in 2024-02-01..2024-02-03"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_53d874fe2f0de8db.orna"
+        )),
+        half_open
+    );
+    assert_eq!(
+        evaluate(include_str!(
+            "fixtures/evaluator_source_0c522cdfbb8a3aec.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
-        evaluate("2024-02-03 in 2024-02-01..2024-02-03"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_d531329b741acc15.orna"
+        )),
         Value::new(Raw::Bool(false)).unwrap()
     );
     assert_eq!(
-        evaluate("2024-02-03 in 2024-02-01..=2024-02-03"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_c689d17c6de129e3.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
-        evaluate("2024-01-01 in ..2024-02-01"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_0717b9494b2fb344.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
-        evaluate("2024-03-01 in 2024-02-01.."),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_c15beffdf618741c.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
 
     let environment =
         Environment::from([("range".into(), date_range(None, Some("2024-02-01"), false))]);
     assert_eq!(
-        evaluate_expression("range", &environment, Limits::default()).unwrap(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_2269c0be009b610c.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
         date_range(None, Some("2024-02-01"), false)
     );
 }
@@ -7094,17 +8157,21 @@ fn date_ranges_are_canonical_membership_values_with_optional_bounds() {
 #[test]
 fn date_ranges_allow_empty_values_but_reject_mixed_bounds_and_iteration() {
     assert_eq!(
-        evaluate("2024-02-01 in 2024-02-01..2024-02-01"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_42c61f7468e4aa7f.orna"
+        )),
         Value::new(Raw::Bool(false)).unwrap()
     );
     assert_eq!(
-        evaluate("2024-02-01 in 2024-02-03..2024-02-01"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_047ec2c64f206e76.orna"
+        )),
         Value::new(Raw::Bool(false)).unwrap()
     );
     for source in [
-        "2024-02-01..1",
-        "2024-02-01 in 2024-02-01..1",
-        "1 in 2024-02-01..2024-02-03",
+        include_str!("fixtures/evaluator_source_e4eb725871ae217f.orna"),
+        include_str!("fixtures/evaluator_source_906a48ec31b77f45.orna"),
+        include_str!("fixtures/evaluator_source_c45fbb0f8df3e258.orna"),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -7118,14 +8185,16 @@ fn date_ranges_allow_empty_values_but_reject_mixed_bounds_and_iteration() {
     }
     assert_eq!(
         code(evaluate_expression(
-            "if true { for date in 2024-02-01..2024-02-03 { date }; 0 }",
+            include_str!("fixtures/evaluator_source_9168eeeb1b64af64.orna"),
             &Environment::new(),
             Limits::default(),
         )),
         "ORNA-EVAL-TYPE"
     );
     assert_eq!(
-        evaluate("if true { let total = 0; for value in 1..=3 { total += value; }; total }"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_757a9017278c0b5f.orna"
+        )),
         Value::int(6.into())
     );
 }
@@ -7134,41 +8203,51 @@ fn date_ranges_allow_empty_values_but_reject_mixed_bounds_and_iteration() {
 fn instant_ranges_are_canonical_membership_values_with_optional_bounds_and_ordering() {
     let half_open = instant_range(Some((0, 0)), Some((1, 2)), false);
     assert_eq!(
-        evaluate("1970-01-01T00:00:00Z..1970-01-01T00:00:01.000000002Z"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_45a08c8a6697d48f.orna"
+        )),
         half_open
     );
     assert_eq!(
-        evaluate("1970-01-01T01:00:00+01:00 in 1969-12-31T23:00:00Z..1970-01-01T00:00:00Z"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_145a07e2d3211be6.orna"
+        )),
         Value::new(Raw::Bool(false)).unwrap()
     );
     assert_eq!(
-        evaluate("1970-01-01T00:00:00Z in 1970-01-01T00:00:00Z..1970-01-01T00:00:01.000000002Z"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_fe0d2aaf0115c68d.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
-        evaluate(
-            "1970-01-01T00:00:01.000000002Z in 1970-01-01T00:00:00Z..1970-01-01T00:00:01.000000002Z"
-        ),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_6475417bb0e40090.orna"
+        )),
         Value::new(Raw::Bool(false)).unwrap()
     );
     assert_eq!(
-        evaluate(
-            "1970-01-01T00:00:01.000000002Z in 1970-01-01T00:00:00Z..=1970-01-01T00:00:01.000000002Z"
-        ),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_42f41daf9338d933.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
-        evaluate("1969-12-31T23:59:59Z in ..1970-01-01T00:00:00Z"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_d3656e570ea6d0c5.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
-        evaluate("1970-01-01T00:00:02Z in 1970-01-01T00:00:01Z.."),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_c2149570253cd071.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
-        evaluate(
-            "(1970-01-01T00:00:00Z..1970-01-01T00:00:01Z) < (1970-01-01T00:00:01Z..1970-01-01T00:00:02Z)"
-        ),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_67c8880020e4c0f5.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
 }
@@ -7176,20 +8255,24 @@ fn instant_ranges_are_canonical_membership_values_with_optional_bounds_and_order
 #[test]
 fn instant_ranges_allow_empty_values_but_reject_mixed_types_and_iteration() {
     assert_eq!(
-        evaluate("1970-01-01T00:00:00Z in 1970-01-01T00:00:00Z..1970-01-01T00:00:00Z"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_22fe581400948f53.orna"
+        )),
         Value::new(Raw::Bool(false)).unwrap()
     );
     assert_eq!(
-        evaluate("1970-01-01T00:00:01Z in 1970-01-01T00:00:02Z..1970-01-01T00:00:01Z"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_a0b16d4e2decd3b2.orna"
+        )),
         Value::new(Raw::Bool(false)).unwrap()
     );
     for source in [
-        "1970-01-01T00:00:00Z..1",
-        "1970-01-01T00:00:00Z in 1970-01-01T00:00:00Z..1",
-        "1 in 1970-01-01T00:00:00Z..1970-01-01T00:00:01Z",
-        "1970-01-01T00:00:00Z..1.0f",
-        "(..1970-01-01T00:00:00Z) < (1..)",
-        "sort_by([(..1970-01-01T00:00:00Z), (1..)], value => value)",
+        include_str!("fixtures/evaluator_source_8acf82bf2e2bf775.orna"),
+        include_str!("fixtures/evaluator_source_d061b3ee5d43c33d.orna"),
+        include_str!("fixtures/evaluator_source_eb47effd5e8807c7.orna"),
+        include_str!("fixtures/evaluator_source_f05eaa8b5f874571.orna"),
+        include_str!("fixtures/evaluator_source_61496acf10a4ea3d.orna"),
+        include_str!("fixtures/evaluator_source_ca122e454bb2ced3.orna"),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -7207,7 +8290,7 @@ fn instant_ranges_allow_empty_values_but_reject_mixed_types_and_iteration() {
     )]);
     assert_eq!(
         code(evaluate_expression(
-            "if true { for instant in range { instant }; 0 }",
+            include_str!("fixtures/evaluator_source_ec398da66aa1787b.orna"),
             &environment,
             Limits::default(),
         )),
@@ -7282,22 +8365,40 @@ fn canonical_duration_ranges_support_membership_ordering_and_stable_collections(
     ]);
 
     for (source, expected) in [
-        ("earlier in range", Value::new(Raw::Bool(true)).unwrap()),
-        ("equal in range", Value::new(Raw::Bool(true)).unwrap()),
-        ("later in range", Value::new(Raw::Bool(true)).unwrap()),
-        ("min(values)", Value::option(Some(earlier.clone())).unwrap()),
-        ("max(values)", Value::option(Some(huge.clone())).unwrap()),
-        ("huge in range", Value::new(Raw::Bool(true)).unwrap()),
         (
-            "lower_first < lower_second",
+            include_str!("fixtures/evaluator_source_195c82295183d6b6.orna"),
             Value::new(Raw::Bool(true)).unwrap(),
         ),
         (
-            "upper_first < upper_second",
+            include_str!("fixtures/evaluator_source_61244926cf1c127c.orna"),
             Value::new(Raw::Bool(true)).unwrap(),
         ),
         (
-            "exclusive < inclusive",
+            include_str!("fixtures/evaluator_source_ca66c63dd2ef2156.orna"),
+            Value::new(Raw::Bool(true)).unwrap(),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_c6a2792645382523.orna"),
+            Value::option(Some(earlier.clone())).unwrap(),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_8e8e4a8a6663c04c.orna"),
+            Value::option(Some(huge.clone())).unwrap(),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_a03999dbe5078266.orna"),
+            Value::new(Raw::Bool(true)).unwrap(),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_c7a7f12a04a11206.orna"),
+            Value::new(Raw::Bool(true)).unwrap(),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_45d79998ca916667.orna"),
+            Value::new(Raw::Bool(true)).unwrap(),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_ebb8978331ef8f5d.orna"),
             Value::new(Raw::Bool(true)).unwrap(),
         ),
     ] {
@@ -7309,7 +8410,7 @@ fn canonical_duration_ranges_support_membership_ordering_and_stable_collections(
     }
     assert_eq!(
         evaluate_expression(
-            "sort_by(rows, row => row.key)",
+            include_str!("fixtures/evaluator_source_0c3ecdd86bab933d.orna"),
             &environment,
             Limits::default()
         )
@@ -7372,7 +8473,10 @@ fn canonical_duration_ranges_reject_mixed_endpoint_and_member_types() {
         ),
         ("mixed_range".into(), mixed_range),
     ]);
-    for source in ["duration in date_range", "mixed_range"] {
+    for source in [
+        include_str!("fixtures/evaluator_source_baae631b3a2eb1dd.orna"),
+        include_str!("fixtures/evaluator_source_847b6bf3a51b1f6c.orna"),
+    ] {
         assert_eq!(
             code(evaluate_expression(source, &environment, Limits::default())),
             "ORNA-EVAL-TYPE",
@@ -7384,12 +8488,14 @@ fn canonical_duration_ranges_reject_mixed_endpoint_and_member_types() {
 #[test]
 fn range_ordering_validates_unbounded_endpoint_types_before_lexicographic_ordering() {
     assert_eq!(
-        evaluate("(..2024-02-01) < (2024-02-01..)"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_a9dd4ab2ebb7621b.orna"
+        )),
         Value::new(Raw::Bool(true)).unwrap()
     );
     for source in [
-        "(..2024-02-01) < (1..)",
-        "sort_by([(..2024-02-01), (1..)], value => value)",
+        include_str!("fixtures/evaluator_source_12ddae725578e980.orna"),
+        include_str!("fixtures/evaluator_source_71099363f6aaf007.orna"),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -7453,7 +8559,7 @@ fn matches_enum_labels_payload_fields_and_interpolates_bound_strings() {
     ]);
     assert_eq!(
         evaluate_expression(
-            "case value { Availability.ready: \"ready\", Availability.waiting { reason }: \"waiting: {reason}\" }",
+            include_str!("fixtures/evaluator_source_413bc39b3304f34d.orna"),
             &environment,
             Limits::default(),
         )
@@ -7464,7 +8570,7 @@ fn matches_enum_labels_payload_fields_and_interpolates_bound_strings() {
     environment.insert("value".into(), ready);
     assert_eq!(
         evaluate_expression(
-            "case value { Availability.ready: \"ready\", Availability.waiting { reason }: reason }",
+            include_str!("fixtures/evaluator_source_be5de2c35fc3a37d.orna"),
             &environment,
             Limits::default(),
         )
@@ -7538,23 +8644,62 @@ fn matches_tagged_optional_some_and_null() {
 #[test]
 fn rejects_fail_closed_cases_with_redacted_stable_diagnostics() {
     for (source, expected) in [
-        ("unknown", "ORNA-EVAL-NAME"),
-        ("std.math.abs(1)", "ORNA-EVAL-UNSUPPORTED"),
         (
-            "std.math.min(right: 2, left: 1, extra: 0)",
+            include_str!("fixtures/evaluator_source_b23a6a8439c0dde5.orna"),
+            "ORNA-EVAL-NAME",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_7e396f4b251c0514.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
-        ("1 / 0", "ORNA-EVAL-DIVIDE-BY-ZERO"),
-        ("{ value: 1 }.missing", "ORNA-EVAL-FIELD"),
-        ("[1][2]", "ORNA-EVAL-INDEX"),
-        ("[1][true]", "ORNA-EVAL-TYPE"),
-        ("case 1 { 2: 2 }", "ORNA-EVAL-NO-MATCH"),
-        ("case 1 { Unknown.value: 1, _: 0 }", "ORNA-EVAL-UNSUPPORTED"),
-        ("case 1 { Other(inside): inside }", "ORNA-EVAL-UNSUPPORTED"),
-        ("\"value: {1}\"", "ORNA-EVAL-TYPE"),
-        ("(value => value)", "ORNA-EVAL-UNSUPPORTED"),
-        ("{ let x = 1; x = 2; x }", "ORNA-EVAL-PARSE"),
-        ("fn x() = 1", "ORNA-EVAL-PARSE"),
+        (
+            include_str!("fixtures/evaluator_source_05c5b675fbc33104.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_95baf036f1aa2733.orna"),
+            "ORNA-EVAL-DIVIDE-BY-ZERO",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_ce7a8a581a60377d.orna"),
+            "ORNA-EVAL-FIELD",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_2e5cb14953ad13e4.orna"),
+            "ORNA-EVAL-INDEX",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_3278e80eb66631a7.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_80258245d0a9b932.orna"),
+            "ORNA-EVAL-NO-MATCH",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_4f3515ce9683c9d5.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_1660bcc227f6599f.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_9d6dcf083f463276.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_0810eaf259d000ed.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_df2e02a07ce9bdf5.orna"),
+            "ORNA-EVAL-PARSE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_cbba69020046b4f6.orna"),
+            "ORNA-EVAL-PARSE",
+        ),
     ] {
         let failure =
             evaluate_expression(source, &Environment::new(), Limits::default()).unwrap_err();
@@ -7571,7 +8716,11 @@ fn rejects_resource_limits_before_work_can_expand() {
         ..Limits::default()
     };
     assert_eq!(
-        code(evaluate_expression("1 + 2", &Environment::new(), limits)),
+        code(evaluate_expression(
+            include_str!("fixtures/evaluator_source_6212702c7a0d68f0.orna"),
+            &Environment::new(),
+            limits
+        )),
         "ORNA-EVAL-LIMIT"
     );
     let limits = Limits {
@@ -7579,15 +8728,11 @@ fn rejects_resource_limits_before_work_can_expand() {
         ..Limits::default()
     };
     assert_eq!(
-        code(evaluate_expression("1234", &Environment::new(), limits)),
-        "ORNA-EVAL-LIMIT"
-    );
-    let limits = Limits {
-        max_collection_items: 1,
-        ..Limits::default()
-    };
-    assert_eq!(
-        code(evaluate_expression("[1, 2]", &Environment::new(), limits)),
+        code(evaluate_expression(
+            include_str!("fixtures/evaluator_source_03ac674216f3e15c.orna"),
+            &Environment::new(),
+            limits
+        )),
         "ORNA-EVAL-LIMIT"
     );
     let limits = Limits {
@@ -7596,7 +8741,19 @@ fn rejects_resource_limits_before_work_can_expand() {
     };
     assert_eq!(
         code(evaluate_expression(
-            "case [1, 2] { [a, b]: a }",
+            include_str!("fixtures/evaluator_source_3a316d6d3226f84c.orna"),
+            &Environment::new(),
+            limits
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+    let limits = Limits {
+        max_collection_items: 1,
+        ..Limits::default()
+    };
+    assert_eq!(
+        code(evaluate_expression(
+            include_str!("fixtures/evaluator_source_795850976cd7236e.orna"),
             &Environment::new(),
             limits
         )),
@@ -7612,7 +8769,7 @@ fn rejects_resource_limits_before_work_can_expand() {
     )]);
     assert_eq!(
         code(evaluate_expression(
-            "case value { Some(Some(name)): name, _: \"none\" }",
+            include_str!("fixtures/evaluator_source_ca45b0406798305e.orna"),
             &environment,
             limits,
         )),
@@ -7623,23 +8780,30 @@ fn rejects_resource_limits_before_work_can_expand() {
 #[test]
 fn std_stats_mean_returns_empty_null_and_preserves_exact_or_explicitly_rounded_results() {
     let null = Value::new(Raw::Null).unwrap();
-    assert_eq!(evaluate("std.stats.mean([])"), null);
     assert_eq!(
-        evaluate("std.stats.mean([1.0, 2.0])"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_5ce1ea49ff9f7388.orna"
+        )),
+        null
+    );
+    assert_eq!(
+        evaluate(include_str!(
+            "fixtures/evaluator_source_8136ba66c3ed6932.orna"
+        )),
         Value::decimal(15.into(), (-1).into()).unwrap()
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.stats.mean([1.0, 2.0, 4.0])",
+            include_str!("fixtures/evaluator_source_61b54f6fbf5535ff.orna"),
             &Environment::new(),
             Limits::default(),
         )),
         "ORNA-EVAL-VALUE"
     );
     assert_eq!(
-        evaluate(
-            "std.stats.mean([1.0, 2.0, 4.0], scale: 2, rounding: \"half_even\")"
-        ),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_ec093eadaab3566d.orna"
+        )),
         Value::decimal(233.into(), (-2).into()).unwrap()
     );
 
@@ -7653,15 +8817,22 @@ fn std_stats_mean_returns_empty_null_and_preserves_exact_or_explicitly_rounded_r
         ]),
     )]);
     assert_eq!(
-        evaluate_expression("std.stats.mean(rows)", &environment, Limits::default()).unwrap(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_c730b9493cb43f5e.orna"),
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
         expected_float
     );
-    let singleton = Environment::from([(
-        "rows".into(),
-        float_rows(&[(-0.0f64).to_bits()]),
-    )]);
+    let singleton = Environment::from([("rows".into(), float_rows(&[(-0.0f64).to_bits()]))]);
     assert_eq!(
-        evaluate_expression("std.stats.mean(rows)", &singleton, Limits::default()).unwrap(),
+        evaluate_expression(
+            include_str!("fixtures/evaluator_source_c730b9493cb43f5e.orna"),
+            &singleton,
+            Limits::default()
+        )
+        .unwrap(),
         Value::float_bits((-0.0f64).to_bits())
     );
 }
@@ -7669,19 +8840,27 @@ fn std_stats_mean_returns_empty_null_and_preserves_exact_or_explicitly_rounded_r
 #[test]
 fn std_stats_median_sorts_by_total_order_and_rounds_only_when_requested() {
     assert_eq!(
-        evaluate("std.stats.median([9, 1, 5])"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_44e880a28b6b3112.orna"
+        )),
         Value::int(5.into())
     );
     assert_eq!(
-        evaluate("std.stats.median([1.0, 2.0])"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_c20db018952d4343.orna"
+        )),
         Value::decimal(15.into(), (-1).into()).unwrap()
     );
     assert_eq!(
-        evaluate("std.stats.median([1.0, 2.0], scale: 0, rounding: \"half_even\")"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_d6877dfd9563475a.orna"
+        )),
         Value::decimal(2.into(), 0.into()).unwrap()
     );
     assert_eq!(
-        evaluate("std.stats.median([1.0, 2.0, 4.0, 8.0])"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_c97b63d7e502afc2.orna"
+        )),
         Value::decimal(3.into(), 0.into()).unwrap()
     );
 
@@ -7697,7 +8876,7 @@ fn std_stats_median_sorts_by_total_order_and_rounds_only_when_requested() {
     )]);
     assert_eq!(
         evaluate_expression(
-            "std.stats.median(rows)",
+            include_str!("fixtures/evaluator_source_96b31fe5eeb266d4.orna"),
             &environment,
             Limits::default()
         )
@@ -7708,42 +8887,41 @@ fn std_stats_median_sorts_by_total_order_and_rounds_only_when_requested() {
 
 #[test]
 fn std_stats_percentile_requires_bounded_probability_and_named_supported_interpolation() {
-    let values = "[10.0, 0.0]";
     for (expression, expected) in [
         (
-            format!("std.stats.percentile({values}, 0.0, interpolation: \"linear\")"),
+            include_str!("fixtures/evaluator_source_b8564530970c8a7b.orna"),
             Value::decimal(0.into(), 0.into()).unwrap(),
         ),
         (
-            format!("std.stats.percentile({values}, 1.0, interpolation: \"linear\")"),
+            include_str!("fixtures/evaluator_source_86ea486df697eeb7.orna"),
             Value::decimal(10.into(), 0.into()).unwrap(),
         ),
         (
-            format!("std.stats.percentile({values}, 0.25, interpolation: \"linear\")"),
+            include_str!("fixtures/evaluator_source_dcbc043ab1daf19b.orna"),
             Value::decimal(25.into(), (-1).into()).unwrap(),
         ),
         (
-            format!("std.stats.percentile({values}, 0.25, interpolation: \"lower\")"),
+            include_str!("fixtures/evaluator_source_2fb7cb7433120b10.orna"),
             Value::decimal(0.into(), 0.into()).unwrap(),
         ),
         (
-            format!("std.stats.percentile({values}, 0.25, interpolation: \"higher\")"),
+            include_str!("fixtures/evaluator_source_525ee7faf2ff8e67.orna"),
             Value::decimal(10.into(), 0.into()).unwrap(),
         ),
         (
-            format!("std.stats.percentile({values}, 0.25, interpolation: \"nearest\")"),
+            include_str!("fixtures/evaluator_source_33219a840870a094.orna"),
             Value::decimal(0.into(), 0.into()).unwrap(),
         ),
         (
-            format!("std.stats.percentile({values}, 0.25, interpolation: \"midpoint\")"),
+            include_str!("fixtures/evaluator_source_3b528646d5f395d4.orna"),
             Value::decimal(5.into(), 0.into()).unwrap(),
         ),
     ] {
         assert_eq!(evaluate(&expression), expected, "{expression}");
     }
     for expression in [
-        "std.stats.percentile([0.0, 10.0], -0.1, interpolation: \"linear\")",
-        "std.stats.percentile([0.0, 10.0], 1.1, interpolation: \"linear\")",
+        include_str!("fixtures/evaluator_source_874ed7ee373c2e4d.orna"),
+        include_str!("fixtures/evaluator_source_fbf78c6bdefe1338.orna"),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -7757,7 +8935,7 @@ fn std_stats_percentile_requires_bounded_probability_and_named_supported_interpo
     }
     assert_eq!(
         code(evaluate_expression(
-            "std.stats.percentile([0.0, 10.0], 0.5)",
+            include_str!("fixtures/evaluator_source_fa644b33178a5b6d.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -7765,7 +8943,7 @@ fn std_stats_percentile_requires_bounded_probability_and_named_supported_interpo
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.stats.percentile([0.0, 10.0], 0.5, interpolation: \"cubic\")",
+            include_str!("fixtures/evaluator_source_0f490f95498d73f7.orna"),
             &Environment::new(),
             Limits::default(),
         )),
@@ -7832,8 +9010,7 @@ fn union_relations_preserve_declared_order_duplicates_and_bounded_terminals() {
     );
     assert_eq!(effects.cursors.len(), 5);
 
-    let dropped_left_duplicate =
-        relation_stage(union.clone(), "drop", vec![relation_integer(2)]);
+    let dropped_left_duplicate = relation_stage(union.clone(), "drop", vec![relation_integer(2)]);
     let mut effects = UnionRelationEffects::new(left.clone(), right.clone());
     assert_eq!(
         invoke_relation(
@@ -7867,10 +9044,7 @@ fn union_relations_preserve_declared_order_duplicates_and_bounded_terminals() {
     );
     assert_eq!(
         effects.cursors,
-        vec![
-            ("Left".into(), None),
-            ("Left".into(), Some(vec![1])),
-        ],
+        vec![("Left".into(), None), ("Left".into(), Some(vec![1])),],
         "take must stop before scanning the right relation"
     );
 }
@@ -7878,7 +9052,9 @@ fn union_relations_preserve_declared_order_duplicates_and_bounded_terminals() {
 #[test]
 fn materialized_list_union_remains_left_to_right_with_duplicates() {
     assert_eq!(
-        evaluate("std.collection.union([1, 2], [2, 3])"),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_96e313a524b19b8b.orna"
+        )),
         Value::new(Raw::Array(vec![
             Raw::Int(1.into()),
             Raw::Int(2.into()),
@@ -7892,14 +9068,26 @@ fn materialized_list_union_remains_left_to_right_with_duplicates() {
 #[test]
 fn std_stats_reject_mixed_or_unsupported_inputs_and_resource_overflow() {
     for (expression, expected) in [
-        ("std.stats.mean([1, 2.0])", "ORNA-EVAL-UNSUPPORTED"),
-        ("std.stats.median([1, true])", "ORNA-EVAL-UNSUPPORTED"),
         (
-            "std.stats.percentile([1, 2.0], 0.5, interpolation: \"linear\")",
+            include_str!("fixtures/evaluator_source_91637a611b83fef1.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
-        ("std.stats.mean(1)", "ORNA-EVAL-TYPE"),
-        ("std.stats.median(values: [1, 2])", "ORNA-EVAL-UNSUPPORTED"),
+        (
+            include_str!("fixtures/evaluator_source_ac764ba2e637ad08.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_a4740917f723fec5.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_5ae40e0510743923.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_0b99861bb1316192.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -7913,7 +9101,7 @@ fn std_stats_reject_mixed_or_unsupported_inputs_and_resource_overflow() {
     }
     assert_eq!(
         code(evaluate_expression(
-            "std.stats.mean([1, 2, 3])",
+            include_str!("fixtures/evaluator_source_dd01296415a1eae8.orna"),
             &Environment::new(),
             Limits {
                 max_collection_items: 2,
@@ -7924,7 +9112,7 @@ fn std_stats_reject_mixed_or_unsupported_inputs_and_resource_overflow() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.stats.percentile([1.0, 2.0, 3.0], 0.5, interpolation: \"linear\")",
+            include_str!("fixtures/evaluator_source_2978c62ea9df14f5.orna"),
             &Environment::new(),
             Limits {
                 max_collection_items: 2,
@@ -7935,7 +9123,7 @@ fn std_stats_reject_mixed_or_unsupported_inputs_and_resource_overflow() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.stats.median([1, 2])",
+            include_str!("fixtures/evaluator_source_4841024f6177b651.orna"),
             &Environment::new(),
             Limits {
                 max_steps: 1,
@@ -8002,10 +9190,8 @@ fn distinct_relation_take_zero_short_circuits_source_scanning() {
     let distinct = relation_stage(source, "distinct", Vec::new());
     let taken = relation_stage(distinct, "take", vec![relation_integer(0)]);
     let body = relation_terminal(taken, "count");
-    let mut effects = DistinctRelationEffects::new(vec![
-        Value::int(1.into()),
-        Value::int(2.into()),
-    ]);
+    let mut effects =
+        DistinctRelationEffects::new(vec![Value::int(1.into()), Value::int(2.into())]);
 
     assert_eq!(
         invoke_relation(body, &mut effects, Limits::default()).unwrap(),
@@ -8034,10 +9220,8 @@ fn distinct_relation_respects_step_budget_and_item_limit() {
         "ORNA-EVAL-LIMIT"
     );
 
-    let mut effects = DistinctRelationEffects::new(vec![
-        Value::int(1.into()),
-        Value::int(2.into()),
-    ]);
+    let mut effects =
+        DistinctRelationEffects::new(vec![Value::int(1.into()), Value::int(2.into())]);
     assert_eq!(
         code(invoke_relation(
             body,
@@ -8056,8 +9240,7 @@ fn distinct_relation_rejects_float_equality() {
     let source = relation_source_expression("FloatRows");
     let distinct = relation_stage(source, "distinct", Vec::new());
     let body = relation_terminal(distinct, "first");
-    let mut effects =
-        DistinctRelationEffects::new(vec![Value::float_bits(1.0f64.to_bits())]);
+    let mut effects = DistinctRelationEffects::new(vec![Value::float_bits(1.0f64.to_bits())]);
 
     assert_eq!(
         code(invoke_relation(body, &mut effects, Limits::default())),
@@ -8068,7 +9251,13 @@ fn distinct_relation_rejects_float_equality() {
 #[test]
 fn distinct_relation_preserves_sorted_buffered_order() {
     let source = relation_source_expression("Note");
-    let sorted = relation_stage(source, "sort_by", vec![parsed_expression("value => value")]);
+    let sorted = relation_stage(
+        source,
+        "sort_by",
+        vec![parsed_expression(include_str!(
+            "fixtures/evaluator_source_82249d21a2916b18.orna"
+        ))],
+    );
     let distinct = relation_stage(sorted, "distinct", Vec::new());
     let dropped = relation_stage(distinct, "drop", vec![relation_integer(1)]);
     let body = relation_terminal(dropped, "first");
@@ -8104,7 +9293,13 @@ fn relation_named_stage(input: Expr, name: &str, argument_name: &str) -> Expr {
 #[test]
 fn pairs_relation_preserves_sorted_buffered_order_and_overlap() {
     let source = relation_source_expression("Note");
-    let sorted = relation_stage(source, "sort_by", vec![parsed_expression("value => value")]);
+    let sorted = relation_stage(
+        source,
+        "sort_by",
+        vec![parsed_expression(include_str!(
+            "fixtures/evaluator_source_82249d21a2916b18.orna"
+        ))],
+    );
     let pairs = relation_stage(sorted, "pairs", Vec::new());
     let second_pair = relation_stage(pairs, "drop", vec![relation_integer(1)]);
     let body = relation_terminal(second_pair, "first");
@@ -8116,8 +9311,7 @@ fn pairs_relation_preserves_sorted_buffered_order_and_overlap() {
 
     assert_eq!(
         invoke_relation(body, &mut effects, Limits::default()).unwrap(),
-        Value::option(Some(relation_pair(2, 3)))
-        .expect("option is canonical")
+        Value::option(Some(relation_pair(2, 3))).expect("option is canonical")
     );
 }
 
@@ -8155,8 +9349,7 @@ fn pairs_relation_preserves_upstream_order_and_adjacent_overlapping_tuples() {
 
     assert_eq!(
         result,
-        Value::option(Some(relation_pair(2, 3)))
-        .expect("option is canonical")
+        Value::option(Some(relation_pair(2, 3))).expect("option is canonical")
     );
 }
 
@@ -8187,13 +9380,12 @@ fn pairs_relation_first_short_circuits_after_bounded_lookahead() {
         Value::int(4.into()),
     ]);
 
-    let result = invoke_relation(body, &mut effects, Limits::default())
-        .expect("first pair should evaluate");
+    let result =
+        invoke_relation(body, &mut effects, Limits::default()).expect("first pair should evaluate");
 
     assert_eq!(
         result,
-        Value::option(Some(relation_pair(1, 2)))
-        .expect("option is canonical")
+        Value::option(Some(relation_pair(1, 2))).expect("option is canonical")
     );
     assert_eq!(
         effects.cursors.len(),
@@ -8229,10 +9421,8 @@ fn pairs_relation_take_bounds_consumption_and_take_zero_skips_source() {
     let pairs = relation_stage(source, "pairs", Vec::new());
     let taken = relation_stage(pairs, "take", vec![relation_integer(0)]);
     let body = relation_terminal(taken, "count");
-    let mut effects = DistinctRelationEffects::new(vec![
-        Value::int(1.into()),
-        Value::int(2.into()),
-    ]);
+    let mut effects =
+        DistinctRelationEffects::new(vec![Value::int(1.into()), Value::int(2.into())]);
 
     assert_eq!(
         invoke_relation(body, &mut effects, Limits::default()).unwrap(),
@@ -8270,7 +9460,9 @@ fn relation_named_flat_map_stage(input: Expr, transform: Expr) -> Expr {
 #[test]
 fn flat_map_relation_invokes_named_callback_once_per_row_and_preserves_inner_order() {
     let source = relation_source_expression("Note");
-    let transform = parsed_expression("value => [value, value + 10]");
+    let transform = parsed_expression(include_str!(
+        "fixtures/evaluator_source_e177aad7ddb461a2.orna"
+    ));
     let flat_map = relation_named_flat_map_stage(source, transform);
     let body = relation_terminal(flat_map, "count");
     let mut effects = DistinctRelationEffects::new(vec![
@@ -8290,7 +9482,9 @@ fn flat_map_relation_invokes_named_callback_once_per_row_and_preserves_inner_ord
     );
 
     let source = relation_source_expression("Note");
-    let transform = parsed_expression("value => [value, value + 10]");
+    let transform = parsed_expression(include_str!(
+        "fixtures/evaluator_source_e177aad7ddb461a2.orna"
+    ));
     let flat_map = relation_named_flat_map_stage(source, transform);
     let pairs = relation_stage(flat_map, "pairs", Vec::new());
     let second_pair = relation_stage(pairs, "drop", vec![relation_integer(1)]);
@@ -8312,7 +9506,9 @@ fn flat_map_relation_allows_empty_inner_lists_without_skipping_source_pages() {
     let flat_map = relation_stage(
         source,
         "flat_map",
-        vec![parsed_expression("value => []")],
+        vec![parsed_expression(include_str!(
+            "fixtures/evaluator_source_a22329b7637f1b04.orna"
+        ))],
     );
     let body = relation_terminal(flat_map, "count");
     let mut effects = DistinctRelationEffects::new(vec![
@@ -8335,21 +9531,27 @@ fn flat_map_relation_allows_empty_inner_lists_without_skipping_source_pages() {
 #[test]
 fn flat_map_relation_rejects_non_list_and_unsupported_inner_outputs() {
     let source = relation_source_expression("Note");
-    let flat_map =
-        relation_named_flat_map_stage(source, parsed_expression("value => value"));
+    let flat_map = relation_named_flat_map_stage(
+        source,
+        parsed_expression(include_str!(
+            "fixtures/evaluator_source_82249d21a2916b18.orna"
+        )),
+    );
     let body = relation_terminal(flat_map, "count");
-    let mut effects = DistinctRelationEffects::new(vec![
-        Value::int(1.into()),
-        Value::int(2.into()),
-    ]);
+    let mut effects =
+        DistinctRelationEffects::new(vec![Value::int(1.into()), Value::int(2.into())]);
     assert_eq!(
         code(invoke_relation(body, &mut effects, Limits::default())),
         "ORNA-EVAL-TYPE"
     );
 
     let source = relation_source_expression("Note");
-    let flat_map =
-        relation_named_flat_map_stage(source, parsed_expression("value => [value => value]"));
+    let flat_map = relation_named_flat_map_stage(
+        source,
+        parsed_expression(include_str!(
+            "fixtures/evaluator_source_b9968e971e15a2e3.orna"
+        )),
+    );
     let body = relation_terminal(flat_map, "first");
     let mut effects = DistinctRelationEffects::new(vec![Value::int(1.into())]);
     assert_eq!(
@@ -8364,7 +9566,9 @@ fn flat_map_relation_take_short_circuits_inner_and_upstream_consumption() {
     let flat_map = relation_stage(
         source,
         "flat_map",
-        vec![parsed_expression("value => [value, value + 10]")],
+        vec![parsed_expression(include_str!(
+            "fixtures/evaluator_source_e177aad7ddb461a2.orna"
+        ))],
     );
     let taken = relation_stage(flat_map, "take", vec![relation_integer(2)]);
     let body = relation_terminal(taken, "count");
@@ -8388,11 +9592,19 @@ fn flat_map_relation_take_short_circuits_inner_and_upstream_consumption() {
 #[test]
 fn flat_map_relation_preserves_sorted_buffered_order() {
     let source = relation_source_expression("Note");
-    let sorted = relation_stage(source, "sort_by", vec![parsed_expression("value => value")]);
+    let sorted = relation_stage(
+        source,
+        "sort_by",
+        vec![parsed_expression(include_str!(
+            "fixtures/evaluator_source_82249d21a2916b18.orna"
+        ))],
+    );
     let flat_map = relation_stage(
         sorted,
         "flat_map",
-        vec![parsed_expression("value => [value, value + 10]")],
+        vec![parsed_expression(include_str!(
+            "fixtures/evaluator_source_e177aad7ddb461a2.orna"
+        ))],
     );
     let pairs = relation_stage(flat_map, "pairs", Vec::new());
     let body = relation_terminal(pairs, "first");
@@ -8418,9 +9630,8 @@ fn window_relation_preserves_overlap_and_omits_trailing_partial_windows() {
     );
     let second = relation_stage(windows, "drop", vec![relation_integer(1)]);
     let body = relation_terminal(second, "first");
-    let mut effects = DistinctRelationEffects::new(
-        (1..=5).map(|value| Value::int(value.into())).collect(),
-    );
+    let mut effects =
+        DistinctRelationEffects::new((1..=5).map(|value| Value::int(value.into())).collect());
 
     assert_eq!(
         invoke_relation(body, &mut effects, Limits::default()).unwrap(),
@@ -8434,9 +9645,8 @@ fn window_relation_preserves_overlap_and_omits_trailing_partial_windows() {
         vec![relation_integer(3), relation_integer(2)],
     );
     let body = relation_terminal(windows, "count");
-    let mut effects = DistinctRelationEffects::new(
-        (1..=5).map(|value| Value::int(value.into())).collect(),
-    );
+    let mut effects =
+        DistinctRelationEffects::new((1..=5).map(|value| Value::int(value.into())).collect());
     assert_eq!(
         invoke_relation(body, &mut effects, Limits::default()).unwrap(),
         Value::int(2.into()),
@@ -8454,9 +9664,8 @@ fn window_relation_handles_gaps_without_partial_windows() {
     );
     let second = relation_stage(windows, "drop", vec![relation_integer(1)]);
     let body = relation_terminal(second, "first");
-    let mut effects = DistinctRelationEffects::new(
-        (1..=7).map(|value| Value::int(value.into())).collect(),
-    );
+    let mut effects =
+        DistinctRelationEffects::new((1..=7).map(|value| Value::int(value.into())).collect());
 
     assert_eq!(
         invoke_relation(body, &mut effects, Limits::default()).unwrap(),
@@ -8470,9 +9679,8 @@ fn window_relation_handles_gaps_without_partial_windows() {
         vec![relation_integer(2), relation_integer(3)],
     );
     let body = relation_terminal(windows, "count");
-    let mut effects = DistinctRelationEffects::new(
-        (1..=7).map(|value| Value::int(value.into())).collect(),
-    );
+    let mut effects =
+        DistinctRelationEffects::new((1..=7).map(|value| Value::int(value.into())).collect());
     assert_eq!(
         invoke_relation(body, &mut effects, Limits::default()).unwrap(),
         Value::int(2.into()),
@@ -8561,9 +9769,8 @@ fn window_relation_accepts_direct_named_and_pipeline_argument_shapes() {
 
     for window in cases {
         let body = relation_terminal(window, "count");
-        let mut effects = DistinctRelationEffects::new(
-            (1..=4).map(|value| Value::int(value.into())).collect(),
-        );
+        let mut effects =
+            DistinctRelationEffects::new((1..=4).map(|value| Value::int(value.into())).collect());
         assert_eq!(
             invoke_relation(body, &mut effects, Limits::default()).unwrap(),
             Value::int(2.into())
@@ -8622,7 +9829,9 @@ fn window_relation_rejects_non_positive_and_non_integer_sizes() {
             relation_terminal(
                 relation_window_direct(
                     relation_source_expression("Note"),
-                    parsed_expression("\"two\""),
+                    parsed_expression(include_str!(
+                        "fixtures/evaluator_source_b85d38dc71a80277.orna"
+                    )),
                     None,
                 ),
                 "count",
@@ -8634,7 +9843,9 @@ fn window_relation_rejects_non_positive_and_non_integer_sizes() {
                 relation_window_direct(
                     relation_source_expression("Note"),
                     relation_integer(2),
-                    Some(parsed_expression("\"three\"")),
+                    Some(parsed_expression(include_str!(
+                        "fixtures/evaluator_source_097a4dfb7f430ff3.orna"
+                    ))),
                 ),
                 "count",
             ),
@@ -8652,7 +9863,13 @@ fn window_relation_rejects_non_positive_and_non_integer_sizes() {
 #[test]
 fn window_relation_preserves_sorted_buffered_order() {
     let source = relation_source_expression("Note");
-    let sorted = relation_stage(source, "sort_by", vec![parsed_expression("value => value")]);
+    let sorted = relation_stage(
+        source,
+        "sort_by",
+        vec![parsed_expression(include_str!(
+            "fixtures/evaluator_source_82249d21a2916b18.orna"
+        ))],
+    );
     let windows = relation_stage(
         sorted,
         "window",
@@ -8691,22 +9908,30 @@ fn last_relation_returns_the_final_value_through_filter_map_flat_map_sort_and_wi
     let filtered = relation_stage(
         source,
         "filter",
-        vec![parsed_expression("value => value > 1")],
+        vec![parsed_expression(include_str!(
+            "fixtures/evaluator_source_551da618a973da06.orna"
+        ))],
     );
     let mapped = relation_stage(
         filtered,
         "map",
-        vec![parsed_expression("value => value * 10")],
+        vec![parsed_expression(include_str!(
+            "fixtures/evaluator_source_54e7140f994de648.orna"
+        ))],
     );
     let expanded = relation_stage(
         mapped,
         "flat_map",
-        vec![parsed_expression("value => [value, value + 1]")],
+        vec![parsed_expression(include_str!(
+            "fixtures/evaluator_source_fdabca8ea2f4552c.orna"
+        ))],
     );
     let sorted = relation_stage(
         expanded,
         "sort_by",
-        vec![parsed_expression("value => value")],
+        vec![parsed_expression(include_str!(
+            "fixtures/evaluator_source_82249d21a2916b18.orna"
+        ))],
     );
     let windows = relation_stage(
         sorted,
@@ -8736,9 +9961,8 @@ fn last_relation_returns_the_final_value_through_filter_map_flat_map_sort_and_wi
 fn last_relation_scans_unsorted_pages_lazily_and_obeys_item_bounds() {
     let source = relation_source_expression("Note");
     let body = relation_terminal(source, "last");
-    let mut effects = DistinctRelationEffects::new(
-        (1..=4).map(|value| Value::int(value.into())).collect(),
-    );
+    let mut effects =
+        DistinctRelationEffects::new((1..=4).map(|value| Value::int(value.into())).collect());
 
     assert_eq!(
         invoke_relation(body.clone(), &mut effects, Limits::default()).unwrap(),
@@ -8750,9 +9974,8 @@ fn last_relation_scans_unsorted_pages_lazily_and_obeys_item_bounds() {
         "unsorted last must advance one source page at a time without an eager source shortcut"
     );
 
-    let mut bounded = DistinctRelationEffects::new(
-        (1..=4).map(|value| Value::int(value.into())).collect(),
-    );
+    let mut bounded =
+        DistinctRelationEffects::new((1..=4).map(|value| Value::int(value.into())).collect());
     assert_eq!(
         code(invoke_relation(
             body,
@@ -8820,11 +10043,7 @@ fn last_relation_rejects_extra_and_unknown_arguments_like_first() {
         "ORNA-EVAL-ARGUMENT"
     );
 
-    let unknown = relation_named_stage(
-        relation_source_expression("Note"),
-        "last",
-        "values",
-    );
+    let unknown = relation_named_stage(relation_source_expression("Note"), "last", "values");
     let mut effects = DistinctRelationEffects::new(vec![Value::int(1.into())]);
     assert_eq!(
         code(invoke_relation(unknown, &mut effects, Limits::default())),
@@ -8879,34 +10098,18 @@ fn relation_every_and_exists_accept_direct_pipeline_and_named_rows_forms() {
     let true_value = Value::new(Raw::Bool(true)).unwrap();
     let false_value = Value::new(Raw::Bool(false)).unwrap();
     for (name, predicate, expected) in [
-        (
-            "every",
-            "value => value > 0",
-            true_value.clone(),
-        ),
-        (
-            "exists",
-            "value => value == 2",
-            true_value.clone(),
-        ),
+        ("every", "value => value > 0", true_value.clone()),
+        ("exists", "value => value == 2", true_value.clone()),
     ] {
         let predicate = parsed_expression(predicate);
         let cases = [
-            relation_predicate_direct(
-                relation_source_expression("Note"),
-                name,
-                predicate.clone(),
-            ),
+            relation_predicate_direct(relation_source_expression("Note"), name, predicate.clone()),
             relation_predicate_pipeline(
                 relation_source_expression("Note"),
                 name,
                 predicate.clone(),
             ),
-            relation_predicate_named(
-                relation_source_expression("Note"),
-                name,
-                predicate,
-            ),
+            relation_predicate_named(relation_source_expression("Note"), name, predicate),
         ];
         for body in cases {
             let mut effects = DistinctRelationEffects::new(vec![
@@ -8923,13 +10126,11 @@ fn relation_every_and_exists_accept_direct_pipeline_and_named_rows_forms() {
     }
 
     for (name, expected) in [("every", true_value), ("exists", false_value)] {
-        let predicate = parsed_expression("value => value > 0");
+        let predicate = parsed_expression(include_str!(
+            "fixtures/evaluator_source_5cef0e622322cf58.orna"
+        ));
         let cases = [
-            relation_predicate_direct(
-                relation_source_expression("Empty"),
-                name,
-                predicate.clone(),
-            ),
+            relation_predicate_direct(relation_source_expression("Empty"), name, predicate.clone()),
             relation_predicate_pipeline(
                 relation_source_expression("Empty"),
                 name,
@@ -9023,29 +10224,55 @@ fn relation_sum_min_and_max_accept_all_argument_forms_and_supported_numeric_type
         (
             "sum",
             vec![
-                evaluate("1.25"),
-                evaluate("2.50"),
-                evaluate("-0.75"),
+                evaluate(include_str!(
+                    "fixtures/evaluator_source_004a9e0878ff83e6.orna"
+                )),
+                evaluate(include_str!(
+                    "fixtures/evaluator_source_853a9a75b07e44c4.orna"
+                )),
+                evaluate(include_str!(
+                    "fixtures/evaluator_source_058de5bc9a2d3f82.orna"
+                )),
             ],
-            evaluate("3.00"),
+            evaluate(include_str!(
+                "fixtures/evaluator_source_a97491cd3cfa6d9c.orna"
+            )),
         ),
         (
             "min",
             vec![
-                evaluate("1.25"),
-                evaluate("2.50"),
-                evaluate("-0.75"),
+                evaluate(include_str!(
+                    "fixtures/evaluator_source_004a9e0878ff83e6.orna"
+                )),
+                evaluate(include_str!(
+                    "fixtures/evaluator_source_853a9a75b07e44c4.orna"
+                )),
+                evaluate(include_str!(
+                    "fixtures/evaluator_source_058de5bc9a2d3f82.orna"
+                )),
             ],
-            Value::option(Some(evaluate("-0.75"))).expect("option is canonical"),
+            Value::option(Some(evaluate(include_str!(
+                "fixtures/evaluator_source_058de5bc9a2d3f82.orna"
+            ))))
+            .expect("option is canonical"),
         ),
         (
             "max",
             vec![
-                evaluate("1.25"),
-                evaluate("2.50"),
-                evaluate("-0.75"),
+                evaluate(include_str!(
+                    "fixtures/evaluator_source_004a9e0878ff83e6.orna"
+                )),
+                evaluate(include_str!(
+                    "fixtures/evaluator_source_853a9a75b07e44c4.orna"
+                )),
+                evaluate(include_str!(
+                    "fixtures/evaluator_source_058de5bc9a2d3f82.orna"
+                )),
             ],
-            Value::option(Some(evaluate("2.50"))).expect("option is canonical"),
+            Value::option(Some(evaluate(include_str!(
+                "fixtures/evaluator_source_853a9a75b07e44c4.orna"
+            ))))
+            .expect("option is canonical"),
         ),
         (
             "sum",
@@ -9073,8 +10300,7 @@ fn relation_sum_min_and_max_accept_all_argument_forms_and_supported_numeric_type
                 Value::float_bits((-2.0f64).to_bits()),
                 Value::float_bits(0.25f64.to_bits()),
             ],
-            Value::option(Some(Value::float_bits(1.5f64.to_bits())))
-                .expect("option is canonical"),
+            Value::option(Some(Value::float_bits(1.5f64.to_bits()))).expect("option is canonical"),
         ),
     ];
     for (name, rows, expected) in typed_cases {
@@ -9146,17 +10372,23 @@ fn relation_aggregates_support_sorted_transformed_suffixes_without_changing_orde
         let sorted = relation_stage(
             source,
             "sort_by",
-            vec![parsed_expression("value => value")],
+            vec![parsed_expression(include_str!(
+                "fixtures/evaluator_source_82249d21a2916b18.orna"
+            ))],
         );
         let mapped = relation_stage(
             sorted,
             "map",
-            vec![parsed_expression("value => value * 10")],
+            vec![parsed_expression(include_str!(
+                "fixtures/evaluator_source_54e7140f994de648.orna"
+            ))],
         );
         let expanded = relation_stage(
             mapped,
             "flat_map",
-            vec![parsed_expression("value => [value, value + 1]")],
+            vec![parsed_expression(include_str!(
+                "fixtures/evaluator_source_fdabca8ea2f4552c.orna"
+            ))],
         );
         let body = relation_terminal(expanded, name);
         let mut effects = DistinctRelationEffects::new(vec![
@@ -9194,7 +10426,9 @@ fn relation_aggregate_calls_reject_invalid_arguments_and_values() {
     let invalid_predicate = relation_predicate_direct(
         relation_source_expression("Note"),
         "exists",
-        parsed_expression("value => value"),
+        parsed_expression(include_str!(
+            "fixtures/evaluator_source_82249d21a2916b18.orna"
+        )),
     );
     let mut effects = DistinctRelationEffects::new(vec![Value::int(1.into())]);
     assert_eq!(
@@ -9235,11 +10469,7 @@ fn relation_aggregate_calls_reject_invalid_arguments_and_values() {
         "ORNA-EVAL-ARGUMENT"
     );
 
-    let unknown = relation_named_stage(
-        relation_source_expression("Note"),
-        "max",
-        "values",
-    );
+    let unknown = relation_named_stage(relation_source_expression("Note"), "max", "values");
     let mut effects = DistinctRelationEffects::new(vec![Value::int(1.into())]);
     assert_eq!(
         code(invoke_relation(unknown, &mut effects, Limits::default())),
@@ -9252,7 +10482,7 @@ fn root_sum_and_min_remain_shadowable_by_admitted_functions() {
     assert_eq!(
         call_module(
             include_str!("fixtures/root_sum_shadow_function.orna"),
-            "run()",
+            include_str!("fixtures/evaluator_source_02fcae88bd120f59.orna"),
             Limits::default(),
         )
         .unwrap(),
@@ -9261,7 +10491,7 @@ fn root_sum_and_min_remain_shadowable_by_admitted_functions() {
     assert_eq!(
         call_module(
             include_str!("fixtures/root_min_shadow_function.orna"),
-            "run()",
+            include_str!("fixtures/evaluator_source_02fcae88bd120f59.orna"),
             Limits::default(),
         )
         .unwrap(),
@@ -9292,8 +10522,8 @@ impl EffectHandler for Uuid7Effects {
 #[test]
 fn uuid7_is_root_effect_intrinsic_and_tag37_round_trips() {
     let bytes = [
-        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0x7c, 0xde, 0x8f, 0x01, 0x23, 0x45, 0x67, 0x89,
-        0xab, 0xcd,
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0x7c, 0xde, 0x8f, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+        0xcd,
     ];
     let expected = Value::uuid(bytes);
     let functions = functions_from_source(include_str!("fixtures/uuid7_main_effect.orna"));
@@ -9316,8 +10546,14 @@ fn uuid7_is_root_effect_intrinsic_and_tag37_round_trips() {
     assert_eq!(effects.calls, 1);
     assert!(effects.arguments.is_empty());
     let encoded = result.encode().expect("canonical UUID encoding");
-    assert_eq!(Value::decode(&encoded).expect("canonical UUID decode"), result);
-    assert_eq!(result.raw(), &Raw::Tag(37, Box::new(Raw::Bytes(bytes.to_vec()))));
+    assert_eq!(
+        Value::decode(&encoded).expect("canonical UUID decode"),
+        result
+    );
+    assert_eq!(
+        result.raw(),
+        &Raw::Tag(37, Box::new(Raw::Bytes(bytes.to_vec())))
+    );
 }
 
 #[test]
@@ -9394,11 +10630,7 @@ fn invoke_relation_with_environment<E: EffectHandler>(
     invoke_named_with_effects("run", &functions, &Environment::new(), limits, effects)
 }
 
-fn relation_bucket_by(
-    input: Expr,
-    period: Expr,
-    zone: Option<Expr>,
-) -> Expr {
+fn relation_bucket_by(input: Expr, period: Expr, zone: Option<Expr>) -> Expr {
     let span = relation_span();
     let mut arguments = vec![
         relation_argument(input, &span),
@@ -9421,11 +10653,7 @@ fn relation_bucket_by(
     }
 }
 
-fn relation_bucket_by_pipeline(
-    input: Expr,
-    period: Expr,
-    zone: Option<Expr>,
-) -> Expr {
+fn relation_bucket_by_pipeline(input: Expr, period: Expr, zone: Option<Expr>) -> Expr {
     let span = relation_span();
     let mut arguments = vec![relation_argument(period, &span)];
     if let Some(zone) = zone {
@@ -9450,11 +10678,7 @@ fn relation_bucket_by_pipeline(
     }
 }
 
-fn relation_bucket_by_named(
-    input: Expr,
-    period: Expr,
-    zone: Option<Expr>,
-) -> Expr {
+fn relation_bucket_by_named(input: Expr, period: Expr, zone: Option<Expr>) -> Expr {
     let span = relation_span();
     let mut arguments = vec![
         orna_syntax_v1::Argument {
@@ -9515,9 +10739,27 @@ fn bucket_by_elapsed_utc_preserves_group_and_row_order_for_all_call_forms() {
     let expected = Value::option(Some(bucket_group(&rows[..2]))).unwrap();
     let source = relation_source_expression("Reading");
     let cases = [
-        relation_bucket_by(source.clone(), parsed_expression("period"), None),
-        relation_bucket_by_pipeline(source.clone(), parsed_expression("period"), None),
-        relation_bucket_by_named(source, parsed_expression("period"), None),
+        relation_bucket_by(
+            source.clone(),
+            parsed_expression(include_str!(
+                "fixtures/evaluator_source_514cb13f603464f9.orna"
+            )),
+            None,
+        ),
+        relation_bucket_by_pipeline(
+            source.clone(),
+            parsed_expression(include_str!(
+                "fixtures/evaluator_source_514cb13f603464f9.orna"
+            )),
+            None,
+        ),
+        relation_bucket_by_named(
+            source,
+            parsed_expression(include_str!(
+                "fixtures/evaluator_source_514cb13f603464f9.orna"
+            )),
+            None,
+        ),
     ];
     for body in cases {
         let mut effects = DistinctRelationEffects::new(rows.clone());
@@ -9550,10 +10792,22 @@ fn bucket_by_preserves_filter_map_flat_map_window_and_sort_suffixes() {
     ];
     let source = relation_source_expression("Reading");
     let bucket = || {
-        relation_bucket_by(source.clone(), parsed_expression("period"), None)
+        relation_bucket_by(
+            source.clone(),
+            parsed_expression(include_str!(
+                "fixtures/evaluator_source_514cb13f603464f9.orna"
+            )),
+            None,
+        )
     };
 
-    let mapped = relation_stage(bucket(), "map", vec![parsed_expression("group => count(group)")]);
+    let mapped = relation_stage(
+        bucket(),
+        "map",
+        vec![parsed_expression(include_str!(
+            "fixtures/evaluator_source_4fb33064b9aaa5a6.orna"
+        ))],
+    );
     let mut effects = DistinctRelationEffects::new(rows.clone());
     assert_eq!(
         invoke_relation_with_environment(
@@ -9569,7 +10823,9 @@ fn bucket_by_preserves_filter_map_flat_map_window_and_sort_suffixes() {
     let filtered = relation_stage(
         bucket(),
         "filter",
-        vec![parsed_expression("group => count(group) == 2")],
+        vec![parsed_expression(include_str!(
+            "fixtures/evaluator_source_ea2a835373c32994.orna"
+        ))],
     );
     let mut effects = DistinctRelationEffects::new(rows.clone());
     assert_eq!(
@@ -9583,7 +10839,13 @@ fn bucket_by_preserves_filter_map_flat_map_window_and_sort_suffixes() {
         Value::option(Some(bucket_group(&rows[..2]))).unwrap()
     );
 
-    let flattened = relation_stage(bucket(), "flat_map", vec![parsed_expression("group => group")]);
+    let flattened = relation_stage(
+        bucket(),
+        "flat_map",
+        vec![parsed_expression(include_str!(
+            "fixtures/evaluator_source_81652cd82e2317ca.orna"
+        ))],
+    );
     let mut effects = DistinctRelationEffects::new(rows.clone());
     assert_eq!(
         invoke_relation_with_environment(
@@ -9606,14 +10868,19 @@ fn bucket_by_preserves_filter_map_flat_map_window_and_sort_suffixes() {
             Limits::default(),
         )
         .unwrap(),
-        Value::option(Some(Value::new(Raw::Array(vec![
-            bucket_group(&rows[..2]).raw().clone(),
-        ]))
-        .unwrap()))
+        Value::option(Some(
+            Value::new(Raw::Array(vec![bucket_group(&rows[..2]).raw().clone(),])).unwrap()
+        ))
         .unwrap()
     );
 
-    let sorted = relation_stage(bucket(), "sort_by", vec![parsed_expression("group => count(group)")]);
+    let sorted = relation_stage(
+        bucket(),
+        "sort_by",
+        vec![parsed_expression(include_str!(
+            "fixtures/evaluator_source_4fb33064b9aaa5a6.orna"
+        ))],
+    );
     let mut effects = DistinctRelationEffects::new(rows);
     assert_eq!(
         invoke_relation_with_environment(
@@ -9639,8 +10906,12 @@ fn bucket_by_calendar_utc_groups_by_local_day_not_elapsed_duration() {
     ];
     let body = relation_bucket_by(
         relation_source_expression("Reading"),
-        parsed_expression("1.day"),
-        Some(parsed_expression("\"UTC\"")),
+        parsed_expression(include_str!(
+            "fixtures/evaluator_source_d1baf58b3f29e74a.orna"
+        )),
+        Some(parsed_expression(include_str!(
+            "fixtures/evaluator_source_68105452227ca2d3.orna"
+        ))),
     );
     let mut effects = DistinctRelationEffects::new(rows.clone());
     assert_eq!(
@@ -9684,8 +10955,12 @@ fn bucket_by_london_calendar_days_cover_23_24_and_25_elapsed_hours() {
     for (rows, expected_count) in cases {
         let body = relation_bucket_by(
             relation_source_expression("Reading"),
-            parsed_expression("1.day"),
-            Some(parsed_expression("\"Europe/London\"")),
+            parsed_expression(include_str!(
+                "fixtures/evaluator_source_d1baf58b3f29e74a.orna"
+            )),
+            Some(parsed_expression(include_str!(
+                "fixtures/evaluator_source_7762ca70e81af937.orna"
+            ))),
         );
         let mut effects = DistinctRelationEffects::new(rows);
         assert_eq!(
@@ -9705,8 +10980,12 @@ fn bucket_by_london_calendar_days_cover_23_24_and_25_elapsed_hours() {
 fn bucket_by_empty_input_is_empty_and_first_is_bounded() {
     let body = relation_bucket_by(
         relation_source_expression("Reading"),
-        parsed_expression("1.day"),
-        Some(parsed_expression("\"UTC\"")),
+        parsed_expression(include_str!(
+            "fixtures/evaluator_source_d1baf58b3f29e74a.orna"
+        )),
+        Some(parsed_expression(include_str!(
+            "fixtures/evaluator_source_68105452227ca2d3.orna"
+        ))),
     );
     let mut effects = DistinctRelationEffects::new(Vec::new());
     assert_eq!(
@@ -9725,8 +11004,16 @@ fn bucket_by_empty_input_is_empty_and_first_is_bounded() {
 #[test]
 fn bucket_by_rejects_invalid_zone_and_period() {
     for (period, zone, expected) in [
-        ("1.day", "\"Mars/Phobos\"", "ORNA-EVAL-VALUE"),
-        ("42", "\"UTC\"", "ORNA-EVAL-TYPE"),
+        (
+            include_str!("fixtures/evaluator_source_d1baf58b3f29e74a.orna"),
+            include_str!("fixtures/evaluator_source_820ce223720a4abd.orna"),
+            "ORNA-EVAL-VALUE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_73475cb40a568e8d.orna"),
+            include_str!("fixtures/evaluator_source_68105452227ca2d3.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
     ] {
         let body = relation_bucket_by(
             relation_source_expression("Reading"),

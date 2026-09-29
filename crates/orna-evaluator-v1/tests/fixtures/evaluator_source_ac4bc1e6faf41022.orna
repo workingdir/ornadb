@@ -1,0 +1,1 @@
+[1, 2, 3, 4] | std.collection.filter(predicate: value => value % 2 == 0)
