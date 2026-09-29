@@ -1,0 +1,1 @@
+pub fn block_value() = () => { let count = 1; count };
