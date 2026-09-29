@@ -268,10 +268,11 @@ fn binary_explain_returns_extended_orna_diagnostic_guidance() {
 #[test]
 fn binary_repl_executes_a_pure_expression_at_the_cli_boundary() {
     let directory = tempfile::tempdir().expect("REPL working directory");
+    let submission = include_str!("fixtures/repl-arithmetic.orna").trim_end();
     let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(directory.path())
-        .args(["repl", "1 + 2"])
+        .args(["repl", submission])
         .output()
         .expect("CLI process");
 
@@ -304,7 +305,13 @@ fn binary_reference_repl_respects_color_mode() {
             .stdin
             .take()
             .expect("REPL stdin")
-            .write_all(b"1 + 2\n:quit\n")
+            .write_all(
+                format!(
+                    "{}\n:quit\n",
+                    include_str!("fixtures/repl-arithmetic.orna").trim_end()
+                )
+                .as_bytes(),
+            )
             .expect("REPL input");
         child.wait_with_output().expect("CLI process output")
     };
@@ -382,11 +389,17 @@ fn binary_repl_recovers_from_malformed_terminal_input() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("CLI process");
+    let mut submissions = include_str!("fixtures/repl-retained-result.orna").lines();
+    let first_submission = submissions.next().expect("first Orna submission");
+    let retained_result_submission = submissions.next().expect("retained result submission");
+    let mut input = format!("{first_submission}\n").into_bytes();
+    input.extend_from_slice(b"\xff\n");
+    input.extend_from_slice(format!("{retained_result_submission}\n:quit\n").as_bytes());
     child
         .stdin
         .take()
         .expect("REPL stdin")
-        .write_all(b"2\n\xff\n$_\n:quit\n")
+        .write_all(&input)
         .expect("REPL input");
     let output = child.wait_with_output().expect("CLI process output");
 
@@ -400,9 +413,10 @@ fn binary_repl_recovers_from_malformed_terminal_input() {
 
 #[test]
 fn binary_repl_rejects_remote_endpoints_before_local_evaluation() {
+    let submission = include_str!("fixtures/repl-arithmetic.orna").trim_end();
     let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .args(["--db", "orna://host/reference", "repl", "1 + 2"])
+        .args(["--db", "orna://host/reference", "repl", submission])
         .output()
         .expect("CLI process");
 
@@ -419,7 +433,7 @@ fn binary_check_accepts_a_core_only_project_without_std() {
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
         directory.path().join("main.orna"),
-        "pub fn main(): Int = 42;",
+        include_str!("fixtures/project-core-main.orna").trim_end(),
     )
     .expect("project source");
     initialize_project(directory.path());
@@ -448,7 +462,7 @@ fn binary_check_run_and_invoke_reject_uncaptured_standard_import_without_host_su
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
         directory.path().join("main.orna"),
-        "use std.math; pub fn main(): Int = std.math.increment(41);",
+        include_str!("fixtures/project-uncaptured-std-main.orna").trim_end(),
     )
     .expect("project source");
     initialize_project(directory.path());
@@ -527,7 +541,7 @@ fn binary_check_run_and_invoke_reject_uncaptured_standard_import_without_host_su
     let repl_directory = tempfile::tempdir().expect("standard-free REPL project directory");
     std::fs::write(
         repl_directory.path().join("main.orna"),
-        "pub fn main(): Int = 42;",
+        include_str!("fixtures/project-core-main.orna").trim_end(),
     )
     .expect("standard-free project source");
     initialize_project(repl_directory.path());
@@ -548,7 +562,13 @@ fn binary_check_run_and_invoke_reject_uncaptured_standard_import_without_host_su
         .stdin
         .take()
         .expect("unlisted REPL stdin")
-        .write_all(b"use std.collection;\n:quit\n")
+        .write_all(
+            format!(
+                "{}\n:quit\n",
+                include_str!("fixtures/repl-unlisted-std-import.orna").trim_end()
+            )
+            .as_bytes(),
+        )
         .expect("unlisted REPL input");
     let unlisted_repl = unlisted_repl
         .wait_with_output()
@@ -561,8 +581,11 @@ fn binary_check_run_and_invoke_reject_uncaptured_standard_import_without_host_su
 #[test]
 fn binary_managed_local_repl_executes_integer_list_aggregates() {
     let directory = tempfile::tempdir().expect("REPL working directory");
-    std::fs::write(directory.path().join("main.orna"), "pub fn run(): Int = 0;")
-        .expect("project source");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/project-run-zero.orna").trim_end(),
+    )
+    .expect("project source");
     assert!(
         Command::new("git")
             .args(["init", "--quiet"])
@@ -586,7 +609,11 @@ fn binary_managed_local_repl_executes_integer_list_aggregates() {
         .take()
         .expect("CLI stdin")
         .write_all(
-            b"sum([3, 1, 2])\nmin([3, 1, 2]) ?? 0\nmax([3, 1, 2]) ?? 0\nsum([])\nmin([])\nmax([])\n:quit\n",
+            format!(
+                "{}\n:quit\n",
+                include_str!("fixtures/repl-list-aggregates.orna").trim_end()
+            )
+            .as_bytes(),
         )
         .expect("REPL input");
     let output = child.wait_with_output().expect("CLI process output");
@@ -837,9 +864,12 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
             .success()
     );
 
-    let original_source = std::fs::read_to_string(&source_path).expect("fixture source");
-    let staged_source = original_source.replace("value * value", "value + value");
-    assert_ne!(staged_source, original_source, "fixture expression must match");
+    let original_source = include_str!("fixtures/function-expression.orna");
+    let staged_source = include_str!("fixtures/function-expression-staged.orna");
+    assert_ne!(
+        staged_source, original_source,
+        "fixture expression must match"
+    );
     std::fs::write(&source_path, &staged_source).expect("staged fixture change");
     std::fs::write(repository.path().join("staged.orna"), &original_source)
         .expect("staged Orna source");
@@ -852,8 +882,11 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
             .expect("stage fixture changes")
             .success()
     );
-    let modified_source = staged_source.replace("value + value", "value - value");
-    assert_ne!(modified_source, staged_source, "staged expression must match");
+    let modified_source = include_str!("fixtures/function-expression-unstaged.orna");
+    assert_ne!(
+        modified_source, staged_source,
+        "staged expression must match"
+    );
     std::fs::write(&source_path, modified_source).expect("unstaged fixture change");
     std::fs::write(repository.path().join("untracked.orna"), &original_source)
         .expect("untracked Orna source");
@@ -1292,8 +1325,7 @@ async fn binary_reference_library_lend_rejects_invalid_and_duplicate_rows_withou
 async fn binary_generic_run_executes_a_renamed_finite_list_stream_root() {
     let directory = reference_project();
     let sensors_path = directory.path().join("sensors.orna");
-    let sensors = std::fs::read_to_string(&sensors_path).expect("read sensors source");
-    std::fs::write(&sensors_path, sensors.replace("ingest", "deliver"))
+    std::fs::write(&sensors_path, include_str!("fixtures/sensors-deliver.orna"))
         .expect("rename stream root");
 
     let init = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
