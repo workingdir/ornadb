@@ -21,6 +21,7 @@ use serde::{
     ser::{SerializeSeq, SerializeStruct},
 };
 use sha2::{Digest, Sha256};
+use orna_security_v1::SecretMetadata;
 
 pub const CANONICAL_VALUE_CODEC_V1: &str = "OVB-1";
 
@@ -206,6 +207,43 @@ pub fn system_value_metadata(
         codecs: facts.codecs,
         redacted: value.is_redacted(),
     })
+}
+
+/// Safe fields projected from a secret provider's non-sensitive metadata.
+///
+/// ORNA-SECRET-004 requires the stable name, provider, and availability while
+/// forbidding secret contents. `SecretMetadata` does not carry enough evidence
+/// to build the rest of a durable `sys.Secret` catalogue row, so this
+/// projection does not invent row authority, paths, recipients, dependencies,
+/// or diagnostics. Secret contents are not accepted by this API.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct SecretProjection {
+    name: String,
+    provider: String,
+    available: bool,
+}
+
+impl SecretProjection {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    pub const fn is_available(&self) -> bool {
+        self.available
+    }
+}
+
+/// Projects the safe `name`, `provider`, and `available` fields for `sys.Secret`.
+pub fn system_secret_projection(metadata: &SecretMetadata) -> SecretProjection {
+    SecretProjection {
+        name: metadata.reference().as_str().to_owned(),
+        provider: metadata.provider().to_owned(),
+        available: metadata.available(),
+    }
 }
 
 /// Opaque identity for one immutable semantic revision.
