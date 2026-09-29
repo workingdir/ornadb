@@ -88,6 +88,126 @@ impl TypeRef {
     }
 }
 
+/// Safe metadata for one typed value.
+///
+/// These references are descriptive identities only. They do not prove that a
+/// catalogue row exists or grant authority to read it; a trusted metadata
+/// resolver must supply the nominal/protocol/codec facts for the exact static
+/// type before this projection is produced.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ValueMetadata {
+    static_type: TypeRef,
+    nominal_type: Option<TypeRef>,
+    protocols: Vec<TypeRef>,
+    codecs: Vec<String>,
+    redacted: bool,
+}
+
+impl ValueMetadata {
+    pub fn static_type(&self) -> &TypeRef {
+        &self.static_type
+    }
+
+    pub fn nominal_type(&self) -> Option<&TypeRef> {
+        self.nominal_type.as_ref()
+    }
+
+    pub fn protocols(&self) -> &[TypeRef] {
+        &self.protocols
+    }
+
+    pub fn codecs(&self) -> &[String] {
+        &self.codecs
+    }
+
+    pub const fn is_redacted(&self) -> bool {
+        self.redacted
+    }
+}
+
+/// Catalogue supplied facts used to project metadata for one static type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ValueMetadataFacts {
+    nominal_type: Option<TypeId>,
+    protocols: Vec<TypeId>,
+    codecs: Vec<String>,
+}
+
+impl ValueMetadataFacts {
+    /// Creates metadata facts from the authoritative type catalogue.
+    ///
+    /// The Orna reference defines these as safe metadata but does not prescribe
+    /// collection order, so protocol and codec names use sorted unique order.
+    pub fn new(
+        nominal_type: Option<TypeId>,
+        protocols: impl IntoIterator<Item = TypeId>,
+        codecs: impl IntoIterator<Item = String>,
+    ) -> Result<Self, ValueMetadataError> {
+        let protocols = protocols.into_iter().collect::<std::collections::BTreeSet<_>>();
+        let codecs = codecs.into_iter().collect::<std::collections::BTreeSet<_>>();
+        if nominal_type
+            .iter()
+            .chain(protocols.iter())
+            .any(|name| name.as_str().trim().is_empty())
+            || codecs.iter().any(|name| name.trim().is_empty())
+        {
+            return Err(ValueMetadataError::InvalidCatalogueMetadata);
+        }
+        Ok(Self {
+            nominal_type,
+            protocols: protocols.into_iter().collect(),
+            codecs: codecs.into_iter().collect(),
+        })
+    }
+}
+
+/// Resolves metadata through the catalogue that owns the type identities.
+pub trait ValueMetadataResolver {
+    /// Returns metadata for an exact static type, or `None` when that type is
+    /// not present in the resolver's admitted catalogue.
+    fn value_metadata_facts(&self, static_type: &TypeId) -> Option<ValueMetadataFacts>;
+}
+
+/// Failure to produce safe metadata from an authoritative catalogue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ValueMetadataError {
+    TypeUnavailable,
+    InvalidCatalogueMetadata,
+}
+
+impl ValueMetadataError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::TypeUnavailable => "sys.meta.type_unavailable",
+            Self::InvalidCatalogueMetadata => "sys.meta.invalid_metadata",
+        }
+    }
+}
+
+/// Projects safe type metadata without exposing or re-encoding the value.
+///
+/// Protected canonical bytes remain inside `TypedValue`; this operation only
+/// observes its static type and redaction bit. It never derives catalogue or
+/// protocol identities from payload bytes or type-name guesses.
+pub fn system_value_metadata(
+    value: &TypedValue,
+    resolver: &impl ValueMetadataResolver,
+) -> Result<ValueMetadata, ValueMetadataError> {
+    if value.static_type().as_str().trim().is_empty() {
+        return Err(ValueMetadataError::InvalidCatalogueMetadata);
+    }
+    let facts = resolver
+        .value_metadata_facts(value.static_type())
+        .ok_or(ValueMetadataError::TypeUnavailable)?;
+    Ok(ValueMetadata {
+        static_type: TypeRef::from_id(value.static_type().clone()),
+        nominal_type: facts.nominal_type.map(TypeRef::from_id),
+        protocols: facts.protocols.into_iter().map(TypeRef::from_id).collect(),
+        codecs: facts.codecs,
+        redacted: value.is_redacted(),
+    })
+}
+
 /// Opaque identity for one immutable semantic revision.
 ///
 /// Its 32 bytes are supplied by the authoritative revision producer. This
@@ -381,6 +501,14 @@ pub struct SystemFunctionDescriptor {
     pub signature: &'static str,
     pub purpose: &'static str,
 }
+
+/// Exact portable descriptor for the metadata-only `sys.meta` operation.
+pub const SYS_META_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
+    name: "sys.meta",
+    effect: SystemEffect::Read,
+    signature: "fn sys.meta<T>(value: T): sys.ValueMetadata<T>",
+    purpose: "Return safe static/nominal/codec/protocol metadata for a value.",
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum SystemEffect {
@@ -688,6 +816,7 @@ pub const SYS_ADMIN_PLAN_CHECKOUT_STR_DESCRIPTOR: SystemFunctionDescriptor =
 /// invocation or administrative authority.
 pub fn system_function_descriptor(name: &str) -> Option<&'static SystemFunctionDescriptor> {
     match name {
+        "sys.meta" => Some(&SYS_META_DESCRIPTOR),
         "sys.explain(Diagnostic)" => Some(&SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR),
         "sys.admin.flush" => Some(&SYS_ADMIN_FLUSH_DESCRIPTOR),
         "sys.admin.compact" => Some(&SYS_ADMIN_COMPACT_DESCRIPTOR),
@@ -2781,6 +2910,10 @@ mod tests {
     #[test]
     fn admin_system_function_descriptors_match_the_reference() {
         assert_eq!(
+            system_function_descriptor("sys.meta"),
+            Some(&SYS_META_DESCRIPTOR)
+        );
+        assert_eq!(
             system_function_descriptor("sys.admin.flush"),
             Some(&SystemFunctionDescriptor {
                 name: "sys.admin.flush",
@@ -3053,6 +3186,69 @@ mod tests {
             Some(&SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR)
         );
         assert_eq!(system_function_descriptor("sys.admin.unknown"), None);
+    }
+
+    #[test]
+    fn sys_meta_returns_catalogue_facts_and_redacts_protected_payloads() {
+        struct Resolver(BTreeMap<String, ValueMetadataFacts>);
+        impl ValueMetadataResolver for Resolver {
+            fn value_metadata_facts(&self, static_type: &TypeId) -> Option<ValueMetadataFacts> {
+                self.0.get(static_type.as_str()).cloned()
+            }
+        }
+
+        let type_id = ty("app.Credential");
+        let value = TypedValue::protected(type_id.clone(), b"do-not-disclose".to_vec());
+        let facts = ValueMetadataFacts::new(
+            Some(ty("app.Credential")),
+            [ty("protocol.Z"), ty("protocol.A")],
+            ["z-orna-codec".to_owned(), "a-orna-codec".to_owned()],
+        )
+        .unwrap();
+        let resolver = Resolver(BTreeMap::from([(type_id.as_str().to_owned(), facts)]));
+
+        let metadata = system_value_metadata(&value, &resolver).unwrap();
+        assert_eq!(metadata.static_type().as_str(), "app.Credential");
+        assert_eq!(
+            metadata.nominal_type().map(TypeRef::as_str),
+            Some("app.Credential")
+        );
+        assert_eq!(
+            metadata
+                .protocols()
+                .iter()
+                .map(TypeRef::as_str)
+                .collect::<Vec<_>>(),
+            ["protocol.A", "protocol.Z"]
+        );
+        assert_eq!(metadata.codecs(), ["a-orna-codec", "z-orna-codec"]);
+        assert!(metadata.is_redacted());
+        assert_eq!(value.canonical(), None);
+
+        let projection = serde_json::to_vec(&metadata).unwrap();
+        assert!(!String::from_utf8_lossy(&projection).contains("do-not-disclose"));
+
+        let public_value = TypedValue::public(type_id, b"canonical-ovb-bytes".to_vec());
+        let canonical_before = public_value.canonical().unwrap().to_vec();
+        let public_metadata = system_value_metadata(&public_value, &resolver).unwrap();
+        assert!(!public_metadata.is_redacted());
+        assert_eq!(public_value.canonical(), Some(canonical_before.as_slice()));
+    }
+
+    #[test]
+    fn sys_meta_fails_closed_without_catalogue_type_facts() {
+        struct EmptyResolver;
+        impl ValueMetadataResolver for EmptyResolver {
+            fn value_metadata_facts(&self, _: &TypeId) -> Option<ValueMetadataFacts> {
+                None
+            }
+        }
+
+        let value = value("Int", "42");
+        assert_eq!(
+            system_value_metadata(&value, &EmptyResolver),
+            Err(ValueMetadataError::TypeUnavailable)
+        );
     }
 
     #[test]
