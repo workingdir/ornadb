@@ -2982,9 +2982,35 @@ impl Context<'_, '_> {
                     self.integer(a % b).map(Value::Int)
                 }
             }
+            "^" => self.integer_power(a, b).map(Value::Int),
             "<" | "<=" | ">" | ">=" => compare(op, a.cmp(&b)),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
+    }
+    fn integer_power(
+        &self,
+        mut base: BigInt,
+        mut exponent: BigInt,
+    ) -> Result<BigInt, EvaluationError> {
+        // Orna 1.0 specifies right-associative exponent precedence, but not
+        // numeric edge cases. This evaluator chooses nonnegative integer
+        // exponents; negative exponents return a type error because their
+        // results are not integers. Check each multiplication against the
+        // normal integer digit budget, avoiding unbounded intermediate growth.
+        if exponent.is_negative() {
+            return Err(error("ORNA-EVAL-TYPE"));
+        }
+        let mut result = BigInt::from(1u8);
+        while !exponent.is_zero() {
+            if exponent.is_odd() {
+                result = self.integer(result * base.clone())?;
+            }
+            exponent /= 2u8;
+            if !exponent.is_zero() {
+                base = self.integer(base.clone() * base)?;
+            }
+        }
+        Ok(result)
     }
     fn checked_decimal(&self, value: DecimalValue) -> Result<DecimalValue, EvaluationError> {
         self.integer(value.coefficient.clone())?;
@@ -3063,6 +3089,24 @@ impl Context<'_, '_> {
             "/" => finite_float(a / b),
             "%" if b == 0.0 => Err(error("ORNA-EVAL-DIVIDE-BY-ZERO")),
             "%" => finite_float(a % b),
+            "^" => {
+                // Pragmatic real-float semantics use exp(exponent * ln(base)).
+                // Negative bases are outside that domain; 0^0 is chosen as 1,
+                // and zero to a negative power uses the division-by-zero code.
+                if a == 0.0 {
+                    if b < 0.0 {
+                        Err(error("ORNA-EVAL-DIVIDE-BY-ZERO"))
+                    } else if b == 0.0 {
+                        finite_float(1.0)
+                    } else {
+                        finite_float(0.0)
+                    }
+                } else if a < 0.0 {
+                    Err(error("ORNA-EVAL-TYPE"))
+                } else {
+                    finite_float((b * a.ln()).exp())
+                }
+            }
             "<" => Ok(Value::Bool(a < b)),
             "<=" => Ok(Value::Bool(a <= b)),
             ">" => Ok(Value::Bool(a > b)),
