@@ -1832,7 +1832,7 @@ mod tests {
                 singletons: 4,
                 opaque_identifiers: 21,
                 reference_aliases: 78,
-                value_types: 34,
+                value_types: 35,
                 enums: 44,
                 relations: 78,
                 functions: 66,
