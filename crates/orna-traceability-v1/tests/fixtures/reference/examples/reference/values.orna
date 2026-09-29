@@ -1,0 +1,21 @@
+pub type Score = Int {
+    assert >= 0;
+    assert <= 100;
+}
+
+pub enum Availability {
+    ready,
+    waiting { reason: Str },
+}
+
+pub fn describe(value: Availability): Str = case value {
+    Availability.ready: "ready",
+    Availability.waiting { reason }: "waiting: {reason}",
+};
+
+pub fn optional_name(value: Str?): Str = case value {
+    Some(name): name,
+    null: "anonymous",
+};
+
+pub fn add(left: Int, right: Int): Int = left + right;

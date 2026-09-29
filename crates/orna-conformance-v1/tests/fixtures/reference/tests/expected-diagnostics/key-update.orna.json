@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/key-update.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E3002",
+  "message_contains": "primary keys are immutable through update",
+  "status": "expected-not-executed"
+}

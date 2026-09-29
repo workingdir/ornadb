@@ -1,0 +1,5 @@
+pub fn contact_names() =
+    contacts.Contact
+    | filter(contact => (contact.emails | count) > 0)
+    | map(Contact.full_name)
+    | sort_by(value => value);

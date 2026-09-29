@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-opaque.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "ORNA091-E-OPAQUE",
+  "message_contains": "use the unified `type` declaration",
+  "status": "expected-not-executed"
+}
