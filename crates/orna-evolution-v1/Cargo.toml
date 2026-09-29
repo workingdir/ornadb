@@ -11,3 +11,4 @@ orna-foundation-v1 = { path = "../orna-foundation-v1" }
 
 [dev-dependencies]
 serde_json = "1"
+orna-syntax-v1 = { path = "../orna-syntax-v1" }
