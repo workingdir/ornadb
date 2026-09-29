@@ -129,10 +129,7 @@ impl StagedReplActivation {
     ///
     /// Runtime/table state is deliberately not touched here. A stale or
     /// foreign session rejects the handoff before semantic state changes.
-    pub fn commit_semantic(
-        self,
-        session: &mut AdmittedReplSession,
-    ) -> Result<(), ReplError> {
+    pub fn commit_semantic(self, session: &mut AdmittedReplSession) -> Result<(), ReplError> {
         let mut semantic = session.semantic.clone();
         semantic
             .commit(self.admission)
@@ -141,7 +138,6 @@ impl StagedReplActivation {
         Ok(())
     }
 }
-
 
 /// An isolated, typed session against one admitted project snapshot.
 ///
@@ -550,7 +546,9 @@ mod tests {
     fn effectful_source_stages_canonical_activation_without_publishing() {
         let mut session = AdmittedReplSession::new(Limits::default());
         let staged = session
-            .stage_activation("std.net.http.get(\"https://example.com\")")
+            .stage_activation(include_str!(
+                "fixtures/repl-inline-std-net-http-get-https-example-com-74c176f7.orna"
+            ))
             .expect("effectful source is semantically admitted");
 
         assert!(matches!(staged.input(), ReplInput::Expression(_)));
@@ -560,68 +558,125 @@ mod tests {
 
         assert_eq!(
             session
-                .submit("std.net.http.get(\"https://example.com\")")
+                .submit(include_str!(
+                    "fixtures/repl-inline-std-net-http-get-https-example-com-74c176f7.orna"
+                ))
                 .unwrap_err()
                 .code(),
             "ORNA-REPL-EFFECT"
         );
-        assert_eq!(session.submit("40 + 2"), Ok(Some(Value::int(42.into()))));
+        assert_eq!(
+            session.submit(include_str!("fixtures/repl-inline-40-2-0fcd2493.orna")),
+            Ok(Some(Value::int(42.into())))
+        );
     }
 
     #[test]
     fn typed_declarations_execute_without_erasing_annotations() {
         let mut session = AdmittedReplSession::new(Limits::default());
-        assert_eq!(session.submit("let n: Int = 21;"), Ok(None));
         assert_eq!(
-            session.submit("fn twice(value: Int): Int = value + value;"),
+            session.submit(include_str!(
+                "fixtures/repl-inline-let-n-int-21-fe1325a7.orna"
+            )),
             Ok(None)
         );
-        assert_eq!(session.submit("twice(n)"), Ok(Some(Value::int(42.into()))));
+        assert_eq!(
+            session.submit(include_str!(
+                "fixtures/repl-inline-fn-twice-value-int-int-value-value-596adf3f.orna"
+            )),
+            Ok(None)
+        );
+        assert_eq!(
+            session.submit(include_str!("fixtures/repl-inline-twice-n-21d0ebc9.orna")),
+            Ok(Some(Value::int(42.into())))
+        );
     }
 
     #[test]
     fn semantic_and_runtime_failures_do_not_publish_pending_bindings() {
         let mut session = AdmittedReplSession::new(Limits::default());
-        let mismatch = session.submit("let text: Int = \"wrong\";").unwrap_err();
+        let mismatch = session
+            .submit(include_str!(
+                "fixtures/repl-inline-let-text-int-wrong-12395f03.orna"
+            ))
+            .unwrap_err();
         assert_eq!(mismatch.code(), "ORNA-S021-TYPE");
         assert_eq!(
-            session.submit("text").unwrap_err().code(),
+            session
+                .submit(include_str!("fixtures/repl-inline-text-982d9e3e.orna"))
+                .unwrap_err()
+                .code(),
             "ORNA-S012-UNRESOLVED"
         );
 
-        assert_eq!(session.submit("40 + 2"), Ok(Some(Value::int(42.into()))));
-        let runtime = session.submit("let pending: Int = 1 / 0;").unwrap_err();
+        assert_eq!(
+            session.submit(include_str!("fixtures/repl-inline-40-2-0fcd2493.orna")),
+            Ok(Some(Value::int(42.into())))
+        );
+        let runtime = session
+            .submit(include_str!(
+                "fixtures/repl-inline-let-pending-int-1-0-9baa0e02.orna"
+            ))
+            .unwrap_err();
         assert_eq!(runtime.code(), "ORNA-EVAL-DIVIDE-BY-ZERO");
         assert_eq!(
-            session.submit("pending").unwrap_err().code(),
+            session
+                .submit(include_str!("fixtures/repl-inline-pending-62a2fed3.orna"))
+                .unwrap_err()
+                .code(),
             "ORNA-S012-UNRESOLVED"
         );
-        assert_eq!(session.submit("$_"), Ok(Some(Value::int(42.into()))));
+        assert_eq!(
+            session.submit(include_str!("fixtures/repl-inline-source-ba1da4b7.orna")),
+            Ok(Some(Value::int(42.into())))
+        );
     }
 
     #[test]
     fn preview_is_semantic_and_runtime_state_isolated() {
         let mut session = AdmittedReplSession::new(Limits::default());
-        assert_eq!(session.submit("let n: Int = 41;"), Ok(None));
-        assert_eq!(session.preview("n + 1"), Ok(Value::int(42.into())));
         assert_eq!(
-            session.submit("$_").unwrap_err().code(),
+            session.submit(include_str!(
+                "fixtures/repl-inline-let-n-int-41-1debaaa2.orna"
+            )),
+            Ok(None)
+        );
+        assert_eq!(
+            session.preview(include_str!("fixtures/repl-inline-n-1-60910b50.orna")),
+            Ok(Value::int(42.into()))
+        );
+        assert_eq!(
+            session
+                .submit(include_str!("fixtures/repl-inline-source-ba1da4b7.orna"))
+                .unwrap_err()
+                .code(),
             "ORNA-S012-UNRESOLVED"
         );
-        assert_eq!(session.submit("n"), Ok(Some(Value::int(41.into()))));
+        assert_eq!(
+            session.submit(include_str!("fixtures/repl-inline-n-1b16b1df.orna")),
+            Ok(Some(Value::int(41.into())))
+        );
     }
 
     #[test]
     fn effectful_sources_are_rejected_before_runtime_execution() {
         let mut session = AdmittedReplSession::new(Limits::default());
-        assert_eq!(session.submit("42"), Ok(Some(Value::int(42.into()))));
+        assert_eq!(
+            session.submit(include_str!("fixtures/repl-inline-42-73475cb4.orna")),
+            Ok(Some(Value::int(42.into())))
+        );
 
         let error = session
-            .submit("std.net.http.get(\"https://example.com\")")
+            .submit(include_str!(
+                "fixtures/repl-inline-std-net-http-get-https-example-com-74c176f7.orna"
+            ))
             .unwrap_err();
         assert_eq!(error.code(), "ORNA-REPL-EFFECT");
         assert_eq!(error.diagnostic().message(), "<redacted>");
-        assert_eq!(session.submit("$_"), Ok(Some(Value::int(42.into()))));
+        assert_eq!(
+            session.submit(include_str!("fixtures/repl-inline-source-ba1da4b7.orna")),
+            Ok(Some(Value::int(42.into())))
+        );
     }
 
     #[test]
@@ -629,20 +684,29 @@ mod tests {
         let mut session = AdmittedReplSession::new(Limits::default());
         assert_eq!(
             session
-                .submit("fn identity<T>(value: T): T = value;")
+                .submit(include_str!(
+                    "fixtures/repl-inline-fn-identity-t-value-t-t-value-ab04ee2f.orna"
+                ))
                 .unwrap_err()
                 .code(),
             "ORNA-EVAL-UNSUPPORTED"
         );
         assert_eq!(
-            session.submit("identity(1)").unwrap_err().code(),
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-identity-1-4a47b267.orna"
+                ))
+                .unwrap_err()
+                .code(),
             "ORNA-S012-UNRESOLVED"
         );
     }
 
     #[test]
     fn standard_bytes_are_verified_before_runtime_seeding() {
-        let standard = "pub fn increment(value: Int): Int = value + 1;";
+        let standard = include_str!(
+            "fixtures/repl-inline-pub-fn-increment-value-int-int-value-1-97766a10.orna"
+        );
         let profile = StandardDependencyProfile::from_sources(
             "std-snapshot",
             [("std/math.orna".into(), standard.into())],
@@ -651,7 +715,9 @@ mod tests {
         let (_directory, project) = loaded_project(
             &[(
                 "main.orna",
-                "use std.math.{increment}; pub fn run(value: Int): Int = increment(value);",
+                include_str!(
+                    "fixtures/repl-inline-use-std-math-increment-pub-fn-run-valu-83d2a2a0.orna"
+                ),
             )],
             Some(profile),
         );
@@ -660,7 +726,10 @@ mod tests {
                 &project,
                 [(
                     "std/math.orna".into(),
-                    "pub fn increment(value: Int): Int = value + 2;".into(),
+                    include_str!(
+                        "fixtures/repl-inline-pub-fn-increment-value-int-int-value-2-724ecb19.orna"
+                    )
+                    .into(),
                 )],
                 Limits::default(),
             )
@@ -675,9 +744,16 @@ mod tests {
             Limits::default(),
         )
         .unwrap();
-        assert_eq!(session.submit("use std.math.{increment};"), Ok(None));
         assert_eq!(
-            session.submit("increment(41)"),
+            session.submit(include_str!(
+                "fixtures/repl-inline-use-std-math-increment-477a9dd9.orna"
+            )),
+            Ok(None)
+        );
+        assert_eq!(
+            session.submit(include_str!(
+                "fixtures/repl-inline-increment-41-fa3331ac.orna"
+            )),
             Ok(Some(Value::int(42.into())))
         );
     }
@@ -685,7 +761,13 @@ mod tests {
     #[test]
     fn admitted_standard_functions_execute_their_verified_source_bodies() {
         let profile = crate::reference_standard_profile();
-        let (_directory, project) = loaded_project(&[("main.orna", "")], Some(profile));
+        let (_directory, project) = loaded_project(
+            &[(
+                "main.orna",
+                include_str!("fixtures/repl-inline-empty-module.orna"),
+            )],
+            Some(profile),
+        );
         let mut session = AdmittedReplSession::from_loaded_project(
             &project,
             crate::reference_standard_sources(),
@@ -693,14 +775,23 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(session.submit("use std.math;"), Ok(None));
         assert_eq!(
-            session.submit("math.clamp(value: 99, lower: 20, upper: 22)"),
+            session.submit(include_str!(
+                "fixtures/repl-inline-use-std-math-6b6c1741.orna"
+            )),
+            Ok(None)
+        );
+        assert_eq!(
+            session.submit(include_str!(
+                "fixtures/repl-inline-math-clamp-value-99-lower-20-upper-22-5a6b11dc.orna"
+            )),
             Ok(Some(Value::int(22.into())))
         );
         assert_eq!(
             session
-                .submit("math.clamp(value: 99, min: 20, max: 22)")
+                .submit(include_str!(
+                    "fixtures/repl-inline-math-clamp-value-99-min-20-max-22-9984937d.orna"
+                ))
                 .unwrap_err()
                 .code(),
             "ORNA-S021-TYPE"
@@ -710,15 +801,20 @@ mod tests {
     #[test]
     fn unprofiled_qualified_collection_fallbacks_are_rejected_without_state_change() {
         let mut session = AdmittedReplSession::new(Limits::default());
-        assert_eq!(session.submit("let answer: Int = 40;"), Ok(None));
         assert_eq!(
-            session.submit("answer + 2"),
+            session.submit(include_str!(
+                "fixtures/repl-inline-let-answer-int-40-32ff602e.orna"
+            )),
+            Ok(None)
+        );
+        assert_eq!(
+            session.submit(include_str!("fixtures/repl-inline-answer-2-1e6074ea.orna")),
             Ok(Some(Value::int(42.into())))
         );
 
         for source in [
-            "std.collection.first([1, 2, 3])",
-            "std.collection.map([1, 2, 3], value => value)",
+            include_str!("fixtures/repl-inline-std-collection-first-1-2-3-07a8406e.orna"),
+            include_str!("fixtures/repl-inline-std-collection-map-1-2-3-value-value-401a69f4.orna"),
         ] {
             assert_eq!(
                 session.submit(source).unwrap_err().code(),
@@ -727,13 +823,21 @@ mod tests {
             );
         }
 
-        assert_eq!(session.submit("answer"), Ok(Some(Value::int(40.into()))));
-        assert_eq!(session.submit("$_"), Ok(Some(Value::int(40.into()))));
+        assert_eq!(
+            session.submit(include_str!("fixtures/repl-inline-answer-0db52f40.orna")),
+            Ok(Some(Value::int(40.into())))
+        );
+        assert_eq!(
+            session.submit(include_str!("fixtures/repl-inline-source-ba1da4b7.orna")),
+            Ok(Some(Value::int(40.into())))
+        );
     }
 
     #[test]
     fn repl_can_import_verified_standard_modules_absent_from_project_source() {
-        let standard = "pub fn increment(value: Int): Int = value + 1;";
+        let standard = include_str!(
+            "fixtures/repl-inline-pub-fn-increment-value-int-int-value-1-97766a10.orna"
+        );
         let profile = StandardDependencyProfile::from_sources(
             "std-snapshot",
             [("std/math.orna".into(), standard.into())],
@@ -743,9 +847,16 @@ mod tests {
             &[
                 (
                     "main.orna",
-                    "use library; pub fn run(): Int = library.local(40);",
+                    include_str!(
+                        "fixtures/repl-inline-use-library-pub-fn-run-int-library-loc-22e03d25.orna"
+                    ),
                 ),
-                ("library.orna", "pub fn local(value: Int): Int = value + 1;"),
+                (
+                    "library.orna",
+                    include_str!(
+                        "fixtures/repl-inline-pub-fn-local-value-int-int-value-1-be07d8e1.orna"
+                    ),
+                ),
             ],
             Some(profile),
         );
@@ -755,10 +866,22 @@ mod tests {
             Limits::default(),
         )
         .unwrap();
-        assert_eq!(session.submit("use std.math;"), Ok(None));
-        assert_eq!(session.submit("use library;"), Ok(None));
         assert_eq!(
-            session.submit("math.increment(library.local(40))"),
+            session.submit(include_str!(
+                "fixtures/repl-inline-use-std-math-6b6c1741.orna"
+            )),
+            Ok(None)
+        );
+        assert_eq!(
+            session.submit(include_str!(
+                "fixtures/repl-inline-use-library-a84bcc62.orna"
+            )),
+            Ok(None)
+        );
+        assert_eq!(
+            session.submit(include_str!(
+                "fixtures/repl-inline-math-increment-library-local-40-c176360e.orna"
+            )),
             Ok(Some(Value::int(42.into())))
         );
     }
@@ -774,15 +897,25 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        fs::write(directory.path().join("main.orna"), "use library;").unwrap();
+        fs::write(
+            directory.path().join("main.orna"),
+            include_str!("fixtures/repl-inline-use-library-a84bcc62.orna"),
+        )
+        .unwrap();
         let library = directory.path().join("library.orna");
-        fs::write(&library, "pub fn value(): Int = 42; fn hidden(): Int = 99;").unwrap();
+        fs::write(
+            &library,
+            include_str!("fixtures/repl-inline-pub-fn-value-int-42-fn-hidden-int-99-3655e003.orna"),
+        )
+        .unwrap();
         let repository = Repository::discover(directory.path()).unwrap();
         let loaded = ProjectLoader::default().load(&repository).unwrap();
 
         fs::write(
             &library,
-            "pub fn value(): Str = \"changed\"; pub fn hidden(): Int = 99;",
+            include_str!(
+                "fixtures/repl-inline-pub-fn-value-str-changed-pub-fn-hidden-4a870d7d.orna"
+            ),
         )
         .unwrap();
         let mut session = AdmittedReplSession::from_loaded_project(
@@ -791,13 +924,25 @@ mod tests {
             Limits::default(),
         )
         .unwrap();
-        assert_eq!(session.submit("use library;"), Ok(None));
         assert_eq!(
-            session.submit("library.value()"),
+            session.submit(include_str!(
+                "fixtures/repl-inline-use-library-a84bcc62.orna"
+            )),
+            Ok(None)
+        );
+        assert_eq!(
+            session.submit(include_str!(
+                "fixtures/repl-inline-library-value-43f7e801.orna"
+            )),
             Ok(Some(Value::int(42.into())))
         );
         assert_eq!(
-            session.submit("library.hidden()").unwrap_err().code(),
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-library-hidden-eddb18cc.orna"
+                ))
+                .unwrap_err()
+                .code(),
             "ORNA-S012-UNRESOLVED"
         );
     }
@@ -806,8 +951,14 @@ mod tests {
     fn loaded_directory_main_uses_the_loader_namespace() {
         let (_directory, project) = loaded_project(
             &[
-                ("main.orna", "use sensors.greenhouse;"),
-                ("sensors/greenhouse/main.orna", "pub fn seeded(): Int = 40;"),
+                (
+                    "main.orna",
+                    include_str!("fixtures/repl-inline-use-sensors-greenhouse-7575c118.orna"),
+                ),
+                (
+                    "sensors/greenhouse/main.orna",
+                    include_str!("fixtures/repl-inline-pub-fn-seeded-int-40-d5abd82d.orna"),
+                ),
             ],
             None,
         );
@@ -826,9 +977,16 @@ mod tests {
             Limits::default(),
         )
         .unwrap();
-        assert_eq!(session.submit("use sensors.greenhouse;"), Ok(None));
         assert_eq!(
-            session.submit("greenhouse.seeded() + 2"),
+            session.submit(include_str!(
+                "fixtures/repl-inline-use-sensors-greenhouse-7575c118.orna"
+            )),
+            Ok(None)
+        );
+        assert_eq!(
+            session.submit(include_str!(
+                "fixtures/repl-inline-greenhouse-seeded-2-8fad7abb.orna"
+            )),
             Ok(Some(Value::int(42.into())))
         );
     }
@@ -836,26 +994,38 @@ mod tests {
     #[test]
     fn typed_submission_preserves_prior_state_after_rejection() {
         let mut session = AdmittedReplSession::new(Limits::default());
-        assert_eq!(session.submit("let answer: Int = 40;"), Ok(None));
         assert_eq!(
-            session.submit("answer + 2"),
+            session.submit(include_str!(
+                "fixtures/repl-inline-let-answer-int-40-32ff602e.orna"
+            )),
+            Ok(None)
+        );
+        assert_eq!(
+            session.submit(include_str!("fixtures/repl-inline-answer-2-1e6074ea.orna")),
             Ok(Some(Value::int(42.into())))
         );
         assert_eq!(
             session
-                .submit("let answer: Int = \"wrong\";")
+                .submit(include_str!(
+                    "fixtures/repl-inline-let-answer-int-wrong-13d92e60.orna"
+                ))
                 .unwrap_err()
                 .code(),
             "ORNA-S021-TYPE"
         );
-        assert_eq!(session.submit("answer"), Ok(Some(Value::int(40.into()))));
+        assert_eq!(
+            session.submit(include_str!("fixtures/repl-inline-answer-0db52f40.orna")),
+            Ok(Some(Value::int(40.into())))
+        );
     }
 
     #[test]
     fn rejected_inputs_retain_only_a_redacted_structured_diagnostic() {
         let mut session = AdmittedReplSession::new(Limits::default());
         let error = session
-            .submit("let secret_name: Int = \"private\";")
+            .submit(include_str!(
+                "fixtures/repl-inline-let-secret-name-int-private-178755d6.orna"
+            ))
             .unwrap_err();
 
         assert_eq!(error.code(), "ORNA-S021-TYPE");
@@ -872,14 +1042,18 @@ mod tests {
     fn last_status_tracks_redacted_failures_and_successes_without_preview_mutation() {
         let mut session = AdmittedReplSession::new(Limits::default());
         assert_eq!(
-            session.preview("$?"),
+            session.preview(include_str!("fixtures/repl-inline-source-3a7494a2.orna")),
             Ok(CanonicalValue::new(orna_foundation_v1::OvbRaw::Null).unwrap())
         );
         let error = session
-            .submit("let secret_name: Int = \"private\";")
+            .submit(include_str!(
+                "fixtures/repl-inline-let-secret-name-int-private-178755d6.orna"
+            ))
             .unwrap_err();
         assert_eq!(error.code(), "ORNA-S021-TYPE");
-        let status = session.preview("$?").expect("status value");
+        let status = session
+            .preview(include_str!("fixtures/repl-inline-source-3a7494a2.orna"))
+            .expect("status value");
         assert_eq!(
             status.raw(),
             &orna_foundation_v1::OvbRaw::Map(vec![
@@ -902,8 +1076,13 @@ mod tests {
             ])
         );
 
-        assert_eq!(session.preview("1 + 1"), Ok(Value::int(2.into())));
-        let status = session.preview("$?").expect("status value");
+        assert_eq!(
+            session.preview(include_str!("fixtures/repl-inline-1-1-72fce594.orna")),
+            Ok(Value::int(2.into()))
+        );
+        let status = session
+            .preview(include_str!("fixtures/repl-inline-source-3a7494a2.orna"))
+            .expect("status value");
         assert_eq!(
             status.raw(),
             &orna_foundation_v1::OvbRaw::Map(vec![
@@ -926,9 +1105,12 @@ mod tests {
             ])
         );
 
-        assert_eq!(session.submit("40 + 2"), Ok(Some(Value::int(42.into()))));
         assert_eq!(
-            session.preview("$?"),
+            session.submit(include_str!("fixtures/repl-inline-40-2-0fcd2493.orna")),
+            Ok(Some(Value::int(42.into())))
+        );
+        assert_eq!(
+            session.preview(include_str!("fixtures/repl-inline-source-3a7494a2.orna")),
             Ok(CanonicalValue::new(orna_foundation_v1::OvbRaw::Null).unwrap())
         );
     }
@@ -936,11 +1118,23 @@ mod tests {
     #[test]
     fn cancellation_in_long_loop_rolls_back_candidate_and_status() {
         let mut session = ReplSession::new(Limits::default());
-        assert_eq!(session.submit("let answer = 41;"), Ok(None));
-        assert_eq!(session.submit("answer"), Ok(Some(Value::int(41.into()))));
-        let before_status = session.preview("$?").unwrap();
+        assert_eq!(
+            session.submit(include_str!(
+                "fixtures/repl-inline-let-answer-41-c31c6eb5.orna"
+            )),
+            Ok(None)
+        );
+        assert_eq!(
+            session.submit(include_str!("fixtures/repl-inline-answer-0db52f40.orna")),
+            Ok(Some(Value::int(41.into())))
+        );
+        let before_status = session
+            .preview(include_str!("fixtures/repl-inline-source-3a7494a2.orna"))
+            .unwrap();
         let input = parse_admitted_repl(
-            "if true { for value in 1..=100000 { value }; 0 }",
+            include_str!(
+                "fixtures/repl-inline-if-true-for-value-in-1-100000-value-0-cb81a3a8.orna"
+            ),
             Limits::default(),
         )
         .unwrap();
@@ -951,18 +1145,30 @@ mod tests {
             .submit_admitted_with_cancellation(&input, &cancellation)
             .unwrap_err();
         assert_eq!(error.code(), "ORNA-EVAL-CANCELLED");
-        assert_eq!(session.preview("answer"), Ok(Value::int(41.into())));
-        assert_eq!(session.preview("$?"), Ok(before_status));
+        assert_eq!(
+            session.preview(include_str!("fixtures/repl-inline-answer-0db52f40.orna")),
+            Ok(Value::int(41.into()))
+        );
+        assert_eq!(
+            session.preview(include_str!("fixtures/repl-inline-source-3a7494a2.orna")),
+            Ok(before_status)
+        );
     }
 
     #[test]
     fn cancellation_in_recursive_calls_is_not_recoverable_or_published() {
         let mut session = AdmittedReplSession::new(Limits::default());
         assert_eq!(
-            session.submit("fn recurse(n) = if n == 0 { 0 } else { recurse(n - 1) };"),
+            session.submit(include_str!(
+                "fixtures/repl-inline-fn-recurse-n-if-n-0-0-else-recurse-n-1-5cd2a50e.orna"
+            )),
             Ok(None)
         );
-        let input = parse_admitted_repl("recurse(100000)", Limits::default()).unwrap();
+        let input = parse_admitted_repl(
+            include_str!("fixtures/repl-inline-recurse-100000-6ed6c372.orna"),
+            Limits::default(),
+        )
+        .unwrap();
         let cancellation = CancellationToken::new();
         cancellation.request_after_checks(12);
 
@@ -970,12 +1176,21 @@ mod tests {
             .submit_admitted_with_cancellation(&input, &cancellation)
             .unwrap_err();
         assert_eq!(error.code(), "ORNA-EVAL-CANCELLED");
-        assert_eq!(session.submit("recurse(0)"), Ok(Some(Value::int(0.into()))));
+        assert_eq!(
+            session.submit(include_str!("fixtures/repl-inline-recurse-0-d5e629d3.orna")),
+            Ok(Some(Value::int(0.into())))
+        );
     }
 
     #[test]
     fn module_source_cannot_admit_the_session_local_status_binding() {
-        let (_directory, project) = loaded_project(&[("main.orna", "pub fn status() = $?;")], None);
+        let (_directory, project) = loaded_project(
+            &[(
+                "main.orna",
+                include_str!("fixtures/repl-inline-pub-fn-status-988936de.orna"),
+            )],
+            None,
+        );
         assert_eq!(
             AdmittedReplSession::from_loaded_project(&project, [], Limits::default())
                 .unwrap_err()
@@ -987,10 +1202,14 @@ mod tests {
     #[test]
     fn loaded_project_is_pinned_before_qualified_execution() {
         let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("main.orna"), "use library;\n").unwrap();
+        std::fs::write(
+            directory.path().join("main.orna"),
+            include_str!("fixtures/repl-inline-use-library-f2cd609f.orna"),
+        )
+        .unwrap();
         std::fs::write(
             directory.path().join("library.orna"),
-            "pub fn seeded(): Int = 40;\n",
+            include_str!("fixtures/repl-inline-pub-fn-seeded-int-40-df4e01cd.orna"),
         )
         .unwrap();
         assert!(
@@ -1005,9 +1224,16 @@ mod tests {
         let project = ProjectLoader::default().load(&repository).unwrap();
         let mut session =
             AdmittedReplSession::from_loaded_project(&project, [], Limits::default()).unwrap();
-        assert_eq!(session.submit("use library;"), Ok(None));
         assert_eq!(
-            session.submit("library.seeded() + 2"),
+            session.submit(include_str!(
+                "fixtures/repl-inline-use-library-a84bcc62.orna"
+            )),
+            Ok(None)
+        );
+        assert_eq!(
+            session.submit(include_str!(
+                "fixtures/repl-inline-library-seeded-2-7f27f8c8.orna"
+            )),
             Ok(Some(Value::int(42.into())))
         );
     }

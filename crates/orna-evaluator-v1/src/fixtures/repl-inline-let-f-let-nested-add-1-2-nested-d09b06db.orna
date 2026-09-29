@@ -1,0 +1,1 @@
+let f = () => { let nested = () => add(1, 2); nested() };
