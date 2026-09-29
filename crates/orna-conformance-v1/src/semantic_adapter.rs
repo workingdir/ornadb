@@ -10124,11 +10124,7 @@ mod durable_tests {
     async fn source_activation_commits_rows_and_reopens_for_the_next_activation() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [1; 16],
@@ -10205,11 +10201,7 @@ mod durable_tests {
     async fn application_eval_resolves_admits_stages_and_commits_digest() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let unit = SourceUnit {
             fixture_id: "application-eval-proof".into(),
@@ -10279,11 +10271,7 @@ mod durable_tests {
     async fn ordinary_activation_reuses_one_captured_now_for_repeated_writes() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [121; 16],
@@ -10328,11 +10316,7 @@ mod durable_tests {
     async fn semantically_admitted_user_now_shadows_activation_intrinsic() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [125; 16],
@@ -10373,11 +10357,7 @@ mod durable_tests {
     async fn request_source_activation_commits_row_and_terminal_together() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [61; 16],
@@ -10474,11 +10454,7 @@ mod durable_tests {
     async fn running_table_continuation_commits_once_with_the_exact_success_terminal() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [111; 16],
@@ -10594,11 +10570,7 @@ mod durable_tests {
     async fn running_table_continuation_semantic_terminal_is_absorbing_before_replay() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [191; 16],
@@ -10681,11 +10653,7 @@ mod durable_tests {
     async fn running_table_continuation_fault_recovers_as_proven() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [181; 16],
@@ -10838,11 +10806,7 @@ mod durable_tests {
     async fn running_table_continuation_rejects_foreign_and_stale_capabilities_without_writes() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [121; 16],
@@ -10882,11 +10846,7 @@ mod durable_tests {
 
         let foreign_temp = TempDir::new().expect("foreign temporary repository");
         git(foreign_temp.path(), &["init"]);
-        git(
-            foreign_temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(foreign_temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(foreign_temp.path());
         let foreign_repository =
             Repository::discover(foreign_temp.path()).expect("foreign repository");
         let foreign = RuntimeState::open(&foreign_repository, identity, [126; 32])
@@ -10970,11 +10930,7 @@ mod durable_tests {
     async fn request_source_failure_replays_without_executing_new_source() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [71; 16],
@@ -11049,11 +11005,7 @@ mod durable_tests {
     async fn request_source_never_executes_an_existing_nonterminal_reservation() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [81; 16],
@@ -11110,11 +11062,7 @@ mod durable_tests {
     async fn project_activation_keeps_modules_qualified_and_rolls_back_failed_roots() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [41; 16],
@@ -11187,11 +11135,7 @@ mod durable_tests {
     async fn authoritative_five_module_project_executes_seed_and_exercise() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [51; 16],
@@ -11842,11 +11786,7 @@ mod list_stream_tests {
     fn repository() -> (TempDir, Repository) {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init", "-q"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         (temp, repository)
     }

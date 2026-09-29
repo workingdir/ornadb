@@ -1,3 +1,6 @@
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 use std::{fs, path::Path, process::Command};
 
 use orna_compiler::{check, materialize_resolved_source_catalogue};
@@ -31,14 +34,7 @@ fn git(root: &Path, args: &[&str]) {
 fn repository() -> (TempDir, Repository) {
     let temp = TempDir::new_in("/var/tmp").unwrap();
     git(temp.path(), &["init", "--quiet"]);
-    git(
-        temp.path(),
-        &["config", "user.email", "test@example.invalid"],
-    );
-    git(
-        temp.path(),
-        &["config", "user.name", "source admission test"],
-    );
+    test_support::configure_fixture_git_identity(temp.path());
     git(temp.path(), &["config", "commit.gpgsign", "false"]);
     fs::write(
         temp.path().join("main.orna"),

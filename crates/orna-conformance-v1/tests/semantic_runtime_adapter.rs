@@ -1,3 +1,6 @@
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 use orna_conformance_v1::{
     BoundedEvaluator, ConformanceAdapter, Corpus, EvidenceClass, EvidenceStatus, Harness,
     ProjectEnvironment, ProjectExpectations, ProjectUnit, RuntimeAdapter, RuntimeEvaluator,
@@ -73,20 +76,15 @@ fn cancellation_project() -> ProjectUnit {
 }
 
 fn initialized_repository(temp: &TempDir) -> Repository {
-    for arguments in [
-        &["init", "--quiet"][..],
-        &["config", "user.email", "test@example.invalid"][..],
-        &["config", "user.name", "conformance test"][..],
-    ] {
-        assert!(
-            Command::new("git")
-                .args(arguments)
-                .current_dir(temp.path())
-                .status()
-                .expect("git command")
-                .success()
-        );
-    }
+    assert!(
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(temp.path())
+            .status()
+            .expect("git command")
+            .success()
+    );
+    test_support::configure_fixture_git_identity(temp.path());
     Repository::discover(temp.path()).expect("repository")
 }
 
@@ -955,20 +953,15 @@ fn semantic_project_adapter_rejects_mismatched_explicit_sys_await_type() {
 #[tokio::test]
 async fn project_stream_ignores_unrelated_false_module_assertion() {
     let temp = TempDir::new().expect("temporary repository");
-    for arguments in [
-        &["init", "--quiet"][..],
-        &["config", "user.email", "test@example.invalid"][..],
-        &["config", "user.name", "conformance test"][..],
-    ] {
-        assert!(
-            Command::new("git")
-                .args(arguments)
-                .current_dir(temp.path())
-                .status()
-                .expect("git command")
-                .success()
-        );
-    }
+    assert!(
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(temp.path())
+            .status()
+            .expect("git command")
+            .success()
+    );
+    test_support::configure_fixture_git_identity(temp.path());
     let repository = Repository::discover(temp.path()).expect("repository");
     let project = ProjectUnit {
         fixture_id: "stream-assertion-scope".into(),
@@ -1105,20 +1098,15 @@ async fn project_stream_ignores_unrelated_false_module_assertion() {
 #[tokio::test]
 async fn project_stream_rolls_back_when_affected_module_assertion_fails() {
     let temp = TempDir::new().expect("temporary repository");
-    for arguments in [
-        &["init", "--quiet"][..],
-        &["config", "user.email", "test@example.invalid"][..],
-        &["config", "user.name", "conformance test"][..],
-    ] {
-        assert!(
-            Command::new("git")
-                .args(arguments)
-                .current_dir(temp.path())
-                .status()
-                .expect("git command")
-                .success()
-        );
-    }
+    assert!(
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(temp.path())
+            .status()
+            .expect("git command")
+            .success()
+    );
+    test_support::configure_fixture_git_identity(temp.path());
     let repository = Repository::discover(temp.path()).expect("repository");
     let project = ProjectUnit {
         fixture_id: "stream-assertion-failure".into(),
@@ -1224,20 +1212,15 @@ async fn project_stream_rolls_back_when_affected_module_assertion_fails() {
 #[tokio::test]
 async fn project_stream_admission_rejects_multiple_applicable_module_assertions() {
     let temp = TempDir::new().expect("temporary repository");
-    for arguments in [
-        &["init", "--quiet"][..],
-        &["config", "user.email", "test@example.invalid"][..],
-        &["config", "user.name", "conformance test"][..],
-    ] {
-        assert!(
-            Command::new("git")
-                .args(arguments)
-                .current_dir(temp.path())
-                .status()
-                .expect("git command")
-                .success()
-        );
-    }
+    assert!(
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(temp.path())
+            .status()
+            .expect("git command")
+            .success()
+    );
+    test_support::configure_fixture_git_identity(temp.path());
     let repository = Repository::discover(temp.path()).expect("repository");
     let project = ProjectUnit {
         fixture_id: "stream-assertion-ordering".into(),
