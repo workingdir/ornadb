@@ -1,0 +1,1 @@
+pub fn invalid_instant() = 2026-01-01T25:00:00Z;
