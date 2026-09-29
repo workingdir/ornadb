@@ -1,0 +1,1 @@
+let lib = { twice: 0 };

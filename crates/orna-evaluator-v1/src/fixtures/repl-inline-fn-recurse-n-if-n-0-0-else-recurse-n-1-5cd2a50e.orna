@@ -1,0 +1,1 @@
+fn recurse(n) = if n == 0 { 0 } else { recurse(n - 1) };

@@ -1,0 +1,1 @@
+use std.math.{increment}; pub fn run(value: Int): Int = increment(value);
