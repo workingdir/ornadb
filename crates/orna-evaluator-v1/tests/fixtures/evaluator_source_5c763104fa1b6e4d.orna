@@ -1,0 +1,1 @@
+[1, 2, 3] | std.collection.take(count: 0)

@@ -1,0 +1,1 @@
+fn run() = fail(if true { return 7; } else { 0 });

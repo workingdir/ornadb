@@ -1,0 +1,1 @@
+std.collection.sum([1.5f, 2.25f])

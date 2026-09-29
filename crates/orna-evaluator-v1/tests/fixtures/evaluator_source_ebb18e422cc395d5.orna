@@ -1,0 +1,1 @@
+std.collection.every(predicate: value => value > 0, rows: [1, 2, 3])

@@ -1,0 +1,1 @@
+std.stats.percentile([10.0, 0.0], 0.25, interpolation: "nearest")

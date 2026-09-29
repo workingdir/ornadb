@@ -1,0 +1,1 @@
+fn outer() { for value in [1] { let stop = () => { break; }; stop(); }; 0 }

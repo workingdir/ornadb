@@ -1,0 +1,1 @@
+every([1, 2, 3], value => if value <= 2 { value == 1 } else { 1 / 0 == 0 })
