@@ -75,7 +75,13 @@ fn ordinary_update_cannot_replace_a_primary_key() {
         include_str!("fixtures/traceability-b4-mut-key-update-invalid.orna"),
     );
 
-    assert!(matches!(outcome, StageOutcome::Failed(_)), "{outcome:?}");
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-S021-TYPE"
+        ),
+        "primary-key patch must be rejected during source admission: {outcome:?}"
+    );
     assert_eq!(
         runtime.committed_row("Note", &Value::int(7.into())),
         None,
@@ -96,7 +102,14 @@ fn rekey_collision_fails_without_publishing_candidate_rows() {
         include_str!("fixtures/traceability-b4-mut-rekey-collision.orna"),
     );
 
-    assert!(matches!(outcome, StageOutcome::Failed(_)), "{outcome:?}");
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-TABLE-DUPLICATE"
+        ),
+        "rekey collision must report a duplicate-key failure: {outcome:?}"
+    );
     for key in [7, 8] {
         assert_eq!(
             runtime.committed_row("Note", &Value::int(key.into())),
