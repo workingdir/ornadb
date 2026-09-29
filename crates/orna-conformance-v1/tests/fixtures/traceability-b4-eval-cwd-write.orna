@@ -1,0 +1,7 @@
+pub table Note(id: Int) {
+    value: Int,
+}
+
+fn main() {
+    Note.insert({ id: 7, value: 70 });
+}
