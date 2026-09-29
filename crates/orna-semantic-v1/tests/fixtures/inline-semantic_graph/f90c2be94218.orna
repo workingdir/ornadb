@@ -1,0 +1,9 @@
+
+            fn half_open(): Range<Instant> = 2026-01-01T00:00:00Z..2027-01-01T00:00:00Z;
+            fn closed(): Range<Instant> = 2026-01-01T00:00:00Z..=2027-01-01T00:00:00Z;
+            fn lower_unbounded(): Range<Instant> = ..2027-01-01T00:00:00Z;
+            fn upper_unbounded(): Range<Instant> = 2026-01-01T00:00:00Z..;
+            fn equal_half_open(): Range<Instant> = 2026-01-01T00:00:00Z..2026-01-01T00:00:00Z;
+            fn equal_closed(): Range<Instant> = 2026-01-01T00:00:00Z..=2026-01-01T00:00:00Z;
+            fn reversed(): Range<Instant> = 2027-01-01T00:00:00Z..2026-01-01T00:00:00Z;
+        

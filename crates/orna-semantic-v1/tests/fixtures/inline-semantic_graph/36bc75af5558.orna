@@ -1,0 +1,6 @@
+
+            fn optional_name(value: Str?): Str = case value {
+                Some(): "missing",
+                null: "anonymous",
+            };
+        

@@ -1,0 +1,10 @@
+
+                pub protocol P {
+                    fn value(self);
+                }
+                pub type Box {
+                    impl P {
+                        fn value(self): Int = "wrong";
+                    }
+                }
+            

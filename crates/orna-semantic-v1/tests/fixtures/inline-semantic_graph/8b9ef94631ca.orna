@@ -1,0 +1,1 @@
+fn mismatched_generic(job: sys.InvocationHandle<Int>) = sys.await<Str>(job);

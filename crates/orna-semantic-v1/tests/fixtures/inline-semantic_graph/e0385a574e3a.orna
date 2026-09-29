@@ -1,0 +1,1 @@
+fn unsupported(job: sys.InvocationHandle<Int>) = sys.cancel<Int>(missing);

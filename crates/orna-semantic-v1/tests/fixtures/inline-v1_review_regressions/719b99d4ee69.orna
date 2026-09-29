@@ -1,0 +1,13 @@
+
+            pub table Audit { message: Str, }
+            pub fn helper(): Str {
+                Audit.insert({ message: "displayed" });
+                "displayed"
+            }
+            pub type Note {
+                value: Str,
+                impl Display {
+                    fn display(self): Str = helper();
+                }
+            }
+        

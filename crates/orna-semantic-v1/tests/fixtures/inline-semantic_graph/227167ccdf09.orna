@@ -1,0 +1,1 @@
+pub table Label(id: Int) { value: Str, } pub fn total() = Label | map(row => row.value) | sum;

@@ -1,0 +1,2 @@
+{source}
+pub fn bad() = EmailAddress.from(null);

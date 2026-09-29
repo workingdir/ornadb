@@ -1,0 +1,9 @@
+
+            fn half_open(): Range<Date> = 2026-01-01..2027-01-01;
+            fn closed(): Range<Date> = 2026-01-01..=2027-01-01;
+            fn lower_unbounded(): Range<Date> = ..2027-01-01;
+            fn upper_unbounded(): Range<Date> = 2026-01-01..;
+            fn equal_half_open(): Range<Date> = 2026-01-01..2026-01-01;
+            fn equal_closed(): Range<Date> = 2026-01-01..=2026-01-01;
+            fn reversed(): Range<Date> = 2027-01-01..2026-01-01;
+        

@@ -1,0 +1,1 @@
+fn unknown_generic(job: sys.InvocationHandle<Int>) = sys.cancel<Missing>(job);

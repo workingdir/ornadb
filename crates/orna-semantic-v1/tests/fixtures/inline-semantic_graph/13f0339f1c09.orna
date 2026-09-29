@@ -1,0 +1,1 @@
+Result/Ok/Err control plumbing was removed; return the success type directly

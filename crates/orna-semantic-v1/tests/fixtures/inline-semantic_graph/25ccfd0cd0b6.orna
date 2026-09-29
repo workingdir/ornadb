@@ -1,0 +1,7 @@
+
+        pub fn between(value: Int, min: Int, max: Int) =
+            value >= min && value <= max;
+
+        pub fn selected(value: Int) =
+            value | between(10, 20);
+    

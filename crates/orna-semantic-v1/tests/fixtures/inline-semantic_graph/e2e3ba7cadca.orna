@@ -1,0 +1,1 @@
+fn cost(rate: Money<GBP> / UnknownUnit) = rate;

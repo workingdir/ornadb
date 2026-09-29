@@ -1,0 +1,1 @@
+table Reading(id: Int) { value: Int, } fn bad() = Reading | flat_map(reading => Stream.from_list([reading.value], source_identity: "reading"));

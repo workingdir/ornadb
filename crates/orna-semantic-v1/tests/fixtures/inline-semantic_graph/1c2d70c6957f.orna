@@ -1,0 +1,7 @@
+
+            pub fn construct(code: Str, message: Str, cause: Error): Error =
+                error(code: code, message: message, cause: cause);
+            pub fn fresh(): Error = error(code: "message.invalid", message: "invalid message");
+            pub fn replacing(failure: Error): Error =
+                error(code: "message.invalid", message: "invalid message", cause: fail(failure));
+        

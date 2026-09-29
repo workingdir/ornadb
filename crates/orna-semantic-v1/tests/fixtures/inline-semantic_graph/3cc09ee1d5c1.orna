@@ -1,0 +1,1 @@
+fn absent_on_view() = sys.database.legacy_member;

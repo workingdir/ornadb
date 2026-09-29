@@ -1,0 +1,6 @@
+
+            enum Availability { ready, waiting { reason: Str }, }
+            fn describe(value: Availability): Str = case value {
+                Availability.ready: "ready",
+            };
+        

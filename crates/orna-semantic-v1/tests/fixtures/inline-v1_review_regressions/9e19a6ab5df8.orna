@@ -1,0 +1,4 @@
+
+            pub type Vault { value: Int, }
+            pub fn leak(value: Vault): Int = value.value;
+        

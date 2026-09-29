@@ -1,0 +1,1 @@
+pub fn piped(function: sys.FunctionRef, arguments: sys.ArgumentMap) = function | sys.start<Int>(arguments, as: Int);

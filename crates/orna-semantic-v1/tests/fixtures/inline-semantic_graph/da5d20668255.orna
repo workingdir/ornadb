@@ -1,0 +1,1 @@
+pub fn integer() = sys.meta<Int>(1); pub fn text() = sys.meta<Str>("value"); pub fn generic<T>(value: T) = sys.meta<T>(value); pub fn piped() = 1 | sys.meta<Int>(); pub fn money() = 1 | Money<GBP>();

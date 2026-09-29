@@ -1,0 +1,1 @@
+table Reading(id: Str) { speed: Float, tags: [Str], } fn write() = Reading.{operation}({value});
