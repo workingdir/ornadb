@@ -6,8 +6,7 @@ use orna_syntax_v1::{
 const LIMIT_ERROR: &str = "maximum syntax nesting exceeded";
 
 fn source(case: &str) -> &'static str {
-    let fixture = std::str::from_utf8(include_bytes!("fixtures/nesting_limits.orna"))
-        .expect("checked-in .orna fixture must be UTF-8");
+    let fixture = include_str!("fixtures/nesting_limits.orna");
     let marker = format!("// CASE {case}\n");
     let (_, source) = fixture
         .split_once(&marker)
