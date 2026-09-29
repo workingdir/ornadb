@@ -4938,11 +4938,7 @@ mod tests {
     fn test_repository() -> (TempDir, Repository) {
         let temp = TempDir::new().unwrap();
         test_git(temp.path(), &["init", "-b", "main"]);
-        test_git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        test_git(temp.path(), &["config", "user.name", "compact-test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         test_git(temp.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(temp.path().join("main.orna"), "module main;\n").unwrap();
         fs::create_dir_all(temp.path().join(".orna")).unwrap();
