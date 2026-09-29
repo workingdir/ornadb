@@ -1,9 +1,10 @@
 use std::{collections::BTreeSet, process::Command};
 
-use orna_syntax_v1::parse_module;
+use orna_syntax_v1::{parse_module, parse_repl};
 use serde_json::json;
 
 const SOURCE_PROBES: &str = include_str!("fixtures/reference-tools/source-probes.orna");
+const SOURCE_BLOCKS: &str = include_str!("fixtures/reference-tools/source-blocks.orna");
 const INDEX_HTML: &str = include_str!("../../../../reference/Orna-1.0.0/index.html");
 
 const NAVIGATION_HARNESS: &str = r#"
@@ -205,6 +206,39 @@ fn reference_project_modules_parse_as_module_units() {
     for (index, source) in modules.iter().enumerate() {
         assert!(parse_module(source).is_ok(), "reference module index {index}");
     }
+}
+
+#[test]
+fn frozen_documentation_source_blocks_parse_in_a_declared_entry_or_wrapper() {
+    let after_prefix = SOURCE_BLOCKS
+        .split_once("// WRAPPER_PREFIX\n")
+        .expect("wrapper prefix marker")
+        .1;
+    let (wrapper_prefix, after_wrapper) = after_prefix
+        .split_once("// WRAPPER_SUFFIX\n")
+        .expect("wrapper suffix marker");
+    let (wrapper_suffix, _) = after_wrapper
+        .split_once("// SOURCE_BLOCK ")
+        .expect("first source block marker");
+    let source_blocks = SOURCE_BLOCKS
+        .split_once("// SOURCE_BLOCKS_END")
+        .expect("source blocks end marker")
+        .0;
+    let mut accepted = 0;
+    let mut rejected = Vec::new();
+    for block in source_blocks.split("// SOURCE_BLOCK ").skip(1) {
+        let (label, source) = block.split_once('\n').expect("source block label");
+        let parsed = parse_module(source).is_ok()
+            || parse_repl(source).is_ok()
+            || parse_module(&format!("{wrapper_prefix}{source}{wrapper_suffix}")).is_ok();
+        if parsed {
+            accepted += 1;
+        } else {
+            rejected.push(label);
+        }
+    }
+    assert_eq!(accepted, 66, "unexpected source-block rejections: {rejected:?}");
+    assert!(rejected.is_empty());
 }
 
 #[test]
