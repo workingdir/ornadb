@@ -1,3 +1,6 @@
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 use std::{fmt, fs, path::Path, process::Command, sync::Mutex};
 
 use num_bigint::BigInt;
@@ -24,14 +27,7 @@ fn git(directory: &Path, arguments: &[&str]) {
 fn repository() -> TempDir {
     let temporary = TempDir::new().unwrap();
     git(temporary.path(), &["init", "-b", "main"]);
-    git(
-        temporary.path(),
-        &["config", "user.email", "test@example.invalid"],
-    );
-    git(
-        temporary.path(),
-        &["config", "user.name", "Foundation adapter test"],
-    );
+    test_support::configure_fixture_git_identity(temporary.path());
     git(temporary.path(), &["config", "commit.gpgsign", "false"]);
     fs::write(
         temporary.path().join("main.orna"),
@@ -194,14 +190,7 @@ fn adapter_preserves_a_sha256_head_as_a_committed_snapshot() {
         root.path(),
         &["init", "--object-format=sha256", "-b", "main"],
     );
-    git(
-        root.path(),
-        &["config", "user.email", "test@example.invalid"],
-    );
-    git(
-        root.path(),
-        &["config", "user.name", "Foundation adapter test"],
-    );
+    test_support::configure_fixture_git_identity(root.path());
     git(root.path(), &["config", "commit.gpgsign", "false"]);
     fs::write(
         root.path().join("main.orna"),
