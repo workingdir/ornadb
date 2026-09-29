@@ -18,7 +18,7 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  --format human|short|json status",
     "  fetch [REMOTE] [BRANCH]",
     "  diff [GIT_DIFF_ARGS...]",
-    "Options: --color auto|always|never, --db ENDPOINT",
+    "Options: --color auto|always|never, --db ENDPOINT, --debug (show technical detail)",
 ];
 
 pub(super) fn print_help() {
