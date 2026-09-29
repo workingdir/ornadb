@@ -1,0 +1,1 @@
+fn missing(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Int>(function, arguments);

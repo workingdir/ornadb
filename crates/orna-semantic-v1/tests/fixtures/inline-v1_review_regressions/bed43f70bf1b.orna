@@ -1,0 +1,6 @@
+
+                pub type Box {
+                    value: Str,
+                    impl From<Str> {}
+                }
+            

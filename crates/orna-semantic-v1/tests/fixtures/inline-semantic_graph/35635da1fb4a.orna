@@ -1,0 +1,15 @@
+
+            table Reading(id: Int) { value: Int, }
+            fn positive(value: Int) = value > 0;
+            fn reads_predicate(value: Int) = Reading.count() > 0 && value > 0;
+            pub fn direct(rows: [Int]) = one(rows);
+            pub fn direct_named(rows: [Int]) = one(rows: rows);
+            pub fn direct_predicate(rows: [Int]) = one(rows, positive);
+            pub fn unused_predicate(rows: [Int]) = one(rows, value => true);
+            pub fn qualified(rows: [Int]) = std.collection.one(rows: rows, predicate: positive);
+            pub fn pipeline(rows: [Int]) = rows | one();
+            pub fn pipeline_predicate(rows: [Int]) = rows | one(positive);
+            pub fn qualified_pipeline(rows: [Int]) = rows | std.collection.one(predicate: positive);
+            pub fn reads(rows: [Int]) = rows | one(predicate: value => Reading.count() > 0 && value > 0);
+            pub fn named_reads(rows: [Int]) = one(predicate: reads_predicate, rows: rows);
+        

@@ -1,0 +1,1 @@
+pub table Note { text: Str, } pub fn bad() = Note.rekey(1, 2);

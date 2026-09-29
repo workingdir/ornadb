@@ -1,0 +1,1 @@
+type Book; fn bad() = Book.insert({ id: "book-1" });

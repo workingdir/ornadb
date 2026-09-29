@@ -1,0 +1,1 @@
+fn cost(energy: Float<kWh>, rate: Money<GBP> / kWh) = energy * rate;

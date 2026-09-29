@@ -1,0 +1,1 @@
+fn empty_generic(job: sys.InvocationHandle<Int>) = sys.await<>(job);

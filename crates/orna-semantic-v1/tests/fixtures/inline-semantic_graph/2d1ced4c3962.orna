@@ -1,0 +1,5 @@
+
+            fn increment(value: Int): Int = value + 1;
+            pub fn recovered(value: Int) =
+                value |? (failure => 0) | increment;
+        

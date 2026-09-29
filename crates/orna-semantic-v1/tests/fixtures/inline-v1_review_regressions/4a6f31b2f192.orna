@@ -1,0 +1,18 @@
+
+            pub protocol Display {
+                fn display(self): Str;
+            }
+            pub type Note {
+                value: Str,
+                impl Display {
+                    fn display(self): Str = self.value;
+                }
+            }
+            pub fn maybe<T impl Display>(value: T): Bool = one([true]);
+            pub table Book(id: Int) { value: Str, }
+            pub table Loan(id: Int) { book_id: Int, }
+            assert every(Loan, loan =>
+                exists(Book, book => book.id == loan.book_id)
+                && maybe<Note>(Note { value: "note" })
+            );
+        

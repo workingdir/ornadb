@@ -1,0 +1,1 @@
+use library; pub fn read(value: Int) = library.lookup<Int>(value);

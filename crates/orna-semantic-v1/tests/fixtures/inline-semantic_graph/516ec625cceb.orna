@@ -1,0 +1,1 @@
+fn duplicate(job: sys.InvocationHandle<Int>) = sys.cancel(job, invocation: job);

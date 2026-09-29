@@ -1,0 +1,9 @@
+
+                use alpha.{Vault};
+                use alpha as a;
+                pub fn named_to_qualified(value: Vault): a.Vault = value;
+                pub fn qualified_to_named(value: a.Vault): Vault = value;
+                pub fn named_constructor(): Vault = Vault { value: 1 };
+                pub fn qualified_constructor(): a.Vault = a.Vault { value: 2 };
+                pub fn aliased_constructor(): Vault = a.Vault { value: 3 };
+            

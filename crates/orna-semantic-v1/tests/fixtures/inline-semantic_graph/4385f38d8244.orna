@@ -1,0 +1,1 @@
+fn coordinates() = sys.current.snapshot;

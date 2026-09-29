@@ -1,0 +1,6 @@
+
+            pub fn first_value(rows: [Int]) = first(rows);
+            pub fn one_value(rows: [Int]) = one(rows);
+            pub fn mapped(rows: [Int]) = rows | map(value => value + 1);
+            pub fn flattened(rows: [Int]) = rows | flat_map(value => [value]);
+        

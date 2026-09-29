@@ -1,0 +1,1 @@
+use currency as c; pub fn amount(): Money<c.GBP> = Money<c.GBP>(12.34);

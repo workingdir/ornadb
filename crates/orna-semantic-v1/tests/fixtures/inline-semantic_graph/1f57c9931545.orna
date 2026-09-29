@@ -1,0 +1,21 @@
+
+            table Reading(id: Int) { value: Float, }
+            pub fn direct_sum(rows: [Float]): Float = sum(rows);
+            pub fn direct_min(rows: [Float]): Float? = min([3.0f, 1.0f, 2.0f]);
+            pub fn direct_max(rows: [Float]): Float? = max([3.0f, 1.0f, 2.0f]);
+            pub fn named_sum(rows: [Float]): Float = sum(rows: rows);
+            pub fn named_min(rows: [Float]): Float? = min(rows: rows);
+            pub fn named_max(rows: [Float]): Float? = max(rows: rows);
+            pub fn pipeline_sum(rows: [Float]): Float = rows | sum();
+            pub fn pipeline_min(rows: [Float]): Float? = rows | min;
+            pub fn pipeline_max(rows: [Float]): Float? = rows | std.collection.max();
+            pub fn call_pipeline_min(rows: [Float]): Float? = rows | min();
+            pub fn empty_sum(): Float = sum([]);
+            pub fn empty_min(): Float? = min([]);
+            pub fn empty_max(): Float? = [] | max;
+            pub fn reads(rows: [Float]): Float =
+                rows | map(transform: value => if Reading.count() > 0 { value } else { value }) | sum;
+            pub fn qualified_sum(rows: [Float]): Float = std.collection.sum(rows);
+            pub fn qualified_min(rows: [Float]): Float? = std.collection.min(rows: rows);
+            pub fn qualified_max(rows: [Float]): Float? = rows | std.collection.max;
+        

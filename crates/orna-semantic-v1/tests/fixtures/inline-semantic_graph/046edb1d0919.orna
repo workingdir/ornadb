@@ -1,0 +1,5 @@
+
+            pub fn inside(value: Int) = value in 1..=5;
+            pub fn first_ten(values: [Int]) = values | take(10);
+            pub fn after_ten(values: [Int]) = values | drop(10);
+        

@@ -1,0 +1,1 @@
+use contacts; fn contacts(): Int = 2; fn misuse() = contacts.Contact.one();

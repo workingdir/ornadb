@@ -1,0 +1,11 @@
+
+            pub type Token { value: Int, }
+            pub protocol P {
+                fn value(self, input: Token): Token;
+            }
+            pub type Box {
+                impl P {
+                    fn value(self, input: Int): Int = input;
+                }
+            }
+        

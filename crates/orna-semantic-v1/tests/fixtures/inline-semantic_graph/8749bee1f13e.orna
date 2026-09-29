@@ -1,0 +1,1 @@
+fn lower() = ..5; fn upper() = 1..; fn bounded() = 1..5;

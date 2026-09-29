@@ -1,0 +1,1 @@
+fn bad(values: [Decimal]) = sum(values);

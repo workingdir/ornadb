@@ -1,0 +1,1 @@
+use vault; pub fn forge() = vault.Vault {};

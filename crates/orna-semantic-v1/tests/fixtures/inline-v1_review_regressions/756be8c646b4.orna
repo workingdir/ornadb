@@ -1,0 +1,5 @@
+
+                pub protocol P {
+                    fn value(self): Int;
+                }
+            

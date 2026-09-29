@@ -1,0 +1,7 @@
+
+                use vault.{Vault};
+                use vault as v;
+                pub fn named(values: [Vault]) = values | map((value: Vault) => value);
+                pub fn aliased(values: [v.Vault]) =
+                    values | map((value: v.Vault) => value);
+            

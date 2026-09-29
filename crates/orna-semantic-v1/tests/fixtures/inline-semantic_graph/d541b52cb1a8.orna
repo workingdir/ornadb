@@ -1,0 +1,5 @@
+
+            table Reading(id: Int) { value: Int, }
+            pub fn readings() = Reading | distinct();
+            pub fn direct() = distinct(Reading);
+        

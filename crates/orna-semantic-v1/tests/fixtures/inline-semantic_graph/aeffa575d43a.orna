@@ -1,0 +1,11 @@
+
+                pub fn json(value: JsonValue) = std.encoding.json.encode(value);
+                pub fn canonical(value: JsonValue) = std.encoding.orna.encode(value);
+                pub fn read(value: ByteStream) = std.encoding.json.decode(value, as: JsonValue);
+                pub fn formats(duration: Duration) = {
+                    compact: std.time.duration.compact.format(duration),
+                    clock: std.time.duration.clock.format(duration),
+                    words: std.time.duration.words.format(duration),
+                    iso: std.time.duration.iso.format(duration),
+                };
+            

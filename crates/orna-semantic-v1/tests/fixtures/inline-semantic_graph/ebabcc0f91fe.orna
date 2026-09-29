@@ -1,0 +1,1 @@
+table Reading(id: Int) { value: Int, } fn recent() = Reading | filter(reading => reading.value > 0);

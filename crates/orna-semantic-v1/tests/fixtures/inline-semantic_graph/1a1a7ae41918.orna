@@ -1,0 +1,1 @@
+fn malformed(function: sys.FunctionRef, arguments: sys.ArgumentMap) = function | sys.start<Int>(arguments, as: 1);

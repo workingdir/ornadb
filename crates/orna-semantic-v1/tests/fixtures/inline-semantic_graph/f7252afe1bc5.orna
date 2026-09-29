@@ -1,0 +1,1 @@
+pub fn history(file: sys.File) = sys.history(file.reference);

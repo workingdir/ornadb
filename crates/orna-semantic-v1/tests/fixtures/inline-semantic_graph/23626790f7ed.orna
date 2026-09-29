@@ -1,0 +1,13 @@
+
+                use std.net.http as http;
+                use std.net.http.{get};
+
+                pub fn aliased() = http.get("https://example.com");
+                pub fn named() = get("https://example.com");
+
+                pub table User(id: Uuid) {
+                    name: Str,
+                    assert http.get("https://example.com") == "ok";
+                    assert get("https://example.com") == "ok";
+                }
+            

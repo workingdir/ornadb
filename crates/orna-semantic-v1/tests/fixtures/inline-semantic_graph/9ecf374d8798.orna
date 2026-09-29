@@ -1,0 +1,10 @@
+
+                    use vehicle.corsa.*;
+                    pub fn recent() = Reading | filter(reading => reading.time > now() - 1.min) | last();
+                    pub fn parallel() = std.concurrent.parallel([
+                        mail.google.sync,
+                        finance.openbanking.sync,
+                        vehicle.corsa.freematics.sync,
+                    ]);
+                    pub fn source() = google.mail(credential: std.secret.ref("google.personal"));
+                

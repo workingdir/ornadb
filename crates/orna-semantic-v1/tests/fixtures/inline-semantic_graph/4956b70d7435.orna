@@ -1,0 +1,1 @@
+table Books(id: Int) { title: Str, } fn use_books() = 1 | Books;

@@ -1,0 +1,4 @@
+
+            pub type Box { pub value: Int, }
+            pub fn identity(x: Box): Box = x;
+        
