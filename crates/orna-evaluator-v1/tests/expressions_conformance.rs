@@ -1,11 +1,8 @@
 //! Evidence-graded expression audit against the frozen 1.0.0 chapter.
 //!
-//! - **A, observed runtime limitation:** `ORNA-OP-001`
-//!   (`source/06-expressions.md:301-305`) includes right-associative `^` in
-//!   the precedence table, but evaluating the fixture returns
-//!   `ORNA-EVAL-UNSUPPORTED`. The chapter does not define exponent operand,
-//!   result, or overflow semantics, so this audit records the gap without
-//!   assigning semantics.
+//! - `ORNA-OP-001` (`source/06-expressions.md:301-305`) specifies right
+//!   associativity for `^`; integer and float edge behavior follows the
+//!   evaluator's documented pragmatic choices where the chapter is silent.
 //! - **B, coverage gap:** `ORNA-CFLOW-002`
 //!   (`source/06-expressions.md:211`) requires left-to-right list and record
 //!   expression evaluation. The evaluator has ordered collection evaluation;
@@ -27,7 +24,7 @@
 //!   exercise an enclosing expression and skipped work after recovery.
 
 use orna_evaluator_v1::{Environment, EvaluationError, Limits, evaluate_expression};
-use orna_value_v1::{Raw, Value};
+use orna_value_v1::Value;
 
 fn evaluate_fixture(
     source: &str,
@@ -131,10 +128,9 @@ fn pipelines_preserve_failure_and_successful_recovery_continues_once() {
     );
 }
 
-// Observed gap (runtime unsupported; exponent typing/result rules under-specified):
-// ORNA-OP-001 (source/06-expressions.md:305).
+// ORNA-OP-001 (source/06-expressions.md:301-305).
 #[test]
-fn arithmetic_precedence_works_and_exponent_remains_an_audited_gap() {
+fn arithmetic_precedence_and_right_associative_exponentiation_work() {
     assert_eq!(
         evaluate_fixture(
             include_str!("fixtures/expressions_conformance/operator_precedence_mixed.orna"),
@@ -143,14 +139,15 @@ fn arithmetic_precedence_works_and_exponent_remains_an_audited_gap() {
         .unwrap(),
         Value::int(7.into())
     );
-    // ORNA-OP-001 (source/06-expressions.md:305) lists exponent `^` in its
-    // precedence table, while its operand/result semantics are not specified.
-    // Capture the evaluator gap rather than inventing exponent behavior.
     assert_eq!(
-        failure_code(include_str!(
-            "fixtures/expressions_conformance/operator_exponent_right_associative.orna"
-        )),
-        "ORNA-EVAL-UNSUPPORTED"
+        evaluate_fixture(
+            include_str!(
+                "fixtures/expressions_conformance/operator_exponent_right_associative.orna"
+            ),
+            &Environment::new(),
+        )
+        .unwrap(),
+        Value::int(512.into())
     );
     assert_eq!(
         evaluate_fixture(
