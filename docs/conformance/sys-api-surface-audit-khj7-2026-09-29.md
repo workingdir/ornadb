@@ -1,6 +1,6 @@
 # System API surface conformance audit
 
-Issue: `ornadb-khj7` (GitHub #2098). Audit base: `origin/main` at `e02fa05e`; the protected `/home/pbox/dev/ornadb/work` was not used. Authority: frozen `/home/pbox/dev/ornadb/reference/Orna-1.0.0/api/sys.json` and `source/34-system-reference.md`.
+Issue: `ornadb-khj7` (GitHub #2098). Audit base after rebase: `origin/main` at `ea5d9d4a`; the protected `/home/pbox/dev/ornadb/work` was not used. Authority: frozen `/home/pbox/dev/ornadb/reference/Orna-1.0.0/api/sys.json` and `source/34-system-reference.md`.
 
 ## Normative anchors
 
@@ -22,7 +22,7 @@ The `sys-v1` `system_function_descriptor` registry has 33 entries: `sys.explain(
 
 ### `sys.meta` gap (confirmed)
 
-The frozen API and repository API both declare `fn sys.meta<T>(value: T): sys.ValueMetadata<T>` with `effect: read`. The fixture `crates/orna-conformance-v1/tests/fixtures/sys-api-audit-meta.orna` is accepted by semantic analysis and yields a green test, but `orna_sys_v1::system_function_descriptor("sys.meta")` returns `None`; a repository search found semantic inference/typechecking only, with no executable `sys.meta` binding or result-producing implementation. Existing Beads issues #1986 and #1987 have the same open title/description, “Implement sys.meta value metadata intrinsic”; neither has an open PR. A clean, stale worktree `herdr-domains/gov5-sys-meta-1378-20260928` remains registered, 112 commits behind main. This audit did not edit its files.
+The frozen API and repository API both declare `fn sys.meta<T>(value: T): sys.ValueMetadata<T>` with `effect: read`. The fixture `crates/orna-conformance-v1/tests/fixtures/sys-api-audit-meta.orna` is accepted by semantic analysis and yields a green test, but `orna_sys_v1::system_function_descriptor("sys.meta")` returns `None`; a repository search found semantic inference/typechecking only, with no executable `sys.meta` binding or result-producing implementation. Existing Beads issues #1986 and #1987 have the same open title/description, “Implement sys.meta value metadata intrinsic”; neither has an open PR. A clean, stale worktree `herdr-domains/gov5-sys-meta-1378-20260928` remains registered, 114 commits behind current `origin/main` after rebase. This audit did not edit its files.
 
 The normative shape is defined, and **ORNA-SYS-099–101** bound redaction: it must happen at the system-value boundary, preserve safe type/identity metadata plus an explicit marker, and generic codecs cannot reveal protected values. The inspected contract does not specify the complete metadata production algorithm for `static_type`, `nominal_type`, `protocols` and `codecs`, including their exact source and ordering. The marker requirement does not by itself supply those mappings. Record this as a contract/implementation gap; this slice invents no metadata values or fallback semantics.
 
