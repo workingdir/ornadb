@@ -1,0 +1,8 @@
+pub table Reading(id: Int) { value: Int, }
+pub fn write_reading(value: Int) {
+    Reading.insert({ id: value, value: value });
+}
+pub fn main() {
+    Stream.from_list([1, 2], source_identity: "fixture:streams-pa0p-function-callback")
+        | for_each(write_reading);
+}
