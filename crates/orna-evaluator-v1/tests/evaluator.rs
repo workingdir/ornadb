@@ -1442,7 +1442,13 @@ fn external_nominal_public_default_runs_in_declaration_owner_namespace() {
         "vault.Vault",
         "stable.Vault",
         Some("vault"),
-        vec![nominal_field("value", true, Some("helper()"))],
+        vec![nominal_field(
+            "value",
+            true,
+            Some(include_str!(
+                "fixtures/evaluator_source_9f70e25cadc7ce9e.orna"
+            )),
+        )],
     );
     let functions = BTreeMap::from([(
         "vault.helper".into(),
@@ -4917,22 +4923,39 @@ fn std_collection_every_and_exists_accept_all_call_forms_and_function_callbacks(
             "{expression}"
         );
     }
-    for expression in [
-        include_str!("fixtures/evaluator_source_e3a666d313a86711.orna"),
-        include_str!("fixtures/evaluator_source_c5d81d1c011f2d44.orna"),
-        include_str!("fixtures/evaluator_source_915cef763c92cd02.orna"),
-        include_str!("fixtures/evaluator_source_06d1374122c805f7.orna"),
-        include_str!("fixtures/evaluator_source_705a0a1fe8acb7b1.orna"),
-        include_str!("fixtures/evaluator_source_e9047e6b4baef6b3.orna"),
-        include_str!("fixtures/evaluator_source_0ba3c5112c167531.orna"),
+    for (expression, expected) in [
+        (
+            include_str!("fixtures/evaluator_source_e3a666d313a86711.orna"),
+            true_value.clone(),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_c5d81d1c011f2d44.orna"),
+            true_value.clone(),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_915cef763c92cd02.orna"),
+            true_value.clone(),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_06d1374122c805f7.orna"),
+            true_value.clone(),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_705a0a1fe8acb7b1.orna"),
+            true_value.clone(),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_e9047e6b4baef6b3.orna"),
+            true_value.clone(),
+        ),
+        (
+            include_str!("fixtures/evaluator_source_0ba3c5112c167531.orna"),
+            false_value.clone(),
+        ),
     ] {
         assert_eq!(
             evaluate_expression(expression, &Environment::new(), Limits::default()).unwrap(),
-            if expression.starts_with("exists([]") {
-                false_value.clone()
-            } else {
-                true_value.clone()
-            },
+            expected,
             "{expression}"
         );
     }
@@ -5059,14 +5082,14 @@ fn std_collection_every_and_exists_debit_each_scanned_predicate_value() {
     for (operation, limited_expression, expression, expected) in [
         (
             "every",
-            "every([1, 2], value => if value == 1 { true } else { 1 / 0 == 0 })",
-            "every([1, 2], value => true)",
+            include_str!("fixtures/evaluator_source_cdd53bd0f62469dc.orna"),
+            include_str!("fixtures/evaluator_source_e6568fc5f5dece10.orna"),
             Value::new(Raw::Bool(true)).unwrap(),
         ),
         (
             "exists",
-            "exists([1, 2], value => if value == 1 { false } else { 1 / 0 == 0 })",
-            "exists([1, 2], value => false)",
+            include_str!("fixtures/evaluator_source_c3ba5a75e3fab0e6.orna"),
+            include_str!("fixtures/evaluator_source_617ca2d0c2dc93fc.orna"),
             Value::new(Raw::Bool(false)).unwrap(),
         ),
     ] {
@@ -6378,11 +6401,26 @@ fn std_collection_split_when_accepts_functions_and_enforces_limits() {
 fn std_collection_split_when_rejects_invalid_callback_calls() {
     let source = include_str!("fixtures/split_when_callbacks.orna");
     for (function, expected) in [
-        ("invalid_collection()", "ORNA-EVAL-TYPE"),
-        ("non_callback()", "ORNA-EVAL-TYPE"),
-        ("callback_result_must_be_bool()", "ORNA-EVAL-TYPE"),
-        ("callback_arity_is_checked()", "ORNA-EVAL-ARGUMENT"),
-        ("extra_argument()", "ORNA-EVAL-UNSUPPORTED"),
+        (
+            include_str!("fixtures/evaluator_source_adb9f4ae66c65bdf.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_3496958419e131a2.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_74445860bb3f4f2d.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_88b5c516109064c8.orna"),
+            "ORNA-EVAL-ARGUMENT",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_cfbc7df2791c39fa.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
     ] {
         assert_eq!(
             code(call_module(source, function, Limits::default())),
@@ -6543,10 +6581,22 @@ fn std_collection_group_by_accepts_functions_and_enforces_limits() {
 fn std_collection_group_by_rejects_invalid_callback_calls() {
     let source = include_str!("fixtures/group_by_callbacks.orna");
     for (function, expected) in [
-        ("invalid_collection()", "ORNA-EVAL-TYPE"),
-        ("non_callback()", "ORNA-EVAL-TYPE"),
-        ("array_key_is_rejected()", "ORNA-EVAL-TYPE"),
-        ("extra_argument()", "ORNA-EVAL-UNSUPPORTED"),
+        (
+            include_str!("fixtures/evaluator_source_adb9f4ae66c65bdf.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_3496958419e131a2.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_7a273d73456bb1dc.orna"),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            include_str!("fixtures/evaluator_source_cfbc7df2791c39fa.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
     ] {
         assert_eq!(
             code(call_module(source, function, Limits::default())),
@@ -10098,8 +10148,16 @@ fn relation_every_and_exists_accept_direct_pipeline_and_named_rows_forms() {
     let true_value = Value::new(Raw::Bool(true)).unwrap();
     let false_value = Value::new(Raw::Bool(false)).unwrap();
     for (name, predicate, expected) in [
-        ("every", "value => value > 0", true_value.clone()),
-        ("exists", "value => value == 2", true_value.clone()),
+        (
+            "every",
+            include_str!("fixtures/evaluator_source_5cef0e622322cf58.orna"),
+            true_value.clone(),
+        ),
+        (
+            "exists",
+            include_str!("fixtures/evaluator_source_6201279a767dbda1.orna"),
+            true_value.clone(),
+        ),
     ] {
         let predicate = parsed_expression(predicate);
         let cases = [
@@ -10154,12 +10212,12 @@ fn relation_every_and_exists_short_circuit_before_later_pages() {
     let cases = [
         (
             "every",
-            "value => if value == 1 { false } else { 1 / 0 == 0 }",
+            include_str!("fixtures/evaluator_source_c92dea66feb49791.orna"),
             Value::new(Raw::Bool(false)).unwrap(),
         ),
         (
             "exists",
-            "value => if value == 1 { true } else { 1 / 0 == 0 }",
+            include_str!("fixtures/evaluator_source_ad184f0156e53bea.orna"),
             Value::new(Raw::Bool(true)).unwrap(),
         ),
     ];

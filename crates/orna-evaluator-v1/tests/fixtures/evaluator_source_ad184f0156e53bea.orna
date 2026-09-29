@@ -1,0 +1,1 @@
+value => if value == 1 { true } else { 1 / 0 == 0 }
