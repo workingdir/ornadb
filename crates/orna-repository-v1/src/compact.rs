@@ -2221,6 +2221,10 @@ impl CompactManifest {
         managed_child(&compact_root(self.table), "manifest.orna").expect("constant safe path")
     }
 
+    /// Validates manifest bookkeeping. Segment schema IDs identify the
+    /// revisions that encoded those immutable files and may differ from the
+    /// table's current manifest schema; a reader must prove compatibility
+    /// from each verified embedded descriptor before projecting those rows.
     fn validate(&self, object_id_length: Option<usize>) -> Result<(), RepositoryError> {
         if self.next_generation == 0 {
             return Err(RepositoryError::InvalidCompactManifest);
@@ -2229,8 +2233,7 @@ impl CompactManifest {
         let mut paths = BTreeSet::new();
         for entry in &self.entries {
             entry.validate(self.table, object_id_length)?;
-            if entry.schema != self.schema
-                || entry.generation >= self.next_generation
+            if entry.generation >= self.next_generation
                 || !ids.insert(entry.segment_id)
                 || !paths.insert(path_key(&entry.relative_path)?)
             {
@@ -6113,6 +6116,128 @@ mod tests {
             OvbRaw::Bool(true)
         ));
         assert!(projection.rows().iter().all(|row| row.value().is_some()));
+        drop(root);
+    }
+
+    #[test]
+    fn committed_compact_base_projects_old_segment_through_current_schema() {
+        let source_descriptor = bool_schema(BOOL_TABLE, BOOL_FIELD);
+        let source_schema = schema_descriptor_fingerprint(&source_descriptor).unwrap();
+        let optional_field = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0003);
+        let uuid_raw = |id: Uuid| OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(id.as_bytes().to_vec())));
+        let target_descriptor = SchemaDescriptor::new(OvbRaw::Map(vec![
+            (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+            (OvbRaw::Int(1.into()), uuid_raw(BOOL_TABLE)),
+            (
+                OvbRaw::Int(2.into()),
+                OvbRaw::Array(vec![uuid_raw(BOOL_FIELD)]),
+            ),
+            (
+                OvbRaw::Int(3.into()),
+                OvbRaw::Array(vec![
+                    OvbRaw::Array(vec![
+                        uuid_raw(BOOL_FIELD),
+                        OvbRaw::Text("identity".into()),
+                        OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Bool".into())]),
+                        OvbRaw::Int(0.into()),
+                        OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
+                    ]),
+                    OvbRaw::Array(vec![
+                        uuid_raw(optional_field),
+                        OvbRaw::Text("label".into()),
+                        OvbRaw::Array(vec![
+                            OvbRaw::Int(2.into()),
+                            OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Str".into())]),
+                        ]),
+                        OvbRaw::Int(1.into()),
+                        OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
+                    ]),
+                ]),
+            ),
+            (OvbRaw::Int(4.into()), OvbRaw::Array(Vec::new())),
+        ]))
+        .unwrap();
+        let target_schema = schema_descriptor_fingerprint(&target_descriptor).unwrap();
+        let columns = bool_columns(BOOL_FIELD);
+        let bytes = bool_parquet(BOOL_TABLE, &source_descriptor, &columns);
+        let (root, repository) = test_repository();
+        let path = ManagedPath::new(format!(
+            ".orna/storage/{BOOL_TABLE}/data/{}/{BOOL_SEGMENT}.parquet",
+            &BOOL_SEGMENT.to_string()[..2]
+        ))
+        .unwrap();
+        let min_key = CanonicalValue::new(OvbRaw::Bool(false))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let max_key = CanonicalValue::new(OvbRaw::Bool(true))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let segment = CompactSegment::new(
+            BOOL_SEGMENT,
+            CompactSegmentRole::Data,
+            source_schema,
+            "test-encoder-v1",
+            path,
+            bytes,
+            min_key,
+            max_key,
+            2,
+            columns,
+            true,
+            false,
+        )
+        .unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let plan = repository
+            .prepare_compact_publication(
+                &head,
+                repository.index_generation().unwrap(),
+                CompactManifest::empty(BOOL_TABLE, target_schema),
+                [4; 16],
+                [5; 32],
+                &[segment],
+                "schema history projection",
+            )
+            .unwrap();
+        let pending = repository
+            .publish_compact_repository_boundary(plan)
+            .unwrap();
+        let projected = repository
+            .read_compact_committed_base_with_schema_history(
+                pending.commit(),
+                BOOL_TABLE,
+                target_schema,
+                &target_descriptor,
+                COMPACT_PROFILE,
+                |_entry, projection| Ok(projection.clone()),
+            )
+            .unwrap();
+        assert_eq!(projected.len(), 1);
+        let projection = &projected[0];
+        assert_eq!(projection.schema_id(), target_schema);
+        assert_eq!(projection.source_schema_id(), source_schema);
+        assert_eq!(projection.schema(), &target_descriptor);
+        assert_eq!(projection.source_schema(), &source_descriptor);
+        for row in projection.rows() {
+            let value = row.value().unwrap();
+            let OvbRaw::Tag(60009, payload) = value.raw() else {
+                panic!("history projection must return a canonical row");
+            };
+            let OvbRaw::Array(parts) = payload.as_ref() else {
+                panic!("canonical row payload must be an array");
+            };
+            let [_, OvbRaw::Array(fields)] = parts.as_slice() else {
+                panic!("canonical row must contain fields");
+            };
+            assert_eq!(fields.len(), 2);
+            assert!(matches!(
+                fields[1],
+                OvbRaw::Array(ref field)
+                    if field.len() == 2 && field[1] == OvbRaw::Null
+            ));
+        }
         drop(root);
     }
 
