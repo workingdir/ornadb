@@ -1,6 +1,6 @@
 use orna_syntax_v1::{
-    Declaration, Expr, Statement, SyntaxDiagnostic, parse_expression, parse_module, parse_repl,
-    parse_row,
+    Declaration, Expr, Pattern, Statement, SyntaxDiagnostic, parse_expression, parse_module,
+    parse_repl, parse_row,
 };
 
 fn assert_postfix_question(diagnostics: &[SyntaxDiagnostic], source: &str) {
@@ -161,17 +161,19 @@ fn malformed_case_arm_recovers_at_case_boundary_and_preserves_outer_tail() {
 }
 
 #[test]
-fn malformed_case_arm_separator_recovers_before_outer_tail() {
-    let source = include_str!("fixtures/malformed-case-arm-separator-outer-tail.orna");
+fn malformed_case_arm_recovers_at_top_level_comma_and_keeps_later_arm() {
+    let source = include_str!("fixtures/malformed-case-arm-resumes-after-comma.orna");
     let parsed = parse_module(source);
 
     assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
     let diagnostic = &parsed.diagnostics[0];
     assert_eq!(diagnostic.code, "ORNA-PARSE-001");
-    assert_eq!(diagnostic.message, "expected `,` or `}` after case arm");
-    let bad_arm_separator = source.find(" 3 if").expect("fixture has a missing comma") + 1;
-    assert_eq!(diagnostic.span.start, bad_arm_separator);
-    assert_eq!(diagnostic.span.end, bad_arm_separator + 1);
+    assert_eq!(diagnostic.message, "expected `:` after case pattern");
+    let bad_pattern_separator = source
+        .find("{ value")
+        .expect("fixture has a malformed arm");
+    assert_eq!(diagnostic.span.start, bad_pattern_separator);
+    assert_eq!(diagnostic.span.end, bad_pattern_separator + 1);
 
     let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
         panic!("expected a function declaration");
@@ -182,10 +184,18 @@ fn malformed_case_arm_separator_recovers_before_outer_tail() {
     else {
         panic!("expected a function block");
     };
-    assert!(matches!(statements.as_slice(), [Statement::Control { .. }]));
+    assert!(statements.is_empty(), "{statements:?}");
+    let Some(Expr::Control { arms, .. }) = tail.as_deref() else {
+        panic!("expected a case expression tail, got {tail:?}");
+    };
+    assert_eq!(arms.len(), 2, "{arms:?}");
     assert!(matches!(
-        tail.as_deref(),
-        Some(Expr::Literal { text, .. }) if text == "5"
+        &arms[1].pattern,
+        Pattern::Literal { text, .. } if text == "true"
+    ));
+    assert!(matches!(
+        &arms[1].body,
+        Expr::Literal { text, .. } if text == "5"
     ));
 }
 
