@@ -1283,6 +1283,101 @@ fn explain_mixed_partial_write_bounds_accumulate_across_unknown_tail() {
 }
 
 #[test]
+fn explain_mixed_partial_write_bounds_survive_multiple_unknown_tails() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let mutation = |kind, rows, bytes, before| QueryMutationDescription {
+        table: obj("table:large"),
+        kind,
+        estimated_affected_rows: rows,
+        estimated_write_bytes: bytes,
+        estimated_table_rows_before: before,
+    };
+    let explain_with_last_write = |write_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:mixed-bounds-multiple-unknown-tails"),
+            source: obj("table:large"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 4),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                mutation(QueryMutationKind::Insert, Some(1), None, Some(1)),
+                mutation(QueryMutationKind::Update, None, None, None),
+                mutation(QueryMutationKind::Delete, None, Some(4_096), Some(1)),
+                mutation(QueryMutationKind::Rekey, None, None, None),
+                mutation(QueryMutationKind::Insert, Some(1), None, Some(1)),
+                mutation(QueryMutationKind::Delete, None, Some(write_bytes), Some(1)),
+            ],
+            materialize_into: Some(obj("materialization:mixed-multiple-unknown-tail")),
+        })
+        .expect("mixed partial bounds separated by several unknown mutations")
+    };
+
+    // Unknown mutations do not erase earlier lower bounds. Two known row
+    // counts and two known write blocks bring the scan subtotal to MAX.
+    let exact = explain_with_last_write(4_096);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let partial_inserts = exact
+        .nodes()
+        .iter()
+        .filter(|node| node.details().get("mutation") == Some(&PlanDetail::Text("insert".to_owned())))
+        .collect::<Vec<_>>();
+    assert_eq!(partial_inserts.len(), 2);
+    assert!(partial_inserts.iter().all(|node| {
+        node.estimated_rows() == Some(1)
+            && node.estimated_bytes().is_none()
+            && node.estimated_work().is_none()
+    }));
+    let partial_deletes = exact
+        .nodes()
+        .iter()
+        .filter(|node| node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned())))
+        .collect::<Vec<_>>();
+    assert_eq!(partial_deletes.len(), 2);
+    assert!(partial_deletes.iter().all(|node| {
+        node.estimated_rows().is_none()
+            && node.estimated_bytes() == Some(4_096)
+            && node.estimated_work().is_none()
+    }));
+    let unknown_count = exact
+        .nodes()
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.details().get("mutation"),
+                Some(PlanDetail::Text(kind)) if kind == "update" || kind == "rekey"
+            ) && node.estimated_rows().is_none()
+                && node.estimated_bytes().is_none()
+        })
+        .count();
+    assert_eq!(unknown_count, 2);
+
+    let overflow = explain_with_last_write(4_097);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the final rounded byte bound pushes the accumulated total past MAX"
+    );
+    let surface = serde_json::to_value(&overflow).expect("multiple-tail mixed-bound surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
 fn explain_cost_overflow_survives_unknown_intermediate_estimates() {
     let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
