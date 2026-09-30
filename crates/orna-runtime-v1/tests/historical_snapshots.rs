@@ -317,7 +317,7 @@ async fn historical_snapshot_cannot_be_rebound_to_another_runtime_identity() {
     let runtime_variant = Snapshot::cwd(
         first_pin.capture().database_id(),
         alternate_runtime,
-        generation_zero,
+        generation_zero.clone(),
     )
     .expect("construct pin with only the runtime coordinate changed");
     for (descriptor, edge) in [
@@ -342,6 +342,29 @@ async fn historical_snapshot_cannot_be_rebound_to_another_runtime_identity() {
             "as-of resolution rejects a changed {edge} at the same generation"
         );
     }
+    let swapped_coordinates = Snapshot::cwd(
+        first_pin.capture().runtime_id(),
+        first_pin.capture().database_id(),
+        generation_zero,
+    )
+    .expect("construct pin with database and runtime coordinates swapped");
+    let swapped_id = match &swapped_coordinates {
+        Snapshot::Cwd { id, .. } => *id,
+        Snapshot::Commit { .. } => unreachable!("constructed CWD pin"),
+    };
+    assert_ne!(
+        swapped_id,
+        first_pin.snapshot_id(),
+        "the snapshot identity tuple preserves database/runtime coordinate order"
+    );
+    assert_eq!(
+        first
+            .resolve_historical_snapshot(&swapped_coordinates)
+            .await
+            .unwrap_err(),
+        RuntimeError::SnapshotContextMismatch,
+        "swapping valid identity coordinates cannot redirect an as-of pin"
+    );
 
     let second = RuntimeState::open(
         &other_repository,
