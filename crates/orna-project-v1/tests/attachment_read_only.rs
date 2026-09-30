@@ -1012,6 +1012,194 @@ fn attached_alias_prefix_of_primary_stays_read_only_and_independent() {
 }
 
 #[test]
+fn chained_primary_prefix_aliases_detach_only_the_exact_route() {
+    let (_primary_dir, primary_repository, primary_commit) = repository(&[
+        (
+            "main.orna",
+            include_str!("fixtures/attach-routing-primary.orna"),
+        ),
+        (
+            "contacts.orna",
+            include_str!("fixtures/attach-routing-table.orna"),
+        ),
+        (
+            "contacts/Contact/1.orna",
+            include_str!("fixtures/attach-routing-primary-row.orna"),
+        ),
+    ]);
+    let (package_dir, package_repository, first_package_commit) = repository(&[
+        (
+            "main.orna",
+            include_str!("fixtures/attach-routing-package.orna"),
+        ),
+        (
+            "contacts.orna",
+            include_str!("fixtures/attach-routing-table.orna"),
+        ),
+        (
+            "contacts/Contact/1.orna",
+            include_str!("fixtures/attach-routing-package-row.orna"),
+        ),
+    ]);
+    let longer_alias_commit = write_commit(
+        package_dir.path(),
+        "contacts/Contact/1.orna",
+        &include_str!("fixtures/attach-routing-package-row.orna").replace("42", "43"),
+    );
+    let replacement_commit = write_commit(
+        package_dir.path(),
+        "contacts/Contact/1.orna",
+        &include_str!("fixtures/attach-routing-package-row.orna").replace("42", "99"),
+    );
+
+    let loader = ProjectLoader::default();
+    let primary = PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader)
+        .unwrap();
+    let shorter_alias = PinnedDatabase::resolve(
+        "app_copy",
+        package_repository.clone(),
+        &first_package_commit,
+        loader,
+    )
+    .unwrap();
+    let longer_alias = PinnedDatabase::resolve(
+        "app_copy_archive",
+        package_repository.clone(),
+        &longer_alias_commit,
+        loader,
+    )
+    .unwrap();
+    let mut session = AttachedDatabaseSession::new(primary).unwrap();
+    session.attach_database(shorter_alias).unwrap();
+    session.attach_database(longer_alias).unwrap();
+    assert_eq!(session.relation_sources("contacts/Contact").len(), 3);
+    assert_relation_routes(
+        &session,
+        "app",
+        &primary_commit,
+        &[("contacts/Contact/1.orna", "value: 7")],
+    );
+    assert_relation_routes(
+        &session,
+        "app_copy",
+        &first_package_commit,
+        &[("contacts/Contact/1.orna", "value: 42")],
+    );
+    assert_relation_routes(
+        &session,
+        "app_copy_archive",
+        &longer_alias_commit,
+        &[("contacts/Contact/1.orna", "value: 43")],
+    );
+
+    assert!(matches!(
+        session.detach_database("app_cop"),
+        Err(AttachmentError::AttachmentNotFound)
+    ));
+    assert_eq!(session.relation_sources("contacts/Contact").len(), 3);
+    assert_relation_routes(
+        &session,
+        "app_copy",
+        &first_package_commit,
+        &[("contacts/Contact/1.orna", "value: 42")],
+    );
+    assert_relation_routes(
+        &session,
+        "app_copy_archive",
+        &longer_alias_commit,
+        &[("contacts/Contact/1.orna", "value: 43")],
+    );
+    let old_clone = session.clone();
+    session.detach_database("app_copy").unwrap();
+    assert!(session.database("app_copy").is_none());
+    assert!(session.database("app_copy_archive").is_some());
+    assert_eq!(session.relation_sources("contacts/Contact").len(), 2);
+    assert_relation_routes(
+        &session,
+        "app",
+        &primary_commit,
+        &[("contacts/Contact/1.orna", "value: 7")],
+    );
+    assert_relation_routes(
+        &session,
+        "app_copy_archive",
+        &longer_alias_commit,
+        &[("contacts/Contact/1.orna", "value: 43")],
+    );
+    assert!(matches!(
+        session.validate_write_target("app_copy"),
+        Err(AttachmentError::DatabaseUnavailable)
+    ));
+    assert!(matches!(
+        session.validate_write_target("app_copy_archive"),
+        Err(AttachmentError::AttachedSnapshotReadOnly)
+    ));
+    let detached_clone = session.clone();
+
+    let replacement = PinnedDatabase::resolve(
+        "app_copy",
+        package_repository,
+        &replacement_commit,
+        loader,
+    )
+    .unwrap();
+    session.attach_database(replacement).unwrap();
+    assert_relation_routes(
+        &session,
+        "app_copy",
+        &replacement_commit,
+        &[("contacts/Contact/1.orna", "value: 99")],
+    );
+    assert_relation_routes(
+        &session,
+        "app_copy_archive",
+        &longer_alias_commit,
+        &[("contacts/Contact/1.orna", "value: 43")],
+    );
+    assert_relation_routes(
+        &session,
+        "app",
+        &primary_commit,
+        &[("contacts/Contact/1.orna", "value: 7")],
+    );
+    assert_relation_routes(
+        &old_clone,
+        "app_copy",
+        &first_package_commit,
+        &[("contacts/Contact/1.orna", "value: 42")],
+    );
+    assert_relation_routes(
+        &old_clone,
+        "app_copy_archive",
+        &longer_alias_commit,
+        &[("contacts/Contact/1.orna", "value: 43")],
+    );
+    assert!(detached_clone.database("app_copy").is_none());
+    assert_relation_routes(
+        &detached_clone,
+        "app_copy_archive",
+        &longer_alias_commit,
+        &[("contacts/Contact/1.orna", "value: 43")],
+    );
+
+    session.detach_database("app_copy_archive").unwrap();
+    assert!(session.database("app_copy").is_some());
+    assert!(session.database("app_copy_archive").is_none());
+    assert_relation_routes(
+        &session,
+        "app_copy",
+        &replacement_commit,
+        &[("contacts/Contact/1.orna", "value: 99")],
+    );
+    assert_relation_routes(
+        &session,
+        "app",
+        &primary_commit,
+        &[("contacts/Contact/1.orna", "value: 7")],
+    );
+}
+
+#[test]
 fn package_pin_failures_are_redacted_and_fail_before_a_session_is_returned() {
     let (_valid_dir, _valid_repository, valid_commit) = repository(&[(
         "main.orna",
