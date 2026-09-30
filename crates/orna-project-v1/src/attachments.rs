@@ -1908,6 +1908,9 @@ mod tests {
         let mirror = root_session.database("mirror").unwrap().clone();
         assert_eq!(backup.pin().commit(), mirror.pin().commit());
         assert_ne!(backup.pin(), mirror.pin());
+        // ORNA-UNIT-002 requires structural checks across database boundaries
+        // but does not define alias-specific outcomes. V1 compares the pinned
+        // unit structures, so equal snapshots stay compatible under each name.
         assert!(root_session.units_structurally_equivalent(
             "backup",
             "meter",
@@ -2237,6 +2240,12 @@ mod tests {
         let mirror = root_session.database("mirror").unwrap();
         assert_eq!(backup.pin().commit(), mirror.pin().commit());
         assert_ne!(backup.pin(), mirror.pin());
+        assert!(root_session.units_structurally_equivalent(
+            "backup",
+            "meter",
+            "mirror",
+            "meter"
+        ));
 
         // The reference fixes each parent's exact pins but does not specify
         // recursive equal-alias cycle behavior. V1 follows one manifest edge
@@ -2260,6 +2269,12 @@ mod tests {
             assert_eq!(child.pin().commit().as_str(), leaf_current_commit);
             assert_eq!(sibling.pin().commit().as_str(), leaf_current_commit);
             assert_ne!(child.pin(), sibling.pin());
+            assert!(current_closure.units_structurally_equivalent(
+                child_alias,
+                "meter",
+                sibling_alias,
+                "meter"
+            ));
 
             let leaf_closure = resolver.resolve_for_parent(child.clone()).unwrap();
             assert_eq!(leaf_closure.primary().pin().name(), child_alias);
@@ -2282,6 +2297,12 @@ mod tests {
                 historical_shared.pin().commit()
             );
             assert_ne!(historical_shared.pin(), repeated_sibling.pin());
+            assert!(leaf_closure.units_structurally_equivalent(
+                "backup",
+                "meter",
+                "mirror",
+                "meter"
+            ));
 
             let historical_closure =
                 resolver.resolve_for_parent(historical_shared.clone()).unwrap();
@@ -2305,6 +2326,12 @@ mod tests {
             assert_eq!(terminal.pin().commit().as_str(), leaf_base_commit);
             assert_eq!(terminal_sibling.pin().commit(), terminal.pin().commit());
             assert_ne!(terminal_sibling.pin(), terminal.pin());
+            assert!(historical_closure.units_structurally_equivalent(
+                "archive",
+                "meter",
+                "terminal",
+                "meter"
+            ));
 
             let closed = resolver.resolve_for_parent(terminal).unwrap();
             assert_eq!(closed.primary().pin().name(), terminal_alias);
