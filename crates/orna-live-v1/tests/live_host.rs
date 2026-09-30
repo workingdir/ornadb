@@ -4152,9 +4152,76 @@ fn durable_unknown_status_retry_survives_orphan_resolution() {
             && result == &expected_result
     ));
 
-    let unknown_retry = block_on(recovered_transport.receive_with_application(
+    let mut conflicting_event =
+        Envelope::decode(&event_request, Limits::default().protocol).unwrap();
+    if let Message::Event { revision, .. } = &mut conflicting_event.message {
+        *revision = 1;
+    } else {
+        panic!("the fixture proof must retain an Event request");
+    }
+    let conflicting_fingerprint = canonical_request_fingerprint(
+        [1; 16],
+        &conflicting_event,
+        Limits::default().protocol,
+    )
+    .unwrap();
+    let conflicting_status_request = Envelope {
+        request: Some([41; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [37; 16],
+            fingerprint: conflicting_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let conflicting_status_output = block_on(recovered_transport.receive_with_application(
         &mut recovered_socket,
         10,
+        &masked_binary_payload(&conflicting_status_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &conflicting_status_output[0] else {
+        panic!("a competing fingerprint gets a portable mismatch diagnostic");
+    };
+    let conflicting_status = Envelope::decode(payload, Limits::default().protocol).unwrap();
+    assert_eq!(conflicting_status.request, Some([41; 16]));
+    assert!(matches!(
+        &conflicting_status.message,
+        Message::Diagnostic { .. }
+    ));
+
+    let corrected_status_request = Envelope {
+        request: Some([41; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [37; 16],
+            fingerprint: event_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let corrected_status_output = block_on(recovered_transport.receive_with_application(
+        &mut recovered_socket,
+        11,
+        &masked_binary_payload(&corrected_status_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &corrected_status_output[0] else {
+        panic!("a rejected status query ID cannot be rebound");
+    };
+    assert_eq!(
+        Envelope::decode(payload, Limits::default().protocol).unwrap(),
+        conflicting_status
+    );
+
+    let unknown_retry = block_on(recovered_transport.receive_with_application(
+        &mut recovered_socket,
+        12,
         &masked_binary_payload(&unknown_status_request),
         &mut recovered_application,
     ))
@@ -4169,7 +4236,7 @@ fn durable_unknown_status_retry_survives_orphan_resolution() {
 
     let orphan_status_retry = block_on(recovered_transport.receive_with_application(
         &mut recovered_socket,
-        11,
+        13,
         &masked_binary_payload(&orphan_status_request),
         &mut recovered_application,
     ))
