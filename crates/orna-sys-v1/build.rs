@@ -30,8 +30,13 @@ fn main() {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
     let source_root = manifest.join("src");
     let base_path = manifest.join("src/system_api_base.json");
+    let build_support_path = manifest.join("build_support.rs");
     println!("cargo:rerun-if-changed={}", base_path.display());
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed={}", build_support_path.display());
+    // Watch the directory recursively so adding a new annotated module also
+    // invalidates the collected schema, even before that file is known here.
+    println!("cargo:rerun-if-changed={}", source_root.display());
 
     // `syn` scans written Rust source and cannot see items emitted later by
     // `macro_rules!` or procedural-macro expansion. Annotated methods in impls

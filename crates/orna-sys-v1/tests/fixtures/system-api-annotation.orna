@@ -5,3 +5,5 @@ pub fn invoke_erased(function: sys.FunctionRef, arguments: sys.ArgumentMap): sys
 pub fn invoke_typed<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap, output: T): T = sys.invoke(function, arguments, output);
 pub fn start_erased(function: sys.FunctionRef, arguments: sys.ArgumentMap): sys.InvocationHandle<sys.Value> = sys.start(function, arguments);
 pub fn start_typed<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap, output: T): sys.InvocationHandle<T> = sys.start(function, arguments, output);
+pub fn snapshot_default(): sys.SnapshotRef = sys.snapshot();
+pub fn resolve_default(name: Str): sys.ObjectRef = sys.resolve(name);
