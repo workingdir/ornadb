@@ -3559,6 +3559,243 @@ fn parent_replacement_closures_keep_captured_diagnostic_snapshots_local() {
 }
 
 #[test]
+fn closure_replacement_sources_restore_parent_snapshots_after_resize() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let original = vec![
+        admitted("ORNA-E-REMAINDER-OLD-A", "remainder old parent a admission")
+            .with_cause(admitted(
+                "ORNA-E-REMAINDER-OLD-A-CHILD",
+                "remainder old child a admission",
+            )),
+        admitted("ORNA-E-REMAINDER-OLD-B", "remainder old parent b admission")
+            .with_cause(admitted(
+                "ORNA-E-REMAINDER-OLD-B-CHILD-A",
+                "remainder old child b a admission",
+            ))
+            .with_cause(admitted(
+                "ORNA-E-REMAINDER-OLD-B-CHILD-B",
+                "remainder old child b b admission",
+            )),
+    ];
+    let mut destination = original.clone();
+    let before_replacement = destination.clone();
+    let before_projection = serde_json::to_value(&before_replacement).unwrap();
+    let before_wires = before_replacement
+        .iter()
+        .map(|diagnostic| diagnostic.encode_ovb().unwrap())
+        .collect::<Vec<_>>();
+
+    // Orna specifies immutable lexical closure captures, while host
+    // clone_from details are unspecified. Model closure sources as owned
+    // snapshots and check that destination replacement leaves them intact.
+    let captured_original = before_replacement.clone();
+    let restore_original = move || captured_original.clone();
+    let shrink = vec![
+        admitted("ORNA-E-REMAINDER-SHRINK", "remainder shrink parent admission")
+            .with_cause(admitted(
+                "ORNA-E-REMAINDER-SHRINK-CHILD",
+                "remainder shrink child admission",
+            )),
+    ];
+    destination.clone_from(&shrink);
+    let after_shrink = destination.clone();
+    let shrink_projection = serde_json::to_value(&after_shrink).unwrap();
+    let shrink_wires = after_shrink
+        .iter()
+        .map(|diagnostic| diagnostic.encode_ovb().unwrap())
+        .collect::<Vec<_>>();
+
+    let grown = vec![
+        admitted("ORNA-E-REMAINDER-GROWN-A", "remainder grown parent a admission")
+            .with_cause(admitted(
+                "ORNA-E-REMAINDER-GROWN-A-CHILD-A",
+                "remainder grown child a a admission",
+            ))
+            .with_cause(admitted(
+                "ORNA-E-REMAINDER-GROWN-A-CHILD-B",
+                "remainder grown child a b admission",
+            )),
+        admitted("ORNA-E-REMAINDER-GROWN-B", "remainder grown parent b admission")
+            .with_cause(admitted(
+                "ORNA-E-REMAINDER-GROWN-B-CHILD",
+                "remainder grown child b admission",
+            )),
+        admitted("ORNA-E-REMAINDER-GROWN-TAIL", "remainder grown tail admission"),
+    ];
+    let captured_growth = grown.clone();
+    let grow_from_closure = move || captured_growth.clone();
+    destination.clone_from(&grow_from_closure());
+    let after_growth = destination.clone();
+    let growth_projection = serde_json::to_value(&after_growth).unwrap();
+    let growth_wires = after_growth
+        .iter()
+        .map(|diagnostic| diagnostic.encode_ovb().unwrap())
+        .collect::<Vec<_>>();
+
+    // The old closure is now a replacement source after both a shrink and a
+    // growth have reused the destination's parent vector slots.
+    destination.clone_from(&restore_original());
+    let after_restore = destination.clone();
+    assert_eq!(destination, original);
+    assert_eq!(
+        serde_json::to_value(&before_replacement).unwrap(),
+        before_projection
+    );
+    assert_eq!(
+        before_replacement
+            .iter()
+            .map(|diagnostic| diagnostic.encode_ovb().unwrap())
+            .collect::<Vec<_>>(),
+        before_wires
+    );
+    assert_eq!(serde_json::to_value(&after_shrink).unwrap(), shrink_projection);
+    assert_eq!(
+        after_shrink
+            .iter()
+            .map(|diagnostic| diagnostic.encode_ovb().unwrap())
+            .collect::<Vec<_>>(),
+        shrink_wires
+    );
+    assert_eq!(serde_json::to_value(&after_growth).unwrap(), growth_projection);
+    assert_eq!(
+        after_growth
+            .iter()
+            .map(|diagnostic| diagnostic.encode_ovb().unwrap())
+            .collect::<Vec<_>>(),
+        growth_wires
+    );
+    assert_eq!(after_restore, before_replacement);
+
+    let compose_captured_replacements = {
+        let before = before_replacement.clone();
+        let shrunk = after_shrink.clone();
+        let grown = after_growth.clone();
+        let restored = after_restore.clone();
+        move || {
+            let mut outer = admitted(
+                "ORNA-E-REMAINDER-OUTER",
+                "remainder outer closure admission",
+            );
+            for cause in [
+                before[0].clone(),
+                before[1].clone(),
+                shrunk[0].clone(),
+                grown[0].clone(),
+                restored[0].clone(),
+            ] {
+                outer = outer.with_cause(cause);
+            }
+            outer
+        }
+    };
+    let empty: Vec<Diagnostic> = Vec::new();
+    destination.clone_from(&empty);
+    assert!(destination.is_empty());
+
+    // Composition still sees the captured roots after the live parent has
+    // been cleared, and repeated calls do not consume their admissions.
+    let outer = compose_captured_replacements();
+    let outer_projection = serde_json::to_value(&outer).unwrap();
+    let outer_again = compose_captured_replacements();
+    assert_eq!(serde_json::to_value(&outer_again).unwrap(), outer_projection);
+    assert_eq!(outer_projection["message"], "remainder outer closure admission");
+    let causes = outer_projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 5);
+    for (cause, expected_children) in causes.iter().zip([1, 2, 1, 2, 1]) {
+        assert_eq!(cause["message"], "<redacted>");
+        let children = cause["causes"].as_array().unwrap();
+        assert_eq!(children.len(), expected_children);
+        for child in children {
+            assert_eq!(child["message"], "<redacted>");
+        }
+    }
+
+    let envelope = serde_json::json!({
+        "outer": outer.clone(),
+        "before_replacement": before_replacement,
+        "after_shrink": after_shrink,
+        "after_growth": after_growth,
+    });
+    let json = serde_json::to_vec(&envelope).unwrap();
+    for message in [
+        b"remainder outer closure admission".as_slice(),
+        b"remainder old parent a admission".as_slice(),
+        b"remainder old parent b admission".as_slice(),
+        b"remainder shrink parent admission".as_slice(),
+        b"remainder grown parent a admission".as_slice(),
+        b"remainder grown parent b admission".as_slice(),
+        b"remainder grown tail admission".as_slice(),
+    ] {
+        assert_eq!(
+            json.windows(message.len())
+                .filter(|window| *window == message)
+                .count(),
+            1
+        );
+    }
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            b"remainder old child a admission".as_slice(),
+            b"remainder old child b a admission".as_slice(),
+            b"remainder old child b b admission".as_slice(),
+            b"remainder shrink child admission".as_slice(),
+            b"remainder grown child a a admission".as_slice(),
+            b"remainder grown child a b admission".as_slice(),
+            b"remainder grown child b admission".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+
+    let wire = outer.encode_ovb().unwrap();
+    for disclosure in [
+        fixture.as_bytes(),
+        b"remainder old parent a admission".as_slice(),
+        b"remainder old parent b admission".as_slice(),
+        b"remainder shrink parent admission".as_slice(),
+        b"remainder grown parent a admission".as_slice(),
+        b"remainder grown parent b admission".as_slice(),
+        b"remainder grown tail admission".as_slice(),
+        b"remainder grown child b admission".as_slice(),
+    ]
+    .into_iter()
+    .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
+    {
+        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    assert_eq!(
+        decoded["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cause| cause["causes"].as_array().unwrap().len())
+            .collect::<Vec<_>>(),
+        [1, 2, 1, 2, 1]
+    );
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
