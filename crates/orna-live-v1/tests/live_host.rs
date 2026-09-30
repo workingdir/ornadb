@@ -11783,6 +11783,44 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
         terminal_bytes
     );
 
+    // The reference specifies terminal status results but does not detail a
+    // fresh status read after interleaved mismatch retries. It must still
+    // expose the same retained failure outcome without executing the Eval.
+    let failure_status_query = Envelope {
+        request: Some([93; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let failure_status = block_on(host.dispatch_frame(
+        [6; 16],
+        8,
+        Frame::Binary(failure_status_query),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a fresh status query observes the retained failure after mismatches");
+    let expected_failure = ResultBody::from_result(&exact_retry, Limits::default().protocol)
+        .unwrap();
+    assert!(matches!(
+        &failure_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(returned),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *returned == fingerprint
+            && result == &expected_failure
+    ));
+    assert_eq!(application.calls, 1);
+
     drop(host);
     remove_test_repository(&root);
 }
