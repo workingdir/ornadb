@@ -3276,6 +3276,132 @@ fn durable_event_diagnostic_status_and_replay_keep_closed_watch_correlation() {
 }
 
 #[test]
+fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch() {
+    let (root, repository) = durable_repository();
+    let runtime = open_durable_state(&repository);
+    let old_owner = RequestOwner::from(block_on(runtime.acquire_lease([73; 16])).unwrap());
+    let mut host = durable_host_with_owner(runtime, [73; 16]);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = WatchEventApplication {
+        mode: WatchEventMode::Denied,
+        subscriptions: 0,
+    };
+
+    let fixture_eval = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(eval_with_context([1; 16], [36; 16], [2; 16], None)),
+        &mut application,
+    ))
+    .unwrap();
+    assert!(matches!(
+        fixture_eval.response.unwrap().message,
+        Message::Diagnostic { .. }
+    ));
+    block_on(host.dispatch_frame(
+        [5; 16],
+        3,
+        Frame::Binary(subscribe_request([35; 16])),
+        &mut application,
+    ))
+    .unwrap();
+
+    let request = event([1; 16], [37; 16], [11; 16]);
+    let first = block_on(host.dispatch_frame(
+        [5; 16],
+        4,
+        Frame::Binary(request.clone()),
+        &mut application,
+    ))
+    .unwrap();
+    let diagnostic = first.response.expect("portable rejection has a response");
+    assert_eq!(diagnostic.request, Some([37; 16]));
+    assert_eq!(diagnostic.watch, Some([11; 16]));
+    assert!(matches!(diagnostic.message, Message::Diagnostic { .. }));
+    let event_fingerprint = request_fingerprint(&request, [1; 16]);
+    block_on(host.dispatch_frame(
+        [5; 16],
+        5,
+        Frame::Binary(unsubscribe()),
+        &mut application,
+    ))
+    .unwrap();
+    drop(host);
+
+    let recovery_runtime = open_durable_state(&repository);
+    block_on(recovery_runtime.recover_abandoned(old_owner.owner_id, [74; 16])).unwrap();
+    drop(recovery_runtime);
+
+    // Rebuild process-local session/watch state, but retain the same durable
+    // request identity. REQUEST-1 specifies terminal replay by fingerprint;
+    // this host therefore returns the diagnostic before requiring watch restore.
+    let mut recovered = durable_host_after_takeover(
+        open_durable_state(&repository),
+        [74; 16],
+        old_owner,
+    );
+    let mut recovered_issuer = Issuer(2, None);
+    let recovered_credential = create(&mut recovered, &mut recovered_issuer);
+    block_on(recovered.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &recovered_credential,
+        attachment: [6; 16],
+        now: 6,
+    }))
+    .unwrap();
+    let status_request = Envelope {
+        request: Some([38; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [37; 16],
+            fingerprint: event_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let status = block_on(recovered.dispatch_frame(
+        [6; 16],
+        7,
+        Frame::Binary(status_request),
+        &mut UnitApplication::default(),
+    ))
+    .unwrap()
+    .response
+    .expect("recovered runtime exposes the rejected terminal status");
+    assert!(matches!(
+        status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: None,
+        } if target == [37; 16] && fingerprint == event_fingerprint
+    ));
+    let replay = block_on(recovered.dispatch_frame(
+        [6; 16],
+        8,
+        Frame::Binary(request),
+        &mut UnitApplication::default(),
+    ))
+    .unwrap();
+    assert_eq!(replay.response, Some(diagnostic));
+
+    drop(recovered);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn websocket_commit_without_completed_delivery_aborts_candidate_and_preserves_incumbent() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
     let mut issuer = Issuer(1, None);
