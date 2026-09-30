@@ -14,6 +14,8 @@ use serde_json::Value;
 const DEPENDENCY_DIAMOND: &str = include_str!("fixtures/dependency_diamond.orna");
 const MUTABLE_BRANCH_QUERY: &str = include_str!("fixtures/mutable_branch_query.orna");
 const ROUNDING_TAIL_INTERPLAY: &str = include_str!("fixtures/rounding_tail_interplay.orna");
+const WRITE_MATERIALIZATION_EDGE_TAIL: &str =
+    include_str!("fixtures/write_materialization_edge_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -4095,6 +4097,99 @@ fn explain_closes_max_byte_write_remainder_through_materialization_tail() {
         .expect("one-row max-byte write");
     assert_eq!(overflow_write.estimated_work(), Some(MAX_BYTE_BLOCKS + 1));
     let surface = serde_json::to_value(&overflow).expect("materialized write overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_one_row_max_byte_write_at_materialization_cost_tail() {
+    let parsed = orna_syntax_v1::parse_module(WRITE_MATERIALIZATION_EDGE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 3);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the existing 4-KiB
+    // rule, the MAX-byte write and its materialization each cost 2^52 blocks.
+    // One affected row adds one unit to each, so reserve both row units in the
+    // scan estimate to close the complete plan exactly at u64::MAX.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    let scan_rows = u64::MAX - (2 * MAX_BYTE_BLOCKS) - 2;
+    let explain_with_affected_rows = |affected_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:max-byte-write-materialization-edge-tail"),
+            source: obj("table:MaterializedWriteSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(scan_rows),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:MaterializedWriteTarget"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(affected_rows),
+                estimated_write_bytes: Some(u64::MAX),
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: Some(obj("materialization:max-byte-write-edge-tail")),
+        })
+        .expect("max-byte write with a materialization row tail")
+    };
+
+    let exact = explain_with_affected_rows(1);
+    let max_cost = u64::MAX.to_string();
+    assert_eq!(exact.plan().estimated_cost(), Some(max_cost.as_str()));
+    let scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:MaterializedWriteSource"))
+        })
+        .expect("fixture source scan");
+    assert_eq!(scan.estimated_work(), Some(scan_rows));
+    let write = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("one-row max-byte write");
+    assert_eq!(write.estimated_rows(), Some(1));
+    assert_eq!(write.estimated_bytes(), Some(u64::MAX));
+    assert_eq!(write.estimated_work(), Some(MAX_BYTE_BLOCKS + 1));
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().estimated_rows(), Some(1));
+    assert_eq!(exact.root().estimated_bytes(), Some(u64::MAX));
+    assert_eq!(exact.root().estimated_work(), Some(MAX_BYTE_BLOCKS + 1));
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+
+    let overflow = explain_with_affected_rows(2);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().estimated_rows(), Some(2));
+    assert_eq!(overflow.root().estimated_work(), Some(MAX_BYTE_BLOCKS + 2));
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the second affected row crosses the aggregate MAX boundary"
+    );
+    assert_eq!(overflow.root().details().get("estimated_work_overflow"), None);
+    let overflow_write = overflow
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("two-row max-byte write");
+    assert_eq!(overflow_write.estimated_work(), Some(MAX_BYTE_BLOCKS + 2));
+    let surface = serde_json::to_value(&overflow).expect("materialization cost-tail surface");
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
