@@ -3955,6 +3955,7 @@ fn durable_unknown_status_retry_survives_orphan_resolution() {
     let mut application = DeferredWatchEventApplication { events: 0 };
 
     let fixture_eval = eval_with_context([1; 16], [36; 16], [2; 16], None);
+    let fixture_eval_fingerprint = request_fingerprint(&fixture_eval, [1; 16]);
     let fixture_output = block_on(transport.receive_with_application(
         &mut socket,
         2,
@@ -4414,6 +4415,75 @@ fn durable_unknown_status_retry_survives_orphan_resolution() {
         .unwrap();
         let WebSocketOutput::Binary { payload, .. } = &original_retry[0] else {
             panic!("the original snapshot survives a changed-target collision");
+        };
+        assert_eq!(
+            Envelope::decode(payload, Limits::default().protocol).unwrap(),
+            *original_snapshot
+        );
+    }
+
+    // A different target may already have a durable terminal response. A
+    // colliding prior query must not disclose that response or rewrite its snapshot.
+    for (index, (query_id, original_request, original_snapshot)) in [
+        ([38; 16], &unknown_status_request, &unknown_status),
+        ([39; 16], &orphan_status_request, &orphan_status),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let collision_request = Envelope {
+            request: Some(query_id),
+            watch: None,
+            message: Message::RequestStatus {
+                target: [36; 16],
+                fingerprint: fixture_eval_fingerprint,
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap();
+        let sequence = 27 + index as u64 * 3;
+        let collision_output = block_on(recovered_transport.receive_with_application(
+            &mut recovered_socket,
+            sequence,
+            &masked_binary_payload(&collision_request),
+            &mut recovered_application,
+        ))
+        .unwrap();
+        let WebSocketOutput::Binary { payload, .. } = &collision_output[0] else {
+            panic!("a query collision cannot disclose another terminal target");
+        };
+        let collision_diagnostic = Envelope::decode(payload, Limits::default().protocol).unwrap();
+        assert_eq!(collision_diagnostic.request, Some(query_id));
+        assert!(matches!(
+            &collision_diagnostic.message,
+            Message::Diagnostic { .. }
+        ));
+
+        let collision_retry = block_on(recovered_transport.receive_with_application(
+            &mut recovered_socket,
+            sequence + 1,
+            &masked_binary_payload(&collision_request),
+            &mut recovered_application,
+        ))
+        .unwrap();
+        let WebSocketOutput::Binary { payload, .. } = &collision_retry[0] else {
+            panic!("the terminal-target collision retry replays its diagnostic");
+        };
+        assert_eq!(
+            Envelope::decode(payload, Limits::default().protocol).unwrap(),
+            collision_diagnostic
+        );
+
+        let original_retry = block_on(recovered_transport.receive_with_application(
+            &mut recovered_socket,
+            sequence + 2,
+            &masked_binary_payload(original_request),
+            &mut recovered_application,
+        ))
+        .unwrap();
+        let WebSocketOutput::Binary { payload, .. } = &original_retry[0] else {
+            panic!("the prior snapshot survives a terminal-target collision");
         };
         assert_eq!(
             Envelope::decode(payload, Limits::default().protocol).unwrap(),
