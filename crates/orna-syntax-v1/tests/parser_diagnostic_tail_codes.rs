@@ -1,6 +1,6 @@
 use orna_syntax_v1::{
-    Declaration, Expr, Pattern, Statement, StringSegment, SyntaxDiagnostic, parse_expression,
-    parse_module, parse_repl, parse_row,
+    CaseArm, Declaration, Expr, Pattern, Statement, StringSegment, SyntaxDiagnostic,
+    parse_expression, parse_module, parse_repl, parse_row,
 };
 
 fn assert_postfix_question(diagnostics: &[SyntaxDiagnostic], source: &str) {
@@ -4856,6 +4856,100 @@ fn recovered_deep_closure_tail_chain_keeps_terminal_suffix_arms() {
 
     // Malformed-arm recovery is unspecified by the reference. Keep the three
     // nested recovery points, terminal case arms, and suffixes after closures.
+}
+
+#[test]
+fn recovered_deep_terminal_arm_keeps_enclosing_closure_suffixes() {
+    let source = include_str!("fixtures/malformed-case-arm-terminal-closure-tail-missing-separator.orna");
+    let parsed = parse_module(source);
+
+    assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+    let diagnostic = &parsed.diagnostics[0];
+    assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+    assert_eq!(diagnostic.message, "expected `:` after case pattern");
+    let malformed_separator = source.find("false 0").expect("fixture has missing separator") + 6;
+    assert_eq!(diagnostic.span.start, malformed_separator);
+    assert_eq!(diagnostic.span.end, malformed_separator + 1);
+
+    fn closure_case<'a>(expression: &'a Expr, condition_name: &str) -> &'a [CaseArm] {
+        let Expr::Lambda { body, .. } = expression else {
+            panic!("expected a closure, got {expression:?}");
+        };
+        let Expr::Block { tail: Some(tail), .. } = body.as_ref() else {
+            panic!("closure lost its case tail");
+        };
+        let Expr::Control {
+            condition: Some(condition),
+            arms,
+            ..
+        } = tail.as_ref()
+        else {
+            panic!("closure tail is not a case expression");
+        };
+        assert!(matches!(condition.as_ref(), Expr::Name { text, .. } if text == condition_name));
+        arms
+    }
+
+    fn interpolation_closure<'a>(expression: &'a Expr, prefix: &str, suffix: &str) -> &'a Expr {
+        let Expr::InterpolatedString { segments, .. } = expression else {
+            panic!("expected a closure interpolation, got {expression:?}");
+        };
+        let [
+            StringSegment::Text { text: actual_prefix, .. },
+            StringSegment::Expression { value, .. },
+            StringSegment::Text { text: actual_suffix, .. },
+        ] = segments.as_slice()
+        else {
+            panic!("interpolation lost its surrounding suffix segment: {segments:?}");
+        };
+        assert_eq!(actual_prefix, prefix);
+        assert_eq!(actual_suffix, suffix);
+        assert!(matches!(value, Expr::Lambda { .. }), "{value:?}");
+        value
+    }
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block { tail: Some(tail), .. } = body else {
+        panic!("expected the root case tail");
+    };
+    let Expr::Control { arms, .. } = tail.as_ref() else {
+        panic!("expected the root case expression");
+    };
+    assert_eq!(arms.len(), 2, "root recovery lost its following arm: {arms:?}");
+    let outer_closure = interpolation_closure(&arms[0].body, "outer ", " outer-after");
+    let outer_arms = closure_case(outer_closure, "outer");
+    assert_eq!(outer_arms.len(), 2, "outer case lost its arms: {outer_arms:?}");
+    assert!(matches!(
+        &outer_arms[0].body,
+        Expr::Name { text, .. } if text == "outer"
+    ));
+
+    let nested_closure = interpolation_closure(&outer_arms[1].body, "inner ", " inner-after");
+    let nested_arms = closure_case(nested_closure, "nested");
+    assert!(!nested_arms.is_empty(), "deep recovery discarded all arms");
+    assert!(matches!(
+        &nested_arms[0].body,
+        Expr::InterpolatedString { segments, .. }
+            if matches!(segments.as_slice(), [
+                StringSegment::Text { text: prefix, .. },
+                StringSegment::Expression { value: Expr::Name { text: name, .. }, .. },
+                StringSegment::Text { text: suffix, .. }
+            ] if prefix == "leaf " && name == "flag" && suffix == " suffix")
+    ));
+    assert!(matches!(
+        &arms[1].body,
+        Expr::InterpolatedString { segments, .. }
+            if matches!(segments.as_slice(), [
+                StringSegment::Text { text: prefix, .. },
+                StringSegment::Expression { value: Expr::Name { text: name, .. }, .. },
+                StringSegment::Text { text: suffix, .. }
+            ] if prefix == "fallback " && name == "flag" && suffix == " done")
+    ));
+
+    // The reference leaves missing-separator recovery unspecified. Retain the
+    // deepest valid tail and the suffix boundaries of both enclosing strings.
 }
 
 #[test]
