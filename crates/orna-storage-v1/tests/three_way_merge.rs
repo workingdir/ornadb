@@ -3971,6 +3971,106 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
             ]
         );
 
+        // After the zero-detail boundary above, one slot retains the first
+        // checkpoint and makes the later one the crossing impact; two slots
+        // close both fixture conflicts at the exact row boundary.
+        for max_conflicts in [1, 2] {
+            let (
+                mut base,
+                mut left,
+                mut right,
+                mut source,
+                agreed_delete_id,
+                unchanged_delete_id,
+                checkpoint_id,
+                tail_id,
+            ) = build_inputs(
+                row_delete_on_left,
+                checkpoint_delete_on_left,
+                true,
+                regular_checkpoint_fixtures,
+            );
+            let mut ordered_keys = [integer(10), integer(20), integer(30)];
+            ordered_keys.sort_by_key(|key| key.encode().unwrap());
+            let suffix_boundary = ordered_keys[2].encode().unwrap();
+            let tombstone_range = KeyRange::new(high_range.start.clone(), Some(suffix_boundary.clone())).unwrap();
+            let suffix_range = KeyRange::new(Some(suffix_boundary), None).unwrap();
+            for (snapshot, locator, digest) in [
+                (&mut base, b"base-empty-suffix".as_slice(), 90),
+                (&mut left, b"left-empty-suffix".as_slice(), 91),
+                (&mut right, b"right-empty-suffix".as_slice(), 92),
+            ] {
+                let manifest = snapshot.tables.get_mut(&id(1)).unwrap();
+                manifest.segments[1].range = tombstone_range.clone();
+                manifest.segments.push(RowSegmentManifest {
+                    locator: locator.to_vec(),
+                    range: suffix_range.clone(),
+                    digest: [digest; 32],
+                });
+            }
+            source.add(MergeSide::Base, b"base-empty-suffix", Vec::new());
+            source.add(MergeSide::Left, b"left-empty-suffix", Vec::new());
+            source.add(MergeSide::Right, b"right-empty-suffix", Vec::new());
+            let result = merge_three_way_snapshots(
+                &base,
+                &left,
+                &right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 2, max_conflicts },
+            );
+            assert_eq!(source.visited.len(), 6);
+            assert_eq!(
+                &source.visited[3..],
+                &[
+                    (MergeSide::Base, b"base-empty-suffix".to_vec()),
+                    (MergeSide::Left, b"left-empty-suffix".to_vec()),
+                    (MergeSide::Right, b"right-empty-suffix".to_vec()),
+                ]
+            );
+            let report = match (max_conflicts, result) {
+                (1, Err(BranchMergeError::BudgetExceeded { report })) => {
+                    assert_eq!(report.conflicts_lower_bound, 2);
+                    report
+                }
+                (2, Err(BranchMergeError::Conflicts { conflicts, report })) => {
+                    let updated = parse_checkpoint_fixture(CHECKPOINT_EDITED);
+                    assert_eq!(
+                        conflicts,
+                        vec![
+                            BranchMergeConflict::CheckpointConflict {
+                                id: checkpoint_id.clone(),
+                                conflict: orna_evolution_v1::CheckpointMergeConflict {
+                                    base: Some(parse_checkpoint_fixture(CHECKPOINT_BASE)),
+                                    left: if checkpoint_delete_on_left { None } else { Some(updated.clone()) },
+                                    right: if checkpoint_delete_on_left { Some(updated) } else { None },
+                                },
+                            },
+                            BranchMergeConflict::CheckpointConflict {
+                                id: tail_id.clone(),
+                                conflict: orna_evolution_v1::CheckpointMergeConflict {
+                                    base: Some(parse_checkpoint_fixture(CHECKPOINT_TAIL_BASE)),
+                                    left: Some(parse_checkpoint_fixture(CHECKPOINT_TAIL_LEFT)),
+                                    right: Some(parse_checkpoint_fixture(CHECKPOINT_TAIL_RIGHT)),
+                                },
+                            },
+                        ]
+                    );
+                    assert_eq!(report.conflicts_lower_bound, 2);
+                    assert_eq!(report.affected_checkpoints.len(), 2);
+                    report
+                }
+                (_, other) => panic!("unexpected exact-row checkpoint tail: {other:?}"),
+            };
+            assert_eq!(report.rows_examined, 2);
+            assert_eq!(report.affected_checkpoints.len(), 2);
+            assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
+            assert!(report.affected_checkpoints.contains(tail_id.as_slice()));
+            assert!(!report.affected_checkpoints.contains(agreed_delete_id.as_slice()));
+            assert!(!report.affected_checkpoints.contains(unchanged_delete_id.as_slice()));
+            assert!(report.affected_ranges.contains(&(id(1), tombstone_range)));
+            assert!(report.affected_ranges.contains(&(id(1), suffix_range)));
+        }
+
         // With enough detail budget, the fixture-backed m and z conflicts
         // retain their full base/left/right values after the row tombstone.
         let (base, left, right, mut source, _, _, checkpoint_id, tail_id) = build_inputs(
