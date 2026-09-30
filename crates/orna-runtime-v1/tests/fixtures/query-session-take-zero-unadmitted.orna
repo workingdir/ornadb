@@ -1,0 +1,4 @@
+sys.MaintenanceJob
+    | take(0)
+    | count()
+    |? (failure => failure.code)
