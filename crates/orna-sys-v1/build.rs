@@ -5,7 +5,7 @@ use std::{
 
 mod build_support;
 
-use build_support::{Collector, validate_api_document};
+use build_support::{Collector, validate_api_document, validate_collection};
 use serde_json::{Value, json};
 
 fn rust_sources(root: &Path, output: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -49,20 +49,10 @@ fn main() {
     assert!(collector.errors.is_empty(), "{}", collector.errors.join("\n"));
     assert!(
         !collector.functions.is_empty(),
-        "no #[ornasys] implementation methods were collected"
+        "no #[ornasys] trait or implementation methods were collected"
     );
-
-    let mut names = std::collections::BTreeSet::new();
-    let mut constants = std::collections::BTreeSet::new();
-    for function in &collector.functions {
-        let name = function.metadata["name"].as_str().expect("validated name");
-        assert!(names.insert(name.to_owned()), "duplicate #[ornasys] name {name}");
-        let constant = descriptor_constant(&function.method);
-        assert!(
-            constants.insert(constant.clone()),
-            "duplicate #[ornasys] descriptor constant {constant}"
-        );
-    }
+    validate_collection(&collector.functions)
+        .expect("annotated system API collection must be unique and internally consistent");
 
     let base_text = fs::read_to_string(&base_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", base_path.display()));

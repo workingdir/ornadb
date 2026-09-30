@@ -58,7 +58,7 @@ fn collector_covers_trait_methods_and_nested_impls_and_rejects_silent_skips() {
             }
 
             impl Binding {
-                #[ornasys(function = r###"{"effect":"admin","name":"sys.inherent_method","purpose":"inherent fixture","signature":"fn sys.inherent_method(): Int"}"###)]
+                #[ornasys(function = r###"{"effect":"read","name":"sys.inherent_method","purpose":"inherent fixture","signature":"fn sys.inherent_method(): Int"}"###)]
                 fn inherent(&self) {}
             }
         }
@@ -103,24 +103,62 @@ fn collector_covers_trait_methods_and_nested_impls_and_rejects_silent_skips() {
 #[test]
 fn annotation_metadata_and_generated_inventory_fail_closed() {
     let valid = serde_json::json!({
-        "name": "sys.fixture",
-        "effect": "invoke",
-        "signature": "fn sys.fixture(): Int",
-        "purpose": "fixture purpose",
-        "contract": "fixture contract",
-        "preconditions": "fixture preconditions",
-        "ownership": "fixture ownership",
-        "snapshot_rule": "fixture snapshot rule"
+        "name": "sys.meta",
+        "effect": "read",
+        "signature": "fn sys.meta<T>(value: T): sys.ValueMetadata<T>",
+        "purpose": "fixture purpose"
     });
     assert!(build_support::validate_function_metadata(&valid).is_ok());
 
+    let valid_admin = serde_json::json!({
+        "name": "sys.admin.checkout(SnapshotRef)",
+        "effect": "admin",
+        "signature": "fn sys.admin.checkout(target: sys.SnapshotRef): sys.SnapshotRef",
+        "purpose": "fixture purpose",
+        "contract": "administrative-state-transitions",
+        "preconditions": "target is pinned"
+    });
+    assert!(build_support::validate_function_metadata(&valid_admin).is_ok());
+
+    let valid_invocation = serde_json::json!({
+        "name": "sys.start(Value)",
+        "effect": "invoke",
+        "signature": "fn sys.start(function: sys.FunctionRef): sys.InvocationHandle<sys.Value>",
+        "purpose": "fixture purpose",
+        "ownership": "child is owned by the call",
+        "snapshot_rule": "the function pin is used"
+    });
+    assert!(build_support::validate_function_metadata(&valid_invocation).is_ok());
+
+    let duplicate_callables = [
+        build_support::Function {
+            method: "first".into(),
+            metadata: serde_json::json!({
+                "name": "sys.fixture", "effect": "read",
+                "signature": "fn sys.fixture(value: Int): Str", "purpose": "first label"
+            }),
+        },
+        build_support::Function {
+            method: "second".into(),
+            metadata: serde_json::json!({
+                "name": "sys.fixture(Int)", "effect": "read",
+                "signature": "fn sys.fixture(value: Int): Bool", "purpose": "second label"
+            }),
+        },
+    ];
+    let duplicate_error = build_support::validate_collection(&duplicate_callables).unwrap_err();
+    assert!(
+        duplicate_error.contains("duplicate #[ornasys] callable signature"),
+        "overload labels cannot disguise a duplicate callable shape: {duplicate_error}"
+    );
+
     for invalid in [
         serde_json::json!({
-            "name": "sys.fixture", "effect": "read", "signature": "fn sys.fixture(): Int",
+            "name": "sys.admin.commit", "effect": "admin", "signature": "fn sys.admin.commit(): Int",
             "purpose": "purpose", "contract": "  "
         }),
         serde_json::json!({
-            "name": "sys.fixture", "effect": "read", "signature": "fn sys.fixture(): Int",
+            "name": "sys.start(Value)", "effect": "invoke", "signature": "fn sys.start(): Int",
             "purpose": "purpose", "ownership": 7
         }),
         serde_json::json!({
@@ -131,6 +169,26 @@ fn annotation_metadata_and_generated_inventory_fail_closed() {
             "name": "sys.fixture", "effect": "read", "signature": "not a function",
             "purpose": "purpose"
         }),
+        serde_json::json!({
+            "name": "sys.admin.plan_checkout(SnapshotRef)", "effect": "admin",
+            "signature": "fn sys.admin.plan_checkout(target: sys.SnapshotRef): sys.CheckoutPlan",
+            "purpose": "purpose", "contract": "administrative-state-transitions"
+        }),
+        serde_json::json!({
+            "name": "sys.admin.retry_failure", "effect": "admin",
+            "signature": "fn sys.admin.retry_failure(): Int", "purpose": "purpose",
+            "contract": "administrative-state-transitions"
+        }),
+        serde_json::json!({
+            "name": "sys.start(Value)", "effect": "invoke",
+            "signature": "fn sys.invoke(): Int", "purpose": "purpose",
+            "ownership": "child is owned by the call", "snapshot_rule": "pinned"
+        }),
+        serde_json::json!({
+            "name": "sys.snapshot(Bool)", "effect": "read",
+            "signature": "fn sys.snapshot(reference: sys.CommitRef): sys.SnapshotRef",
+            "purpose": "wrong overload label"
+        }),
     ] {
         assert!(
             build_support::validate_function_metadata(&invalid).is_err(),
@@ -140,6 +198,22 @@ fn annotation_metadata_and_generated_inventory_fail_closed() {
 
     let generated: Value = serde_json::from_str(&orna_sys_v1::system_api_json()).unwrap();
     build_support::validate_api_document(&generated).expect("generated API inventory is valid");
+
+    let mut wrong_effect = generated.clone();
+    let invoke = wrong_effect["functions"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|function| function["name"] == "sys.invoke(Value)")
+        .unwrap();
+    invoke["effect"] = serde_json::json!("read");
+    assert!(
+        build_support::validate_api_document(&wrong_effect)
+            .unwrap_err()
+            .contains("requires effect `invoke`"),
+        "effect drift must fail document validation"
+    );
+
     let mut stale_count = generated;
     stale_count["counts"]["functions"] = serde_json::json!(65);
     assert!(
@@ -170,4 +244,22 @@ fn in_crate_orna_fixture_uses_a_published_collected_api_signature() {
     assert!(api["value_types"].as_array().unwrap().iter().any(|value_type| {
         value_type["name"] == "sys.ValueMetadata<T>"
     }));
+    for (label, signature) in [
+        (
+            "sys.snapshot(SnapshotRef)",
+            "fn sys.snapshot(reference: sys.SnapshotRef = sys.database.cwd): sys.SnapshotRef",
+        ),
+        (
+            "sys.snapshot(CommitRef)",
+            "fn sys.snapshot(reference: sys.CommitRef): sys.SnapshotRef",
+        ),
+    ] {
+        let function = api["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|function| function["name"] == label)
+            .unwrap_or_else(|| panic!("missing annotated overload {label}"));
+        assert_eq!(function["signature"], signature);
+    }
 }

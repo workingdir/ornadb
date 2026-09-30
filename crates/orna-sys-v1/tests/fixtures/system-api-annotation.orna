@@ -1,1 +1,3 @@
 pub fn describe_value(value: Int): sys.ValueMetadata<Int> = sys.meta(value);
+pub fn resolve_snapshot(snapshot: sys.SnapshotRef): sys.SnapshotRef = sys.snapshot(snapshot);
+pub fn resolve_commit(commit: sys.CommitRef): sys.SnapshotRef = sys.snapshot(commit);
