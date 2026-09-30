@@ -3034,6 +3034,55 @@ fn conflict_budget_closes_fixture_row_tombstone_checkpoint_tail() {
             assert!(!report.affected_checkpoints.contains(closure_id.as_slice()));
         }
     }
+
+    // A row budget ending one row before the clean tombstone cannot enter the
+    // checkpoint phase, even though the conflict budget still has capacity.
+    // At the exact five-row boundary, the tombstone resolves and both fixture
+    // checkpoint conflicts close within the exact four-conflict budget.
+    let (base, left, right, mut source, _, _, _) = build_inputs();
+    let error = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 4, max_conflicts: 4 },
+    )
+    .unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("the row limit stops before the tombstone and checkpoint closure")
+    };
+    assert_eq!(report.rows_examined, 5);
+    assert_eq!(report.conflicts_lower_bound, 2);
+    assert_eq!(report.affected_ranges.len(), 3);
+    assert!(report.affected_checkpoints.is_empty());
+    let mut visits_before_tombstone = segment_visits
+        .iter()
+        .take(2)
+        .flat_map(|visits| visits.iter().cloned())
+        .collect::<Vec<_>>();
+    visits_before_tombstone.push((MergeSide::Base, b"base-tombstone".to_vec()));
+    assert_eq!(source.visited, visits_before_tombstone);
+
+    let (base, left, right, mut source, delete_update_id, divergent_id, _) = build_inputs();
+    let error = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 5, max_conflicts: 4 },
+    )
+    .unwrap_err();
+    let BranchMergeError::Conflicts { conflicts, report } = error else {
+        panic!("the exact row and conflict budgets close the fixture tail")
+    };
+    assert_eq!(conflicts.len(), 4);
+    assert_eq!(report.rows_examined, 5);
+    assert_eq!(report.conflicts_lower_bound, 4);
+    assert_eq!(report.affected_ranges.len(), 3);
+    assert_eq!(report.affected_checkpoints.len(), 2);
+    assert!(report.affected_checkpoints.contains(delete_update_id.as_slice()));
+    assert!(report.affected_checkpoints.contains(divergent_id.as_slice()));
+    assert_eq!(source.visited.len(), 9);
 }
 
 #[test]
