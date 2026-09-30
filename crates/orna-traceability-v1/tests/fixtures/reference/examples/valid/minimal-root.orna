@@ -1,0 +1,5 @@
+pub table Note {
+    text: Str,
+}
+
+pub fn main() = Note | count();

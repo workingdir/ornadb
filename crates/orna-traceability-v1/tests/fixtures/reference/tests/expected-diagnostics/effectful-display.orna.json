@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/effectful-display.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E7201",
+  "message_contains": "Display and Present implementations must be read-only",
+  "status": "expected-not-executed"
+}
