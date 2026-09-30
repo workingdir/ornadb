@@ -358,6 +358,52 @@ fn schema_type_graph_rejects_dangling_and_misaligned_inventory_edges() {
         "generic function results must resolve their nested row type: {error}"
     );
 
+    let source_document = generated["value_types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|value_type| value_type["name"] == "sys.SourceDocument")
+        .unwrap();
+    assert_eq!(
+        source_document["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["name"] == "maps")
+            .unwrap()["type"],
+        "Relation<sys.SourceMapEntry>",
+        "the published record-row edge remains in the generated type graph"
+    );
+
+    let mut enum_relation_result = generated.clone();
+    let history = enum_relation_result["functions"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|function| function["name"] == "sys.history(ObjectRef)")
+        .unwrap();
+    history["signature"] =
+        serde_json::json!("fn sys.history(object: sys.ObjectRef): Relation<sys.DiffScope>");
+    let error = build_support::validate_api_document(&enum_relation_result).unwrap_err();
+    assert!(
+        error.contains("requires a declared relation or record row type, found `sys.DiffScope`"),
+        "enum types cannot be relation rows: {error}"
+    );
+
+    let mut enum_relation_field = generated.clone();
+    let target = enum_relation_field["value_types"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|value_type| value_type["name"] == "sys.ChangeTarget")
+        .unwrap();
+    target["fields"][0]["type"] = serde_json::json!("Relation<sys.DiffScope>");
+    let error = build_support::validate_api_document(&enum_relation_field).unwrap_err();
+    assert!(
+        error.contains("requires a declared relation or record row type, found `sys.DiffScope`"),
+        "value-type relation fields must reject enum rows: {error}"
+    );
+
     let mut dangling_enum_default = generated.clone();
     dangling_enum_default["enums"]["sys.DiffScope"] = serde_json::json!(["semantic", "source", "rows", "storage"]);
     let error = build_support::validate_api_document(&dangling_enum_default).unwrap_err();
