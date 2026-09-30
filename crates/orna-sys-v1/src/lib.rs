@@ -1,8 +1,11 @@
+#![recursion_limit = "512"]
+
 //! Bounded, pre-effect admission for Orna 1.0 reflective invocation.
 //!
-//! Resolution, durable transaction ownership, and schema generation stay with
-//! the evaluator/runtime that owns those concerns. The local supervisor below
-//! only provides a bounded execution and await seam for admitted work.
+//! Resolution and durable transaction ownership stay with the evaluator and
+//! runtime that own those concerns. The portable `sys` declaration schema is
+//! owned by the macros in [`system_api`]. The local supervisor below only
+//! provides a bounded execution and await seam for admitted work.
 
 use std::{
     collections::BTreeMap,
@@ -21,6 +24,7 @@ use serde::{
     ser::{SerializeSeq, SerializeStruct},
 };
 use sha2::{Digest, Sha256};
+use orna_security_v1::SecretMetadata;
 
 mod introspection;
 pub use introspection::{
@@ -218,6 +222,43 @@ pub fn system_value_metadata(
         codecs: facts.codecs,
         redacted: value.is_redacted(),
     })
+}
+
+/// Safe fields projected from a secret provider's non-sensitive metadata.
+///
+/// ORNA-SECRET-004 requires the stable name, provider, and availability while
+/// forbidding secret contents. `SecretMetadata` does not carry enough evidence
+/// to build the rest of a durable `sys.Secret` catalogue row, so this
+/// projection does not invent row authority, paths, recipients, dependencies,
+/// or diagnostics. Secret contents are not accepted by this API.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct SecretProjection {
+    name: String,
+    provider: String,
+    available: bool,
+}
+
+impl SecretProjection {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    pub const fn is_available(&self) -> bool {
+        self.available
+    }
+}
+
+/// Projects the safe `name`, `provider`, and `available` fields for `sys.Secret`.
+pub fn system_secret_projection(metadata: &SecretMetadata) -> SecretProjection {
+    SecretProjection {
+        name: metadata.reference().as_str().to_owned(),
+        provider: metadata.provider().to_owned(),
+        available: metadata.available(),
+    }
 }
 
 /// Opaque identity for one immutable semantic revision.
@@ -514,14 +555,6 @@ pub struct SystemFunctionDescriptor {
     pub purpose: &'static str,
 }
 
-/// Exact portable descriptor for the metadata-only `sys.meta` operation.
-pub const SYS_META_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
-    name: "sys.meta",
-    effect: SystemEffect::Read,
-    signature: "fn sys.meta<T>(value: T): sys.ValueMetadata<T>",
-    purpose: "Return safe static/nominal/codec/protocol metadata for a value.",
-};
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum SystemEffect {
     Read,
@@ -529,381 +562,21 @@ pub enum SystemEffect {
     Admin,
 }
 
-/// Exact `api/sys.json` descriptor for `sys.explain(Diagnostic)`.
-pub const SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.explain(Diagnostic)",
-        effect: SystemEffect::Read,
-        signature: "fn sys.explain(diagnostic: sys.Diagnostic): sys.Explanation",
-        purpose: "Return structured causal explanation.",
-    };
+mod system_api;
+pub use system_api::*;
 
-/// Exact `api/sys.json` descriptor for `sys.explain(Query)`.
-pub const SYS_EXPLAIN_QUERY_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
-    name: "sys.explain(Query)",
-    effect: SystemEffect::Read,
-    signature: "fn sys.explain<T>(query: Query<T>): sys.Plan",
-    purpose: "Return structured query plan.",
-};
+/// Compatibility name for callers predating the macro-generated API catalog.
+pub const SYS_EXPLAIN_FUNCTION_DESCRIPTOR: SystemFunctionDescriptor =
+    SYS_EXPLAIN_FUNCTION_REF_DESCRIPTOR;
 
-/// Exact `api/sys.json` descriptor for `sys.explain(FunctionRef)`.
-pub const SYS_EXPLAIN_FUNCTION_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
-    name: "sys.explain(FunctionRef)",
-    effect: SystemEffect::Read,
-    signature: "fn sys.explain(function: sys.FunctionRef): sys.Plan",
-    purpose: "Return structured function/effect plan.",
-};
-
-/// Exact `api/sys.json` descriptor for outgoing dependency traversal.
-pub const SYS_DEPENDENCIES_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
-    name: "sys.dependencies",
-    effect: SystemEffect::Read,
-    signature: "fn sys.dependencies(object: sys.ObjectRef, transitive: Bool = false, kinds: [sys.DependencyKind]? = null): Relation<sys.Dependency>",
-    purpose: "Traverse outgoing dependency edges.",
-};
-
-/// Exact `api/sys.json` descriptor for incoming dependency traversal.
-pub const SYS_DEPENDENTS_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
-    name: "sys.dependents",
-    effect: SystemEffect::Read,
-    signature: "fn sys.dependents(object: sys.ObjectRef, transitive: Bool = false, kinds: [sys.DependencyKind]? = null): Relation<sys.Dependency>",
-    purpose: "Traverse incoming dependency edges.",
-};
-
-/// Exact system-reference descriptor for `sys.admin.flush`.
-pub const SYS_ADMIN_FLUSH_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
-    name: "sys.admin.flush",
-    effect: SystemEffect::Admin,
-    signature: "fn sys.admin.flush(table: sys.TableRef? = null): sys.FlushResult",
-    purpose: "Durably seal pending rows without changing logical contents.",
-};
-
-/// Exact system-reference descriptor for `sys.admin.compact`.
-pub const SYS_ADMIN_COMPACT_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
-    name: "sys.admin.compact",
-    effect: SystemEffect::Admin,
-    signature: "fn sys.admin.compact(table: sys.TableRef? = null): sys.CompactionResult",
-    purpose: "Rewrite physical segments atomically.",
-};
-
-/// Exact system-reference descriptor for `sys.admin.set_storage_preference`.
-pub const SYS_ADMIN_SET_STORAGE_PREFERENCE_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.set_storage_preference",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.set_storage_preference(table: sys.TableRef, preference: sys.StoragePreference): sys.Storage",
-        purpose: "Set future automatic placement preference without rewriting existing rows.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.rewrite_storage`.
-pub const SYS_ADMIN_REWRITE_STORAGE_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.rewrite_storage",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.rewrite_storage(table: sys.TableRef, to: sys.StorageRewriteTarget): sys.StorageRewriteResult",
-        purpose: "Atomically rewrite physical placement while preserving logical rows.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.verify`.
-pub const SYS_ADMIN_VERIFY_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.verify",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.verify(scope: sys.VerifyScope = sys.VerifyScope.database): sys.VerificationReport",
-        purpose: "Verify repository, metadata, storage and checkpoint invariants.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.cancel_run`.
-pub const SYS_ADMIN_CANCEL_RUN_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.cancel_run",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.cancel_run(run: sys.RunRef, reason: Str? = null): Bool",
-        purpose: "Cancel a durable program run.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.pause_stream`.
-pub const SYS_ADMIN_PAUSE_STREAM_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.pause_stream",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.pause_stream(stream: sys.StreamRef, reason: Str? = null): Bool",
-        purpose: "Pause at an item/batch transaction boundary.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.resume_stream`.
-pub const SYS_ADMIN_RESUME_STREAM_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.resume_stream",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.resume_stream(stream: sys.StreamRef): Bool",
-        purpose: "Resume a paused stream.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.reset_checkpoint`.
-pub const SYS_ADMIN_RESET_CHECKPOINT_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.reset_checkpoint",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.reset_checkpoint(checkpoint: sys.CheckpointRef, expected_version: sys.CheckpointVersion, expected_position: sys.CheckpointPosition, to: sys.CheckpointPosition, reason: Str): sys.Checkpoint",
-        purpose: "Compare-and-set checkpoint reset.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.retry_failure`.
-pub const SYS_ADMIN_RETRY_FAILURE_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.retry_failure",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.retry_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus = sys.FailureStatus.open): sys.InvocationHandle<sys.Value>",
-        purpose: "Lease and retry the same blocked delivery; keep identity stable across failed attempts.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.skip_failure`.
-pub const SYS_ADMIN_SKIP_FAILURE_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.skip_failure",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.skip_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus, reason: Str): sys.Checkpoint",
-        purpose: "Atomically skip a supported failed position and move progress.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.replay_failure`.
-pub const SYS_ADMIN_REPLAY_FAILURE_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.replay_failure",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.replay_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus = sys.FailureStatus.skipped): sys.InvocationHandle<sys.Value>",
-        purpose: "Reprocess a preserved skipped delivery without rewinding the live checkpoint.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.resolve_failure`.
-pub const SYS_ADMIN_RESOLVE_FAILURE_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.resolve_failure",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.resolve_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus, reason: Str): sys.Failure",
-        purpose: "Resolve a preserved failure without marking its processing as successful.",
-    };
-/// Exact system-reference descriptor for `sys.admin.commit`.
-pub const SYS_ADMIN_COMMIT_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
-    name: "sys.admin.commit",
-    effect: SystemEffect::Admin,
-    signature: "fn sys.admin.commit(message: Str, author: sys.PersonIdentity? = null): sys.CommitRef",
-    purpose: "Commit the validated staged state, preserving unstaged CWD changes and unpublished tail.",
-};
-
-/// Exact system-reference descriptor for `sys.admin.create_branch(SnapshotRef)`.
-pub const SYS_ADMIN_CREATE_BRANCH_SNAPSHOT_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.create_branch(SnapshotRef)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.create_branch(name: Str, at: sys.SnapshotRef? = null): sys.BranchRef",
-        purpose: "Create a branch at the supplied committed snapshot or current HEAD; do not switch or commit pending changes.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.create_branch(CommitRef)`.
-pub const SYS_ADMIN_CREATE_BRANCH_COMMIT_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.create_branch(CommitRef)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.create_branch(name: Str, at: sys.CommitRef): sys.BranchRef",
-        purpose: "Create a Git branch at a commit.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.create_branch(BranchRef)`.
-pub const SYS_ADMIN_CREATE_BRANCH_BRANCH_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.create_branch(BranchRef)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.create_branch(name: Str, at: sys.BranchRef): sys.BranchRef",
-        purpose: "Create a Git branch at another branch target.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.create_branch(TagRef)`.
-pub const SYS_ADMIN_CREATE_BRANCH_TAG_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.create_branch(TagRef)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.create_branch(name: Str, at: sys.TagRef): sys.BranchRef",
-        purpose: "Create a Git branch at a peeled tag target.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.create_branch(GitOid)`.
-pub const SYS_ADMIN_CREATE_BRANCH_GIT_OID_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.create_branch(GitOid)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.create_branch(name: Str, at: sys.GitOid): sys.BranchRef",
-        purpose: "Create a Git branch at an exact Git object.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.create_branch(Str)`.
-pub const SYS_ADMIN_CREATE_BRANCH_STR_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.create_branch(Str)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.create_branch(name: Str, at: Str): sys.BranchRef",
-        purpose: "Resolve a Git revision expression and create a branch there.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.checkout(SnapshotRef)`.
-pub const SYS_ADMIN_CHECKOUT_SNAPSHOT_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.checkout(SnapshotRef)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.checkout(target: sys.SnapshotRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
-        purpose: "Validate and select an already resolved snapshot.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.checkout(CommitRef)`.
-pub const SYS_ADMIN_CHECKOUT_COMMIT_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.checkout(CommitRef)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.checkout(target: sys.CommitRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
-        purpose: "Validate and select a commit snapshot.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.checkout(BranchRef)`.
-pub const SYS_ADMIN_CHECKOUT_BRANCH_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.checkout(BranchRef)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.checkout(target: sys.BranchRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
-        purpose: "Validate and select a branch target.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.checkout(TagRef)`.
-pub const SYS_ADMIN_CHECKOUT_TAG_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.checkout(TagRef)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.checkout(target: sys.TagRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
-        purpose: "Validate and select a peeled tag target.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.checkout(GitOid)`.
-pub const SYS_ADMIN_CHECKOUT_GIT_OID_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.checkout(GitOid)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.checkout(target: sys.GitOid, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
-        purpose: "Validate and select an exact Git object.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.checkout(Str)`.
-pub const SYS_ADMIN_CHECKOUT_STR_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.checkout(Str)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.checkout(target: Str, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
-        purpose: "Resolve, validate and select a Git revision expression.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.plan_checkout(SnapshotRef)`.
-pub const SYS_ADMIN_PLAN_CHECKOUT_SNAPSHOT_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.plan_checkout(SnapshotRef)",
-        effect: SystemEffect::Read,
-        signature: "fn sys.admin.plan_checkout(target: sys.SnapshotRef): sys.CheckoutPlan",
-        purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.plan_checkout(CommitRef)`.
-pub const SYS_ADMIN_PLAN_CHECKOUT_COMMIT_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.plan_checkout(CommitRef)",
-        effect: SystemEffect::Read,
-        signature: "fn sys.admin.plan_checkout(target: sys.CommitRef): sys.CheckoutPlan",
-        purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.plan_checkout(BranchRef)`.
-pub const SYS_ADMIN_PLAN_CHECKOUT_BRANCH_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.plan_checkout(BranchRef)",
-        effect: SystemEffect::Read,
-        signature: "fn sys.admin.plan_checkout(target: sys.BranchRef): sys.CheckoutPlan",
-        purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.plan_checkout(TagRef)`.
-pub const SYS_ADMIN_PLAN_CHECKOUT_TAG_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.plan_checkout(TagRef)",
-        effect: SystemEffect::Read,
-        signature: "fn sys.admin.plan_checkout(target: sys.TagRef): sys.CheckoutPlan",
-        purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.plan_checkout(GitOid)`.
-pub const SYS_ADMIN_PLAN_CHECKOUT_GIT_OID_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.plan_checkout(GitOid)",
-        effect: SystemEffect::Read,
-        signature: "fn sys.admin.plan_checkout(target: sys.GitOid): sys.CheckoutPlan",
-        purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.plan_checkout(Str)`.
-pub const SYS_ADMIN_PLAN_CHECKOUT_STR_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.plan_checkout(Str)",
-        effect: SystemEffect::Read,
-        signature: "fn sys.admin.plan_checkout(target: Str): sys.CheckoutPlan",
-        purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
-    };
-
-/// Returns the authoritative descriptor for a portable system function.
+/// Returns the macro-declared descriptor for a portable system function.
 ///
-/// The returned descriptor is static catalogue data.  It does not grant
+/// The descriptor is static declaration metadata. It does not grant
 /// invocation or administrative authority.
 pub fn system_function_descriptor(name: &str) -> Option<&'static SystemFunctionDescriptor> {
-    match name {
-        "sys.meta" => Some(&SYS_META_DESCRIPTOR),
-        "sys.explain(Query)" => Some(&SYS_EXPLAIN_QUERY_DESCRIPTOR),
-        "sys.explain(FunctionRef)" => Some(&SYS_EXPLAIN_FUNCTION_DESCRIPTOR),
-        "sys.explain(Diagnostic)" => Some(&SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR),
-        "sys.dependencies" => Some(&SYS_DEPENDENCIES_DESCRIPTOR),
-        "sys.dependents" => Some(&SYS_DEPENDENTS_DESCRIPTOR),
-        "sys.admin.flush" => Some(&SYS_ADMIN_FLUSH_DESCRIPTOR),
-        "sys.admin.compact" => Some(&SYS_ADMIN_COMPACT_DESCRIPTOR),
-        "sys.admin.set_storage_preference" => Some(&SYS_ADMIN_SET_STORAGE_PREFERENCE_DESCRIPTOR),
-        "sys.admin.rewrite_storage" => Some(&SYS_ADMIN_REWRITE_STORAGE_DESCRIPTOR),
-        "sys.admin.verify" => Some(&SYS_ADMIN_VERIFY_DESCRIPTOR),
-        "sys.admin.cancel_run" => Some(&SYS_ADMIN_CANCEL_RUN_DESCRIPTOR),
-        "sys.admin.pause_stream" => Some(&SYS_ADMIN_PAUSE_STREAM_DESCRIPTOR),
-        "sys.admin.reset_checkpoint" => Some(&SYS_ADMIN_RESET_CHECKPOINT_DESCRIPTOR),
-        "sys.admin.resume_stream" => Some(&SYS_ADMIN_RESUME_STREAM_DESCRIPTOR),
-        "sys.admin.retry_failure" => Some(&SYS_ADMIN_RETRY_FAILURE_DESCRIPTOR),
-        "sys.admin.skip_failure" => Some(&SYS_ADMIN_SKIP_FAILURE_DESCRIPTOR),
-        "sys.admin.replay_failure" => Some(&SYS_ADMIN_REPLAY_FAILURE_DESCRIPTOR),
-        "sys.admin.resolve_failure" => Some(&SYS_ADMIN_RESOLVE_FAILURE_DESCRIPTOR),
-        "sys.admin.commit" => Some(&SYS_ADMIN_COMMIT_DESCRIPTOR),
-        "sys.admin.create_branch(SnapshotRef)" => {
-            Some(&SYS_ADMIN_CREATE_BRANCH_SNAPSHOT_REF_DESCRIPTOR)
-        }
-        "sys.admin.create_branch(CommitRef)" => Some(&SYS_ADMIN_CREATE_BRANCH_COMMIT_REF_DESCRIPTOR),
-        "sys.admin.create_branch(BranchRef)" => Some(&SYS_ADMIN_CREATE_BRANCH_BRANCH_REF_DESCRIPTOR),
-        "sys.admin.create_branch(TagRef)" => Some(&SYS_ADMIN_CREATE_BRANCH_TAG_REF_DESCRIPTOR),
-        "sys.admin.create_branch(GitOid)" => Some(&SYS_ADMIN_CREATE_BRANCH_GIT_OID_DESCRIPTOR),
-        "sys.admin.create_branch(Str)" => Some(&SYS_ADMIN_CREATE_BRANCH_STR_DESCRIPTOR),
-        "sys.admin.checkout(SnapshotRef)" => Some(&SYS_ADMIN_CHECKOUT_SNAPSHOT_REF_DESCRIPTOR),
-        "sys.admin.checkout(CommitRef)" => Some(&SYS_ADMIN_CHECKOUT_COMMIT_REF_DESCRIPTOR),
-        "sys.admin.checkout(BranchRef)" => Some(&SYS_ADMIN_CHECKOUT_BRANCH_REF_DESCRIPTOR),
-        "sys.admin.checkout(TagRef)" => Some(&SYS_ADMIN_CHECKOUT_TAG_REF_DESCRIPTOR),
-        "sys.admin.checkout(GitOid)" => Some(&SYS_ADMIN_CHECKOUT_GIT_OID_DESCRIPTOR),
-        "sys.admin.checkout(Str)" => Some(&SYS_ADMIN_CHECKOUT_STR_DESCRIPTOR),
-        "sys.admin.plan_checkout(SnapshotRef)" => {
-            Some(&SYS_ADMIN_PLAN_CHECKOUT_SNAPSHOT_REF_DESCRIPTOR)
-        }
-        "sys.admin.plan_checkout(CommitRef)" => Some(&SYS_ADMIN_PLAN_CHECKOUT_COMMIT_REF_DESCRIPTOR),
-        "sys.admin.plan_checkout(BranchRef)" => Some(&SYS_ADMIN_PLAN_CHECKOUT_BRANCH_REF_DESCRIPTOR),
-        "sys.admin.plan_checkout(TagRef)" => Some(&SYS_ADMIN_PLAN_CHECKOUT_TAG_REF_DESCRIPTOR),
-        "sys.admin.plan_checkout(GitOid)" => Some(&SYS_ADMIN_PLAN_CHECKOUT_GIT_OID_DESCRIPTOR),
-        "sys.admin.plan_checkout(Str)" => Some(&SYS_ADMIN_PLAN_CHECKOUT_STR_DESCRIPTOR),
-        _ => None,
-    }
+    SYSTEM_FUNCTION_DESCRIPTORS
+        .iter()
+        .find(|descriptor| descriptor.name == name)
 }
 
 /// A descriptive object reference in an explanation.
