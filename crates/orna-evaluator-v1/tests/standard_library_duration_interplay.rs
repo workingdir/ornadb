@@ -812,6 +812,30 @@ fn positive_factor_values_around_six_keep_single_nanosecond_minute_remainders() 
 }
 
 #[test]
+fn positive_factor_subnanosecond_remainders_at_minute_edges_are_rejected() {
+    // The reference is silent on fractional-factor products below Duration's
+    // nanosecond quantum. Keep the evaluator's exactness rule at both sides of
+    // the minute: 59.9999999995s and 60.0000000005s are not rounded.
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna")),
+        Ok(None)
+    );
+
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-factor-half-ns-before-minute-f6bmg.orna"),
+        include_str!("fixtures/stdlib-time-duration-factor-half-ns-after-minute-f6bmg.orna"),
+    ] {
+        let result = session.submit(source);
+        assert_eq!(
+            result.unwrap_err().code(),
+            "ORNA-EVAL-VALUE",
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn clock_output_bound_keeps_elapsed_hours_and_fractional_tail() {
     let limits = Limits {
         max_string_bytes: 129,
