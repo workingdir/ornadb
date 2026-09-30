@@ -87,6 +87,85 @@ fn diagnostic_debug_redacts_fixture_payloads_without_explicit_redaction() {
     assert!(!debug.contains("credential.orna"));
 }
 
+#[test]
+fn composed_json_and_codec_projections_redact_fixture_tails() {
+    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let cause = Diagnostic::new(
+        SafeText::new("ORNA-E-CHILD").unwrap(),
+        DiagnosticSeverity::Warning,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .with_note(SafeText::new(fixture).unwrap());
+    let diagnostic = Diagnostic::new(
+        SafeText::new("ORNA-E-ROOT").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .with_note(SafeText::new(fixture).unwrap())
+    .with_cause(cause);
+
+    let admitted = diagnostic
+        .clone()
+        .redacted_with_message(SafeText::new("operation denied").unwrap())
+        // A later composition must not undo the redaction claim.
+        .with_note(SafeText::new(fixture).unwrap());
+    let composed_json = serde_json::json!({
+        "outer": {
+            "diagnostic": diagnostic,
+            "admitted": admitted,
+        }
+    });
+    let json = serde_json::to_vec(&composed_json).unwrap();
+    assert!(
+        !json
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+    assert_eq!(
+        composed_json["outer"]["diagnostic"]["message"],
+        "<redacted>"
+    );
+    assert_eq!(composed_json["outer"]["diagnostic"]["redacted"], true);
+    assert_eq!(
+        composed_json["outer"]["diagnostic"]["causes"][0]["message"],
+        "<redacted>"
+    );
+    assert_eq!(
+        composed_json["outer"]["admitted"]["message"],
+        "operation denied"
+    );
+    assert_eq!(
+        composed_json["outer"]["admitted"]["notes"][0],
+        "<redacted>"
+    );
+
+    let codec_diagnostic = Diagnostic::new(
+        SafeText::new("ORNA-E-CODEC").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .with_cause(
+        Diagnostic::new(
+            SafeText::new("ORNA-E-CODEC-CAUSE").unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap(),
+    );
+    let encoded = codec_diagnostic.encode_ovb().unwrap();
+    assert!(
+        !encoded
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    assert_eq!(decoded["causes"][0]["message"], "<redacted>");
+}
+
 fn assert_redacted_boundaries(redacted: Diagnostic, expected_message: &str) {
     let ovb = redacted.encode_ovb().unwrap();
     let decoded = Diagnostic::decode_ovb(&ovb).unwrap();
@@ -133,19 +212,22 @@ fn assert_redacted_boundaries(redacted: Diagnostic, expected_message: &str) {
 }
 
 #[test]
-fn non_redacted_diagnostics_keep_their_existing_text_and_metadata() {
+fn unredacted_diagnostics_keep_local_text_but_serialize_only_safe_projections() {
     let diagnostic = diagnostic_with_secret_text();
     let json = serde_json::to_value(&diagnostic).unwrap();
 
     assert_eq!(diagnostic.message(), "connector secret: root-secret-value");
-    assert_eq!(json["message"], "connector secret: root-secret-value");
-    assert_eq!(json["notes"][0], "authorization: root-secret-note");
-    assert_eq!(
-        json["causes"][0]["message"],
-        "nested connector token: nested-secret-value"
-    );
-    assert_eq!(json["redacted"], false);
-    assert_eq!(json["causes"][0]["redacted"], false);
+    assert_eq!(json["message"], "<redacted>");
+    assert_eq!(json["notes"][0], "<redacted>");
+    assert_eq!(json["causes"][0]["message"], "<redacted>");
+    assert_eq!(json["redacted"], true);
+    assert_eq!(json["causes"][0]["redacted"], true);
+
+    let encoded = diagnostic.encode_ovb().unwrap();
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    assert_eq!(decoded["notes"][0], "<redacted>");
+    assert_eq!(decoded["causes"][0]["message"], "<redacted>");
 }
 
 #[test]
@@ -206,7 +288,7 @@ fn diagnostic_spans_reject_unsafe_repository_paths() {
 }
 
 #[test]
-fn redacted_span_marker_requires_a_matching_diagnostic_redaction_claim() {
+fn redacted_span_marker_promotes_boundary_projection_to_redacted() {
     let snapshot = Snapshot::Commit {
         database: [7; 16],
         algorithm: GitHash::Sha256,
@@ -221,8 +303,13 @@ fn redacted_span_marker_requires_a_matching_diagnostic_redaction_claim() {
     .unwrap()
     .with_span(span);
 
-    assert!(diagnostic.encode_ovb().is_err());
-    assert!(serde_json::to_value(&diagnostic).is_err());
+    let projected = serde_json::to_value(&diagnostic).unwrap();
+    assert_eq!(projected["redacted"], true);
+    assert_eq!(projected["spans"][0]["file-path"], "<redacted>");
+
+    let encoded = diagnostic.encode_ovb().unwrap();
+    let decoded = Diagnostic::decode_ovb(&encoded).unwrap();
+    assert!(serde_json::to_value(decoded).is_ok());
 
     let encoded = diagnostic.redacted().encode_ovb().unwrap();
     assert!(Diagnostic::decode_ovb(&encoded).is_ok());
