@@ -16,6 +16,7 @@ const DELETE_CITY: &str = include_str!("fixtures/merge-row-delete-city.orna");
 const MULTI_CONFLICT_LEFT: &str = include_str!("fixtures/merge-row-multi-conflict-left.orna");
 const MULTI_CONFLICT_RIGHT: &str = include_str!("fixtures/merge-row-multi-conflict-right.orna");
 const OTHER_KEY: &str = include_str!("fixtures/merge-row-other-key.orna");
+const OTHER_KEY_CONFLICT: &str = include_str!("fixtures/merge-row-other-key-conflict.orna");
 
 fn id(value: u8) -> ObjectId {
     ObjectId::new([value; 16])
@@ -382,5 +383,54 @@ fn pruned_history_takes_precedence_over_tombstone_identity_checks() {
         Err(RowSnapshotMergeError::PrunedInput {
             sides: vec![RowSnapshotSide::Right],
         }),
+    );
+}
+
+#[test]
+fn identity_conflicts_precede_field_and_delete_edit_conflicts() {
+    let base = parse_fixture(BASE);
+    let left = parse_fixture(MULTI_CONFLICT_LEFT);
+    let wrong_identity = parse_fixture(OTHER_KEY_CONFLICT);
+    let identity_conflict = Err(RowSnapshotMergeError::Conflict(RowMergeConflict::Identity {
+        table: base.table,
+        key: base.key.clone(),
+    }));
+
+    // These branch payloads also diverge on both fields. Identity is the
+    // higher-priority diagnosis, with the common base anchoring either order.
+    assert_eq!(
+        merge_keyed_row_states(
+            RowSnapshotState::Present(&base),
+            RowSnapshotState::Present(&left),
+            RowSnapshotState::Present(&wrong_identity),
+        ),
+        identity_conflict,
+    );
+    assert_eq!(
+        merge_keyed_row_states(
+            RowSnapshotState::Present(&base),
+            RowSnapshotState::Present(&wrong_identity),
+            RowSnapshotState::Present(&left),
+        ),
+        identity_conflict,
+    );
+
+    // A different-key row paired with a deletion is likewise an identity
+    // error, not a delete/edit conflict for the base row.
+    assert_eq!(
+        merge_keyed_row_states(
+            RowSnapshotState::Present(&base),
+            RowSnapshotState::Absent,
+            RowSnapshotState::Present(&wrong_identity),
+        ),
+        identity_conflict,
+    );
+    assert_eq!(
+        merge_keyed_row_states(
+            RowSnapshotState::Present(&base),
+            RowSnapshotState::Present(&wrong_identity),
+            RowSnapshotState::Absent,
+        ),
+        identity_conflict,
     );
 }
