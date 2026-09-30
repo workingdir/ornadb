@@ -620,6 +620,157 @@ fn clone_from_cause_vector_size_changes_redact_or_drop_secret_tails() {
 }
 
 #[test]
+fn clone_from_nested_cause_vectors_resize_without_secret_tails() {
+    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture_credential = fixture.split('"').nth(1).unwrap();
+    let admitted_leaf = |code: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .redacted_with_message(SafeText::new(fixture).unwrap())
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let untrusted_leaf = |code: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+
+    let admitted_branch = Diagnostic::new(
+        SafeText::new("ORNA-E-NESTED-GROW-SOURCE").unwrap(),
+        DiagnosticSeverity::Warning,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .redacted_with_message(SafeText::new(fixture).unwrap())
+    .with_note(SafeText::new(fixture).unwrap())
+    .with_cause(admitted_leaf("ORNA-E-NESTED-GROW-A"))
+    .with_cause(admitted_leaf("ORNA-E-NESTED-GROW-B"));
+    let growing_source = Diagnostic::new(
+        SafeText::new("ORNA-E-NESTED-GROW-ROOT").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .redacted_with_message(SafeText::new("admitted nested growth root").unwrap())
+    .with_cause(admitted_branch);
+    let old_branch = Diagnostic::new(
+        SafeText::new("ORNA-E-NESTED-OLD-BRANCH").unwrap(),
+        DiagnosticSeverity::Warning,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .with_cause(untrusted_leaf("ORNA-E-NESTED-OLD-LEAF"));
+    let mut growing_destination = Diagnostic::new(
+        SafeText::new("ORNA-E-NESTED-OLD-ROOT").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .with_cause(old_branch);
+
+    // The root reuses its cause slot while that cause's own vector grows.
+    growing_destination.clone_from(&growing_source);
+    let growing_json = serde_json::to_vec(&growing_destination).unwrap();
+    let growing_projection = serde_json::to_value(&growing_destination).unwrap();
+    assert_eq!(growing_projection["message"], "admitted nested growth root");
+    assert_eq!(growing_projection["causes"].as_array().unwrap().len(), 1);
+    assert_eq!(growing_projection["causes"][0]["message"], "<redacted>");
+    assert_eq!(growing_projection["causes"][0]["notes"][0], "<redacted>");
+    assert_eq!(
+        growing_projection["causes"][0]["causes"].as_array().unwrap().len(),
+        2
+    );
+    for leaf in growing_projection["causes"][0]["causes"].as_array().unwrap() {
+        assert_eq!(leaf["message"], "<redacted>");
+        assert_eq!(leaf["notes"][0], "<redacted>");
+    }
+    assert!(
+        !growing_json
+            .windows(fixture_credential.len())
+            .any(|window| window == fixture_credential.as_bytes())
+    );
+    let growing_wire = growing_destination.encode_ovb().unwrap();
+    assert!(
+        !growing_wire
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+
+    let empty_admitted_branch = Diagnostic::new(
+        SafeText::new("ORNA-E-NESTED-SHRINK-SOURCE").unwrap(),
+        DiagnosticSeverity::Warning,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .redacted_with_message(SafeText::new(fixture).unwrap())
+    .with_note(SafeText::new(fixture).unwrap());
+    let shrinking_source = Diagnostic::new(
+        SafeText::new("ORNA-E-NESTED-SHRINK-ROOT").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .redacted_with_message(SafeText::new("admitted nested shrink root").unwrap())
+    .with_cause(empty_admitted_branch);
+    let stale_branch = Diagnostic::new(
+        SafeText::new("ORNA-E-NESTED-STALE-BRANCH").unwrap(),
+        DiagnosticSeverity::Warning,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .redacted_with_message(SafeText::new(fixture).unwrap())
+    .with_note(SafeText::new(fixture).unwrap())
+    .with_cause(admitted_leaf("ORNA-E-NESTED-STALE-A"))
+    .with_cause(admitted_leaf("ORNA-E-NESTED-STALE-B"));
+    let mut shrinking_destination = Diagnostic::new(
+        SafeText::new("ORNA-E-NESTED-STALE-ROOT").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .with_cause(stale_branch);
+
+    // Replacing that cause reuses its slot and removes its stale nested tail.
+    shrinking_destination.clone_from(&shrinking_source);
+    let shrinking_json = serde_json::to_vec(&shrinking_destination).unwrap();
+    let shrinking_projection = serde_json::to_value(&shrinking_destination).unwrap();
+    assert_eq!(shrinking_projection["message"], "admitted nested shrink root");
+    assert_eq!(shrinking_projection["causes"].as_array().unwrap().len(), 1);
+    assert_eq!(shrinking_projection["causes"][0]["message"], "<redacted>");
+    assert_eq!(
+        shrinking_projection["causes"][0]["causes"].as_array().unwrap().len(),
+        0
+    );
+    assert!(
+        !shrinking_json
+            .windows(fixture_credential.len())
+            .any(|window| window == fixture_credential.as_bytes())
+    );
+    let shrinking_wire = shrinking_destination.encode_ovb().unwrap();
+    assert!(
+        !shrinking_wire
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+    let shrinking_decoded =
+        serde_json::to_value(Diagnostic::decode_ovb(&shrinking_wire).unwrap()).unwrap();
+    assert_eq!(shrinking_decoded["message"], "<redacted>");
+    assert_eq!(shrinking_decoded["causes"][0]["message"], "<redacted>");
+    assert_eq!(
+        shrinking_decoded["causes"][0]["causes"].as_array().unwrap().len(),
+        0
+    );
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
