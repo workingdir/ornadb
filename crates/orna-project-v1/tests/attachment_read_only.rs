@@ -120,7 +120,7 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
         .modules()
         .iter()
         .any(|module| module.source.contains("= 42")));
-    let in_flight = session.clone();
+    let mut in_flight = session.clone();
     assert!(matches!(
         session.detach_database("../outside"),
         Err(AttachmentError::InvalidName)
@@ -164,6 +164,7 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
         in_flight.validate_write_target("archive"),
         Err(AttachmentError::AttachedSnapshotReadOnly)
     ));
+    let detached_clone = session.clone();
     let replacement =
         PinnedDatabase::resolve("archive", history_repository, &moved_head, loader).unwrap();
     session.attach_database(replacement).unwrap();
@@ -184,6 +185,24 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
             .as_str(),
         history_commit
     );
+    assert!(detached_clone.database("archive").is_none());
+    assert!(matches!(
+        detached_clone.validate_write_target("archive"),
+        Err(AttachmentError::DatabaseUnavailable)
+    ));
+    in_flight.detach_database("archive").unwrap();
+    assert!(matches!(
+        in_flight.validate_write_target("archive"),
+        Err(AttachmentError::DatabaseUnavailable)
+    ));
+    assert_eq!(
+        session.database("archive").unwrap().pin().commit().as_str(),
+        moved_head
+    );
+    assert!(matches!(
+        session.validate_write_target("archive"),
+        Err(AttachmentError::AttachedSnapshotReadOnly)
+    ));
     assert_eq!(git(history_dir.path(), &["rev-parse", "HEAD"]), head_before);
     assert_eq!(git(history_dir.path(), &["status", "--porcelain"]), status_before);
     assert_eq!(
