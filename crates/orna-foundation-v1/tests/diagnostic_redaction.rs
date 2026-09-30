@@ -928,6 +928,125 @@ fn root_readmission_after_clone_from_does_not_regrant_nested_slots() {
 }
 
 #[test]
+fn post_clone_admission_stays_local_through_nested_cause_composition() {
+    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture_credential = fixture.split('"').nth(1).unwrap();
+    let diagnostic = |code: &str, admitted: bool| {
+        let diagnostic = Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap());
+        if admitted {
+            diagnostic.redacted_with_message(SafeText::new(fixture).unwrap())
+        } else {
+            diagnostic
+        }
+    };
+
+    let source = Diagnostic::new(
+        SafeText::new("ORNA-E-POST-CLONE-SOURCE").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .with_cause(
+        diagnostic("ORNA-E-POST-CLONE-BRANCH", true)
+            .with_cause(diagnostic("ORNA-E-POST-CLONE-LEAF", true)),
+    );
+    let mut destination = Diagnostic::new(
+        SafeText::new("ORNA-E-POST-CLONE-OLD-ROOT").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .redacted_with_message(SafeText::new("old local admission").unwrap())
+    .with_cause(diagnostic("ORNA-E-POST-CLONE-OLD-BRANCH", true));
+    destination.clone_from(&source);
+    assert_eq!(destination, source);
+
+    // The post-clone root gets a fresh local admission and then receives new
+    // independently admitted descendants. Those marks remain local too.
+    let post_clone = destination
+        .redacted_with_message(SafeText::new("post-clone local admission").unwrap())
+        .with_cause(
+            diagnostic("ORNA-E-POST-CLONE-NEW-BRANCH", true)
+                .with_cause(diagnostic("ORNA-E-POST-CLONE-NEW-LEAF", true)),
+        )
+        .with_cause(diagnostic("ORNA-E-POST-CLONE-UNTRUSTED", false));
+
+    let standalone_json = serde_json::to_vec(&post_clone).unwrap();
+    let standalone = serde_json::to_value(&post_clone).unwrap();
+    assert_eq!(standalone["message"], "post-clone local admission");
+    assert_eq!(standalone["causes"][0]["message"], "<redacted>");
+    assert_eq!(
+        standalone["causes"][0]["causes"][0]["message"],
+        "<redacted>"
+    );
+    assert_eq!(standalone["causes"][1]["message"], "<redacted>");
+    assert!(
+        !standalone_json
+            .windows(fixture_credential.len())
+            .any(|window| window == fixture_credential.as_bytes())
+    );
+    let standalone_wire = post_clone.encode_ovb().unwrap();
+    assert!(
+        !standalone_wire
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+    let standalone_decoded =
+        serde_json::to_value(Diagnostic::decode_ovb(&standalone_wire).unwrap()).unwrap();
+    assert_eq!(standalone_decoded["message"], "<redacted>");
+    assert_eq!(standalone_decoded["causes"][0]["message"], "<redacted>");
+    assert_eq!(
+        standalone_decoded["causes"][0]["causes"][0]["message"],
+        "<redacted>"
+    );
+
+    let composed = Diagnostic::new(
+        SafeText::new("ORNA-E-POST-CLONE-OUTER").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .redacted_with_message(SafeText::new("outer local admission").unwrap())
+    .with_cause(post_clone);
+    let composed_json = serde_json::to_vec(&composed).unwrap();
+    let projection = serde_json::to_value(&composed).unwrap();
+    assert_eq!(projection["message"], "outer local admission");
+    assert_eq!(projection["causes"][0]["message"], "<redacted>");
+    assert_eq!(projection["causes"][0]["causes"][0]["message"], "<redacted>");
+    assert_eq!(
+        projection["causes"][0]["causes"][0]["causes"][0]["message"],
+        "<redacted>"
+    );
+    assert!(
+        !composed_json
+            .windows(fixture_credential.len())
+            .any(|window| window == fixture_credential.as_bytes())
+    );
+
+    let composed_wire = composed.encode_ovb().unwrap();
+    assert!(
+        !composed_wire
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+    assert!(
+        !composed_wire
+            .windows(b"post-clone local admission".len())
+            .any(|window| window == b"post-clone local admission")
+    );
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&composed_wire).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    assert_eq!(decoded["causes"][0]["message"], "<redacted>");
+    assert_eq!(decoded["causes"][0]["causes"][0]["message"], "<redacted>");
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
