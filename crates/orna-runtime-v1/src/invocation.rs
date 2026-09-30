@@ -846,6 +846,9 @@ impl RuntimeState {
                 observation,
             });
         }
+        // The reference specifies durable invocation observations, not a tail
+        // transport protocol. Keep an empty poll at its existing sequence so
+        // a caller can poll again and observe later append-only transitions.
         let next_cursor = entries
             .last()
             .map(|entry| InvocationObservationTailCursor {
