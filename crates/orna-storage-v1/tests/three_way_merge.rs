@@ -2266,6 +2266,173 @@ fn positionless_checkpoint_delete_resolves_with_upper_segment_tombstone() {
 }
 
 #[test]
+fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
+    let candidate_a = integer(10);
+    let candidate_b = integer(20);
+    let high_key = if candidate_a.encode().unwrap() < candidate_b.encode().unwrap() {
+        candidate_b
+    } else {
+        candidate_a
+    };
+    let boundary = high_key.encode().unwrap();
+    let low_range = KeyRange::new(None, Some(boundary.clone())).unwrap();
+    let high_range = KeyRange::new(Some(boundary), None).unwrap();
+    let split_manifest = |table_digest, upper_digest, upper_locator: &[u8]| TableManifest {
+        digest: [table_digest; 32],
+        segments: vec![
+            RowSegmentManifest {
+                locator: b"shared-lower".to_vec(),
+                range: low_range.clone(),
+                digest: [7; 32],
+            },
+            RowSegmentManifest {
+                locator: upper_locator.to_vec(),
+                range: high_range.clone(),
+                digest: [upper_digest; 32],
+            },
+        ],
+    };
+    let mut deleted_row = parse_fixture(BASE, RowKeyKind::Explicit);
+    deleted_row.key = high_key.clone();
+
+    let build_inputs = |delete_on_left, divergent_checkpoint| {
+        let mut source = FixtureRows::default();
+        source.add(MergeSide::Base, b"base-upper", vec![deleted_row.clone()]);
+        source.add(
+            MergeSide::Left,
+            b"left-upper",
+            if delete_on_left { Vec::new() } else { vec![deleted_row.clone()] },
+        );
+        source.add(
+            MergeSide::Right,
+            b"right-upper",
+            if delete_on_left { vec![deleted_row.clone()] } else { Vec::new() },
+        );
+
+        let mut base = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(70, 10, b"base-upper"),
+            None,
+        );
+        let mut left = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(71, 11, b"left-upper"),
+            None,
+        );
+        let mut right = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(72, 12, b"right-upper"),
+            None,
+        );
+
+        let agreed_delete_id = b"consumer/a-agreed-delete".to_vec();
+        base.checkpoints.insert(
+            agreed_delete_id.clone(),
+            CheckpointGeneration { generation: 2, position: None },
+        );
+
+        let unchanged_delete_id = b"consumer/b-delete-against-unchanged".to_vec();
+        let base_checkpoint = CheckpointGeneration { generation: 4, position: None };
+        base.checkpoints.insert(unchanged_delete_id.clone(), base_checkpoint.clone());
+        let retained_side = if delete_on_left { &mut right } else { &mut left };
+        retained_side
+            .checkpoints
+            .insert(unchanged_delete_id.clone(), base_checkpoint.clone());
+
+        let checkpoint_id = b"consumer/m-delete-update-after-tombstone".to_vec();
+        base.checkpoints.insert(checkpoint_id.clone(), base_checkpoint.clone());
+        let update_side = if delete_on_left { &mut right } else { &mut left };
+        let updated_checkpoint = if divergent_checkpoint {
+            CheckpointGeneration { generation: 5, position: None }
+        } else {
+            base_checkpoint.clone()
+        };
+        update_side.checkpoints.insert(checkpoint_id.clone(), updated_checkpoint);
+
+        let tail_id = b"consumer/z-later-conflict".to_vec();
+        if divergent_checkpoint {
+            for (snapshot, generation) in [(&mut base, 7), (&mut left, 8), (&mut right, 9)] {
+                snapshot.checkpoints.insert(
+                    tail_id.clone(),
+                    CheckpointGeneration { generation, position: None },
+                );
+            }
+        } else {
+            for snapshot in [&mut base, &mut left, &mut right] {
+                snapshot.checkpoints.insert(tail_id.clone(), base_checkpoint.clone());
+            }
+        }
+
+        (base, left, right, source, agreed_delete_id, unchanged_delete_id, checkpoint_id, tail_id)
+    };
+
+    for delete_on_left in [true, false] {
+        let (
+            base,
+            left,
+            right,
+            mut source,
+            agreed_delete_id,
+            unchanged_delete_id,
+            checkpoint_id,
+            tail_id,
+        ) = build_inputs(delete_on_left, true);
+
+        // MERGE-005 requires bounded impact evidence, but does not specify
+        // cross-phase order. Storage finishes the segmented row phase first;
+        // a clean row deletion therefore becomes a tombstone before this
+        // zero-budget checkpoint delete/update conflict is reported.
+        let error = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 0 },
+        )
+        .unwrap_err();
+        let BranchMergeError::BudgetExceeded { report } = error else {
+            panic!("the checkpoint delete/update after the tombstone exceeds zero budget")
+        };
+        assert_eq!(report.conflicts_lower_bound, 1);
+        assert_eq!(report.rows_examined, 2);
+        assert!(report.affected_ranges.contains(&(id(1), high_range.clone())));
+        assert!(!report.affected_ranges.contains(&(id(1), low_range.clone())));
+        assert_eq!(report.affected_checkpoints.len(), 1);
+        assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(agreed_delete_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(unchanged_delete_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(tail_id.as_slice()));
+        assert_eq!(source.visited.len(), 3);
+        assert!(source.visited.iter().all(|(_, locator)| locator.ends_with(b"upper")));
+
+        // The same row/checkpoint deletion orientation without the divergent
+        // checkpoint proves the changed segment emits the tombstone itself.
+        let (base, left, right, mut source, _, _, checkpoint_id, tail_id) =
+            build_inputs(delete_on_left, false);
+        let plan = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 0 },
+        )
+        .unwrap();
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        assert_eq!(plan.report.rows_examined, 2);
+        assert_eq!(source.visited.len(), 3);
+        assert!(!plan.checkpoints.contains_key(checkpoint_id.as_slice()));
+        assert!(plan.checkpoints.contains_key(tail_id.as_slice()));
+        let segments = &plan.tables[&id(1)].segments;
+        assert!(matches!(segments[0], MergedSegment::Reuse { from: MergeSide::Left, .. }));
+        let MergedSegment::Rows { rows, tombstones, .. } = &segments[1] else {
+            panic!("the upper segment deletion must materialize a tombstone")
+        };
+        assert!(rows.is_empty());
+        assert_eq!(tombstones, &[high_key.clone()]);
+    }
+}
+
+#[test]
 fn schema_conflict_is_a_boundary_before_row_reads_and_checkpoint_resolution() {
     let base_checkpoint = CheckpointGeneration {
         generation: 4,
