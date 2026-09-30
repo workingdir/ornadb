@@ -7082,6 +7082,198 @@ fn mixed_trust_empty_cause_closures_preserve_readmission_before_second_revocatio
 }
 
 #[test]
+fn readmitted_cause_closure_survives_second_revocation_of_its_parent() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let untrusted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(message).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+
+    let initial_generation = admitted("ORNA-E-EDGE-INITIAL", "edge initial admission");
+    let capture_initial = {
+        let snapshot = initial_generation.clone();
+        move || snapshot.clone()
+    };
+    let first_revoked_generation = capture_initial().redacted();
+    let capture_first_revoked = {
+        let snapshot = first_revoked_generation.clone();
+        move || snapshot.clone()
+    };
+    let readmitted_generation = capture_first_revoked()
+        .redacted_with_message(SafeText::new("edge readmitted cause admission").unwrap());
+    let capture_readmitted = {
+        let snapshot = readmitted_generation.clone();
+        move || snapshot.clone()
+    };
+
+    // ORNA-SECRET-002 requires secret values redacted from diagnostics, but
+    // leaves closure snapshots through recursive parent revocation unspecified.
+    // Revoke the parent as a new generation and retain the child snapshot.
+    let parent_with_readmitted_cause = admitted(
+        "ORNA-E-EDGE-PARENT",
+        "edge parent before second revocation",
+    )
+    .with_cause(capture_readmitted());
+    let capture_parent = {
+        let snapshot = parent_with_readmitted_cause.clone();
+        move || snapshot.clone()
+    };
+    let second_revoked_parent = capture_parent().redacted();
+    let capture_second_revoked_parent = {
+        let snapshot = second_revoked_parent.clone();
+        move || snapshot.clone()
+    };
+
+    let parent_projection = serde_json::to_value(capture_parent()).unwrap();
+    assert_eq!(
+        parent_projection["message"],
+        "edge parent before second revocation"
+    );
+    assert_eq!(parent_projection["causes"][0]["message"], "<redacted>");
+    let revoked_projection = serde_json::to_value(capture_second_revoked_parent()).unwrap();
+    assert_eq!(revoked_projection["message"], "<redacted>");
+    assert_eq!(revoked_projection["causes"][0]["message"], "<redacted>");
+    assert_eq!(
+        serde_json::to_value(capture_readmitted()).unwrap()["message"],
+        "edge readmitted cause admission"
+    );
+
+    let mut left = capture_parent();
+    let mut right = capture_second_revoked_parent();
+    left.clone_from(&capture_second_revoked_parent());
+    right.clone_from(&capture_parent());
+    assert_eq!(left, second_revoked_parent);
+    assert_eq!(right, parent_with_readmitted_cause);
+    left.clone_from(&capture_parent());
+    right.clone_from(&capture_second_revoked_parent());
+    assert_eq!(left, parent_with_readmitted_cause);
+    assert_eq!(right, second_revoked_parent);
+
+    let initial_value = capture_initial();
+    let readmitted_value = capture_readmitted();
+    let parent_value = capture_parent();
+    let second_revoked_parent_value = capture_second_revoked_parent();
+    let compose_captured_parent_generations = {
+        let left = left.clone();
+        let right = right.clone();
+        let capture_initial = capture_initial;
+        let capture_readmitted = capture_readmitted;
+        move || {
+            admitted("ORNA-E-EDGE-OUTER", "edge closure outer admission")
+                .with_cause(left.clone())
+                .with_cause(right.clone())
+                .with_cause(capture_initial())
+                .with_cause(capture_readmitted())
+        }
+    };
+
+    let empty_live = untrusted("ORNA-E-EDGE-LIVE", "edge replaced sibling secret");
+    left.clone_from(&empty_live);
+    right.clone_from(&empty_live);
+    assert_eq!(left, empty_live);
+    assert_eq!(right, empty_live);
+
+    let outer = compose_captured_parent_generations();
+    assert_eq!(outer, compose_captured_parent_generations());
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["message"], "edge closure outer admission");
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 4);
+    for cause in causes {
+        assert_eq!(cause["message"], "<redacted>");
+    }
+    assert_eq!(causes[0]["causes"].as_array().unwrap().len(), 1);
+    assert_eq!(causes[0]["causes"][0]["message"], "<redacted>");
+    assert_eq!(causes[1]["causes"].as_array().unwrap().len(), 1);
+    assert_eq!(causes[1]["causes"][0]["message"], "<redacted>");
+
+    let envelope = serde_json::json!({
+        "outer": outer.clone(),
+        "initial": initial_value,
+        "readmitted": readmitted_value,
+        "parent": parent_value,
+        "revoked_parent": second_revoked_parent_value,
+    });
+    let json = serde_json::to_vec(&envelope).unwrap();
+    for message in [
+        b"edge closure outer admission".as_slice(),
+        b"edge initial admission".as_slice(),
+        b"edge readmitted cause admission".as_slice(),
+        b"edge parent before second revocation".as_slice(),
+    ] {
+        assert_eq!(
+            json.windows(message.len())
+                .filter(|window| *window == message)
+                .count(),
+            1
+        );
+    }
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"edge replaced sibling secret".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+
+    let wire = outer.encode_ovb().unwrap();
+    assert!(
+        wire.windows(b"edge closure outer admission".len())
+            .any(|window| window == b"edge closure outer admission")
+    );
+    for disclosure in [
+        fixture.as_bytes(),
+        b"edge initial admission".as_slice(),
+        b"edge readmitted cause admission".as_slice(),
+        b"edge parent before second revocation".as_slice(),
+    ]
+    .into_iter()
+    .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
+    {
+        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    let decoded_causes = decoded["causes"].as_array().unwrap();
+    assert_eq!(decoded_causes.len(), 4);
+    assert_eq!(
+        decoded_causes
+            .iter()
+            .map(|cause| cause["causes"].as_array().unwrap().len())
+            .collect::<Vec<_>>(),
+        [1, 1, 0, 0]
+    );
+    for cause in decoded_causes {
+        assert_eq!(cause["message"], "<redacted>");
+    }
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
