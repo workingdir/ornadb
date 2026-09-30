@@ -9473,6 +9473,19 @@ fn is_portable_collection_operation(operation: &str) -> bool {
             | "map"
             | "flat_map"
             | "sort_by"
+            | "chunk"
+            | "flatten"
+            | "partition"
+            | "zip"
+            | "zip_exact"
+            | "unique"
+            | "group_by"
+            | "pairs"
+            | "window"
+            | "split_when"
+            | "rank"
+            | "asof_join"
+            | "bucket_by"
             | "take"
             | "drop"
             | "distinct"
@@ -9624,7 +9637,9 @@ fn infer_finite_list_collection_call(
             *operation,
             "filter" | "map" | "flat_map" | "sort_by" | "take" | "drop" | "distinct"
                 | "union" | "count" | "first" | "one" | "sum" | "min" | "max"
-                | "every" | "exists"
+                | "every" | "exists" | "chunk" | "flatten" | "partition" | "zip"
+                | "zip_exact" | "unique" | "group_by" | "pairs" | "window"
+                | "split_when" | "rank" | "asof_join"
         ),
         _ => standard_collection_module_operation(callee, scope, local).is_some(),
     };
@@ -9675,6 +9690,40 @@ fn infer_finite_list_collection(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
+    if operation == "bucket_by" {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "bucket_by requires a relation with an explicit time source",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects: input.map_or_else(EffectSummary::default, |input| input.effects),
+        };
+    }
+    if matches!(
+        operation,
+        "chunk"
+            | "flatten"
+            | "partition"
+            | "zip"
+            | "zip_exact"
+            | "unique"
+            | "group_by"
+            | "pairs"
+            | "window"
+            | "split_when"
+            | "rank"
+            | "asof_join"
+    ) {
+        return infer_finite_list_helper_collection(
+            operation,
+            input,
+            arguments,
+            scope,
+            local,
+            diagnostics,
+        );
+    }
     if operation == "first" {
         return infer_finite_list_first(arguments, input, scope, local, diagnostics);
     }
@@ -9854,6 +9903,243 @@ fn infer_finite_list_collection(
         _ => unreachable!("finite list collection operation was checked"),
     };
     Inferred { ty, effects }
+}
+
+/// Static signatures for the remaining finite std.collection/std.query
+/// helpers. Their runtime bodies remain evaluator intrinsics admitted by the
+/// same captured module exports.
+fn infer_finite_list_helper_collection(
+    operation: &str,
+    input: Option<Inferred>,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let expected: &[&str] = match operation {
+        "chunk" => &["values", "size"],
+        "flatten" | "unique" | "pairs" => &["values"],
+        "partition" | "split_when" => &["values", "predicate"],
+        "zip" | "zip_exact" => &["left", "right"],
+        "group_by" | "rank" => &["values", "key"],
+        "window" => &["values", "size", "step"],
+        "asof_join" => &["left", "right", "time", "by"],
+        _ => unreachable!("finite-list helper was checked"),
+    };
+    let pipeline = input.is_some();
+    let mut slots = vec![None; expected.len()];
+    let mut values = vec![None; expected.len()];
+    let mut malformed = false;
+    let mut positional = usize::from(pipeline);
+    let mut named_started = false;
+    let mut effects = input
+        .as_ref()
+        .map(|input| input.effects.clone())
+        .unwrap_or_default();
+    if let Some(input) = input {
+        values[0] = Some(input.ty);
+    }
+    for (index, argument) in arguments.iter().enumerate() {
+        let slot = if let Some(name) = argument.name.as_deref() {
+            named_started = true;
+            expected.iter().position(|expected| *expected == name)
+        } else if named_started || positional >= expected.len() {
+            None
+        } else {
+            let slot = positional;
+            positional += 1;
+            Some(slot)
+        };
+        let contextual_callback = slot.is_some_and(|slot| {
+            matches!(
+                (operation, slot),
+                ("partition" | "split_when", 1)
+                    | ("group_by" | "rank", 1)
+                    | ("asof_join", 2 | 3)
+            )
+        }) && matches!(&argument.value, Expr::Lambda { .. });
+        let inferred = if contextual_callback {
+            Inferred {
+                ty: Type::Error,
+                effects: EffectSummary::default(),
+            }
+        } else {
+            infer(&argument.value, scope, local, diagnostics)
+        };
+        effects.join(&inferred.effects);
+        if let Some(slot) = slot {
+            if (pipeline && slot == 0) || slots[slot].replace(index).is_some() {
+                malformed = true;
+            } else {
+                values[slot] = Some(inferred.ty);
+            }
+        } else {
+            malformed = true;
+        }
+    }
+    let required = if operation == "window" {
+        expected.len() - 1
+    } else {
+        expected.len()
+    };
+    if values.iter().take(required).any(Option::is_none) {
+        malformed = true;
+    }
+    if operation == "window" && values[2].is_none() {
+        values[2] = Some(Type::Int);
+    }
+    if malformed {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            format!("std.collection {operation} arguments do not match its static signature"),
+        ));
+    }
+
+    let list_element = |index: usize, name: &str, diagnostics: &mut Vec<Diagnostic>| {
+        match values.get(index).and_then(Option::as_ref) {
+            Some(Type::List(element)) => element.as_ref().clone(),
+            Some(Type::Error) | None => Type::Error,
+            Some(_) => {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!("std.collection {operation} {name} must be a finite list"),
+                ));
+                Type::Error
+            }
+        }
+    };
+    let first = list_element(0, "input", diagnostics);
+    let result = match operation {
+        "chunk" => {
+            let size = values.get(1).and_then(Option::as_ref).unwrap_or(&Type::Error);
+            require_same(&Type::Int, size, diagnostics);
+            if let Some(index) = slots.get(1).and_then(|slot| *slot)
+                && is_non_positive_integer_constant(&arguments[index].value)
+            {
+                diagnostics.push(diag(DIAG_TYPE, "chunk size must be positive"));
+            }
+            Type::List(Box::new(Type::List(Box::new(first))))
+        }
+        "flatten" => match first {
+            Type::List(inner) => Type::List(inner),
+            Type::Error => Type::Error,
+            _ => {
+                diagnostics.push(diag(DIAG_TYPE, "flatten requires a list of finite lists"));
+                Type::Error
+            }
+        },
+        "partition" | "split_when" => {
+            if let Some(index) = slots.get(1).and_then(|slot| *slot) {
+                let callback = infer_finite_list_callback(
+                    &arguments[index].value,
+                    first.clone(),
+                    Type::Bool,
+                    scope,
+                    local,
+                    diagnostics,
+                );
+                effects.join(&callback.effects);
+            }
+            if operation == "partition" {
+                Type::Tuple(vec![
+                    Type::List(Box::new(first.clone())),
+                    Type::List(Box::new(first)),
+                ])
+            } else {
+                Type::List(Box::new(Type::List(Box::new(first))))
+            }
+        }
+        "zip" | "zip_exact" => {
+            let right = list_element(1, "right input", diagnostics);
+            Type::List(Box::new(Type::Tuple(vec![first, right])))
+        }
+        "unique" => {
+            if is_default_float_equality_type(&first) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "unique requires lawful equality; default Float equality is unavailable",
+                ));
+                Type::Error
+            } else {
+                Type::List(Box::new(first))
+            }
+        }
+        "pairs" => Type::List(Box::new(Type::Tuple(vec![first.clone(), first]))),
+        "group_by" | "rank" => {
+            let key_type = if let Some(index) = slots.get(1).and_then(|slot| *slot) {
+                let callback = infer_finite_list_callback(
+                    &arguments[index].value,
+                    first.clone(),
+                    Type::Error,
+                    scope,
+                    local,
+                    diagnostics,
+                );
+                effects.join(&callback.effects);
+                callback.ty
+            } else {
+                Type::Error
+            };
+            if key_type != Type::Error && !is_evaluator_ordered_comparison_type(&key_type) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!("std.collection {operation} key must have a lawful total order"),
+                ));
+            }
+            if operation == "group_by" {
+                Type::List(Box::new(Type::Tuple(vec![
+                    key_type,
+                    Type::List(Box::new(first)),
+                ])))
+            } else {
+                Type::List(Box::new(Type::Tuple(vec![first, Type::Int])))
+            }
+        }
+        "window" => {
+            for index in [1, 2] {
+                let size = values.get(index).and_then(Option::as_ref).unwrap_or(&Type::Error);
+                require_same(&Type::Int, size, diagnostics);
+                if let Some(argument_index) = slots.get(index).and_then(|slot| *slot)
+                    && is_non_positive_integer_constant(&arguments[argument_index].value)
+                {
+                    diagnostics.push(diag(DIAG_TYPE, "window size and step must be positive"));
+                }
+            }
+            Type::List(Box::new(Type::List(Box::new(first))))
+        }
+        "asof_join" => {
+            let right = list_element(1, "right input", diagnostics);
+            require_same(&first, &right, diagnostics);
+            for index in [2, 3] {
+                if let Some(argument_index) = slots.get(index).and_then(|slot| *slot) {
+                    let callback = infer_finite_list_callback(
+                        &arguments[argument_index].value,
+                        first.clone(),
+                        Type::Error,
+                        scope,
+                        local,
+                        diagnostics,
+                    );
+                    effects.join(&callback.effects);
+                    if index == 2
+                        && callback.ty != Type::Error
+                        && !is_evaluator_ordered_comparison_type(&callback.ty)
+                    {
+                        diagnostics.push(diag(DIAG_TYPE, "asof_join time key must be ordered"));
+                    }
+                }
+            }
+            Type::List(Box::new(Type::Tuple(vec![
+                first.clone(),
+                Type::Optional(Box::new(first)),
+            ])))
+        }
+        _ => unreachable!("finite-list helper was checked"),
+    };
+    Inferred {
+        ty: if malformed { Type::Error } else { result },
+        effects,
+    }
 }
 
 fn infer_finite_list_simple_collection(
