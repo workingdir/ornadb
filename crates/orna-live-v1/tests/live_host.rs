@@ -4219,9 +4219,73 @@ fn durable_unknown_status_retry_survives_orphan_resolution() {
         conflicting_status
     );
 
-    let unknown_retry = block_on(recovered_transport.receive_with_application(
+    let fresh_status_request = Envelope {
+        request: Some([42; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [37; 16],
+            fingerprint: event_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let fresh_status_output = block_on(recovered_transport.receive_with_application(
         &mut recovered_socket,
         12,
+        &masked_binary_payload(&fresh_status_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &fresh_status_output[0] else {
+        panic!("a fresh query ID can read the correctly fingerprinted orphan");
+    };
+    let fresh_status = Envelope::decode(payload, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        &fresh_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Orphaned,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [37; 16]
+            && *fingerprint == event_fingerprint
+            && result == &expected_result
+    ));
+
+    let conflicting_status_retry = block_on(recovered_transport.receive_with_application(
+        &mut recovered_socket,
+        13,
+        &masked_binary_payload(&conflicting_status_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &conflicting_status_retry[0] else {
+        panic!("the competing query ID keeps its original diagnostic");
+    };
+    assert_eq!(
+        Envelope::decode(payload, Limits::default().protocol).unwrap(),
+        conflicting_status
+    );
+
+    let fresh_status_retry = block_on(recovered_transport.receive_with_application(
+        &mut recovered_socket,
+        14,
+        &masked_binary_payload(&fresh_status_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &fresh_status_retry[0] else {
+        panic!("the fresh corrected query ID keeps its orphan snapshot");
+    };
+    assert_eq!(
+        Envelope::decode(payload, Limits::default().protocol).unwrap(),
+        fresh_status
+    );
+
+    let unknown_retry = block_on(recovered_transport.receive_with_application(
+        &mut recovered_socket,
+        15,
         &masked_binary_payload(&unknown_status_request),
         &mut recovered_application,
     ))
@@ -4236,7 +4300,7 @@ fn durable_unknown_status_retry_survives_orphan_resolution() {
 
     let orphan_status_retry = block_on(recovered_transport.receive_with_application(
         &mut recovered_socket,
-        13,
+        16,
         &masked_binary_payload(&orphan_status_request),
         &mut recovered_application,
     ))
