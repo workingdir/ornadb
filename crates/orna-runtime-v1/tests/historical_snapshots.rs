@@ -912,16 +912,18 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     let writer = state.acquire_lease([65; 16]).await.expect("acquire writer");
     let mut pins = Vec::new();
 
-    for generation in 1..=264_u64 {
+    for generation in 1..=266_u64 {
         let mut mutation_id = [0; 16];
         mutation_id[8..].copy_from_slice(&generation.to_be_bytes());
         // Delete the prefix while its extended neighbor remains stable, restore an
         // intermediate value, return to the original bytes, repeat delete and
         // identical restoration twice, then retain the terminal delete after the
-        // third restoration.
+        // third restoration. Restore the prefix once more after the neighbor update,
+        // then prove the following terminal delete remains visible.
         let prefix_value = match generation {
-            256 | 259 | 261 | 263 | 264 => None,
+            256 | 259 | 261 | 263 | 264 | 266 => None,
             257 => Some(b"intermediate-prefix".to_vec()),
+            265 => Some(b"original-prefix".to_vec()),
             _ => Some(b"original-prefix".to_vec()),
         };
         let mut mutations = Vec::new();
@@ -959,7 +961,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         }
         commit(&state, writer, &mutations, 57).await;
 
-        if matches!(generation, 255 | 256 | 257 | 258 | 259 | 260 | 261 | 262 | 263 | 264) {
+        if matches!(generation, 255 | 256 | 257 | 258 | 259 | 260 | 261 | 262 | 263 | 264 | 265 | 266) {
             let selected = state
                 .select_historical_snapshot(generation)
                 .await
@@ -974,7 +976,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
 
     assert_eq!(
         pins.iter().map(|(generation, _, _)| *generation).collect::<Vec<_>>(),
-        [255, 256, 257, 258, 259, 260, 261, 262, 263, 264]
+        [255, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266]
     );
     assert!(pins.windows(2).all(|pair| {
         pair[0].2.capture().generation_digest() == pair[1].2.capture().generation_digest()
@@ -1015,6 +1017,11 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         ],
         263 => vec![(vec![5, 0], b"stable-extension".to_vec())],
         264 => vec![(vec![5, 0], b"post-delete-extension".to_vec())],
+        265 => vec![
+            (vec![5], b"original-prefix".to_vec()),
+            (vec![5, 0], b"post-delete-extension".to_vec()),
+        ],
+        266 => vec![(vec![5, 0], b"post-delete-extension".to_vec())],
         _ => unreachable!("only prefix restoration boundary generations are read"),
     };
     assert_eq!(expected_rows(255), expected_rows(258));
