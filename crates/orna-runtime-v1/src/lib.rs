@@ -13934,6 +13934,7 @@ async fn load_admin_invocation_receipt(
         decode_u64(row.get::<i64>(6).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     let terminal_outcome: String = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
     validate_observation_text(&terminal_outcome)?;
+    let effect = decode_admin_lifecycle_effect(&terminal_outcome)?;
     Ok(Some(AdminInvocationAudit {
         sequence,
         invocation_id,
@@ -13942,6 +13943,7 @@ async fn load_admin_invocation_receipt(
         owner,
         observed_generation,
         terminal_outcome,
+        effect,
         succeeded: decode_bool(row.get::<i64>(8).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
         redacted: decode_bool(row.get::<i64>(9).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
     }))
@@ -23315,6 +23317,10 @@ mod tests {
             .expect("the terminal admin receipt is durable");
         assert_eq!(receipt.function, "sys.admin.pause_stream_with_reason");
         assert_eq!(receipt.terminal_outcome, "paused");
+        assert_eq!(
+            receipt.effect,
+            AdminLifecycleEffect::StreamPaused { changed: true }
+        );
         assert!(receipt.succeeded);
         drop(state);
 
@@ -23462,6 +23468,10 @@ mod tests {
             .expect("the terminal effect retains its request receipt");
         assert!(receipt.succeeded);
         assert_eq!(receipt.terminal_outcome, "paused");
+        assert_eq!(
+            receipt.effect,
+            AdminLifecycleEffect::StreamPaused { changed: true }
+        );
         let rejected_receipt = reopened
             .admin_invocation_receipt(rejected_invocation_id)
             .await
@@ -23469,6 +23479,7 @@ mod tests {
             .expect("the staged-write rejection retains the request receipt");
         assert!(!rejected_receipt.succeeded);
         assert_eq!(rejected_receipt.terminal_outcome, "failure:admin_busy");
+        assert_eq!(rejected_receipt.effect, AdminLifecycleEffect::Failed);
     }
 
     #[tokio::test]
