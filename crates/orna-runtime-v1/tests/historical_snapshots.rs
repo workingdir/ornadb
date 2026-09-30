@@ -496,7 +496,21 @@ async fn as_of_pins_stay_exact_across_generation_encoding_boundaries() {
         );
     }
 
-    for snapshot in boundary_snapshots.iter().skip(1) {
+    let round_tripped_boundaries: Vec<_> = boundary_snapshots
+        .iter()
+        .map(|snapshot| {
+            let encoded = snapshot.encode().expect("encode boundary descriptor");
+            let decoded = Snapshot::decode_bytes(&encoded).expect("decode boundary descriptor");
+            assert_eq!(&decoded, snapshot, "round-trip preserves every coordinate");
+            assert_eq!(
+                decoded.encode().expect("re-encode boundary descriptor"),
+                encoded,
+                "round-trip preserves canonical bytes"
+            );
+            decoded
+        })
+        .collect();
+    for snapshot in round_tripped_boundaries.iter().skip(1) {
         assert_eq!(
             state.resolve_historical_snapshot(snapshot).await.unwrap_err(),
             RuntimeError::SnapshotNotFound,
