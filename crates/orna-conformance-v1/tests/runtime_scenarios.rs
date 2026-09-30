@@ -742,18 +742,18 @@ fn published_report_declares_bounded_runtime_adapter_scenarios_without_an_orna_e
     assert_eq!(
         declared,
         [
-            "REPL-001",
-            "TXN-001",
-            "TXN-002",
+            "ASSERT-CHECKPOINT-091",
             "CP-001",
+            "EVAL-003",
+            "FAIL-001",
             "LIVE-001",
             "LIVE-002",
             "LIVE-003",
             "LIVE-004",
+            "REPL-001",
             "SYS-RT-RENAME-100",
-            "ASSERT-CHECKPOINT-091",
-            "FAIL-001",
-            "EVAL-003"
+            "TXN-001",
+            "TXN-002"
         ]
     );
     let scenarios = report["scenarios"]
