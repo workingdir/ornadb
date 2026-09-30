@@ -30,6 +30,8 @@ const MAX_SOURCE_MATERIALIZATION_LAST_BLOCK_TAIL: &str =
     include_str!("fixtures/max_source_materialization_last_block_tail.orna");
 const MAX_SOURCE_MATERIALIZATION_TERMINAL_BYTE_TAIL: &str =
     include_str!("fixtures/max_source_materialization_terminal_byte_tail.orna");
+const MAX_SOURCE_MATERIALIZATION_FIRST_REMAINDER_TAIL: &str =
+    include_str!("fixtures/max_source_materialization_first_remainder_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -4772,5 +4774,86 @@ fn explain_preserves_max_source_terminal_byte_closure() {
             .expect("max-source terminal-byte materialization surface");
         assert_eq!(surface["nodes"][0]["estimated_bytes"], serde_json::json!(source_bytes));
         assert_eq!(surface["nodes"][0]["details"]["estimated_work"], serde_json::json!(local_work));
+    }
+}
+
+#[test]
+fn explain_closes_max_source_materialization_at_first_remainder_byte() {
+    let parsed = orna_syntax_v1::parse_module(MAX_SOURCE_MATERIALIZATION_FIRST_REMAINDER_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    // ORNA-PLAN leaves byte-cost units open. Under the established 4-KiB
+    // heuristic, the aligned MAX-4095-byte source costs one block less than
+    // the adjacent MAX-4094-byte source with its first remainder byte. Since
+    // scan and materialization each pay that cost, one more row restores the
+    // same exact aggregate closure.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const ALIGNED_SOURCE_BYTES: u64 = u64::MAX - 4_095;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = ALIGNED_SOURCE_BYTES + 1;
+    let local_work = u64::MAX / 2;
+    let closing_rows = local_work - MAX_BYTE_BLOCKS;
+    let explain = |rows, source_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:max-source-first-remainder-materialization-closure",
+            ),
+            source: obj("table:MaxSourceMaterializationFirstRemainder"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(rows),
+                estimated_bytes: Some(source_bytes),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:max-source-first-remainder")),
+        })
+        .expect("max-source first-remainder byte materialization closure")
+    };
+
+    let first_remainder = explain(closing_rows, FIRST_REMAINDER_SOURCE_BYTES);
+    let max_cost_minus_one = (u64::MAX - 1).to_string();
+    assert_eq!(
+        first_remainder.plan().estimated_cost(),
+        Some(max_cost_minus_one.as_str())
+    );
+    assert_eq!(first_remainder.root().estimated_work(), Some(local_work));
+    assert_eq!(first_remainder.root().estimated_bytes(), Some(FIRST_REMAINDER_SOURCE_BYTES));
+
+    let aligned_before = explain(closing_rows, ALIGNED_SOURCE_BYTES);
+    let max_cost_minus_three = (u64::MAX - 3).to_string();
+    assert_eq!(
+        aligned_before.plan().estimated_cost(),
+        Some(max_cost_minus_three.as_str())
+    );
+    assert_eq!(
+        aligned_before.root().estimated_work(),
+        Some(local_work - 1)
+    );
+    assert_eq!(aligned_before.root().estimated_bytes(), Some(ALIGNED_SOURCE_BYTES));
+
+    let aligned_closed_by_row = explain(closing_rows + 1, ALIGNED_SOURCE_BYTES);
+    assert_eq!(
+        aligned_closed_by_row.plan().estimated_cost(),
+        Some(max_cost_minus_one.as_str())
+    );
+    assert_eq!(
+        aligned_closed_by_row.root().estimated_work(),
+        Some(local_work)
+    );
+
+    for explained in [first_remainder, aligned_before, aligned_closed_by_row] {
+        assert_eq!(explained.nodes().len(), 2);
+        assert!(explained.nodes().iter().all(|node| {
+            node.details().get("estimated_work_overflow").is_none()
+                && node.details().get("estimated_cost_overflow").is_none()
+                && node.actual_rows().is_none()
+                && node.actual_bytes().is_none()
+        }));
     }
 }
