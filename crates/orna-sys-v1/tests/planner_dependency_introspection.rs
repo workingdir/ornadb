@@ -5,7 +5,8 @@ use orna_sys_v1::{
     ExplainError,
     FileRef, FunctionPlanDescription, FunctionRef, ObjectRef, PlanNodeKind, PlanOrdering,
     PlanSortDirection, PlanNullOrder, QueryJoinDescription, QueryPlanDescription,
-    QuerySourceStatistics, MutableBranchSnapshot, SnapshotRef, MAX_PLAN_EXPRESSIONS,
+    QuerySourceStatistics, QueryMutationDescription, QueryMutationKind,
+    MutableBranchSnapshot, SnapshotRef, MAX_PLAN_EXPRESSIONS,
     SystemEffect, explain_function, explain_query, system_function_descriptor, SourceSpan,
 };
 use serde_json::Value;
@@ -301,6 +302,7 @@ fn query_explain_returns_a_snapshot_pinned_scan_fallback_without_fabricated_stat
             null_order: PlanNullOrder::Last,
         }],
         limit: Some(10),
+        mutations: Vec::new(),
         materialize_into: None,
     };
     let explained = explain_query(&query).expect("structured query plan");
@@ -352,7 +354,7 @@ fn query_explain_returns_a_snapshot_pinned_scan_fallback_without_fabricated_stat
 fn explain_builds_a_deep_join_materialization_plan_from_mutable_branch_stats() {
     let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
-    assert_eq!(parsed.value.items.len(), 3);
+    assert_eq!(parsed.value.items.len(), 7);
     let query = QueryPlanDescription {
         snapshot: SnapshotRef::descriptive("snapshot:workspace-generation-7"),
         source: obj("table:Contact"),
@@ -387,6 +389,36 @@ fn explain_builds_a_deep_join_materialization_plan_from_mutable_branch_stats() {
             null_order: PlanNullOrder::Last,
         }],
         limit: Some(30),
+        mutations: vec![
+            QueryMutationDescription {
+                table: obj("table:Contact"),
+                kind: QueryMutationKind::Insert,
+                estimated_affected_rows: Some(5),
+                estimated_write_bytes: Some(240),
+                estimated_table_rows_before: None,
+            },
+            QueryMutationDescription {
+                table: obj("table:Contact"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(2),
+                estimated_write_bytes: Some(96),
+                estimated_table_rows_before: None,
+            },
+            QueryMutationDescription {
+                table: obj("table:Contact"),
+                kind: QueryMutationKind::Rekey,
+                estimated_affected_rows: Some(1),
+                estimated_write_bytes: Some(80),
+                estimated_table_rows_before: None,
+            },
+            QueryMutationDescription {
+                table: obj("table:Contact"),
+                kind: QueryMutationKind::Delete,
+                estimated_affected_rows: Some(2),
+                estimated_write_bytes: Some(64),
+                estimated_table_rows_before: None,
+            },
+        ],
         materialize_into: Some(obj("materialization:active_contact_names")),
     };
     let explained = explain_query(&query).expect("deep query plan");
@@ -418,7 +450,40 @@ fn explain_builds_a_deep_join_materialization_plan_from_mutable_branch_stats() {
             .estimated_rows(),
         Some(2_500)
     );
-    assert_eq!(explained.root().estimated_rows(), Some(30));
+    assert_eq!(
+        explained
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Limit)
+            .unwrap()
+            .estimated_rows(),
+        Some(30)
+    );
+    let mutations = explained
+        .nodes()
+        .iter()
+        .filter(|node| {
+            node.kind() == PlanNodeKind::Invoke
+                && node.object() == Some(&obj("table:Contact"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(mutations.len(), 4);
+    assert_eq!(mutations[0].estimated_rows(), Some(2));
+    assert_eq!(mutations[1].estimated_rows(), Some(1));
+    assert_eq!(mutations[2].estimated_rows(), Some(2));
+    assert_eq!(mutations[3].estimated_rows(), Some(5));
+    assert_eq!(explained.nodes()[0].inputs(), &[explained.nodes()[1].reference().clone()]);
+    for position in 1..4 {
+        assert_eq!(
+            explained.nodes()[position].inputs(),
+            &[explained.nodes()[position + 1].reference().clone()]
+        );
+        assert_eq!(
+            explained.nodes()[position + 1].parent(),
+            Some(explained.nodes()[position].reference())
+        );
+    }
+    assert_eq!(explained.nodes()[5].kind(), PlanNodeKind::Limit);
     assert!(explained.nodes().iter().any(|node| {
         node.kind() == PlanNodeKind::Scan
             && node.object() == Some(&obj("table:Contact"))
@@ -445,11 +510,29 @@ fn explain_builds_a_deep_join_materialization_plan_from_mutable_branch_stats() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|node| node["object"] == "table:Contact")
+        .find(|node| node["kind"] == "scan" && node["object"] == "table:Contact")
         .expect("serialized contact scan");
     assert_eq!(contact_scan["details"]["mutable_branch"], "branch:working");
     assert_eq!(contact_scan["details"]["branch_generation"], 7);
     assert_eq!(contact_scan["details"]["statistics_scope"], "overlay_inclusive");
+    let delete_node = rendered
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["details"]["mutation"] == "delete")
+        .expect("mutation tail");
+    assert_eq!(delete_node["details"]["table_rows_before"], 1_005);
+    assert_eq!(delete_node["details"]["table_rows_after"], 1_003);
+    for kind in ["update", "rekey"] {
+        let node = rendered
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["details"]["mutation"] == kind)
+            .expect("cardinality-preserving mutation tail");
+        assert_eq!(node["details"]["table_rows_before"], 1_005);
+        assert_eq!(node["details"]["table_rows_after"], 1_005);
+    }
 
     let mut next_generation = query.clone();
     next_generation.source_statistics.as_mut().unwrap().mutable_branch.as_mut().unwrap().generation = 8;
@@ -473,6 +556,170 @@ fn explain_builds_a_deep_join_materialization_plan_from_mutable_branch_stats() {
     .expect("reference scan/query fallback");
     assert_ne!(fallback.root().kind(), PlanNodeKind::Materialize);
     assert!(fallback.nodes().iter().any(|node| node.kind() == PlanNodeKind::Scan));
+}
+
+#[test]
+fn mutation_estimate_edges_keep_unknown_overflow_and_underflow_unfabricated() {
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:mutation-estimates"),
+        source: obj("table:partial_stats"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: None,
+            estimated_bytes: Some(512),
+            mutable_branch: None,
+        }),
+        joins: Vec::new(),
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: vec![
+            QueryMutationDescription {
+                table: obj("table:overflow"),
+                kind: QueryMutationKind::Insert,
+                estimated_affected_rows: Some(1),
+                estimated_write_bytes: Some(16),
+                estimated_table_rows_before: Some(u64::MAX),
+            },
+            QueryMutationDescription {
+                table: obj("table:underflow"),
+                kind: QueryMutationKind::Delete,
+                estimated_affected_rows: Some(2),
+                estimated_write_bytes: Some(16),
+                estimated_table_rows_before: Some(1),
+            },
+            QueryMutationDescription {
+                table: obj("table:stable"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(3),
+                estimated_write_bytes: Some(96),
+                estimated_table_rows_before: Some(20),
+            },
+            QueryMutationDescription {
+                table: obj("table:stable"),
+                kind: QueryMutationKind::Rekey,
+                estimated_affected_rows: Some(1),
+                estimated_write_bytes: Some(32),
+                estimated_table_rows_before: None,
+            },
+            QueryMutationDescription {
+                table: obj("table:unknown"),
+                kind: QueryMutationKind::Insert,
+                estimated_affected_rows: None,
+                estimated_write_bytes: None,
+                estimated_table_rows_before: None,
+            },
+        ],
+        materialize_into: None,
+    })
+    .expect("bounded mutation plan");
+
+    assert_eq!(explained.plan().estimated_cost(), None);
+    let nodes = serde_json::to_value(explained.nodes()).expect("portable plan details");
+    let nodes = nodes.as_array().unwrap();
+    assert_eq!(
+        nodes
+            .iter()
+            .find(|node| node["object"] == "table:partial_stats")
+            .unwrap()["estimated_bytes"],
+        512
+    );
+    for table in ["table:overflow", "table:underflow", "table:unknown"] {
+        let node = nodes
+            .iter()
+            .find(|node| node["object"] == table && node["kind"] == "invoke")
+            .expect("mutation node");
+        assert!(node["details"].get("table_rows_after").is_none());
+        assert!(node.get("actual_rows").is_none());
+    }
+    for kind in ["update", "rekey"] {
+        let node = nodes
+            .iter()
+            .find(|node| node["details"]["mutation"] == kind)
+            .expect("known table cardinality");
+        assert_eq!(node["details"]["table_rows_after"], 20);
+    }
+}
+
+#[test]
+fn join_estimates_handle_empty_cross_partial_and_overflow_cardinalities() {
+    let explain = |left: QuerySourceStatistics,
+                   right: QuerySourceStatistics,
+                   predicate: Option<orna_sys_v1::ExpressionRef>| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:join-estimates"),
+            source: obj("table:left"),
+            source_statistics: Some(left),
+            joins: vec![QueryJoinDescription {
+                source: obj("table:right"),
+                statistics: Some(right),
+                predicate,
+            }],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: None,
+        })
+        .expect("query with a single join")
+    };
+    let stats = |rows, bytes| QuerySourceStatistics {
+        estimated_rows: rows,
+        estimated_bytes: bytes,
+        mutable_branch: None,
+    };
+
+    let empty = explain(
+        stats(Some(0), Some(0)),
+        stats(Some(7), Some(140)),
+        Some(orna_sys_v1::ExpressionRef::descriptive("expr:join")),
+    );
+    let join = empty
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .unwrap();
+    assert_eq!(join.estimated_rows(), Some(0));
+    assert_eq!(join.estimated_bytes(), Some(0));
+    assert!(empty.plan().estimated_cost().is_some());
+
+    let cross = explain(stats(Some(2), Some(32)), stats(Some(3), Some(15)), None);
+    let join = cross
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .unwrap();
+    assert_eq!(join.estimated_rows(), Some(6));
+    assert_eq!(join.estimated_bytes(), Some(126));
+    let cross_details = serde_json::to_value(join).unwrap();
+    assert_eq!(cross_details["details"]["join_type"], "cross");
+
+    let partial = explain(stats(Some(3), Some(30)), stats(None, Some(40)), None);
+    let join = partial
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .unwrap();
+    assert_eq!(join.estimated_rows(), None);
+    assert_eq!(join.estimated_bytes(), None);
+    assert_eq!(partial.plan().estimated_cost(), None);
+
+    let overflow = explain(
+        stats(Some(u64::MAX), Some(0)),
+        stats(Some(u64::MAX), Some(0)),
+        None,
+    );
+    let join = overflow
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .unwrap();
+    assert_eq!(join.estimated_rows(), None);
+    assert_eq!(join.estimated_bytes(), None);
+    assert_eq!(overflow.plan().estimated_cost(), None);
 }
 
 #[test]
@@ -571,6 +818,7 @@ fn explain_rejects_conflicting_function_edges_and_over_limit_query_shapes() {
         distinct: false,
         ordering: Vec::new(),
         limit: None,
+        mutations: Vec::new(),
         materialize_into: None,
     };
     assert_eq!(
@@ -588,6 +836,7 @@ fn explain_rejects_conflicting_function_edges_and_over_limit_query_shapes() {
         distinct: false,
         ordering: Vec::new(),
         limit: None,
+        mutations: Vec::new(),
         materialize_into: None,
     };
     assert_eq!(
