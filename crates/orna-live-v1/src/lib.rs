@@ -4140,6 +4140,9 @@ impl LiveHost {
             },
             Err(error) => return Err(map_serving(error)),
         };
+        // Bind this observation to the query request ID: after the target
+        // advances, an exact retry replays this status snapshot instead of
+        // silently becoming a new read.
         Ok(DispatchOutcome {
             outcome: FrameOutcome::Accepted,
             response: Some(Envelope {
