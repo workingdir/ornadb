@@ -3392,6 +3392,90 @@ mod tests {
     }
 
     #[test]
+    fn inserted_destination_update_survives_chained_rekey_retries() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "table-rekey-inserted-destination-update-chain.orna",
+                include_str!("../tests/fixtures/table-rekey-inserted-destination-update-chain.orna"),
+                "main",
+            )
+            .expect("checked-in inserted destination chain should be admitted");
+
+        let int = |value: i64| {
+            CanonicalValue::new(OvbRaw::Int(value.into())).expect("integer is canonical")
+        };
+        let row = |id: i64, text: &str, quantity: i64| {
+            CanonicalValue::new(OvbRaw::Map(vec![
+                (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
+                (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
+                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+            ]))
+            .expect("row is canonical")
+        };
+        let key = |value: i64| int(value).encode().expect("key is canonical");
+        let rows = BTreeMap::from([(
+            "Note".to_owned(),
+            vec![
+                (key(1), row(1, "source", 10).encode().unwrap()),
+                (key(2), row(2, "destination", 20).encode().unwrap()),
+            ],
+        )]);
+        let tables = admitted_table_schemas(&application.module_header);
+        let mut handler =
+            SourceMutationEffectHandler::with_table_rows(tables, rows).expect("valid snapshot");
+
+        invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            &Environment::new(),
+            application.limits,
+            &mut handler,
+        )
+        .expect("the inserted destination row remains addressable through chained retries");
+
+        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        assert_eq!(mutations.len(), 15);
+
+        let expected = [
+            (2, Some(3), false, row(3, "destination", 20)),
+            (1, Some(4), false, row(4, "source", 10)),
+            (1, None, true, row(1, "replacement", 30)),
+            (1, None, false, row(1, "replacement", 31)),
+            (1, Some(2), false, row(2, "replacement", 31)),
+            (2, None, false, row(2, "replacement", 32)),
+            (2, Some(5), false, row(5, "replacement", 32)),
+            (5, None, false, row(5, "replacement", 33)),
+            (3, Some(2), false, row(2, "destination", 20)),
+            (5, Some(6), false, row(6, "replacement", 33)),
+            (6, None, false, row(6, "replacement", 34)),
+            (2, Some(5), false, row(5, "destination", 20)),
+            (5, None, false, row(5, "destination", 21)),
+            (6, None, false, row(6, "replacement", 35)),
+            (4, None, false, row(4, "source", 11)),
+        ];
+
+        for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in
+            mutations.iter().zip(expected).enumerate()
+        {
+            assert_eq!(mutation.key(), key(old_key), "mutation {index} source key");
+            let expected_key = new_key.map(key);
+            assert_eq!(
+                mutation.rekey_to(),
+                expected_key.as_deref(),
+                "mutation {index} re-key destination"
+            );
+            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
+                expected_row,
+                "mutation {index} row value"
+            );
+        }
+    }
+
+    #[test]
     fn rekey_survives_a_recovered_failed_update_and_later_mutation() {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
