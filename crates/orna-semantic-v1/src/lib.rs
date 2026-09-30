@@ -9449,65 +9449,93 @@ fn infer_stream_from_list(
     })
 }
 
+/// Only a public export from the captured std.collection/std.query modules
+/// admits this intrinsic. The query declaration is a source-level re-export
+/// of the same operation identity, not an additional host implementation.
 fn standard_collection_operation_is_admitted(operation: &str, scope: &Scope) -> bool {
-    scope
-        .available_modules
-        .get(&Namespace(vec!["std".into(), "collection".into()]))
-        .is_some_and(|module| {
-            module
-                .exports
-                .get(operation)
-                .is_some_and(|symbol| symbol.kind == SymbolKind::Function)
-        })
+    ["collection", "query"].into_iter().any(|module_name| {
+        scope
+            .available_modules
+            .get(&Namespace(vec!["std".into(), module_name.into()]))
+            .is_some_and(|module| {
+                module
+                    .exports
+                    .get(operation)
+                    .is_some_and(|symbol| symbol.kind == SymbolKind::Function)
+            })
+    })
 }
 
-fn standard_integer_aggregate_operation_is_admitted(operation: &str, scope: &Scope) -> bool {
-    standard_aggregate_element(operation, Type::Int, scope).is_some()
+fn is_portable_collection_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "filter"
+            | "map"
+            | "flat_map"
+            | "sort_by"
+            | "take"
+            | "drop"
+            | "distinct"
+            | "union"
+            | "count"
+            | "first"
+            | "one"
+            | "sum"
+            | "min"
+            | "max"
+            | "every"
+            | "exists"
+    )
 }
 
-fn standard_float_aggregate_operation_is_admitted(operation: &str, scope: &Scope) -> bool {
-    standard_aggregate_element(operation, Type::Float, scope).is_some()
-}
-
-fn standard_aggregate_element(operation: &str, element: Type, scope: &Scope) -> Option<Type> {
-    if !matches!(operation, "sum" | "min" | "max") {
-        return None;
+fn standard_collection_module_operation<'a>(
+    callee: &'a Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+) -> Option<&'a str> {
+    let path = qualified_path(callee)?;
+    match path.as_slice() {
+        ["std", "collection" | "query", operation]
+            if !local.contains_key("std")
+                && is_portable_collection_operation(operation)
+                && standard_collection_operation_is_admitted(operation, scope) =>
+        {
+            Some(*operation)
+        }
+        [alias, operation] if !local.contains_key(*alias) => {
+            let namespace = scope.modules.get(*alias)?;
+            if namespace.0.len() == 2
+                && namespace.0[0] == "std"
+                && matches!(namespace.0[1].as_str(), "collection" | "query")
+                && is_portable_collection_operation(operation)
+                && scope
+                    .available_modules
+                    .get(namespace)
+                    .is_some_and(|module| {
+                        module
+                            .exports
+                            .get(*operation)
+                            .is_some_and(|symbol| symbol.kind == SymbolKind::Function)
+                    })
+            {
+                Some(*operation)
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
-    let result = if operation == "sum" {
-        element.clone()
-    } else {
-        Type::Optional(Box::new(element.clone()))
-    };
-    let expected = Type::Function {
-        parameters: vec![Type::List(Box::new(element.clone()))],
-        parameter_names: Some(vec!["rows".into()]),
-        default_parameters: BTreeSet::new(),
-        result: Box::new(result),
-    };
-    scope
-        .available_modules
-        .get(&Namespace(vec!["std".into(), "collection".into()]))
-        .and_then(|module| module.exports.get(operation))
-        .is_some_and(|symbol| symbol.kind == SymbolKind::Function && symbol.ty == expected)
-        .then_some(element)
 }
 
-fn standard_finite_list_operation_is_admitted(operation: &str, scope: &Scope) -> bool {
-    if matches!(operation, "sum" | "min" | "max") {
-        standard_integer_aggregate_operation_is_admitted(operation, scope)
-            || standard_float_aggregate_operation_is_admitted(operation, scope)
-    } else {
-        standard_collection_operation_is_admitted(operation, scope)
-    }
-}
-
-fn finite_list_aggregate_element(callee: &Expr, operation: &str, scope: &Scope) -> Option<Type> {
-    if qualified_path(callee)?.as_slice() == ["std", "collection", operation] {
-        standard_aggregate_element(operation, Type::Int, scope)
-            .or_else(|| standard_aggregate_element(operation, Type::Float, scope))
-    } else {
-        None
-    }
+// The pinned collection source declares one generic finite-list signature.
+// Nonempty calls get their element type from the rows; empty aggregates use
+// the caller's context where available and otherwise keep the Int zero rule.
+fn finite_list_aggregate_element(
+    _callee: &Expr,
+    _operation: &str,
+    _scope: &Scope,
+) -> Option<Type> {
+    None
 }
 
 /// Root collection names are ordinary, shadowable bindings in 1.0.0. Keep
@@ -9565,15 +9593,7 @@ fn finite_list_collection_operation<'a>(
     {
         return path.last().copied();
     }
-    match path.as_slice() {
-        ["std", "collection", operation]
-            if !local.contains_key("std")
-                && standard_finite_list_operation_is_admitted(operation, scope) =>
-        {
-            Some(*operation)
-        }
-        _ => None,
-    }
+    standard_collection_module_operation(callee, scope, local)
 }
 
 fn is_finite_list_numeric_aggregate_pipeline_stage(
@@ -9599,10 +9619,16 @@ fn infer_finite_list_collection_call(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Inferred> {
     let path = qualified_path(callee)?;
-    if matches!(
-        path.as_slice(),
-        ["every"] | ["exists"] | ["sort_by"] | ["first"] | ["one"] | ["sum"] | ["min"] | ["max"]
-    ) && let Some(argument) = arguments
+    let portable_collection_call = match path.as_slice() {
+        [operation] => matches!(
+            *operation,
+            "filter" | "map" | "flat_map" | "sort_by" | "take" | "drop" | "distinct"
+                | "union" | "count" | "first" | "one" | "sum" | "min" | "max"
+                | "every" | "exists"
+        ),
+        _ => standard_collection_module_operation(callee, scope, local).is_some(),
+    };
+    if portable_collection_call && let Some(argument) = arguments
         .iter()
         .find(|argument| argument.name.as_deref() == Some("rows"))
         .or_else(|| arguments.first())
@@ -9624,18 +9650,7 @@ fn infer_finite_list_collection_call(
         ["sort_by"] if root_collection_intrinsic_is_unshadowed("sort_by", scope, local) => {
             "sort_by"
         }
-        ["std", "collection", "sort_by"]
-            if !local.contains_key("std")
-                && standard_finite_list_operation_is_admitted("sort_by", scope) =>
-        {
-            "sort_by"
-        }
-        ["std", "collection", operation]
-            if standard_finite_list_operation_is_admitted(operation, scope) =>
-        {
-            operation
-        }
-        _ => return None,
+        _ => standard_collection_module_operation(callee, scope, local)?,
     };
     Some(infer_finite_list_collection(
         operation,
@@ -9690,6 +9705,16 @@ fn infer_finite_list_collection(
             diagnostics,
         );
     }
+    if matches!(operation, "distinct" | "count" | "take" | "drop" | "union") {
+        return infer_finite_list_simple_collection(
+            operation,
+            input,
+            arguments,
+            scope,
+            local,
+            diagnostics,
+        );
+    }
     let pipeline = input.is_some();
     let mut slots = [None, None];
     let mut malformed = false;
@@ -9701,7 +9726,11 @@ fn infer_finite_list_collection(
                 named_started = true;
                 Some(0)
             }
-            Some("transform") => {
+            Some("predicate") if operation == "filter" => {
+                named_started = true;
+                Some(1)
+            }
+            Some("transform") if matches!(operation, "map" | "flat_map") => {
                 named_started = true;
                 Some(1)
             }
@@ -9764,7 +9793,11 @@ fn infer_finite_list_collection(
         let callback = infer_finite_list_callback(
             &arguments[index].value,
             element,
-            Type::Error,
+            if operation == "filter" {
+                Type::Bool
+            } else {
+                Type::Error
+            },
             scope,
             local,
             diagnostics,
@@ -9796,6 +9829,16 @@ fn infer_finite_list_collection(
         };
     };
     let ty = match operation {
+        "filter" => {
+            if callback.ty == Type::Bool {
+                let Type::List(element) = row else {
+                    unreachable!("finite-list row type was checked")
+                };
+                Type::List(element)
+            } else {
+                Type::Error
+            }
+        }
         "map" => Type::List(Box::new(callback.ty)),
         "flat_map" => match callback.ty {
             Type::List(element) => Type::List(element),
@@ -9811,6 +9854,143 @@ fn infer_finite_list_collection(
         _ => unreachable!("finite list collection operation was checked"),
     };
     Inferred { ty, effects }
+}
+
+fn infer_finite_list_simple_collection(
+    operation: &str,
+    input: Option<Inferred>,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let pipeline = input.is_some();
+    let expected: &[&str] = match operation {
+        "distinct" | "count" => &["rows"],
+        "take" | "drop" => &["rows", "count"],
+        "union" => &["left", "right"],
+        _ => unreachable!("simple finite-list operation was checked"),
+    };
+    let mut slots = vec![None; expected.len()];
+    let mut malformed = false;
+    let mut positional = usize::from(pipeline);
+    let mut named_started = false;
+    for (index, argument) in arguments.iter().enumerate() {
+        let slot = match argument.name.as_deref() {
+            Some(name) => {
+                named_started = true;
+                expected.iter().position(|expected| *expected == name)
+            }
+            None if named_started || positional >= expected.len() => None,
+            None => {
+                let slot = positional;
+                positional += 1;
+                Some(slot)
+            }
+        };
+        if let Some(slot) = slot {
+            if pipeline && slot == 0 || slots[slot].replace(index).is_some() {
+                malformed = true;
+            }
+        } else {
+            malformed = true;
+        }
+    }
+    if pipeline {
+        if slots[0].is_some() {
+            malformed = true;
+        }
+    } else if slots[0].is_none() {
+        malformed = true;
+    }
+    if slots.iter().skip(1).any(Option::is_none) {
+        malformed = true;
+    }
+
+    let mut effects = input
+        .as_ref()
+        .map(|input| input.effects.clone())
+        .unwrap_or_default();
+    let mut values = vec![None; expected.len()];
+    if let Some(input) = input {
+        values[0] = Some(input.ty);
+    }
+    for (index, argument) in arguments.iter().enumerate() {
+        let Some(slot) = slots.iter().position(|candidate| *candidate == Some(index)) else {
+            let inferred = infer(&argument.value, scope, local, diagnostics);
+            effects.join(&inferred.effects);
+            continue;
+        };
+        let inferred = infer(&argument.value, scope, local, diagnostics);
+        effects.join(&inferred.effects);
+        values[slot] = Some(inferred.ty);
+    }
+    if malformed {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            format!("std.collection {operation} arguments do not match its static signature"),
+        ));
+    }
+    let first = values.first().and_then(Option::as_ref).cloned().unwrap_or(Type::Error);
+    let Type::List(element) = first else {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            format!("finite-list {operation} requires a finite list"),
+        ));
+        return Inferred { ty: Type::Error, effects };
+    };
+    let result = match operation {
+        "count" => Type::Int,
+        "distinct" => {
+            if is_default_float_equality_type(&element) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "distinct requires a lawful equality key; default Float equality is unavailable",
+                ));
+                Type::Error
+            } else {
+                Type::List(element)
+            }
+        }
+        "take" | "drop" => {
+            let count = values.get(1).and_then(Option::as_ref).unwrap_or(&Type::Error);
+            if count != &Type::Int && count != &Type::Error {
+                diagnostics.push(diag(DIAG_TYPE, format!("{operation} count must be an Int")));
+                Type::Error
+            } else if count == &Type::Int
+                && slots[1].is_some_and(|index| is_negative_integer_constant(&arguments[index].value))
+            {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!("{operation} count must be nonnegative"),
+                ));
+                Type::Error
+            } else {
+                Type::List(element)
+            }
+        }
+        "union" => {
+            let right = values.get(1).and_then(Option::as_ref).cloned().unwrap_or(Type::Error);
+            match right {
+                Type::List(right_element) if types_match(&element, &right_element) => {
+                    Type::List(element)
+                }
+                Type::Error => Type::Error,
+                _ => {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "finite-list union requires lists with compatible element types",
+                    ));
+                    Type::Error
+                }
+            }
+        }
+        _ => unreachable!("simple finite-list operation was checked"),
+    };
+    Inferred {
+        ty: if malformed { Type::Error } else { result },
+        effects,
+    }
 }
 
 /// Checks the finite-list `sort_by(rows, key)` signature.  The key callback is
@@ -9987,11 +10167,10 @@ fn is_sort_key_type(ty: &Type) -> bool {
     }
 }
 
-/// Checks the bounded finite-list numeric aggregate signatures. Unqualified
-/// calls admit only `List<Int>` and `List<Float>`; qualified calls pass the
-/// exact element type from their pinned standard declaration. Empty lists use
-/// that declaration or the contextual result type, falling back to Int for
-/// the unannotated legacy form. Effects from the input expression are retained.
+/// Checks the bounded finite-list numeric aggregate signatures. The pinned
+/// source declarations are generic, so rows supply the element type and the
+/// operation admits only supported numeric element kinds. Empty unannotated
+/// lists retain the legacy Int-zero rule; input effects are preserved.
 fn infer_finite_list_numeric_aggregate(
     operation: &str,
     arguments: &[orna_syntax_v1::Argument],
@@ -10077,7 +10256,8 @@ fn infer_finite_list_numeric_aggregate(
     }
     let valid = match (&rows, aggregate_element.as_ref()) {
         (Type::List(element), Some(expected)) => element.as_ref() == expected,
-        (Type::List(element), None) => matches!(element.as_ref(), Type::Int | Type::Float),
+        (Type::List(element), None) if operation == "sum" => is_sum_element_type(element),
+        (Type::List(element), None) => is_sort_key_type(element),
         _ => false,
     };
     if !valid {
@@ -10089,7 +10269,7 @@ fn infer_finite_list_numeric_aggregate(
         } else {
             diagnostics.push(diag(
                 DIAG_TYPE,
-                format!("finite-list {operation} requires a finite list of Int or Float values"),
+                format!("finite-list {operation} requires a finite list with a supported {operation} element type"),
             ));
         }
     }
@@ -10111,6 +10291,11 @@ fn infer_finite_list_numeric_aggregate(
         },
         effects,
     }
+}
+
+fn is_sum_element_type(element: &Type) -> bool {
+    matches!(element, Type::Int | Type::Decimal | Type::Float)
+        || matches!(element, Type::Applied { base, .. } if base == "Money")
 }
 
 fn infer_finite_list_aggregate_rows(
@@ -10637,7 +10822,7 @@ fn infer_relation_collection_call(
         {
             *operation
         }
-        _ => return None,
+        _ => standard_collection_module_operation(callee, scope, local)?,
     };
     if operation == "union" {
         return infer_relation_union_call(arguments, scope, local, diagnostics);
@@ -10780,6 +10965,195 @@ fn infer_relation_collection_call(
         },
         effects,
     })
+}
+
+fn infer_relation_collection_pipeline(
+    operation: &str,
+    input: Inferred,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let Type::Relation(element) = input.ty else {
+        unreachable!("qualified relation pipeline is selected for Relation<T>")
+    };
+    let mut effects = input.effects;
+    let element = *element;
+    let callback_parameter = match operation {
+        "filter" | "every" | "exists" => Some("predicate"),
+        "map" | "flat_map" => Some("transform"),
+        "sort_by" => Some("key"),
+        _ => None,
+    };
+    if let Some(parameter) = callback_parameter {
+        let expected_count = 1;
+        let malformed = arguments.len() != expected_count
+            || arguments
+                .first()
+                .is_some_and(|argument| argument.name.as_deref().is_some_and(|name| name != parameter));
+        let Some(argument) = arguments.first() else {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                format!("relation {operation} requires a {parameter} callback"),
+            ));
+            return Inferred { ty: Type::Error, effects };
+        };
+        let callback = infer_relation_callback(
+            &argument.value,
+            element.clone(),
+            if matches!(operation, "filter" | "every" | "exists") {
+                Type::Bool
+            } else {
+                Type::Error
+            },
+            scope,
+            local,
+            diagnostics,
+        );
+        effects.join(&callback.effects);
+        if malformed {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                format!("relation {operation} pipeline arguments do not match its static signature"),
+            ));
+        }
+        let valid = !malformed
+            && match operation {
+                "filter" | "every" | "exists" => callback.ty == Type::Bool,
+                "map" => callback.ty != Type::Error,
+                "flat_map" => matches!(callback.ty, Type::List(_) | Type::Relation(_)),
+                "sort_by" => is_sort_key_type(&callback.ty),
+                _ => false,
+            };
+        return Inferred {
+            ty: if valid {
+                match operation {
+                    "every" | "exists" => Type::Bool,
+                    "map" => Type::Relation(Box::new(callback.ty)),
+                    "flat_map" => match callback.ty {
+                        Type::List(element) | Type::Relation(element) => Type::Relation(element),
+                        _ => Type::Error,
+                    },
+                    _ => Type::Relation(Box::new(element)),
+                }
+            } else {
+                Type::Error
+            },
+            effects,
+        };
+    }
+
+    let expected = match operation {
+        "take" | "drop" | "union" => 1,
+        "one" => usize::from(!arguments.is_empty()),
+        "count" | "first" | "distinct" | "sum" | "min" | "max" => 0,
+        _ => unreachable!("qualified relation collection operation was checked"),
+    };
+    let expected_name = match operation {
+        "take" | "drop" => Some("count"),
+        "union" => Some("right"),
+        "one" => Some("predicate"),
+        _ => None,
+    };
+    let mut malformed = arguments.len() != expected;
+    if let Some(name) = expected_name {
+        malformed |= arguments
+            .first()
+            .is_some_and(|argument| argument.name.as_deref().is_some_and(|actual| actual != name));
+    }
+    let mut values = Vec::with_capacity(arguments.len());
+    for argument in arguments {
+        let value = if matches!(operation, "one") {
+            infer_relation_callback(
+                &argument.value,
+                element.clone(),
+                Type::Bool,
+                scope,
+                local,
+                diagnostics,
+            )
+        } else {
+            infer(&argument.value, scope, local, diagnostics)
+        };
+        effects.join(&value.effects);
+        values.push(value.ty);
+    }
+    if malformed {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            format!("relation {operation} pipeline arguments do not match its static signature"),
+        ));
+    }
+    let ty = match operation {
+        "count" => Type::Int,
+        "first" => Type::Optional(Box::new(element.clone())),
+        "one" => {
+            if values.first().is_some_and(|ty| *ty != Type::Bool) {
+                diagnostics.push(diag(DIAG_TYPE, "relation one predicate must return Bool"));
+                Type::Error
+            } else {
+                effects.may_fail = true;
+                element.clone()
+            }
+        }
+        "distinct" => {
+            if is_default_float_equality_type(&element) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "distinct requires a lawful equality key; default Float equality is unavailable",
+                ));
+                Type::Error
+            } else {
+                Type::Relation(Box::new(element.clone()))
+            }
+        }
+        "take" | "drop" => {
+            if values.first().is_some_and(|ty| *ty != Type::Int) {
+                diagnostics.push(diag(DIAG_TYPE, format!("relation {operation} count must be an Int")));
+                Type::Error
+            } else if values.first() == Some(&Type::Int)
+                && is_negative_integer_constant(&arguments[0].value)
+            {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!("relation {operation} count must be nonnegative"),
+                ));
+                Type::Error
+            } else {
+                Type::Relation(Box::new(element.clone()))
+            }
+        }
+        "union" => match values.first() {
+            Some(Type::Relation(right)) if types_match(&element, right) => {
+                Type::Relation(Box::new(element.clone()))
+            }
+            Some(Type::Error) => Type::Error,
+            _ => {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "relation union requires a compatible relation",
+                ));
+                Type::Error
+            }
+        },
+        "sum" if is_sum_element_type(&element) => element.clone(),
+        "min" | "max" if is_sort_key_type(&element) => {
+            Type::Optional(Box::new(element.clone()))
+        }
+        "sum" | "min" | "max" => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                format!("relation {operation} requires a supported element type"),
+            ));
+            Type::Error
+        }
+        _ => unreachable!("qualified relation collection operation was checked"),
+    };
+    Inferred {
+        ty: if malformed { Type::Error } else { ty },
+        effects,
+    }
 }
 
 fn infer_relation_union_call(
@@ -11060,12 +11434,17 @@ fn infer_relation_terminal_call(
         }
         "take" | "drop" => Type::Relation(element.clone()),
         "window" => Type::Relation(Box::new(Type::List(Box::new(element.as_ref().clone())))),
-        "sum" | "min" | "max" if matches!(element.as_ref(), Type::Int | Type::Float) => {
-            if operation == "sum" {
-                element.as_ref().clone()
-            } else {
-                Type::Optional(element.clone())
-            }
+        "sum" if is_sum_element_type(element.as_ref()) => element.as_ref().clone(),
+        "min" | "max" if is_sort_key_type(element.as_ref()) => {
+            Type::Optional(element.clone())
+        }
+        "sum" | "min" | "max" => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                format!("relation {operation} requires a supported element type"),
+            ));
+            valid = false;
+            Type::Error
         }
         _ => {
             diagnostics.push(diag(
@@ -11303,6 +11682,21 @@ fn infer_success_pipeline(
             ty: Type::Error,
             effects: input.effects,
         };
+    }
+    if matches!(&input.ty, Type::Relation(_))
+        && let Expr::Call {
+            callee, arguments, ..
+        } = rhs
+        && let Some(operation) = standard_collection_module_operation(callee, scope, local)
+    {
+        return infer_relation_collection_pipeline(
+            operation,
+            input,
+            arguments,
+            scope,
+            local,
+            diagnostics,
+        );
     }
     if let Type::Relation(element) = &input.ty
         && let Expr::Call {
@@ -16785,6 +17179,9 @@ fn decode_row_key_path(components: &[String]) -> Option<Vec<String>> {
 }
 
 fn row_key_component_types(admission: &TableAdmission, analysis: &Analysis) -> Option<Vec<Type>> {
+    // Editable paths contain scalar key leaves in declaration order. Flatten
+    // tuple and table-reference types recursively: a reference contributes
+    // its target key path, never target-row data or a table identity segment.
     fn append(
         ty: &Type,
         analysis: &Analysis,

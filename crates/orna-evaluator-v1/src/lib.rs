@@ -48,7 +48,7 @@ pub use repl::{ReplSession, parse_admitted_repl};
 /// crate verifies its pinned profile before either boundary admits an import.
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
-pub fn reference_standard_sources() -> [(String, String); 2] {
+pub fn reference_standard_sources() -> [(String, String); 3] {
     orna_standard::reference_standard_sources_v1()
 }
 
@@ -580,6 +580,27 @@ pub trait EffectHandler {
         _budget: &mut StepBudget,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         self.handle(callee, arguments)
+    }
+
+    /// Resolve a stored row reference at the reference's snapshot pin.
+    ///
+    /// An activation adapter may apply its private write overlay at that pin,
+    /// but must not substitute a different database, table, key, or snapshot.
+    /// Returning `None` means the non-optional target could not be resolved.
+    fn resolve_reference(
+        &mut self,
+        _reference: &CanonicalValue,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        Ok(None)
+    }
+
+    /// Resolve a row reference while sharing the activation's evaluator budget.
+    fn resolve_reference_with_budget(
+        &mut self,
+        reference: &CanonicalValue,
+        _budget: &mut StepBudget,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        self.resolve_reference(reference)
     }
 
     /// Supplies one bounded page for an evaluator-owned relation plan at its
@@ -1183,6 +1204,8 @@ enum Value {
     String(String),
     Date(String),
     Uuid([u8; 16]),
+    /// OVB's complete stored identity is retained, including its snapshot pin.
+    Reference(CanonicalValue),
     Instant {
         unix_seconds: i64,
         nanosecond: u32,
@@ -1471,6 +1494,7 @@ impl Value {
             Self::String(value) => Raw::Text(value),
             Self::Date(value) => Raw::Tag(60001, Box::new(Raw::Text(value))),
             Self::Uuid(value) => object_id_raw(value),
+            Self::Reference(value) => value.raw().clone(),
             Self::Instant {
                 unix_seconds,
                 nanosecond,
@@ -1610,6 +1634,7 @@ impl Value {
                     .map_err(|_| error("ORNA-EVAL-VALUE"))?;
                 Ok(Self::Uuid(bytes))
             }
+            Raw::Tag(60010, _) => Ok(Self::Reference(value.clone())),
             Raw::Tag(60002, boxed) => Self::instant_from_raw(boxed, context),
             Raw::Tag(60005, boxed) => Self::duration_from_raw(boxed, context),
             Raw::Array(values) => {
@@ -1974,6 +1999,57 @@ impl Context<'_, '_> {
             _ => Err(error("ORNA-EVAL-FIELD")),
         }
     }
+
+    fn reference_field(
+        &mut self,
+        reference: &CanonicalValue,
+        name: &str,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        self.depth(depth)?;
+        let Raw::Tag(60010, payload) = reference.raw() else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        let Raw::Array(identity) = payload.as_ref() else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        let [_, _, key, _] = identity.as_slice() else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+
+        // The canonical key is stored in the reference itself, so reading it
+        // does not fetch or materialize the referenced row.
+        if name == "key" {
+            let key = CanonicalValue::new(key.clone()).map_err(|_| error("ORNA-EVAL-VALUE"))?;
+            return Value::from_canonical(&key, self, depth + 1);
+        }
+
+        let remaining = self.limits.max_steps.saturating_sub(self.steps);
+        let mut budget = StepBudget::new(remaining);
+        let target = self
+            .effects
+            .as_deref_mut()
+            .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?
+            .resolve_reference_with_budget(reference, &mut budget);
+        let debited = remaining.saturating_sub(budget.remaining());
+        self.steps = self
+            .steps
+            .checked_add(debited)
+            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        let target = target?.ok_or_else(|| error("ORNA-EVAL-FIELD"))?;
+        match Value::from_canonical(&target, self, depth + 1)? {
+            Value::Record(fields) => fields
+                .get(name)
+                .cloned()
+                .ok_or_else(|| error("ORNA-EVAL-FIELD")),
+            Value::NominalRecord { type_id, fields } => {
+                self.nominal_field(&type_id, &fields, name, scope)
+            }
+            _ => Err(error("ORNA-EVAL-TYPE")),
+        }
+    }
+
     fn numeric_postfix(&self, value: BigInt, name: &str) -> Result<Value, EvaluationError> {
         let unit = name.rsplit('.').next().unwrap_or(name);
         match unit {
@@ -2154,6 +2230,9 @@ impl Context<'_, '_> {
                         .ok_or_else(|| error("ORNA-EVAL-FIELD")),
                     Value::NominalRecord { type_id, fields } => {
                         self.nominal_field(&type_id, &fields, name, scope)
+                    }
+                    Value::Reference(reference) => {
+                        self.reference_field(&reference, name, scope, depth + 1)
                     }
                     Value::Error(failure) => self.error_field(&failure, name, depth + 1),
                     Value::Int(value) => self.numeric_postfix(value, name),
@@ -3123,8 +3202,21 @@ impl Context<'_, '_> {
         scope: &mut Scope,
         depth: usize,
     ) -> Option<Result<Value, EvaluationError>> {
-        let name = root_collection_name(callee)?;
-        if scope.0.contains_key(name) || self.resolve_function_name(callee, scope).is_some() {
+        let resolved = self.resolve_function_name(callee, scope);
+        let native_export = is_native_collection_binding(
+            callee,
+            resolved.as_deref(),
+            scope,
+            !self.restrict_function_names,
+            function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
+        )
+            || resolved.as_deref() == Some("std.collection.asof_join");
+        let name = root_collection_name(callee).or_else(|| {
+            native_export
+                .then(|| portable_collection_operation(callee, resolved.as_deref()))
+                .flatten()
+        })?;
+        if scope.0.contains_key(name) || (resolved.is_some() && !native_export) {
             return None;
         }
         let pipeline_relation = matches!(input, Some(Value::Relation(_)));
@@ -3160,7 +3252,10 @@ impl Context<'_, '_> {
                     plan = plan.with_stage(RelationStage::Filter(ordered[1].clone()));
                     Ok(Value::Relation(plan))
                 }
-                "map" => {
+                // The reference specifies relation composition and order but
+                // no separate projection grammar. `project` is the named
+                // result-shaping spelling of the same lazy one-to-one map.
+                "map" | "project" => {
                     plan = plan.with_stage(RelationStage::Map(ordered[1].clone()));
                     Ok(Value::Relation(plan))
                 }
@@ -4257,29 +4352,37 @@ impl Context<'_, '_> {
         let root_collection =
             root_collection_name(callee).filter(|name| !scope.0.contains_key(*name));
         let resolved_function = self.resolve_function_name(callee, scope);
+        let native_collection = is_native_collection_binding(
+            callee,
+            resolved_function.as_deref(),
+            scope,
+            !self.restrict_function_names,
+            function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
+        );
         let native_asof_join = resolved_function.as_deref() == Some("std.collection.asof_join")
-            || (collection_name(callee) == Some("asof_join")
+            || (portable_collection_name(callee) == Some("asof_join")
                 && !self.restrict_function_names
                 && !scope.0.contains_key("std")
                 && resolved_function.is_none());
-        if collection_name(callee).is_some()
+        if portable_collection_operation(callee, resolved_function.as_deref()).is_some()
             && self.restrict_function_names
             && resolved_function.is_none()
             && !native_asof_join
+            && !native_collection
         {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
-        // `std.collection.asof_join` is a source-declared evaluator binding:
-        // once that function resolves from the admitted module (or the
-        // standalone evaluator sees the explicit qualified path), execute
-        // the bounded native implementation below instead of the fail-closed
-        // source stub. Other standard-source functions still execute their
-        // pinned bodies before any legacy native fallback.
+        // The portable std.collection/std.query exports and asof_join are
+        // source-declared evaluator bindings. Once the exact pinned export is
+        // available, execute its bounded intrinsic instead of the fail-closed
+        // source stub. Other standard-source functions execute their pinned
+        // bodies normally.
         if !native_asof_join
+            && !native_collection
             && (math_name(callee).is_none()
                 && bits_name(callee).is_none()
                 && text_name(callee).is_none()
-                && collection_name(callee).is_none()
+                && portable_collection_operation(callee, resolved_function.as_deref()).is_none()
                 && stats_name(callee).is_none()
                 && root_collection.is_none()
                 || resolved_function.is_some())
@@ -4432,7 +4535,8 @@ impl Context<'_, '_> {
         let bits = bits_name(callee);
         let text = text_name(callee);
         let stats = stats_name(callee);
-        let collection = collection_name(callee).or(root_collection);
+        let collection =
+            portable_collection_operation(callee, resolved_function.as_deref()).or(root_collection);
         let name = math
             .or(bits)
             .or(text)
@@ -5578,33 +5682,33 @@ impl Context<'_, '_> {
             }
             return Ok(candidate.map_or(Value::Null, |value| Value::Option(Some(Box::new(value)))));
         }
-        let mut candidate = None;
+        let mut candidate: Option<Value> = None;
         for value in values {
             self.step()?;
-            let Value::Int(value) = value else {
-                // Mixed numeric kinds, Decimal, Money and affine aggregation
-                // fail closed rather than receiving incidental host ordering.
-                return Err(error("ORNA-EVAL-UNSUPPORTED"));
-            };
-            let replace = candidate.as_ref().is_none_or(|current: &BigInt| {
-                if name == "min" {
-                    value < current
-                } else {
-                    value > current
+            lawful_sort_key(value)?;
+            let replace = match candidate.as_ref() {
+                None => true,
+                Some(current) => {
+                    let ordering = compare_sort_keys(value, current)?;
+                    if name == "min" {
+                        ordering.is_lt()
+                    } else {
+                        ordering.is_gt()
+                    }
                 }
-            });
+            };
             if replace {
                 // Strict comparison above deliberately retains the first
                 // equal candidate, preserving observable input order.
                 candidate = Some(value.clone());
             }
         }
-        Ok(candidate.map_or(Value::Null, |value| {
-            Value::Option(Some(Box::new(Value::Int(value))))
-        }))
+        Ok(candidate.map_or(Value::Null, |value| Value::Option(Some(Box::new(value)))))
     }
     fn first(&self, values: &[Value]) -> Result<Value, EvaluationError> {
-        Ok(values.first().cloned().unwrap_or(Value::Null))
+        Ok(values.first().cloned().map_or(Value::Null, |value| {
+            Value::Option(Some(Box::new(value)))
+        }))
     }
     fn last(&self, values: &[Value]) -> Result<Value, EvaluationError> {
         Ok(Value::Option(
@@ -6348,7 +6452,8 @@ fn named_arguments(
         "replace" => &["value", "from", "to"],
         "normalise" => &["value", "form"],
         "chunk" => &["values", "size"],
-        "flatten" | "distinct" | "unique" | "pairs" | "count" => &["values"],
+        "flatten" | "unique" | "pairs" => &["values"],
+        "distinct" | "count" => &["rows"],
         "last" => &["rows"],
         "sum" => &["rows"],
         "mean" | "median" => match values.len() {
@@ -6369,12 +6474,12 @@ fn named_arguments(
         },
         "every" | "exists" => &["rows", "predicate"],
         "union" => &["left", "right"],
-        "take" => &["values", "count"],
-        "drop" => &["values", "count"],
-        "map" | "flat_map" => &["values", "transform"],
+        "take" | "drop" => &["rows", "count"],
+        "map" | "flat_map" => &["rows", "transform"],
         "sort_by" => &["rows", "key"],
         "rank" => &["values", "key"],
-        "filter" | "partition" | "split_when" => &["values", "predicate"],
+        "filter" => &["rows", "predicate"],
+        "partition" | "split_when" => &["values", "predicate"],
         "group_by" => &["values", "key"],
         "asof_join" => &["left", "right", "time", "by"],
         "zip" | "zip_exact" => &["left", "right"],
@@ -6398,7 +6503,16 @@ fn named_arguments(
             .and_then(|argument| argument.name.as_deref());
         let position = if let Some(name) = name {
             named_started = true;
-            expected.iter().position(|expected| *expected == name)
+            expected
+                .iter()
+                .position(|expected| *expected == name)
+                .or_else(|| {
+                    // Older bounded evaluator fixtures used `values` for
+                    // finite lists. Keep that alias at runtime while the
+                    // pinned 1.0 source signature canonically names `rows`.
+                    (name == "values" && expected.first() == Some(&"rows"))
+                        .then_some(0)
+                })
         } else if named_started {
             None
         } else {
@@ -6431,6 +6545,70 @@ fn text_name(expression: &Expr) -> Option<&str> {
 fn collection_name(expression: &Expr) -> Option<&str> {
     standard_name(expression, "collection")
 }
+fn query_name(expression: &Expr) -> Option<&str> {
+    standard_name(expression, "query")
+}
+fn portable_collection_name(expression: &Expr) -> Option<&str> {
+    collection_name(expression).or_else(|| query_name(expression))
+}
+
+fn portable_collection_operation<'a>(
+    expression: &'a Expr,
+    resolved_function: Option<&'a str>,
+) -> Option<&'a str> {
+    resolved_function
+        .and_then(standard_collection_function_operation)
+        .or_else(|| portable_collection_name(expression))
+}
+
+fn standard_collection_function_operation(name: &str) -> Option<&str> {
+    name.strip_prefix("std.collection.")
+        .or_else(|| name.strip_prefix("std.query."))
+}
+
+fn is_native_collection_binding(
+    callee: &Expr,
+    resolved_function: Option<&str>,
+    scope: &Scope,
+    allow_unresolved_qualified: bool,
+    source_export_available: bool,
+) -> bool {
+    // A source export in the loaded pinned module is the admission record for
+    // the intrinsic; an unresolved explicit path is accepted only by the
+    // unrestricted standalone evaluator. Lexical `std` values still win.
+    if scope.0.contains_key("std") && resolved_function.is_none() {
+        return false;
+    }
+    let resolved_operation = resolved_function.and_then(standard_collection_function_operation);
+    let Some(operation) = resolved_operation.or_else(|| portable_collection_name(callee)) else {
+        return false;
+    };
+    if !matches!(
+        operation,
+        "filter"
+            | "map"
+            | "flat_map"
+            | "sort_by"
+            | "take"
+            | "drop"
+            | "distinct"
+            | "union"
+            | "count"
+            | "first"
+            | "one"
+            | "sum"
+            | "min"
+            | "max"
+            | "every"
+            | "exists"
+    ) {
+        return false;
+    }
+    match resolved_function {
+        Some(_) => resolved_operation.is_some(),
+        None => allow_unresolved_qualified || source_export_available,
+    }
+}
 fn stats_name(expression: &Expr) -> Option<&str> {
     standard_name(expression, "stats")
 }
@@ -6451,6 +6629,7 @@ fn root_collection_name(expression: &Expr) -> Option<&str> {
             | "every"
             | "exists"
             | "map"
+            | "project"
             | "flat_map"
             | "sort_by"
             | "bucket_by"
@@ -6501,7 +6680,8 @@ fn relation_expression_candidate(expression: &Expr, scope: &Scope) -> bool {
         Expr::Binary { lhs, op, .. } if op == "|" => relation_expression_candidate(lhs, scope),
         Expr::Call {
             callee, arguments, ..
-        } if root_collection_name(callee).is_some() => arguments
+        } if root_collection_name(callee).is_some()
+            || portable_collection_name(callee).is_some() => arguments
             .iter()
             .find(|argument| argument.name.as_deref() == Some("rows"))
             .or_else(|| arguments.first())
@@ -6518,7 +6698,7 @@ fn relation_named_arguments(
 ) -> Result<Vec<Value>, EvaluationError> {
     let expected: &[&str] = match function {
         "filter" => &["rows", "predicate"],
-        "map" | "flat_map" => &["rows", "transform"],
+        "map" | "project" | "flat_map" => &["rows", "transform"],
         "sort_by" => &["rows", "key"],
         "bucket_by" => match values.len() {
             2 => &["rows", "period"],

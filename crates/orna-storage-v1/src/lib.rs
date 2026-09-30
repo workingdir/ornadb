@@ -114,6 +114,9 @@ impl LoosePath {
         Self::for_key(table_root, &key)
     }
 
+    /// `key` contains canonical text leaves in declared order. The catalogue
+    /// flattens tuples and table references to those leaves; storage owns only
+    /// their portable path encoding and does not embed referenced rows.
     pub fn for_key(table_root: impl AsRef<str>, key: &[String]) -> Result<Self, Error> {
         let root = table_root.as_ref();
         if root.is_empty() || root.starts_with('.') || root.contains('/') || root.contains('\\') {

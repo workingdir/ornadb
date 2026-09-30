@@ -26,7 +26,8 @@ use std::{
 };
 
 use orna_foundation_v1::{
-    CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value,
+    CanonicalSnapshot, CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity,
+    OvbRaw, SafeText, Value,
 };
 use orna_protocol_v1::{
     Envelope, Limits as ProtocolLimits, Message, RequestState, ResultBody, ResultStatus,
@@ -1564,6 +1565,7 @@ pub struct LiveHost {
     attachments: BTreeMap<[u8; 16], [u8; 16]>,
     requests: BTreeMap<([u8; 16], [u8; 16]), RequestRecord>,
     watches: BTreeSet<([u8; 16], [u8; 16])>,
+    watch_snapshots: BTreeMap<([u8; 16], [u8; 16]), AcceptedWatchSnapshot>,
     application_sessions: BTreeSet<[u8; 16]>,
     deleted_sessions: BTreeMap<[u8; 16], DeletedSession>,
     runtime: Option<Arc<RuntimeState>>,
@@ -1572,6 +1574,31 @@ pub struct LiveHost {
     recovered_owner: Option<RequestOwner>,
     takeover_recovery_complete: bool,
     application_work: LiveApplicationWorkSupervisor,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AcceptedWatchSnapshot {
+    revision: u64,
+    present: orna_protocol_v1::PresentNode,
+    snapshot: CanonicalSnapshot,
+}
+
+impl AcceptedWatchSnapshot {
+    fn from_response(response: &Envelope) -> Result<Option<Self>> {
+        match &response.message {
+            Message::Snapshot {
+                revision,
+                present,
+                snapshot,
+            } => Ok(Some(Self {
+                revision: *revision,
+                present: present.clone(),
+                snapshot: snapshot.clone(),
+            })),
+            Message::Diagnostic { .. } => Ok(None),
+            _ => Err(Error::ApplicationRejected),
+        }
+    }
 }
 
 enum DurableAdmission {
@@ -1695,6 +1722,7 @@ impl LiveHost {
             attachments: BTreeMap::new(),
             requests: BTreeMap::new(),
             watches: BTreeSet::new(),
+            watch_snapshots: BTreeMap::new(),
             application_sessions: BTreeSet::new(),
             deleted_sessions: BTreeMap::new(),
             runtime: runtime.map(Arc::new),
@@ -2224,6 +2252,8 @@ impl LiveHost {
     fn finish_delete(&mut self, request: &DeleteRequest<'_>, deleted: bool) -> Result<()> {
         self.requests.retain(|(owner, _), _| *owner != request.id);
         self.watches.retain(|(owner, _)| *owner != request.id);
+        self.watch_snapshots
+            .retain(|(owner, _), _| *owner != request.id);
         self.serving
             .credential_deleted(request.id, deleted)
             .map_err(|_| Error::DeletionFailed)?;
@@ -2680,6 +2710,7 @@ impl LiveHost {
         };
         let mut open_watch = None;
         let mut close_watch = None;
+        let mut watch_snapshot_replacement = None;
         let outcome = match &message {
             Message::Subscribe { .. } => {
                 let outcome =
@@ -2696,6 +2727,12 @@ impl LiveHost {
                 let watch = watch.ok_or(Error::InvalidMessage)?;
                 let outcome =
                     validate_watch_response(request, Some(watch), response, self.limits.protocol)?;
+                let response = outcome
+                    .response
+                    .as_ref()
+                    .ok_or(Error::ApplicationRejected)?;
+                watch_snapshot_replacement =
+                    self.prepare_watch_snapshot_replacement(session, watch, response)?;
                 DispatchOutcome {
                     outcome: FrameOutcome::Resync {
                         revisions: resync_revisions,
@@ -2765,6 +2802,13 @@ impl LiveHost {
             })
         );
         if !cancelled_winner {
+            if let Some(watch) = watch {
+                self.commit_watch_snapshot_replacement(
+                    session,
+                    watch,
+                    watch_snapshot_replacement,
+                );
+            }
             if let Some(watch) = open_watch {
                 self.open_watch(session, watch, &outcome)?;
             }
@@ -3070,7 +3114,14 @@ impl LiveHost {
                                 response,
                                 self.limits.protocol,
                             )?;
-                            self.complete(
+                            let response = outcome
+                                .response
+                                .as_ref()
+                                .ok_or(Error::ApplicationRejected)?;
+                            let replacement = self.prepare_watch_snapshot_replacement(
+                                session, watch, response,
+                            )?;
+                            let completed = self.complete(
                                 session,
                                 request,
                                 &envelope,
@@ -3079,7 +3130,9 @@ impl LiveHost {
                                     response: outcome.response,
                                 },
                             )
-                            .await
+                            .await?;
+                            self.commit_watch_snapshot_replacement(session, watch, replacement);
+                            Ok(completed)
                         }
                         Message::Unsubscribe => {
                             let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
@@ -4298,6 +4351,7 @@ impl LiveHost {
             .close_watch(session, watch)
             .map_err(map_serving)?;
         self.watches.remove(&(session, watch));
+        self.watch_snapshots.remove(&(session, watch));
         Ok(())
     }
 
@@ -4307,18 +4361,55 @@ impl LiveHost {
         watch: [u8; 16],
         outcome: &DispatchOutcome,
     ) -> Result<()> {
-        let Some(Envelope {
-            message: Message::Snapshot { revision, .. },
-            ..
-        }) = outcome.response.as_ref()
-        else {
+        let response = outcome
+            .response
+            .as_ref()
+            .ok_or(Error::ApplicationRejected)?;
+        let Some(snapshot) = AcceptedWatchSnapshot::from_response(response)? else {
             return Err(Error::ApplicationRejected);
         };
         self.serving
-            .open_watch(session, watch, *revision)
+            .open_watch(session, watch, snapshot.revision)
             .map_err(map_serving)?;
         self.watches.insert((session, watch));
+        self.watch_snapshots.insert((session, watch), snapshot);
         Ok(())
+    }
+
+    /// A resync is a complete-root replacement fallback. Keep the server
+    /// watch identity stable, reject revision regressions, and permit same-
+    /// revision replay only when the complete visible tree and pinned snapshot
+    /// are unchanged.
+    fn prepare_watch_snapshot_replacement(
+        &self,
+        session: [u8; 16],
+        watch: [u8; 16],
+        response: &Envelope,
+    ) -> Result<Option<AcceptedWatchSnapshot>> {
+        let Some(candidate) = AcceptedWatchSnapshot::from_response(response)? else {
+            return Ok(None);
+        };
+        let current = self
+            .watch_snapshots
+            .get(&(session, watch))
+            .ok_or(Error::ApplicationRejected)?;
+        if candidate.revision < current.revision
+            || candidate.revision == current.revision && candidate != *current
+        {
+            return Err(Error::ApplicationRejected);
+        }
+        Ok(Some(candidate))
+    }
+
+    fn commit_watch_snapshot_replacement(
+        &mut self,
+        session: [u8; 16],
+        watch: [u8; 16],
+        candidate: Option<AcceptedWatchSnapshot>,
+    ) {
+        if let Some(candidate) = candidate {
+            self.watch_snapshots.insert((session, watch), candidate);
+        }
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<Envelope> {

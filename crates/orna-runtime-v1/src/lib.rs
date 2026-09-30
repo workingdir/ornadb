@@ -314,6 +314,22 @@ CREATE TABLE IF NOT EXISTS stream_retry_claim (
     key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
     identity_id TEXT NOT NULL CHECK (length(identity_id) > 0)
 );
+-- A provider receipt is keyed by the complete delivery identity, effect
+-- ordinal, provider and operation. Request bytes are never retained here;
+-- the digest fences a replay from changing the effect for an existing key.
+-- Applied receipts are retained because an explicit checkpoint reset may
+-- encounter any prior delivery again; pruning would remove its dedupe fence.
+CREATE TABLE IF NOT EXISTS stream_provider_effect_receipt (
+    effect_identity BLOB PRIMARY KEY CHECK (length(effect_identity) > 0),
+    request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
+    idempotency_key BLOB NOT NULL CHECK (length(idempotency_key) = 32),
+    lease_fence INTEGER NOT NULL CHECK (lease_fence > 0),
+    attempts_in_fence INTEGER NOT NULL CHECK (attempts_in_fence > 0),
+    total_attempts INTEGER NOT NULL CHECK (total_attempts > 0),
+    status INTEGER NOT NULL CHECK (status IN (1, 2, 3, 4)),
+    receipt BLOB CHECK (receipt IS NULL OR length(receipt) <= 16777216),
+    CHECK ((status = 2 AND receipt IS NOT NULL) OR (status <> 2 AND receipt IS NULL))
+);
 CREATE TABLE IF NOT EXISTS stream_replay_claim (
     identity_id TEXT PRIMARY KEY CHECK (length(identity_id) > 0),
     version INTEGER NOT NULL CHECK (version >= 0),
@@ -2657,6 +2673,146 @@ impl StreamSource for ListStreamSource {
 
 pub trait StreamHandler {
     fn handle(&mut self, item: &StreamItem) -> StreamHandlerResult;
+
+    /// Returns staged external effects only after `handle` has produced a
+    /// successful commit result. The runtime executes these intents before it
+    /// atomically commits Orna writes and the source checkpoint.
+    fn take_provider_effects(&mut self) -> Vec<StreamProviderEffect> {
+        Vec::new()
+    }
+
+    /// Replayability is a source-delivery promise, not an external effect
+    /// guarantee. A handler must opt into `IdempotentByKey` only when its
+    /// provider atomically deduplicates calls by the supplied stable key and
+    /// retains the resulting receipt across the runtime retry horizon.
+    fn provider_effect_contract(&self, _provider: &str) -> ProviderEffectDeliveryContract {
+        ProviderEffectDeliveryContract::ReplayableOnly
+    }
+
+    /// Applies one staged effect under the provider's durable idempotency
+    /// contract. Returned receipt bytes must be non-secret, deterministic for
+    /// a stable key, and no larger than `MAX_TERMINAL_OUTCOME_BYTES`.
+    fn apply_provider_effect_once<'a>(
+        &'a mut self,
+        _key: ProviderEffectKey,
+        _effect: &'a StreamProviderEffect,
+    ) -> ProviderEffectFuture<'a> {
+        Box::pin(std::future::ready(Err(ProviderEffectFailure::Unsupported)))
+    }
+}
+
+/// Delivery capability declared for external provider effects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderEffectDeliveryContract {
+    /// The provider can replay source deliveries but has no idempotent effect
+    /// operation. Runtime retries must not claim exactly-once effects.
+    ReplayableOnly,
+    /// The provider durably deduplicates concurrent/repeated effect calls by
+    /// the runtime-supplied `ProviderEffectKey`.
+    IdempotentByKey,
+}
+
+/// Stable key supplied to an idempotent provider for one effect of a delivery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct ProviderEffectKey([u8; 32]);
+
+impl ProviderEffectKey {
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// A non-secret receipt returned by an idempotent provider.
+pub type ProviderEffectFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<u8>, ProviderEffectFailure>> + 'a>>;
+
+/// Safe provider result class. Arbitrary error strings are intentionally not
+/// retained in runtime state or exposed through delivery diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderEffectFailure {
+    Retryable,
+    Permanent,
+    /// The provider may have applied the effect but did not confirm it. This
+    /// retries only because the declared idempotency contract reuses the key.
+    OutcomeUnknown,
+    Unsupported,
+}
+
+/// One external effect staged by a successful stream handler.
+#[derive(Clone, Eq, PartialEq)]
+pub struct StreamProviderEffect {
+    provider: String,
+    operation: String,
+    request: Vec<u8>,
+}
+
+impl fmt::Debug for StreamProviderEffect {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StreamProviderEffect")
+            .field("provider", &self.provider)
+            .field("operation", &self.operation)
+            .field("request_bytes", &self.request.len())
+            .field("request", &"<redacted>")
+            .finish()
+    }
+}
+
+impl StreamProviderEffect {
+    pub fn new(
+        provider: impl Into<String>,
+        operation: impl Into<String>,
+        request: Vec<u8>,
+    ) -> Result<Self, RuntimeError> {
+        let provider = provider.into();
+        let operation = operation.into();
+        if !valid_provider_effect_name(&provider)
+            || !valid_provider_effect_name(&operation)
+            || request.len() > MAX_TERMINAL_OUTCOME_BYTES
+        {
+            return Err(RuntimeError::InvalidIdentity);
+        }
+        Ok(Self {
+            provider,
+            operation,
+            request,
+        })
+    }
+
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    pub fn operation(&self) -> &str {
+        &self.operation
+    }
+
+    pub fn request(&self) -> &[u8] {
+        &self.request
+    }
+}
+
+fn valid_provider_effect_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'/')
+        })
+}
+
+const MAX_STREAM_PROVIDER_EFFECTS: usize = 64;
+/// Maximum provider calls made for one effect under one delivery lease.
+pub const MAX_STREAM_PROVIDER_EFFECT_ATTEMPTS: u32 = 3;
+
+enum ProviderEffectPreparation {
+    Cached,
+    Started { attempt: u32 },
+    Rejected(ProviderEffectFailure),
+}
+
+enum ProviderEffectDispatchError {
+    Runtime(RuntimeError),
+    Provider(ProviderEffectFailure),
 }
 
 /// Lets a stream owner stop admission between delivery transactions.
@@ -5706,6 +5862,338 @@ impl RuntimeState {
         let _ = self.release_stream_lease(writer, lease).await;
     }
 
+    async fn dispatch_stream_provider_effects<H: StreamHandler>(
+        &self,
+        writer: WriterLease,
+        lease: &DeliveryLease,
+        handler: &mut H,
+        effects: &[StreamProviderEffect],
+    ) -> Result<(), ProviderEffectDispatchError> {
+        if effects.len() > MAX_STREAM_PROVIDER_EFFECTS {
+            return Err(ProviderEffectDispatchError::Provider(
+                ProviderEffectFailure::Permanent,
+            ));
+        }
+        for (ordinal, effect) in effects.iter().enumerate() {
+            if handler.provider_effect_contract(effect.provider())
+                != ProviderEffectDeliveryContract::IdempotentByKey
+            {
+                return Err(ProviderEffectDispatchError::Provider(
+                    ProviderEffectFailure::Unsupported,
+                ));
+            }
+
+            let delivery = lease.delivery.canonical();
+            let mut identity = b"ORNA-STREAM-PROVIDER-EFFECT/v1\0".to_vec();
+            for part in [
+                delivery.as_bytes(),
+                effect.provider().as_bytes(),
+                effect.operation().as_bytes(),
+            ] {
+                identity.extend_from_slice(&(part.len() as u64).to_be_bytes());
+                identity.extend_from_slice(part);
+            }
+            identity.extend_from_slice(&(ordinal as u64).to_be_bytes());
+
+            let request_digest: [u8; 32] = Sha256::digest(effect.request()).into();
+            let mut key_hash = Sha256::new();
+            key_hash.update(b"ORNA-STREAM-PROVIDER-EFFECT-KEY/v1\0");
+            key_hash.update((identity.len() as u64).to_be_bytes());
+            key_hash.update(&identity);
+            key_hash.update(request_digest);
+            let effect_key = ProviderEffectKey(key_hash.finalize().into());
+
+            loop {
+                let preparation = self
+                    .prepare_stream_provider_effect_attempt(
+                        writer,
+                        lease,
+                        &identity,
+                        request_digest,
+                        effect_key,
+                    )
+                    .await
+                    .map_err(ProviderEffectDispatchError::Runtime)?;
+                let attempt = match preparation {
+                    ProviderEffectPreparation::Cached => break,
+                    ProviderEffectPreparation::Started { attempt } => attempt,
+                    ProviderEffectPreparation::Rejected(failure) => {
+                        return Err(ProviderEffectDispatchError::Provider(failure));
+                    }
+                };
+
+                match handler
+                    .apply_provider_effect_once(effect_key, effect)
+                    .await
+                {
+                    Ok(receipt) if receipt.len() <= MAX_TERMINAL_OUTCOME_BYTES => {
+                        self.complete_stream_provider_effect(
+                            writer,
+                            lease,
+                            &identity,
+                            request_digest,
+                            effect_key,
+                            receipt,
+                        )
+                        .await
+                        .map_err(ProviderEffectDispatchError::Runtime)?;
+                        break;
+                    }
+                    Ok(_) => {
+                        self.fail_stream_provider_effect(
+                            writer,
+                            lease,
+                            &identity,
+                            false,
+                        )
+                        .await
+                        .map_err(ProviderEffectDispatchError::Runtime)?;
+                        return Err(ProviderEffectDispatchError::Provider(
+                            ProviderEffectFailure::Permanent,
+                        ));
+                    }
+                    Err(failure) => {
+                        let retryable = matches!(
+                            failure,
+                            ProviderEffectFailure::Retryable
+                                | ProviderEffectFailure::OutcomeUnknown
+                        );
+                        self.fail_stream_provider_effect(
+                            writer,
+                            lease,
+                            &identity,
+                            retryable,
+                        )
+                        .await
+                        .map_err(ProviderEffectDispatchError::Runtime)?;
+                        if retryable && attempt < MAX_STREAM_PROVIDER_EFFECT_ATTEMPTS {
+                            continue;
+                        }
+                        return Err(ProviderEffectDispatchError::Provider(failure));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn prepare_stream_provider_effect_attempt(
+        &self,
+        writer: WriterLease,
+        lease: &DeliveryLease,
+        identity: &[u8],
+        request_digest: [u8; 32],
+        effect_key: ProviderEffectKey,
+    ) -> Result<ProviderEffectPreparation, RuntimeError> {
+        if lease.purpose != LeasePurpose::Deliver {
+            return Ok(ProviderEffectPreparation::Rejected(
+                ProviderEffectFailure::Permanent,
+            ));
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, writer).await?;
+        let stream_key = stream_key_id(&lease.delivery.checkpoint_key());
+        let mut leases = tx
+            .query(
+                "SELECT delivery_position, successor_position, fence, purpose \
+                 FROM stream_lease WHERE key_id = ?1",
+                params![stream_key],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let Some(active_lease) = leases
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        else {
+            return Err(RuntimeError::RequestStateConflict);
+        };
+        let position: String = active_lease
+            .get(0)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let successor: String = active_lease
+            .get(1)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let fence: i64 = active_lease
+            .get(2)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let purpose: i64 = active_lease
+            .get(3)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if position != lease.delivery.position.token.as_str()
+            || successor != lease.delivery.successor.token.as_str()
+            || fence != i64::try_from(lease.fence).map_err(|_| RuntimeError::RecoveryInvalid)?
+            || purpose != 1
+        {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+
+        let mut rows = tx
+            .query(
+                "SELECT request_digest, idempotency_key, lease_fence, \
+                        attempts_in_fence, total_attempts, status, receipt \
+                 FROM stream_provider_effect_receipt WHERE effect_identity = ?1",
+                params![identity],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let current_fence = i64::try_from(lease.fence).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let effect_key = effect_key.as_bytes().to_vec();
+        let preparation = if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let stored_digest: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let stored_key: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let stored_fence: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let attempts: i64 = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let total_attempts: i64 = row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let status: i64 = row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let receipt: Option<Vec<u8>> = row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if stored_digest != request_digest || stored_key != effect_key {
+                ProviderEffectPreparation::Rejected(ProviderEffectFailure::Permanent)
+            } else if status == 2 {
+                if receipt
+                    .as_ref()
+                    .is_none_or(|receipt| receipt.len() > MAX_TERMINAL_OUTCOME_BYTES)
+                {
+                    return Err(RuntimeError::RecoveryInvalid);
+                }
+                tx.commit()
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                return Ok(ProviderEffectPreparation::Cached);
+            } else if receipt.is_some() || !(1..=4).contains(&status) {
+                return Err(RuntimeError::RecoveryInvalid);
+            } else if stored_fence == current_fence && status == 1 {
+                ProviderEffectPreparation::Rejected(ProviderEffectFailure::OutcomeUnknown)
+            } else if stored_fence == current_fence
+                && (attempts >= i64::from(MAX_STREAM_PROVIDER_EFFECT_ATTEMPTS) || status == 4)
+            {
+                ProviderEffectPreparation::Rejected(if status == 4 {
+                    ProviderEffectFailure::Permanent
+                } else {
+                    ProviderEffectFailure::Retryable
+                })
+            } else {
+                let attempts_in_fence = if stored_fence == current_fence {
+                    attempts + 1
+                } else {
+                    1
+                };
+                let total_attempts = total_attempts
+                    .checked_add(1)
+                    .ok_or(RuntimeError::RecoveryInvalid)?;
+                tx.execute(
+                    "UPDATE stream_provider_effect_receipt \
+                     SET lease_fence = ?1, attempts_in_fence = ?2, \
+                         total_attempts = ?3, status = 1, receipt = NULL \
+                     WHERE effect_identity = ?4",
+                    params![current_fence, attempts_in_fence, total_attempts, identity],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                ProviderEffectPreparation::Started {
+                    attempt: u32::try_from(attempts_in_fence)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                }
+            }
+        } else {
+            tx.execute(
+                "INSERT INTO stream_provider_effect_receipt \
+                 (effect_identity, request_digest, idempotency_key, lease_fence, \
+                  attempts_in_fence, total_attempts, status, receipt) \
+                 VALUES (?1, ?2, ?3, ?4, 1, 1, 1, NULL)",
+                params![identity, request_digest.to_vec(), effect_key, current_fence],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            ProviderEffectPreparation::Started { attempt: 1 }
+        };
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(preparation)
+    }
+
+    async fn complete_stream_provider_effect(
+        &self,
+        writer: WriterLease,
+        lease: &DeliveryLease,
+        identity: &[u8],
+        request_digest: [u8; 32],
+        effect_key: ProviderEffectKey,
+        receipt: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, writer).await?;
+        let changed = tx
+            .execute(
+                "UPDATE stream_provider_effect_receipt \
+                 SET status = 2, receipt = ?1 \
+                 WHERE effect_identity = ?2 AND request_digest = ?3 \
+                   AND idempotency_key = ?4 AND lease_fence = ?5 AND status = 1",
+                params![
+                    receipt,
+                    identity,
+                    request_digest.to_vec(),
+                    effect_key.as_bytes().to_vec(),
+                    i64::try_from(lease.fence).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if changed != 1 {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    async fn fail_stream_provider_effect(
+        &self,
+        writer: WriterLease,
+        lease: &DeliveryLease,
+        identity: &[u8],
+        retryable: bool,
+    ) -> Result<(), RuntimeError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, writer).await?;
+        let changed = tx
+            .execute(
+                "UPDATE stream_provider_effect_receipt \
+                 SET status = ?1, receipt = NULL \
+                 WHERE effect_identity = ?2 AND lease_fence = ?3 AND status = 1",
+                params![
+                    if retryable { 3 } else { 4 },
+                    identity,
+                    i64::try_from(lease.fence).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if changed != 1 {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
     /// Runs at most one provider delivery. Polling, handler execution and
     /// durable publication stay separated: only a successful handler result
     /// reaches the atomic mutation/checkpoint boundary.
@@ -5899,7 +6387,7 @@ impl RuntimeState {
             }
         };
 
-        let (handler_result, handler_panicked) =
+        let (mut handler_result, handler_panicked) =
             match catch_unwind(AssertUnwindSafe(|| handler.handle(&item))) {
                 Ok(result) => (result, false),
                 Err(_) => (
@@ -5911,6 +6399,7 @@ impl RuntimeState {
                 ),
             };
         if !handler_panicked && control.cancelled() {
+            let _ = handler.take_provider_effects();
             let result = match self
                 .stream_backend(writer)
                 .apply_async(CommitIntent::Cancel {
@@ -5940,6 +6429,48 @@ impl RuntimeState {
                     Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
                 }
             };
+        }
+
+        let effects = if handler_panicked {
+            Vec::new()
+        } else {
+            handler.take_provider_effects()
+        };
+        if matches!(
+            &handler_result,
+            StreamHandlerResult::Commit(_)
+                | StreamHandlerResult::CommitValidatedTable(_)
+        ) && !effects.is_empty()
+        {
+            match self
+                .dispatch_stream_provider_effects(
+                    writer,
+                    &lease_for_cleanup,
+                    handler,
+                    &effects,
+                )
+                .await
+            {
+                Ok(()) => {}
+                Err(ProviderEffectDispatchError::Runtime(error)) => {
+                    self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                        .await;
+                    return Err(StreamStepError::Runtime(error));
+                }
+                Err(ProviderEffectDispatchError::Provider(failure)) => {
+                    let class = match failure {
+                        ProviderEffectFailure::Permanent | ProviderEffectFailure::Unsupported => {
+                            DiagnosticClass::Permanent
+                        }
+                        ProviderEffectFailure::Retryable
+                        | ProviderEffectFailure::OutcomeUnknown => DiagnosticClass::Transient,
+                    };
+                    handler_result = StreamHandlerResult::Fail(SafeDiagnostic {
+                        code: DiagnosticCode::ProviderUnavailable,
+                        class,
+                    });
+                }
+            }
         }
 
         match handler_result {
@@ -11383,14 +11914,14 @@ fn bigint_to_i64(value: &BigInt) -> Result<i64, RuntimeError> {
 }
 
 fn encode_capture(capture: &CwdCapture) -> Result<Vec<u8>, RuntimeError> {
-    Value::new(capture.snapshot().raw())
-        .and_then(|value| value.encode())
+    capture
+        .snapshot()
+        .encode()
         .map_err(|_| RuntimeError::RecoveryInvalid)
 }
 
 fn decode_capture(bytes: Vec<u8>, digest: [u8; 32]) -> Result<CwdCapture, RuntimeError> {
-    let value = Value::decode(&bytes).map_err(|_| RuntimeError::RecoveryInvalid)?;
-    let snapshot = Snapshot::decode(value.raw()).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let snapshot = Snapshot::decode_bytes(&bytes).map_err(|_| RuntimeError::RecoveryInvalid)?;
     CwdCapture::new(snapshot, digest).map_err(|_| RuntimeError::RecoveryInvalid)
 }
 
@@ -13313,33 +13844,7 @@ fn encode_row_ref(reference: &RowRef) -> Result<Vec<u8>, RuntimeError> {
 }
 
 fn decode_row_ref(bytes: Vec<u8>) -> Result<RowRef, RuntimeError> {
-    let value = Value::decode(&bytes).map_err(|_| RuntimeError::RecoveryInvalid)?;
-    let OvbRaw::Tag(60010, payload) = value.raw() else {
-        return Err(RuntimeError::RecoveryInvalid);
-    };
-    let OvbRaw::Array(parts) = payload.as_ref() else {
-        return Err(RuntimeError::RecoveryInvalid);
-    };
-    let [
-        OvbRaw::Tag(37, database),
-        OvbRaw::Tag(37, table),
-        key,
-        snapshot,
-    ] = parts.as_slice()
-    else {
-        return Err(RuntimeError::RecoveryInvalid);
-    };
-    let (OvbRaw::Bytes(database), OvbRaw::Bytes(table)) = (database.as_ref(), table.as_ref())
-    else {
-        return Err(RuntimeError::RecoveryInvalid);
-    };
-    RowRef::new(
-        fixed(database.clone())?,
-        fixed(table.clone())?,
-        key.clone(),
-        Snapshot::decode(snapshot).map_err(|_| RuntimeError::RecoveryInvalid)?,
-    )
-    .map_err(|_| RuntimeError::RecoveryInvalid)
+    RowRef::decode(&bytes).map_err(|_| RuntimeError::RecoveryInvalid)
 }
 
 fn encode_nonnegative_bigint(value: &BigInt) -> Result<Vec<u8>, RuntimeError> {
@@ -15875,13 +16380,19 @@ mod tests {
     use super::*;
     use std::{
         cell::Cell,
-        collections::VecDeque,
+        collections::{BTreeMap, VecDeque},
         future::{Ready, ready},
         path::Path,
         process::Command,
-        sync::atomic::{AtomicBool, Ordering},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
     };
     use tempfile::TempDir;
+
+    const PROVIDER_EFFECT_FIXTURE: &str =
+        include_str!("../tests/fixtures/provider-effect-once.orna");
 
     fn checkpoint_snapshot_component(value: &str) -> Component {
         Component::new(value).expect("test checkpoint component is valid")
@@ -18667,6 +19178,114 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct MockIdempotentProvider {
+        calls: AtomicUsize,
+        applied_effects: AtomicUsize,
+        fail_responses_until: usize,
+        receipts: Mutex<BTreeMap<[u8; 32], Vec<u8>>>,
+    }
+
+    impl MockIdempotentProvider {
+        fn new(fail_responses_until: usize) -> Self {
+            Self {
+                fail_responses_until,
+                ..Self::default()
+            }
+        }
+
+        fn apply_once(
+            &self,
+            key: ProviderEffectKey,
+            effect: &StreamProviderEffect,
+        ) -> Result<Vec<u8>, ProviderEffectFailure> {
+            assert_eq!(effect.request(), PROVIDER_EFFECT_FIXTURE.as_bytes());
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let receipt = {
+                let mut receipts = self.receipts.lock().expect("provider receipt lock");
+                receipts
+                    .entry(*key.as_bytes())
+                    .or_insert_with(|| {
+                        self.applied_effects.fetch_add(1, Ordering::SeqCst);
+                        b"fixture-provider-receipt-v1".to_vec()
+                    })
+                    .clone()
+            };
+            if call < self.fail_responses_until {
+                Err(ProviderEffectFailure::OutcomeUnknown)
+            } else {
+                Ok(receipt)
+            }
+        }
+    }
+
+    struct ProviderEffectCandidateValidator {
+        tables: Vec<String>,
+        reject: bool,
+    }
+
+    impl StreamTableCandidateValidator for ProviderEffectCandidateValidator {
+        fn tables(&self) -> &[String] {
+            &self.tables
+        }
+
+        fn validate(&mut self, _: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+            if self.reject {
+                Err(SafeDiagnostic {
+                    code: DiagnosticCode::Internal,
+                    class: DiagnosticClass::Permanent,
+                })
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    struct ProviderEffectTestHandler {
+        calls: usize,
+        provider: Arc<MockIdempotentProvider>,
+        reject_candidate: bool,
+        effects: Vec<StreamProviderEffect>,
+    }
+
+    impl StreamHandler for ProviderEffectTestHandler {
+        fn handle(&mut self, item: &StreamItem) -> StreamHandlerResult {
+            self.calls += 1;
+            self.effects = vec![
+                StreamProviderEffect::new(
+                    "fixture.provider",
+                    "archive_event",
+                    item.payload.clone(),
+                )
+                .expect("valid fixture provider effect"),
+            ];
+            StreamHandlerResult::CommitValidatedTable(StreamValidatedTableMutationBatch {
+                mutations: vec![table_mutation(89, 8, Some(9))],
+                next_digest: digest(88),
+                validator: Box::new(ProviderEffectCandidateValidator {
+                    tables: vec!["books".into()],
+                    reject: self.reject_candidate && self.calls == 1,
+                }),
+            })
+        }
+
+        fn take_provider_effects(&mut self) -> Vec<StreamProviderEffect> {
+            std::mem::take(&mut self.effects)
+        }
+
+        fn provider_effect_contract(&self, _: &str) -> ProviderEffectDeliveryContract {
+            ProviderEffectDeliveryContract::IdempotentByKey
+        }
+
+        fn apply_provider_effect_once<'a>(
+            &'a mut self,
+            key: ProviderEffectKey,
+            effect: &'a StreamProviderEffect,
+        ) -> ProviderEffectFuture<'a> {
+            Box::pin(std::future::ready(self.provider.apply_once(key, effect)))
+        }
+    }
+
     struct SequenceSource {
         key: CheckpointKey,
         descriptor: StreamSourceDescriptor,
@@ -20100,6 +20719,169 @@ mod tests {
                 .expect("typed delivery checkpoint")
                 .digest,
             digest(9)
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_provider_effect_retry_is_bounded_and_reuses_provider_receipt() {
+        assert!(orna_syntax_v1::parse_module(PROVIDER_EFFECT_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let key = stream_delivery("provider-effect-retry", "provider-effect-next").checkpoint_key();
+        let provider = Arc::new(MockIdempotentProvider::new(
+            MAX_STREAM_PROVIDER_EFFECT_ATTEMPTS as usize,
+        ));
+        let failure = {
+            let state = open_state(&repo).await;
+            let writer = state.acquire_lease(id(91)).await.unwrap();
+            let checkpoint_before = state.stream_checkpoint(&key).await.unwrap();
+            let mut source = ListStreamSource::new(
+                key.clone(),
+                vec![PROVIDER_EFFECT_FIXTURE.as_bytes().to_vec()],
+            );
+            let mut handler = ProviderEffectTestHandler {
+                calls: 0,
+                provider: Arc::clone(&provider),
+                reject_candidate: false,
+                effects: Vec::new(),
+            };
+            let failure = match state
+                .run_stream_once(writer, &key, &mut source, &mut handler)
+                .await
+                .unwrap()
+            {
+                StreamStep::Failed { failure } => failure,
+                other => panic!("retry budget must retain the failed delivery: {other:?}"),
+            };
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+            assert_eq!(provider.applied_effects.load(Ordering::SeqCst), 1);
+            assert_eq!(failure.attempts, 1);
+            assert_eq!(state.stream_checkpoint(&key).await.unwrap(), checkpoint_before);
+            failure
+        };
+
+        // A new owner performs the explicit retry. The provider saw an
+        // uncertain response three times, but its durable key receipt makes
+        // the fourth call return the same effect result without applying it
+        // again. Replayable delivery alone does not provide this property.
+        let state = open_state(&repo).await;
+        let writer = state.recover_abandoned(id(91), id(92)).await.unwrap();
+        let checkpoint = state.stream_checkpoint(&key).await.unwrap();
+        let retry = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Retry {
+                failure: failure.identity.clone(),
+                expected_version: failure.version,
+                expected: CheckpointPrecondition::from(&checkpoint),
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::RetryScheduled { failure } => failure,
+            other => panic!("failed provider effect must be explicitly retried: {other:?}"),
+        };
+        assert_eq!(retry.attempts, 2);
+        let mut source = ListStreamSource::new(
+            key.clone(),
+            vec![PROVIDER_EFFECT_FIXTURE.as_bytes().to_vec()],
+        );
+        let mut handler = ProviderEffectTestHandler {
+            calls: 0,
+            provider: Arc::clone(&provider),
+            reject_candidate: false,
+            effects: Vec::new(),
+        };
+        assert!(matches!(
+            state
+                .run_stream_once(writer, &key, &mut source, &mut handler)
+                .await
+                .unwrap(),
+            StreamStep::Committed {
+                checkpoint: StreamCheckpoint { version: 1, .. }
+            }
+        ));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+        assert_eq!(provider.applied_effects.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state.committed_table_row("books", &[8]).await.unwrap(),
+            Some(vec![9])
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_provider_receipt_survives_restart_after_later_commit_rejection() {
+        assert!(orna_syntax_v1::parse_module(PROVIDER_EFFECT_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let key = stream_delivery("provider-effect-receipt", "provider-effect-next")
+            .checkpoint_key();
+        let provider = Arc::new(MockIdempotentProvider::new(0));
+        let failure = {
+            let state = open_state(&repo).await;
+            let writer = state.acquire_lease(id(93)).await.unwrap();
+            let checkpoint_before = state.stream_checkpoint(&key).await.unwrap();
+            let mut source = ListStreamSource::new(
+                key.clone(),
+                vec![PROVIDER_EFFECT_FIXTURE.as_bytes().to_vec()],
+            );
+            let mut handler = ProviderEffectTestHandler {
+                calls: 0,
+                provider: Arc::clone(&provider),
+                reject_candidate: true,
+                effects: Vec::new(),
+            };
+            let failure = match state
+                .run_stream_once(writer, &key, &mut source, &mut handler)
+                .await
+                .unwrap()
+            {
+                StreamStep::Failed { failure } => failure,
+                other => panic!("candidate rejection must retain the delivery: {other:?}"),
+            };
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(provider.applied_effects.load(Ordering::SeqCst), 1);
+            assert_eq!(state.stream_checkpoint(&key).await.unwrap(), checkpoint_before);
+            failure
+        };
+
+        let state = open_state(&repo).await;
+        let writer = state.recover_abandoned(id(93), id(94)).await.unwrap();
+        let checkpoint = state.stream_checkpoint(&key).await.unwrap();
+        match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Retry {
+                failure: failure.identity.clone(),
+                expected_version: failure.version,
+                expected: CheckpointPrecondition::from(&checkpoint),
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::RetryScheduled { .. } => {}
+            other => panic!("durable provider receipt retry was rejected: {other:?}"),
+        }
+        let mut source = ListStreamSource::new(
+            key.clone(),
+            vec![PROVIDER_EFFECT_FIXTURE.as_bytes().to_vec()],
+        );
+        let mut handler = ProviderEffectTestHandler {
+            calls: 0,
+            provider: Arc::clone(&provider),
+            reject_candidate: false,
+            effects: Vec::new(),
+        };
+        assert!(matches!(
+            state
+                .run_stream_once(writer, &key, &mut source, &mut handler)
+                .await
+                .unwrap(),
+            StreamStep::Committed {
+                checkpoint: StreamCheckpoint { version: 1, .. }
+            }
+        ));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.applied_effects.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state.committed_table_row("books", &[8]).await.unwrap(),
+            Some(vec![9])
         );
     }
 
