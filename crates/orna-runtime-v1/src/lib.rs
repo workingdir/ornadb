@@ -20730,6 +20730,26 @@ mod tests {
             "first() crosses the rejected child, then stops before the nested failing tail"
         );
 
+        // The reference does not spell out `first()` exhausting a filtered
+        // outer bound with no match. It returns the empty fallback after the
+        // third in-bound rejection, without projecting the excluded failure.
+        let (first_exhausts_filtered_outer_bound, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-first-exhausts-bound.orna"
+                ),
+            );
+        assert_eq!(
+            first_exhausts_filtered_outer_bound.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "first() exhausts only the outer prefix when its filter has no match"
+        );
+
         // The reference fixes left-to-right union order and bounded
         // enumeration but leaves projection failures across a child-local
         // take boundary implicit. Keep the left child lazy: its excluded
