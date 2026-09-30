@@ -153,3 +153,9 @@ The fixture documents this local mutation order where the reference is silent.
 owner's move-aside target. The owner's nested failure closure moves that blocker
 away, then the primary blocker, competitor, and owner complete their retries in
 order. The fixture records the local closure log where the reference is silent.
+
+`owner_move_closure_deletes_blocker_in_competitor_tail` covers the paired
+release path: the owner's move-aside target is deleted inside its failure
+closure, then the primary blocker and competitor finish their retries before
+the owner returns. The fixture records the adapter's local caught-retry order
+where the reference is silent.
