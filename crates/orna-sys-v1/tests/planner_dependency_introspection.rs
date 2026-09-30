@@ -44,6 +44,8 @@ const FIRST_REMAINDER_PARTIAL_BOUND_EDGE_TAIL: &str =
     include_str!("fixtures/first_remainder_partial_bound_edge_tail.orna");
 const FIRST_REMAINDER_PARTIAL_BOUND_PIN_TAIL: &str =
     include_str!("fixtures/first_remainder_partial_bound_pin_tail.orna");
+const FIRST_REMAINDER_UNKNOWN_JOIN_BOUND_TAIL: &str =
+    include_str!("fixtures/first_remainder_unknown_join_bound_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -5459,6 +5461,118 @@ fn explain_pins_first_remainder_bound_across_unknown_mutation_tail() {
 
     let surface = serde_json::to_value(&first_remainder)
         .expect("first-remainder bound across unknown mutation surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_pins_first_remainder_bound_across_unknown_join() {
+    let parsed = orna_syntax_v1::parse_module(FIRST_REMAINDER_UNKNOWN_JOIN_BOUND_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 4);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // 4-KiB heuristic, aligned MAX-4095 bytes contribute 2^52-1 to the
+    // partial scan bound and the first remainder byte contributes 2^52. Keep
+    // an unknown join between that scan and the row-only delete bound: the
+    // aligned lower bound reaches MAX, while the first remainder exceeds it.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const ALIGNED_SOURCE_BYTES: u64 = u64::MAX - 4_095;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = ALIGNED_SOURCE_BYTES + 1;
+    let delete_rows = u64::MAX - MAX_BYTE_BLOCKS + 1;
+    let explain = |source_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:first-remainder-unknown-join-bound-tail",
+            ),
+            source: obj("table:FirstRemainderUnknownJoinSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(source_bytes),
+                mutable_branch: None,
+            }),
+            joins: vec![QueryJoinDescription {
+                source: obj("table:FirstRemainderUnknownJoinRight"),
+                statistics: None,
+                predicate: None,
+            }],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:FirstRemainderUnknownJoinTarget"),
+                kind: QueryMutationKind::Delete,
+                estimated_affected_rows: Some(delete_rows),
+                estimated_write_bytes: None,
+                estimated_table_rows_before: Some(delete_rows),
+            }],
+            materialize_into: Some(obj("materialization:first-remainder-unknown-join")),
+        })
+        .expect("first-remainder partial bound across unknown join")
+    };
+
+    let aligned = explain(ALIGNED_SOURCE_BYTES);
+    assert_eq!(aligned.plan().estimated_cost(), None);
+    assert_eq!(aligned.root().details().get("estimated_cost_overflow"), None);
+    let unknown_right_scan = aligned
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:FirstRemainderUnknownJoinRight"))
+        })
+        .expect("unknown right scan between the partial bounds");
+    assert_eq!(unknown_right_scan.estimated_work(), None);
+    let aligned_join = aligned
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("join with unknown input statistics");
+    assert_eq!(aligned_join.estimated_work(), None);
+
+    let first_remainder = explain(FIRST_REMAINDER_SOURCE_BYTES);
+    assert_eq!(first_remainder.plan().estimated_cost(), None);
+    assert_eq!(
+        first_remainder
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the first remainder scan bound survives the unknown join and crosses MAX"
+    );
+    let scan = first_remainder
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:FirstRemainderUnknownJoinSource"))
+        })
+        .expect("first-remainder source scan");
+    assert_eq!(scan.estimated_rows(), None);
+    assert_eq!(scan.estimated_bytes(), Some(FIRST_REMAINDER_SOURCE_BYTES));
+    assert_eq!(scan.estimated_work(), None);
+    let delete = first_remainder
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned())))
+        .expect("row-only delete lower bound after unknown join");
+    assert_eq!(delete.estimated_rows(), Some(delete_rows));
+    assert_eq!(delete.estimated_bytes(), None);
+    assert_eq!(delete.estimated_work(), None);
+    assert!(first_remainder.nodes().iter().all(|node| {
+        node.estimated_work().is_none()
+            && node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&first_remainder)
+        .expect("first-remainder unknown-join overflow surface");
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
