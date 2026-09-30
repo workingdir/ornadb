@@ -625,6 +625,37 @@ fn checkpoint_budget_tail_reports_only_the_crossing_id_after_a_row_conflict() {
 }
 
 #[test]
+fn checkpoint_delete_update_budget_tail_reports_the_missing_side_identity() {
+    let (mut base, mut left, mut right, mut source) = row_checkpoint_conflict_inputs();
+    base.checkpoints.clear();
+    left.checkpoints.clear();
+    right.checkpoints.clear();
+
+    // Deletion-versus-update has an absent branch value, but impact remains
+    // attached to the stable checkpoint ID when it crosses the shared budget.
+    let checkpoint_id = b"consumer/deleted-on-left".to_vec();
+    base.checkpoints.insert(
+        checkpoint_id.clone(),
+        CheckpointGeneration { generation: 4, position: Some(b"base-token".to_vec()) },
+    );
+    right.checkpoints.insert(
+        checkpoint_id.clone(),
+        CheckpointGeneration { generation: 5, position: Some(b"right-token".to_vec()) },
+    );
+
+    let one_detail_budget = BranchMergeBudget { max_rows_examined: 100, max_conflicts: 1 };
+    let error = merge_three_way_snapshots(&base, &left, &right, &mut source, one_detail_budget)
+        .unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("checkpoint delete/update is the first conflict beyond the row detail")
+    };
+    assert_eq!(report.conflicts_lower_bound, 2);
+    assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+    assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
+    assert_eq!(source.visited.len(), 3);
+}
+
+#[test]
 fn schema_conflict_is_a_boundary_before_row_reads_and_checkpoint_resolution() {
     let base_checkpoint = CheckpointGeneration {
         generation: 4,
