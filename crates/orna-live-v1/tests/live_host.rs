@@ -4053,9 +4053,31 @@ fn durable_unknown_status_retry_survives_orphan_resolution() {
         now: 6,
     }))
     .unwrap();
+    let mut second_issuer = Issuer(3, None);
+    let second_subscribe = subscribe();
+    let second_credential = block_on(recovered.create(
+        CreateRequest {
+            id: [2; 16],
+            origin: origin(),
+            expires_at: 100,
+            now: 0,
+            subscribe: &second_subscribe,
+        },
+        &mut second_issuer,
+    ))
+    .unwrap();
+    block_on(recovered.resume(ResumeRequest {
+        id: [2; 16],
+        origin: &origin(),
+        credential: &second_credential,
+        attachment: [7; 16],
+        now: 7,
+    }))
+    .unwrap();
     let mut recovered_transport =
         LiveTransport::new(recovered, TransportLimits::default()).unwrap();
     let mut recovered_socket = WebSocketState::new([6; 16]);
+    let mut second_socket = WebSocketState::new([7; 16]);
     let mut recovered_application = UnitApplication::default();
 
     let orphan_status_request = Envelope {
@@ -4536,6 +4558,93 @@ fn durable_unknown_status_retry_survives_orphan_resolution() {
         self_target_status
     );
 
+    // Request and target IDs are scoped by session. Reusing the same query
+    // bytes across sessions may therefore observe different target snapshots.
+    let cross_session_status_request = Envelope {
+        request: Some([44; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [37; 16],
+            fingerprint: event_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let second_session_status_output = block_on(recovered_transport.receive_with_application(
+        &mut second_socket,
+        35,
+        &masked_binary_payload(&cross_session_status_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &second_session_status_output[0] else {
+        panic!("the other session has an independent target snapshot");
+    };
+    let second_session_status = Envelope::decode(payload, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        &second_session_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Unknown,
+            fingerprint: None,
+            result: None,
+        } if *target == [37; 16]
+    ));
+
+    let first_session_status_output = block_on(recovered_transport.receive_with_application(
+        &mut recovered_socket,
+        36,
+        &masked_binary_payload(&cross_session_status_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &first_session_status_output[0] else {
+        panic!("the owning session still sees its orphaned target");
+    };
+    let first_session_status = Envelope::decode(payload, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        &first_session_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Orphaned,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [37; 16]
+            && *fingerprint == event_fingerprint
+            && result == &expected_result
+    ));
+
+    let second_session_status_retry = block_on(recovered_transport.receive_with_application(
+        &mut second_socket,
+        37,
+        &masked_binary_payload(&cross_session_status_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &second_session_status_retry[0] else {
+        panic!("the second session replays its own Unknown snapshot");
+    };
+    assert_eq!(
+        Envelope::decode(payload, Limits::default().protocol).unwrap(),
+        second_session_status
+    );
+
+    let first_session_status_retry = block_on(recovered_transport.receive_with_application(
+        &mut recovered_socket,
+        38,
+        &masked_binary_payload(&cross_session_status_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &first_session_status_retry[0] else {
+        panic!("the owning session replays its Orphaned snapshot");
+    };
+    assert_eq!(
+        Envelope::decode(payload, Limits::default().protocol).unwrap(),
+        first_session_status
+    );
+
     let post_collision_status_request = Envelope {
         request: Some([43; 16]),
         watch: None,
@@ -4549,7 +4658,7 @@ fn durable_unknown_status_retry_survives_orphan_resolution() {
     .unwrap();
     let post_collision_status_output = block_on(recovered_transport.receive_with_application(
         &mut recovered_socket,
-        35,
+        39,
         &masked_binary_payload(&post_collision_status_request),
         &mut recovered_application,
     ))
@@ -4571,7 +4680,7 @@ fn durable_unknown_status_retry_survives_orphan_resolution() {
 
     let final_event_retry = block_on(recovered_transport.receive_with_application(
         &mut recovered_socket,
-        36,
+        40,
         &masked_binary_payload(&event_request),
         &mut recovered_application,
     ))
