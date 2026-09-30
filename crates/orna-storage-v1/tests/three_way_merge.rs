@@ -890,6 +890,135 @@ fn zero_conflict_budget_allows_row_tombstone_and_checkpoint_deletes() {
 }
 
 #[test]
+fn segmented_zero_conflict_budget_stops_after_tombstone_before_checkpoints() {
+    let candidate_a = integer(10);
+    let candidate_b = integer(20);
+    let (low_key, high_key) = if candidate_a.encode().unwrap() < candidate_b.encode().unwrap() {
+        (candidate_a, candidate_b)
+    } else {
+        (candidate_b, candidate_a)
+    };
+    let boundary = high_key.encode().unwrap();
+    let low_range = KeyRange::new(None, Some(boundary.clone())).unwrap();
+    let high_range = KeyRange::new(Some(boundary), None).unwrap();
+    let split_manifest = |table_digest, low_digest, high_digest, low_locator: &[u8], high_locator: &[u8]| {
+        TableManifest {
+            digest: [table_digest; 32],
+            segments: vec![
+                RowSegmentManifest {
+                    locator: low_locator.to_vec(),
+                    range: low_range.clone(),
+                    digest: [low_digest; 32],
+                },
+                RowSegmentManifest {
+                    locator: high_locator.to_vec(),
+                    range: high_range.clone(),
+                    digest: [high_digest; 32],
+                },
+            ],
+        }
+    };
+    let fixture_row = |fixture: &str, key: CanonicalValue| {
+        let mut row = parse_fixture(fixture, RowKeyKind::Explicit);
+        row.key = key;
+        row
+    };
+    let build_inputs = |upper_conflict| {
+        let mut source = FixtureRows::default();
+        source.add(MergeSide::Base, b"base-low", vec![fixture_row(BASE, low_key.clone())]);
+        source.add(MergeSide::Left, b"left-low", Vec::new());
+        source.add(MergeSide::Right, b"right-low", Vec::new());
+        source.add(MergeSide::Base, b"base-high", vec![fixture_row(BASE, high_key.clone())]);
+        source.add(
+            MergeSide::Left,
+            b"left-high",
+            if upper_conflict { Vec::new() } else { vec![fixture_row(BASE, high_key.clone())] },
+        );
+        source.add(
+            MergeSide::Right,
+            b"right-high",
+            vec![fixture_row(if upper_conflict { CONFLICT } else { RIGHT }, high_key.clone())],
+        );
+
+        let mut base = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(80, 1, 4, b"base-low", b"base-high"),
+            None,
+        );
+        let left = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(81, 2, 5, b"left-low", b"left-high"),
+            None,
+        );
+        let right = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(82, 3, 6, b"right-low", b"right-high"),
+            None,
+        );
+        let checkpoint_delete_id = b"consumer/positionless-delete-after-row-tail".to_vec();
+        base.checkpoints.insert(
+            checkpoint_delete_id.clone(),
+            CheckpointGeneration { generation: 40, position: None },
+        );
+        (base, left, right, source, checkpoint_delete_id)
+    };
+
+    // MERGE-005 bounds conflict detail but leaves traversal order open. This
+    // adapter policy visits the lower segment first: its agreed delete is a
+    // clean tombstone, while the later upper delete/edit conflict is the first
+    // impact at zero detail budget and prevents checkpoint-phase reporting.
+    let (base, left, right, mut source, checkpoint_delete_id) = build_inputs(true);
+    let error = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 100, max_conflicts: 0 },
+    )
+    .unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("the upper row delete/edit conflict exceeds the zero-detail budget")
+    };
+    assert_eq!(report.conflicts_lower_bound, 1);
+    assert_eq!(report.rows_examined, 3);
+    assert!(report.affected_ranges.contains(&(id(1), low_range.clone())));
+    assert!(report.affected_ranges.contains(&(id(1), high_range.clone())));
+    assert!(report.affected_checkpoints.is_empty());
+    assert!(!report.affected_checkpoints.contains(checkpoint_delete_id.as_slice()));
+    assert_eq!(source.visited.len(), 6);
+
+    // Removing only the later row conflict demonstrates that the same zero
+    // conflict budget preserves the lower tombstone and resolves the pending
+    // checkpoint deletion instead of charging either clean deletion as a hit.
+    let (base, left, right, mut source, checkpoint_delete_id) = build_inputs(false);
+    let plan = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 100, max_conflicts: 0 },
+    )
+    .unwrap();
+    assert_eq!(plan.report.conflicts_lower_bound, 0);
+    assert_eq!(plan.report.rows_examined, 4);
+    assert!(!plan.checkpoints.contains_key(checkpoint_delete_id.as_slice()));
+    let segments = &plan.tables[&id(1)].segments;
+    let MergedSegment::Rows { rows, tombstones, .. } = &segments[0] else {
+        panic!("the lower segment delete must materialize a tombstone")
+    };
+    assert!(rows.is_empty());
+    assert_eq!(tombstones, &[low_key]);
+    let MergedSegment::Rows { rows, tombstones, .. } = &segments[1] else {
+        panic!("the clean upper edit must merge after the tombstone range")
+    };
+    assert!(tombstones.is_empty());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].fields[&id(2)], string("Ada"));
+    assert_eq!(rows[0].fields[&id(3)], string("Paris"));
+    assert_eq!(source.visited.len(), 6);
+}
+
+#[test]
 fn checkpoint_delete_update_budget_tail_reports_identity_for_either_deleted_side() {
     for delete_on_left in [true, false] {
         let (mut base, mut left, mut right, mut source) = row_checkpoint_conflict_inputs();
