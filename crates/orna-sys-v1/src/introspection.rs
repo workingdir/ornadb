@@ -1328,6 +1328,24 @@ fn mutation_work(affected_rows: Option<u64>, write_bytes: Option<u64>) -> Option
         .and_then(|(rows, bytes)| rows.checked_add(ceil_div(bytes, 4096)))
 }
 
+fn partial_mutation_work_lower_bound(operator: &Operator) -> Option<u64> {
+    if operator.kind != PlanNodeKind::Invoke
+        || !operator.details.contains_key("mutation")
+        || operator.details.contains_key("estimated_work_overflow")
+    {
+        return None;
+    }
+
+    // A mutation's public work estimate requires both affected rows and write
+    // bytes. When exactly one is missing, its known nonnegative component is
+    // still a lower bound for aggregate overflow checks, but not a node cost.
+    match (operator.cardinality.rows, operator.cardinality.bytes) {
+        (Some(rows), None) => Some(rows),
+        (None, Some(bytes)) => Some(ceil_div(bytes, 4096)),
+        _ => None,
+    }
+}
+
 fn mutated_table_rows(
     kind: QueryMutationKind,
     before: Option<u64>,
@@ -1577,7 +1595,10 @@ fn build_plan(
             (Some(total), Some(work)) => total.checked_add(work),
             _ => None,
         };
-        if let Some(work) = operator.work {
+        if let Some(work) = operator
+            .work
+            .or_else(|| partial_mutation_work_lower_bound(operator))
+        {
             known_work_total = known_work_total.and_then(|known| known.checked_add(work));
             known_work_overflow |= known_work_total.is_none();
         }
