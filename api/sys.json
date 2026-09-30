@@ -7,7 +7,7 @@
     "reference_aliases": 78,
     "relations": 78,
     "singletons": 4,
-    "value_types": 35
+    "value_types": 34
   },
   "enums": {
     "sys.AssertionOwnerKind": [
@@ -4558,14 +4558,6 @@
           "type": "Instant?"
         },
         {
-          "name": "published_rows",
-          "type": "Int"
-        },
-        {
-          "name": "published_bytes",
-          "type": "Int"
-        },
-        {
           "name": "last_snapshot",
           "type": "sys.SnapshotRef?"
         },
@@ -4575,7 +4567,7 @@
         },
         {
           "name": "publication_policy",
-          "type": "sys.PublicationPolicy"
+          "type": "sys.Value"
         },
         {
           "name": "verification",
@@ -4977,30 +4969,6 @@
           "type": "sys.BuildStatus"
         },
         {
-          "name": "publication_policy",
-          "type": "sys.PublicationPolicy"
-        },
-        {
-          "name": "pending_rows",
-          "type": "Int"
-        },
-        {
-          "name": "pending_bytes",
-          "type": "Int"
-        },
-        {
-          "name": "published_rows",
-          "type": "Int"
-        },
-        {
-          "name": "published_bytes",
-          "type": "Int"
-        },
-        {
-          "name": "last_publication",
-          "type": "Instant?"
-        },
-        {
           "name": "progress",
           "type": "Decimal?"
         },
@@ -5302,7 +5270,7 @@
       "type": "sys.ReplView"
     }
   ],
-  "source_of_truth": "crates/orna-sys-v1/src/system_api.rs macros; normative semantics in source chapters and generated system reference",
+  "source_of_truth": "crates/orna-sys-v1/src/system_api.rs #[ornasys] descriptor methods; normative semantics in source chapters and generated system reference",
   "status": "specification",
   "sys_version": "1.0",
   "title": "Orna portable sys API",
@@ -6016,27 +5984,6 @@
       "kind": "record",
       "name": "sys.StorageRewriteResult",
       "purpose": "Result of a generation-CAS rewrite between editable and compact physical representations.",
-      "type_parameters": []
-    },
-    {
-      "fields": [
-        {
-          "name": "compressed_target_bytes",
-          "type": "Int"
-        },
-        {
-          "name": "max_file_bytes",
-          "type": "Int"
-        },
-        {
-          "name": "max_pending_age_seconds",
-          "type": "Int"
-        }
-      ],
-      "invariants": [],
-      "kind": "record",
-      "name": "sys.PublicationPolicy",
-      "purpose": "Effective compact publication target, file bound and maximum pending age.",
       "type_parameters": []
     },
     {

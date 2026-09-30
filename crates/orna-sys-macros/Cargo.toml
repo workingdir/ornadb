@@ -1,0 +1,10 @@
+[package]
+name = "orna-sys-macros"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "Attribute markers for the portable Orna system API"
+
+[lib]
+proc-macro = true

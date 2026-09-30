@@ -1596,14 +1596,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-sys-macros"
+version = "1.0.0"
+
+[[package]]
 name = "orna-sys-v1"
 version = "1.0.0"
 dependencies = [
  "orna-security-v1",
  "orna-syntax-v1",
+ "orna-sys-macros",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "syn 2.0.119",
 ]
 
 [[package]]
