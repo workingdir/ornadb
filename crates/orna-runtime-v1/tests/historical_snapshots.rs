@@ -912,7 +912,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     let writer = state.acquire_lease([65; 16]).await.expect("acquire writer");
     let mut pins = Vec::new();
 
-    for generation in 1..=389_u64 {
+    for generation in 1..=398_u64 {
         let mut mutation_id = [0; 16];
         mutation_id[8..].copy_from_slice(&generation.to_be_bytes());
         // Delete the prefix while its extended neighbor remains stable, restore an
@@ -965,10 +965,15 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         // prefix, restore it, and delete the tail before closing the prefix.
         // Finish with a distinct tail-only image and its terminal empty image;
         // the reference does not prescribe these replacement-order cases.
+        // Replace the tail twice before deleting the prefix, then restore the
+        // prefix and replace the tail in one generation. Close the tail and
+        // prefix separately, and pin one final tail-only closure. The reference
+        // is silent on the combined row-image boundary, so the fixture proof
+        // records both resulting rows explicitly.
         let prefix_value = match generation {
             256 | 259 | 261 | 263 | 264 | 266 | 273 | 277 | 282 | 284 | 288 | 291 | 295 | 298
             | 303 | 308 | 311 | 314 | 319 | 321 | 324 | 329 | 332 | 337 | 340 | 343 | 346
-            | 353 | 355 | 359 | 362 | 367 | 370 | 375 | 378 | 384 | 387 => None,
+            | 353 | 355 | 359 | 362 | 367 | 370 | 375 | 378 | 384 | 387 | 393 | 396 => None,
             257 => Some(b"intermediate-prefix".to_vec()),
             265 => Some(b"original-prefix".to_vec()),
             _ => Some(b"original-prefix".to_vec()),
@@ -980,7 +985,8 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                 | 294 | 297 | 299 | 300 | 301 | 304 | 306 | 307 | 310 | 313 | 315 | 316
                 | 318 | 322 | 326 | 327 | 328 | 330 | 334 | 335 | 336 | 338 | 342 | 345 | 347
                 | 348 | 350 | 351 | 352 | 356 | 358 | 361 | 363 | 364 | 366 | 369 | 371 | 372
-                | 374 | 377 | 379 | 380 | 382 | 383 | 386 | 388 | 389
+                | 374 | 377 | 379 | 380 | 382 | 383 | 386 | 388 | 389 | 391 | 392 | 395 | 397
+                | 398
         ) {
             mutations.push(
                 TableMutation::new(mutation_id, "records", vec![5], prefix_value)
@@ -1703,10 +1709,73 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                 TableMutation::new(extension_mutation_id, "records", vec![5, 0], None)
                     .expect("valid final terminal tail-only closure"),
             );
+        } else if generation == 391 {
+            let mut extension_mutation_id = mutation_id;
+            extension_mutation_id[0] = 1;
+            mutations.push(
+                TableMutation::new(
+                    extension_mutation_id,
+                    "records",
+                    vec![5, 0],
+                    Some(b"edge-closure-tail-three".to_vec()),
+                )
+                .expect("valid edge-closure tail restoration"),
+            );
+        } else if generation == 392 {
+            let mut extension_mutation_id = mutation_id;
+            extension_mutation_id[0] = 1;
+            mutations.push(
+                TableMutation::new(
+                    extension_mutation_id,
+                    "records",
+                    vec![5, 0],
+                    Some(b"edge-closure-tail-three-replaced".to_vec()),
+                )
+                .expect("valid replacement of the edge-closure tail"),
+            );
+        } else if generation == 394 {
+            // Restore the prefix and replace the tail in this same generation.
+            let mut extension_mutation_id = mutation_id;
+            extension_mutation_id[0] = 1;
+            mutations.push(
+                TableMutation::new(
+                    extension_mutation_id,
+                    "records",
+                    vec![5, 0],
+                    Some(b"edge-closure-tail-three-reopened".to_vec()),
+                )
+                .expect("valid same-generation tail replacement beside prefix restoration"),
+            );
+        } else if generation == 395 {
+            let mut extension_mutation_id = mutation_id;
+            extension_mutation_id[0] = 1;
+            mutations.push(
+                TableMutation::new(extension_mutation_id, "records", vec![5, 0], None)
+                    .expect("valid tail closure with prefix retained"),
+            );
+        } else if generation == 397 {
+            let mut extension_mutation_id = mutation_id;
+            extension_mutation_id[0] = 1;
+            mutations.push(
+                TableMutation::new(
+                    extension_mutation_id,
+                    "records",
+                    vec![5, 0],
+                    Some(b"edge-closure-tail-three-final".to_vec()),
+                )
+                .expect("valid final tail-only restoration"),
+            );
+        } else if generation == 398 {
+            let mut extension_mutation_id = mutation_id;
+            extension_mutation_id[0] = 1;
+            mutations.push(
+                TableMutation::new(extension_mutation_id, "records", vec![5, 0], None)
+                    .expect("valid final tail-only closure"),
+            );
         }
         commit(&state, writer, &mutations, 57).await;
 
-        if (255..=389).contains(&generation) {
+        if (255..=398).contains(&generation) {
             let selected = state
                 .select_historical_snapshot(generation)
                 .await
@@ -1730,7 +1799,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             336, 337, 338, 339, 340, 341, 342, 343, 344, 345, 346, 347, 348, 349, 350, 351,
             352, 353, 354, 355, 356, 357, 358, 359, 360, 361, 362, 363, 364, 365, 366, 367,
             368, 369, 370, 371, 372, 373, 374, 375, 376, 377, 378, 379, 380, 381, 382, 383,
-            384, 385, 386, 387, 388, 389,
+            384, 385, 386, 387, 388, 389, 390, 391, 392, 393, 394, 395, 396, 397, 398,
         ]
     );
     assert!(pins.windows(2).all(|pair| {
@@ -2008,6 +2077,24 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         387 => vec![],
         388 => vec![(vec![5, 0], b"edge-final-closure-terminal-tail".to_vec())],
         389 => vec![],
+        390 => vec![(vec![5], b"original-prefix".to_vec())],
+        391 => vec![
+            (vec![5], b"original-prefix".to_vec()),
+            (vec![5, 0], b"edge-closure-tail-three".to_vec()),
+        ],
+        392 => vec![
+            (vec![5], b"original-prefix".to_vec()),
+            (vec![5, 0], b"edge-closure-tail-three-replaced".to_vec()),
+        ],
+        393 => vec![(vec![5, 0], b"edge-closure-tail-three-replaced".to_vec())],
+        394 => vec![
+            (vec![5], b"original-prefix".to_vec()),
+            (vec![5, 0], b"edge-closure-tail-three-reopened".to_vec()),
+        ],
+        395 => vec![(vec![5], b"original-prefix".to_vec())],
+        396 => vec![],
+        397 => vec![(vec![5, 0], b"edge-closure-tail-three-final".to_vec())],
+        398 => vec![],
         _ => unreachable!("only closure remainder boundary generations are read"),
     };
     assert_eq!(expected_rows(255), expected_rows(258));
@@ -2191,6 +2278,22 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         vec![(vec![5, 0], b"edge-final-closure-terminal-tail".to_vec())]
     );
     assert!(expected_rows(389).is_empty());
+    assert_eq!(expected_rows(390), vec![(vec![5], b"original-prefix".to_vec())]);
+    assert_eq!(expected_rows(391)[0], expected_rows(392)[0]);
+    assert_ne!(expected_rows(391)[1], expected_rows(392)[1]);
+    assert_eq!(expected_rows(392)[1], expected_rows(393)[0]);
+    assert_eq!(expected_rows(394)[0], expected_rows(390)[0]);
+    assert_eq!(
+        expected_rows(394)[1],
+        (vec![5, 0], b"edge-closure-tail-three-reopened".to_vec())
+    );
+    assert_eq!(expected_rows(395)[0], expected_rows(394)[0]);
+    assert!(expected_rows(396).is_empty());
+    assert_eq!(
+        expected_rows(397),
+        vec![(vec![5, 0], b"edge-closure-tail-three-final".to_vec())]
+    );
+    assert!(expected_rows(398).is_empty());
 
     for (generation, descriptor, selected) in &pins {
         let resolved = state
