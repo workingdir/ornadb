@@ -20833,6 +20833,24 @@ mod tests {
             "last() evaluates predicates within the outer prefix and skips the failing next predicate"
         );
 
+        // The reference leaves filter-predicate failure at the inclusive
+        // outer edge implicit. This fourth row is admitted, so last() must
+        // observe the predicate's missing lookup even after an earlier match.
+        let (last_includes_bound_predicate_failure, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-includes-bound-predicate-failure.orna"
+                ),
+            );
+        let predicate_failure = last_includes_bound_predicate_failure.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (6, 4),
+            "last() observes the failing predicate on the outer bound's final admitted row"
+        );
+
         // The reference leaves the first matching row immediately beyond a
         // filtered outer bound implicit. The three-row prefix has no match;
         // do not scan its fourth row, which would satisfy `first()`.
