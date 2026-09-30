@@ -10333,6 +10333,219 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
         )),
         Err(Error::Closed)
     ));
+
+    // Request IDs are session-scoped in the reference. It does not spell out
+    // reuse across operation kinds after closure, so exercise a prior target
+    // ID as this new session's status-query ID and keep the identities apart.
+    let seventh_subscribe = subscribe();
+    let mut seventh_issuer = Issuer(7, None);
+    let seventh_credential = block_on(host.create(
+        CreateRequest {
+            id: [7; 16],
+            origin: origin(),
+            expires_at: 100,
+            now: 12,
+            subscribe: &seventh_subscribe,
+        },
+        &mut seventh_issuer,
+    ))
+    .unwrap();
+    block_on(host.resume(ResumeRequest {
+        id: [7; 16],
+        origin: &origin(),
+        credential: &seventh_credential,
+        attachment: [12; 16],
+        now: 13,
+    }))
+    .unwrap();
+
+    let seventh_target_request = eval_with_context([7; 16], [92; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&seventh_target_request, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    let seventh_target_fingerprint = request_fingerprint(&seventh_target_request, [7; 16]);
+    let seventh_query_request = Envelope {
+        // 91 identified target operations in closed sessions 1, 3, and 6.
+        request: Some([91; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [92; 16],
+            fingerprint: seventh_target_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let seventh_query_fingerprint = request_fingerprint(&seventh_query_request, [7; 16]);
+    let seventh_unknown = block_on(host.dispatch_frame(
+        [12; 16],
+        2,
+        Frame::Binary(seventh_query_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a new scope may use a closed target ID for its status query");
+    assert!(matches!(
+        &seventh_unknown.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Unknown,
+            fingerprint: None,
+            result: None,
+        } if *target == [92; 16]
+    ));
+    for (identity, expected_fingerprint, expected_state) in [
+        (
+            first_identity,
+            first_fingerprint,
+            orna_runtime_v1::RequestState::Completed,
+        ),
+        (
+            third_identity,
+            third_target_fingerprint,
+            orna_runtime_v1::RequestState::Cancelled,
+        ),
+        (
+            sixth_identity,
+            sixth_target_fingerprint,
+            orna_runtime_v1::RequestState::Cancelled,
+        ),
+        (
+            RequestIdentity {
+                session_id: [7; 16],
+                request_id: [91; 16],
+            },
+            seventh_query_fingerprint,
+            orna_runtime_v1::RequestState::Completed,
+        ),
+    ] {
+        assert!(matches!(
+            block_on(open_durable_state(&repository)
+                .request_status_for_identity(identity))
+            .unwrap(),
+            Some(status)
+                if status.state == expected_state && status.fingerprint == expected_fingerprint
+        ));
+    }
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status(second_identity, second_fingerprint))
+            .unwrap(),
+        Some(status) if status.state == orna_runtime_v1::RequestState::Cancelled
+    ));
+
+    let seventh_identity = RequestIdentity {
+        session_id: [7; 16],
+        request_id: [92; 16],
+    };
+    let runtime = open_durable_state(&repository);
+    let (_, capability) = block_on(runtime.reserve_request_with_admission(
+        seventh_identity,
+        seventh_target_fingerprint,
+    ))
+    .unwrap();
+    let capability = capability.expect("fresh owner-bound capability in the seventh session");
+    block_on(runtime.start_request_with_owner_and_admission(
+        seventh_identity,
+        seventh_target_fingerprint,
+        lease,
+        capability,
+    ))
+    .unwrap();
+    drop(runtime);
+
+    let seventh_unknown_retry = block_on(host.dispatch_frame(
+        [12; 16],
+        3,
+        Frame::Binary(seventh_query_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the reused target bytes do not change the original Unknown query");
+    assert_eq!(seventh_unknown_retry, seventh_unknown);
+    let seventh_fresh_request = Envelope {
+        request: Some([98; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [92; 16],
+            fingerprint: seventh_target_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let seventh_fresh = block_on(host.dispatch_frame(
+        [12; 16],
+        4,
+        Frame::Binary(seventh_fresh_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a distinct query ID observes the new target in this scope");
+    assert!(matches!(
+        &seventh_fresh.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Running,
+            fingerprint: Some(returned),
+            result: None,
+        } if *target == [92; 16] && *returned == seventh_target_fingerprint
+    ));
+
+    let mut seventh_deletion = RecordingDelete::default();
+    let mut seventh_children = RecordingChildren::default();
+    assert_eq!(
+        block_on(host.http_delete_with_children(
+            DeleteRequest {
+                id: [7; 16],
+                origin: &origin(),
+                credential: &seventh_credential,
+                now: 14,
+            },
+            &mut seventh_deletion,
+            &mut seventh_children,
+        ))
+        .status,
+        204
+    );
+    assert_eq!(seventh_children.requests, vec![seventh_identity]);
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status(
+            seventh_identity,
+            seventh_target_fingerprint,
+        ))
+        .unwrap(),
+        Some(status) if status.state == orna_runtime_v1::RequestState::Cancelled
+    ));
+    for (request_id, expected_fingerprint) in [
+        ([91; 16], seventh_query_fingerprint),
+        ([98; 16], request_fingerprint(&seventh_fresh_request, [7; 16])),
+    ] {
+        assert!(matches!(
+            block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+                session_id: [7; 16],
+                request_id,
+            }))
+            .unwrap(),
+            Some(status)
+                if status.state == orna_runtime_v1::RequestState::Completed
+                    && status.fingerprint == expected_fingerprint
+        ));
+    }
+    assert!(matches!(
+        block_on(host.dispatch_frame(
+            [12; 16],
+            5,
+            Frame::Binary(seventh_query_request),
+            &mut application,
+        )),
+        Err(Error::Closed)
+    ));
     assert_eq!(application.calls, 0);
     drop(host);
     remove_test_repository(&root);
