@@ -44,3 +44,47 @@ fn adding_a_new_table_row_keeps_older_rows_in_head_and_prior_history() {
     );
     assert!(git(root.path(), &["rev-list", "HEAD"]).lines().any(|commit| commit == old_snapshot));
 }
+
+#[test]
+fn explicit_row_deletion_is_visible_and_keeps_ancestor_history() {
+    let root = tempfile::tempdir().unwrap();
+    git(root.path(), &["init", "-b", "main"]);
+    git(root.path(), &["config", "user.name", "kierandrewett"]);
+    git(root.path(), &["config", "user.email", "kieran@drewett.dev"]);
+    git(root.path(), &["config", "commit.gpgsign", "false"]);
+    let table = root.path().join("tables/Reading");
+    fs::create_dir_all(&table).unwrap();
+    fs::write(table.join("1.orna"), OLD_ROW).unwrap();
+    git(root.path(), &["add", "tables/Reading/1.orna"]);
+    git(root.path(), &["commit", "-m", "seed old table row"]);
+    let old_snapshot = git(root.path(), &["rev-parse", "HEAD"]);
+
+    fs::write(table.join("2.orna"), NEW_ROW).unwrap();
+    git(root.path(), &["add", "tables/Reading/2.orna"]);
+    git(root.path(), &["commit", "-m", "append new table row"]);
+    let before_delete = git(root.path(), &["rev-parse", "HEAD"]);
+
+    fs::remove_file(table.join("1.orna")).unwrap();
+    git(root.path(), &["add", "-u", "tables/Reading/1.orna"]);
+    git(root.path(), &["commit", "-m", "explicitly delete old table row"]);
+
+    assert_eq!(
+        git(root.path(), &["show", "-s", "--format=%s", "HEAD"]),
+        "explicitly delete old table row"
+    );
+    assert_eq!(
+        git(root.path(), &["diff", "--name-status", "HEAD^", "HEAD"]),
+        "D\ttables/Reading/1.orna"
+    );
+    assert_eq!(
+        git(root.path(), &["ls-tree", "-r", "--name-only", "HEAD", "--", "tables/Reading"]),
+        "tables/Reading/2.orna"
+    );
+    assert_eq!(
+        git(root.path(), &["show", &format!("{before_delete}:tables/Reading/1.orna")]),
+        OLD_ROW.trim()
+    );
+    let ancestry = git(root.path(), &["rev-list", "HEAD"]);
+    assert!(ancestry.lines().any(|commit| commit == old_snapshot));
+    assert!(ancestry.lines().any(|commit| commit == before_delete));
+}
