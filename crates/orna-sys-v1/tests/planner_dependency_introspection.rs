@@ -1173,6 +1173,103 @@ fn explain_cost_boundary_retains_overflow_before_unknown_join_tails() {
 }
 
 #[test]
+fn explain_unknown_join_chain_retains_known_scan_cost_boundary() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_with_right_tail = |last_scan_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:unknown-join-known-scan-boundary"),
+            source: obj("table:missing-stats"),
+            source_statistics: None,
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:known-first-right"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(u64::MAX - 3),
+                        estimated_bytes: Some(0),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:known-second-right"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(last_scan_rows),
+                        estimated_bytes: Some(0),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:missing-stats"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(1),
+                estimated_write_bytes: Some(0),
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: Some(obj("materialization:unknown-join-boundary")),
+        })
+        .expect("known scan tails behind joins with unknown left cardinality")
+    };
+
+    let exact = explain_with_right_tail(1);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().estimated_work(), Some(1));
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None,
+        "mutation, materialization, and both right scans sum to exactly u64::MAX"
+    );
+    let joins = exact
+        .nodes()
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Join)
+        .collect::<Vec<_>>();
+    assert_eq!(joins.len(), 2);
+    assert!(joins.iter().all(|node| node.estimated_work().is_none()));
+    let unknown_left = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:missing-stats"))
+        })
+        .expect("unknown left scan");
+    assert_eq!(unknown_left.estimated_work(), None);
+    for (table, rows) in [
+        ("table:known-first-right", u64::MAX - 3),
+        ("table:known-second-right", 1),
+    ] {
+        let scan = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("known right scan under unknown join");
+        assert_eq!(scan.estimated_work(), Some(rows));
+    }
+
+    let overflow = explain_with_right_tail(2);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let surface = serde_json::to_value(&overflow).expect("unknown-join boundary surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
 fn explain_local_work_overflow_is_explicit_on_cost_and_write_tails() {
     let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
