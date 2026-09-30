@@ -759,6 +759,127 @@ fn prefix_overlapping_aliases_keep_same_repository_pins_isolated() {
 }
 
 #[test]
+fn attached_alias_with_primary_prefix_stays_read_only_and_independent() {
+    let (_primary_dir, primary_repository, primary_commit) = repository(&[
+        (
+            "main.orna",
+            include_str!("fixtures/attach-routing-primary.orna"),
+        ),
+        (
+            "contacts.orna",
+            include_str!("fixtures/attach-routing-table.orna"),
+        ),
+        (
+            "contacts/Contact/1.orna",
+            include_str!("fixtures/attach-routing-primary-row.orna"),
+        ),
+    ]);
+    let (attached_dir, attached_repository, attached_commit) = repository(&[
+        (
+            "main.orna",
+            include_str!("fixtures/attach-routing-package.orna"),
+        ),
+        (
+            "contacts.orna",
+            include_str!("fixtures/attach-routing-table.orna"),
+        ),
+        (
+            "contacts/Contact/1.orna",
+            include_str!("fixtures/attach-routing-package-row.orna"),
+        ),
+    ]);
+    let replacement_commit = write_commit(
+        attached_dir.path(),
+        "contacts/Contact/1.orna",
+        &include_str!("fixtures/attach-routing-package-row.orna").replace("42", "99"),
+    );
+
+    let loader = ProjectLoader::default();
+    let primary = PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader)
+        .unwrap();
+    let attached = PinnedDatabase::resolve(
+        "app_copy",
+        attached_repository.clone(),
+        &attached_commit,
+        loader,
+    )
+    .unwrap();
+    let mut session = AttachedDatabaseSession::new(primary).unwrap();
+    session.attach_database(attached).unwrap();
+    assert_eq!(session.relation_sources("contacts/Contact").len(), 2);
+    assert_relation_routes(
+        &session,
+        "app",
+        &primary_commit,
+        &[("contacts/Contact/1.orna", "value: 7")],
+    );
+    assert_relation_routes(
+        &session,
+        "app_copy",
+        &attached_commit,
+        &[("contacts/Contact/1.orna", "value: 42")],
+    );
+    assert!(session.is_writable_database("app"));
+    assert!(matches!(
+        session.validate_write_target("app_copy"),
+        Err(AttachmentError::AttachedSnapshotReadOnly)
+    ));
+
+    let old_clone = session.clone();
+    assert!(matches!(
+        session.detach_database("app"),
+        Err(AttachmentError::PrimaryDatabaseCannotDetach)
+    ));
+    assert!(session.database("app").is_some());
+    assert!(session.database("app_copy").is_some());
+    assert_eq!(session.relation_sources("contacts/Contact").len(), 2);
+
+    session.detach_database("app_copy").unwrap();
+    let detached_clone = session.clone();
+    assert_eq!(session.relation_sources("contacts/Contact").len(), 1);
+    assert_relation_routes(
+        &session,
+        "app",
+        &primary_commit,
+        &[("contacts/Contact/1.orna", "value: 7")],
+    );
+    assert!(matches!(
+        session.validate_write_target("app_copy"),
+        Err(AttachmentError::DatabaseUnavailable)
+    ));
+
+    let replacement = PinnedDatabase::resolve(
+        "app_copy",
+        attached_repository,
+        &replacement_commit,
+        loader,
+    )
+    .unwrap();
+    session.attach_database(replacement).unwrap();
+    assert_relation_routes(
+        &session,
+        "app_copy",
+        &replacement_commit,
+        &[("contacts/Contact/1.orna", "value: 99")],
+    );
+    assert_relation_routes(
+        &old_clone,
+        "app_copy",
+        &attached_commit,
+        &[("contacts/Contact/1.orna", "value: 42")],
+    );
+    assert!(detached_clone.database("app_copy").is_none());
+    assert!(detached_clone
+        .relation_sources("contacts/Contact")
+        .iter()
+        .all(|source| source.database() == "app"));
+    assert!(matches!(
+        session.validate_write_target("app_copy"),
+        Err(AttachmentError::AttachedSnapshotReadOnly)
+    ));
+}
+
+#[test]
 fn package_pin_failures_are_redacted_and_fail_before_a_session_is_returned() {
     let (_valid_dir, _valid_repository, valid_commit) = repository(&[(
         "main.orna",

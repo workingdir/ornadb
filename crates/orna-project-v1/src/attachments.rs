@@ -455,7 +455,7 @@ impl AttachedDatabaseSession {
     /// from every alias without deduplicating them; consumers keep the alias
     /// and commit with each row and decide how their query treats that overlap.
     /// Aliases are exact names, so a prefix never selects or replaces a longer
-    /// alias such as `archive` versus `archive_copy`.
+    /// alias; an attached `app_copy` remains distinct from primary `app`.
     pub fn relation_sources<'a>(
         &'a self,
         table_path: &str,
