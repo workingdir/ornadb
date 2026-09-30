@@ -186,18 +186,25 @@ fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     assert_eq!(projection["causes"][0]["redacted"], true);
     assert_eq!(projection["causes"][0]["message"], "<redacted>");
 
-    // A producer-admitted root message may survive, but a nested cause with
-    // a false redaction claim cannot inherit that admission.
+    // Neither a forged root admission bit nor a false nested cause bit grants
+    // a generic decoder permission to expose fixture payloads.
     let mixed = raw_diagnostic(
         "ORNA-E-ROOT",
-        "safe admitted message",
+        fixture,
         vec![raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false)],
         true,
     );
     let decoded = Diagnostic::decode_ovb(&Value::new(mixed).unwrap().encode().unwrap()).unwrap();
-    assert_eq!(decoded.message(), "safe admitted message");
+    assert_eq!(decoded.message(), "<redacted>");
+    let json = serde_json::to_vec(&decoded).unwrap();
+    assert!(
+        !json
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
     let projection = serde_json::to_value(decoded).unwrap();
-    assert_eq!(projection["message"], "safe admitted message");
+    assert_eq!(projection["message"], "<redacted>");
+    assert_eq!(projection["redacted"], true);
     assert_eq!(projection["causes"][0]["message"], "<redacted>");
 }
 
@@ -222,7 +229,7 @@ fn assert_redacted_boundaries(redacted: Diagnostic, expected_message: &str) {
     let decoded = Diagnostic::decode_ovb(&ovb).unwrap();
     let json = serde_json::to_vec(&redacted).unwrap();
     let json_value = serde_json::to_value(&redacted).unwrap();
-    assert_eq!(serde_json::to_value(decoded).unwrap(), json_value);
+    assert_eq!(decoded, redacted.clone().redacted());
 
     for secret in [
         "root-secret-value",
