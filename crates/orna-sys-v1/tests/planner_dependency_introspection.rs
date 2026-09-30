@@ -1691,6 +1691,88 @@ fn explain_partial_scan_bounds_accumulate_across_unknown_join_chain() {
 }
 
 #[test]
+fn explain_partial_byte_scan_boundary_survives_unknown_final_scan() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_with_tail_bytes = |tail_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-byte-final-scan"),
+            source: obj("table:exact-max-scan"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:partial-byte-scan"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:unknown-final-scan"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:partial-byte-final-scan")),
+        })
+        .expect("partial byte scan before an unknown final scan")
+    };
+
+    // A known zero-byte scan contributes zero, while any positive byte count
+    // rounds to one 4-KiB work unit; unknown final scans preserve either state.
+    let exact = explain_with_tail_bytes(0);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let overflow = explain_with_tail_bytes(1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one byte rounds to a block beyond the exact MAX scan"
+    );
+
+    let nodes = overflow.nodes();
+    let full_scan = nodes
+        .iter()
+        .find(|node| node.object() == Some(&obj("table:exact-max-scan")))
+        .expect("exact maximum source scan");
+    assert_eq!(full_scan.estimated_work(), Some(u64::MAX));
+    let partial_scan_position = nodes
+        .iter()
+        .position(|node| node.object() == Some(&obj("table:partial-byte-scan")))
+        .expect("partial byte scan");
+    assert_eq!(nodes[partial_scan_position].estimated_rows(), None);
+    assert_eq!(nodes[partial_scan_position].estimated_bytes(), Some(1));
+    assert_eq!(nodes[partial_scan_position].estimated_work(), None);
+    let unknown_scan_position = nodes
+        .iter()
+        .position(|node| node.object() == Some(&obj("table:unknown-final-scan")))
+        .expect("unknown final scan");
+    assert!(unknown_scan_position > partial_scan_position);
+    assert_eq!(nodes[unknown_scan_position].estimated_work(), None);
+
+    let surface = serde_json::to_value(&overflow).expect("unknown final scan overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
 fn explain_partial_scan_overflow_survives_unknown_scan_suffixes() {
     let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
