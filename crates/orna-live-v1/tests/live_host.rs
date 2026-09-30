@@ -4490,6 +4490,106 @@ fn durable_unknown_status_retry_survives_orphan_resolution() {
             *original_snapshot
         );
     }
+
+    // A RequestStatus query cannot borrow the orphan target's own request ID:
+    // that durable identity remains bound to the Event and its recovered result.
+    let self_target_status_request = Envelope {
+        request: Some([37; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [37; 16],
+            fingerprint: event_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let self_target_status_output = block_on(recovered_transport.receive_with_application(
+        &mut recovered_socket,
+        33,
+        &masked_binary_payload(&self_target_status_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &self_target_status_output[0] else {
+        panic!("a status query reusing the target ID receives a collision diagnostic");
+    };
+    let self_target_status = Envelope::decode(payload, Limits::default().protocol).unwrap();
+    assert_eq!(self_target_status.request, Some([37; 16]));
+    assert!(matches!(
+        &self_target_status.message,
+        Message::Diagnostic { .. }
+    ));
+
+    let self_target_status_retry = block_on(recovered_transport.receive_with_application(
+        &mut recovered_socket,
+        34,
+        &masked_binary_payload(&self_target_status_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &self_target_status_retry[0] else {
+        panic!("the target-ID collision retry replays its diagnostic");
+    };
+    assert_eq!(
+        Envelope::decode(payload, Limits::default().protocol).unwrap(),
+        self_target_status
+    );
+
+    let post_collision_status_request = Envelope {
+        request: Some([43; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [37; 16],
+            fingerprint: event_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let post_collision_status_output = block_on(recovered_transport.receive_with_application(
+        &mut recovered_socket,
+        35,
+        &masked_binary_payload(&post_collision_status_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &post_collision_status_output[0] else {
+        panic!("a fresh status ID still observes the orphaned Event");
+    };
+    assert!(matches!(
+        &Envelope::decode(payload, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Orphaned,
+            fingerprint: Some(fingerprint),
+            result: Some(_),
+        } if *target == [37; 16] && *fingerprint == event_fingerprint
+    ));
+
+    let final_event_retry = block_on(recovered_transport.receive_with_application(
+        &mut recovered_socket,
+        36,
+        &masked_binary_payload(&event_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &final_event_retry[0] else {
+        panic!("the Event identity remains replayable after its ID collision");
+    };
+    assert!(matches!(
+        &Envelope::decode(payload, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Result {
+            status: ResultStatus::RetainedWithoutValue,
+            value: None,
+            fingerprint,
+            diagnostic: None,
+        } if *fingerprint == event_fingerprint
+    ));
     assert_eq!(recovered_application.calls, 0);
 
     drop(recovered_transport);
