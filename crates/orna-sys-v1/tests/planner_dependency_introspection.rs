@@ -661,6 +661,10 @@ fn explain_estimate_reporting_distinguishes_unknown_zero_and_partial_cost() {
     })
     .expect("partially estimated plan");
     assert_eq!(partial.plan().estimated_cost(), None);
+    assert_eq!(
+        partial.root().details().get("estimated_cost_overflow"),
+        None
+    );
     let known_scan = partial
         .nodes()
         .iter()
@@ -721,6 +725,10 @@ fn explain_total_work_overflow_keeps_known_operator_estimates_in_the_tail() {
     assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
     assert_eq!(explained.root().estimated_work(), Some(1));
     assert_eq!(explained.plan().estimated_cost(), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
     let join = explained
         .nodes()
         .iter()
@@ -741,6 +749,7 @@ fn explain_total_work_overflow_keeps_known_operator_estimates_in_the_tail() {
     let surface = serde_json::to_value(&explained).expect("structured overflow plan");
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_work"], 1);
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
     let mutation = surface["nodes"]
         .as_array()
         .unwrap()
@@ -748,6 +757,98 @@ fn explain_total_work_overflow_keeps_known_operator_estimates_in_the_tail() {
         .find(|node| node["details"]["mutation"] == "update")
         .expect("mutation tail");
     assert_eq!(mutation["details"]["estimated_work"], 1);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_local_work_overflow_is_explicit_on_cost_and_write_tails() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:local-work-overflow"),
+        source: obj("table:large"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(u64::MAX),
+            estimated_bytes: Some(4_096),
+            mutable_branch: None,
+        }),
+        joins: vec![QueryJoinDescription {
+            source: obj("table:small"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(1),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            predicate: None,
+        }],
+        predicate: None,
+        projections: vec![
+            orna_sys_v1::ExpressionRef::descriptive("expr:first"),
+            orna_sys_v1::ExpressionRef::descriptive("expr:second"),
+        ],
+        distinct: true,
+        ordering: vec![PlanOrdering {
+            expression: orna_sys_v1::ExpressionRef::descriptive("expr:ordered"),
+            direction: PlanSortDirection::Ascending,
+            null_order: PlanNullOrder::Last,
+        }],
+        limit: None,
+        mutations: vec![QueryMutationDescription {
+            table: obj("table:large"),
+            kind: QueryMutationKind::Update,
+            estimated_affected_rows: Some(u64::MAX),
+            estimated_write_bytes: Some(4_096),
+            estimated_table_rows_before: Some(u64::MAX),
+        }],
+        materialize_into: Some(obj("materialization:large")),
+    })
+    .expect("plan with local work overflow");
+
+    assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(explained.plan().estimated_cost(), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        None
+    );
+    for kind in [
+        PlanNodeKind::Materialize,
+        PlanNodeKind::Invoke,
+        PlanNodeKind::Sort,
+        PlanNodeKind::Aggregate,
+        PlanNodeKind::Project,
+        PlanNodeKind::Join,
+        PlanNodeKind::Scan,
+    ] {
+        let node = explained
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == kind)
+            .expect("plan tail operator");
+        assert_eq!(node.estimated_work(), None);
+        assert_eq!(
+            node.details().get("estimated_work_overflow"),
+            Some(&PlanDetail::Boolean(true))
+        );
+    }
+    let small_scan = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj("table:small")))
+        .expect("nonoverflowing scan estimate");
+    assert_eq!(small_scan.estimated_work(), Some(1));
+    assert_eq!(small_scan.details().get("estimated_work_overflow"), None);
+    let surface = serde_json::to_value(&explained).expect("structured local overflow plan");
+    assert_eq!(surface["nodes"][0]["details"]["estimated_work_overflow"], true);
+    let mutation = surface["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["details"]["mutation"] == "update")
+        .expect("mutation tail");
+    assert_eq!(mutation["details"]["estimated_work_overflow"], true);
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
         node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
     }));
