@@ -466,7 +466,7 @@ mod tests {
             )
         );
 
-        let error = parse_cli(&args(&["serve"])).expect_err("unknown command is rejected");
+        let error = parse_cli(&args(&["unknown"])).expect_err("unknown command is rejected");
         assert_eq!(
             (error.code, error.title, error.help),
             (
