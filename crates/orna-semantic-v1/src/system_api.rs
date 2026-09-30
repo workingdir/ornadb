@@ -384,6 +384,9 @@ impl SystemApi {
         for raw_function in raw.functions {
             let descriptor =
                 parse_function(&raw_function, &type_arities, &singletons, &types, &enums)?;
+            if singletons.contains_key(&descriptor.name) {
+                return Err(SystemApiError::DuplicateName);
+            }
             let identity = function_identity(&descriptor);
             if !function_signatures.insert(identity) {
                 return Err(SystemApiError::DuplicateName);
@@ -430,6 +433,11 @@ impl SystemApi {
                 || grouped_relations.contains_key(&name)
                 || types.contains_key(&name)
                 || enums.contains_key(&name)
+                || name.rsplit_once('.').is_some_and(|(enum_name, variant)| {
+                    enums
+                        .get(enum_name)
+                        .is_some_and(|variants| variants.contains(variant))
+                })
                 || removed
                     .insert(
                         name,
@@ -2863,6 +2871,60 @@ mod tests {
         assert_eq!(
             SystemApi::from_json(&removed.to_string()),
             Err(SystemApiError::InvalidRemovedName)
+        );
+
+        for replacement in [
+            "sys.Database",
+            "sys.DatabaseRef",
+            "sys.catalog.databases",
+            "sys.history",
+            "sys.DiffScope.all",
+        ] {
+            let mut valid_replacement = document();
+            valid_replacement["removed_names"]["sys.runtime"]["replacement"] =
+                serde_json::Value::String(replacement.into());
+            assert!(
+                SystemApi::from_json(&valid_replacement.to_string()).is_ok(),
+                "live API path `{replacement}` is a valid removal target"
+            );
+        }
+
+        for live_name in [
+            "sys.Database",
+            "sys.DatabaseRef",
+            "sys.catalog.databases",
+            "sys.history",
+            "sys.DiffScope.all",
+        ] {
+            let mut shadowed = document();
+            let descriptor = shadowed["removed_names"]["sys.runtime"].clone();
+            shadowed["removed_names"][live_name] = descriptor;
+            assert_eq!(
+                SystemApi::from_json(&shadowed.to_string()),
+                Err(SystemApiError::InvalidRemovedName),
+                "removed name `{live_name}` must not shadow a current API path"
+            );
+        }
+
+        let mut singleton_function_collision = document();
+        singleton_function_collision["singletons"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "availability": "fixture singleton",
+                "name": "sys.history",
+                "type": "sys.DatabaseView"
+            }));
+        let singleton_count = singleton_function_collision["singletons"]
+            .as_array()
+            .unwrap()
+            .len();
+        singleton_function_collision["counts"]["singletons"] =
+            serde_json::json!(singleton_count);
+        assert_eq!(
+            SystemApi::from_json(&singleton_function_collision.to_string()),
+            Err(SystemApiError::DuplicateName),
+            "a singleton cannot shadow an overloaded callable base path"
         );
     }
 
