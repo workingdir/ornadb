@@ -4147,9 +4147,16 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         source.add(MergeSide::Left, b"left-empty-suffix", Vec::new());
         source.add(MergeSide::Right, b"right-empty-suffix", Vec::new());
         let final_tail_id = b"consumer/zz-final-tail-conflict".to_vec();
+        // ORNA-MERGE-011 is silent on conflict-budget traversal. Follow this
+        // crate's sorted checkpoint-ID traversal and put one more fixture
+        // conflict after the prior three to pin exact-cap closure at the tail.
+        let closure_tail_id = b"consumer/zzz-closure-tail-conflict".to_vec();
         base.checkpoints.insert(final_tail_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_BASE));
         left.checkpoints.insert(final_tail_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_LEFT));
         right.checkpoints.insert(final_tail_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_RIGHT));
+        base.checkpoints.insert(closure_tail_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_BASE));
+        left.checkpoints.insert(closure_tail_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_LEFT));
+        right.checkpoints.insert(closure_tail_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_RIGHT));
         let error = merge_three_way_snapshots(
             &base,
             &left,
@@ -4170,6 +4177,7 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
         assert!(report.affected_checkpoints.contains(tail_id.as_slice()));
         assert!(report.affected_checkpoints.contains(final_tail_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(closure_tail_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(agreed_delete_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(unchanged_delete_id.as_slice()));
         assert_eq!(source.visited.len(), 6);
@@ -4183,8 +4191,8 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
             ]
         );
 
-        // Exact capacity for the third and final checkpoint conflict closes
-        // the same suffix tail without another row-budget unit.
+        // Three details still stop before the fourth terminal fixture
+        // conflict, after the same suffix scan and without more row budget.
         source.visited.clear();
         let error = merge_three_way_snapshots(
             &base,
@@ -4192,6 +4200,41 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
             &right,
             &mut source,
             BranchMergeBudget { max_rows_examined: 2, max_conflicts: 3 },
+        )
+        .unwrap_err();
+        let BranchMergeError::BudgetExceeded { report } = error else {
+            panic!("the fourth checkpoint conflict crosses the three-detail budget")
+        };
+        assert_eq!(report.rows_examined, 2);
+        assert_eq!(report.conflicts_lower_bound, 4);
+        assert_eq!(report.affected_ranges.len(), 2);
+        assert!(report.affected_ranges.contains(&(id(1), tombstone_range.clone())));
+        assert!(report.affected_ranges.contains(&(id(1), suffix_range.clone())));
+        assert_eq!(report.affected_checkpoints.len(), 4);
+        assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
+        assert!(report.affected_checkpoints.contains(tail_id.as_slice()));
+        assert!(report.affected_checkpoints.contains(final_tail_id.as_slice()));
+        assert!(report.affected_checkpoints.contains(closure_tail_id.as_slice()));
+        assert_eq!(source.visited.len(), 6);
+        assert!(source.visited[..3].iter().all(|(_, locator)| locator.ends_with(b"upper")));
+        assert_eq!(
+            &source.visited[3..],
+            &[
+                (MergeSide::Base, b"base-empty-suffix".to_vec()),
+                (MergeSide::Left, b"left-empty-suffix".to_vec()),
+                (MergeSide::Right, b"right-empty-suffix".to_vec()),
+            ]
+        );
+
+        // Exact capacity for all four checkpoint conflicts closes the same
+        // suffix tail without another row-budget unit.
+        source.visited.clear();
+        let error = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 2, max_conflicts: 4 },
         )
         .unwrap_err();
         let BranchMergeError::Conflicts { conflicts, report } = error else {
@@ -4220,22 +4263,28 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
                 },
                 BranchMergeConflict::CheckpointConflict {
                     id: final_tail_id.clone(),
+                    conflict: expected_tail_conflict.clone(),
+                },
+                BranchMergeConflict::CheckpointConflict {
+                    id: closure_tail_id.clone(),
                     conflict: expected_tail_conflict,
                 },
             ]
         );
         assert_eq!(report.rows_examined, 2);
-        assert_eq!(report.conflicts_lower_bound, 3);
+        assert_eq!(report.conflicts_lower_bound, 4);
         assert_eq!(report.affected_ranges.len(), 2);
         assert!(report.affected_ranges.contains(&(id(1), tombstone_range)));
         assert!(report.affected_ranges.contains(&(id(1), suffix_range)));
-        assert_eq!(report.affected_checkpoints.len(), 3);
+        assert_eq!(report.affected_checkpoints.len(), 4);
         assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
         assert!(report.affected_checkpoints.contains(tail_id.as_slice()));
         assert!(report.affected_checkpoints.contains(final_tail_id.as_slice()));
+        assert!(report.affected_checkpoints.contains(closure_tail_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(agreed_delete_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(unchanged_delete_id.as_slice()));
         assert_eq!(source.visited.len(), 6);
+        assert!(source.visited[..3].iter().all(|(_, locator)| locator.ends_with(b"upper")));
         assert_eq!(
             &source.visited[3..],
             &[
