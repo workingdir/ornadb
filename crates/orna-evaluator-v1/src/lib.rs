@@ -7087,6 +7087,8 @@ fn format_duration(name: &str, seconds: &BigInt, nanosecond: u32) -> String {
             format!("{sign}{}", parts.join(" "))
         }
         "duration.clock.format" => {
+            // This is elapsed time, not a wall clock: retain total hours
+            // beyond 23, then enforce the output byte bound at the caller.
             let total_hours = days * BigInt::from(24u8) + BigInt::from(hours);
             let total_hours = total_hours.to_str_radix(10);
             let total_hours = if total_hours.len() < 2 {
