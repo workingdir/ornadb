@@ -10817,6 +10817,57 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
                 && status.fingerprint == ninth_target_fingerprint
     ));
 
+    // Reusing that byte ID as a different operation is valid in the new
+    // session, but a second operation in the same session still mismatches.
+    let ninth_other_target_request = eval_with_context([9; 16], [92; 16], [2; 16], None);
+    let ninth_other_target_fingerprint =
+        request_fingerprint(&ninth_other_target_request, [9; 16]);
+    let ninth_same_scope_query = Envelope {
+        request: Some([91; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [92; 16],
+            fingerprint: ninth_other_target_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let ninth_mismatch = block_on(host.dispatch_frame(
+        [14; 16],
+        2,
+        Frame::Binary(ninth_same_scope_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("same-scope cross-kind reuse returns request mismatch");
+    assert_eq!(ninth_mismatch.request, Some([91; 16]));
+    assert!(matches!(
+        ninth_mismatch.message,
+        Message::Diagnostic { .. }
+    ));
+    let ninth_mismatch_retry = block_on(host.dispatch_frame(
+        [14; 16],
+        3,
+        Frame::Binary(ninth_same_scope_query),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the same-scope collision retries its mismatch diagnostic");
+    assert_eq!(ninth_mismatch_retry, ninth_mismatch);
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status(
+            ninth_identity,
+            ninth_target_fingerprint,
+        ))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Running
+                && status.fingerprint == ninth_target_fingerprint
+    ));
+
     let mut ninth_deletion = RecordingDelete::default();
     let mut ninth_children = RecordingChildren::default();
     assert_eq!(
@@ -10855,7 +10906,7 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     assert!(matches!(
         block_on(host.dispatch_frame(
             [14; 16],
-            2,
+            4,
             Frame::Binary(ninth_target_request),
             &mut application,
         )),
