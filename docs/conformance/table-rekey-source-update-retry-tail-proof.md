@@ -105,3 +105,10 @@ release edge: the competitor claims the original owner key, then is deleted so
 the owner can retry into that key. Its fixture checks the full ordered mutation
 log; this caught-retry ordering remains adapter behavior where the reference is
 silent.
+
+`original_owner_retries_after_competitor_nested_closure` covers nested closure
+interplay on the final return: the owner first fails to reclaim its original
+key, then moves aside to block the competitor's release move. The competitor's
+failure closure moves the owner again, retries the competitor move, and lets the
+owner take its original key. The fixture documents the resulting mutation log
+as local adapter behavior because the reference does not specify this ordering.
