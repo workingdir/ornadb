@@ -151,6 +151,27 @@ fn edge_interplay_fixture_keeps_nullable_docs_after_default_filter() {
 }
 
 #[test]
+fn edge_interplay_fixture_composes_nullable_sibling_null_arms() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The frozen schema makes key_position, docs, and computed_expression independently
+    // nullable and gives no relationship between them; compose sibling predicates while
+    // preserving the nullable computed-expression projection.
+    assert!(
+        analysis.is_ok(),
+        "nullable Column sibling predicates must preserve the projected nullable expression: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn runtime_publication_counters_do_not_leak_into_frozen_sys_types() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-internal-publication-metadata.orna",
