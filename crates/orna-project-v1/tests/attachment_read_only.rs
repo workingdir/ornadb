@@ -63,6 +63,23 @@ fn routed_module_source(
         .map(|module| module.source)
 }
 
+fn routed_relation_source(
+    session: &AttachedDatabaseSession,
+    table_path: &str,
+    database: &str,
+) -> Option<(String, String)> {
+    session
+        .relation_sources(table_path)
+        .into_iter()
+        .find(|source| source.database() == database)
+        .map(|source| {
+            (
+                source.commit().as_str().to_owned(),
+                source.row().source().to_owned(),
+            )
+        })
+}
+
 #[test]
 fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
     let (_primary_dir, primary_repository, primary_commit) = repository(&[(
@@ -406,6 +423,171 @@ fn cloned_sessions_route_relation_rows_to_their_own_pinned_snapshot() {
         .unwrap();
     assert_eq!(final_archive.commit().as_str(), replacement_commit);
     assert!(final_archive.row().source().contains("value: 99"));
+}
+
+#[test]
+fn detaching_one_relation_alias_preserves_other_routes_in_each_clone() {
+    let (_primary_dir, primary_repository, primary_commit) = repository(&[
+        (
+            "main.orna",
+            include_str!("fixtures/attach-routing-primary.orna"),
+        ),
+        (
+            "contacts.orna",
+            include_str!("fixtures/attach-routing-table.orna"),
+        ),
+        (
+            "contacts/Contact/1.orna",
+            include_str!("fixtures/attach-routing-primary-row.orna"),
+        ),
+    ]);
+    let (archive_dir, archive_repository, archive_commit) = repository(&[
+        (
+            "main.orna",
+            include_str!("fixtures/attach-routing-package.orna"),
+        ),
+        (
+            "contacts.orna",
+            include_str!("fixtures/attach-routing-table.orna"),
+        ),
+        (
+            "contacts/Contact/1.orna",
+            include_str!("fixtures/attach-routing-package-row.orna"),
+        ),
+    ]);
+    let archive_replacement_commit = write_commit(
+        archive_dir.path(),
+        "contacts/Contact/1.orna",
+        &include_str!("fixtures/attach-routing-package-row.orna").replace("42", "99"),
+    );
+    let catalog_row = include_str!("fixtures/attach-routing-package-row.orna").replace("42", "17");
+    let (_catalog_dir, catalog_repository, catalog_commit) = repository(&[
+        (
+            "main.orna",
+            include_str!("fixtures/attach-routing-package.orna"),
+        ),
+        (
+            "contacts.orna",
+            include_str!("fixtures/attach-routing-table.orna"),
+        ),
+        ("contacts/Contact/1.orna", &catalog_row),
+    ]);
+
+    let loader = ProjectLoader::default();
+    let primary = PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader)
+        .unwrap();
+    let archive = PinnedDatabase::resolve(
+        "archive",
+        archive_repository.clone(),
+        &archive_commit,
+        loader,
+    )
+    .unwrap();
+    let catalog = PinnedDatabase::resolve(
+        "catalog",
+        catalog_repository.clone(),
+        &catalog_commit,
+        loader,
+    )
+    .unwrap();
+    let mut session = AttachedDatabaseSession::new(primary).unwrap();
+    session.attach_database(archive).unwrap();
+    session.attach_database(catalog).unwrap();
+
+    assert_eq!(
+        routed_relation_source(&session, "contacts/Contact", "archive")
+            .unwrap()
+            .0,
+        archive_commit
+    );
+    assert!(routed_relation_source(&session, "contacts/Contact", "archive")
+        .unwrap()
+        .1
+        .contains("value: 42"));
+    assert_eq!(
+        routed_relation_source(&session, "contacts/Contact", "catalog")
+            .unwrap()
+            .0,
+        catalog_commit
+    );
+
+    let mut old_clone = session.clone();
+    session.detach_database("archive").unwrap();
+    assert!(routed_relation_source(&session, "contacts/Contact", "archive").is_none());
+    assert_eq!(
+        routed_relation_source(&session, "contacts/Contact", "catalog")
+            .unwrap()
+            .0,
+        catalog_commit
+    );
+    assert!(matches!(
+        session.validate_write_target("archive"),
+        Err(AttachmentError::DatabaseUnavailable)
+    ));
+    assert!(matches!(
+        session.validate_write_target("catalog"),
+        Err(AttachmentError::AttachedSnapshotReadOnly)
+    ));
+
+    let detached_clone = session.clone();
+    let archive_replacement = PinnedDatabase::resolve(
+        "archive",
+        archive_repository,
+        &archive_replacement_commit,
+        loader,
+    )
+    .unwrap();
+    session.attach_database(archive_replacement).unwrap();
+    assert_eq!(
+        routed_relation_source(&session, "contacts/Contact", "archive")
+            .unwrap()
+            .0,
+        archive_replacement_commit
+    );
+    assert!(routed_relation_source(&session, "contacts/Contact", "archive")
+        .unwrap()
+        .1
+        .contains("value: 99"));
+    assert_eq!(
+        routed_relation_source(&session, "contacts/Contact", "catalog")
+            .unwrap()
+            .0,
+        catalog_commit
+    );
+
+    assert_eq!(
+        routed_relation_source(&old_clone, "contacts/Contact", "archive")
+            .unwrap()
+            .0,
+        archive_commit
+    );
+    assert!(routed_relation_source(&old_clone, "contacts/Contact", "archive")
+        .unwrap()
+        .1
+        .contains("value: 42"));
+    assert_eq!(
+        routed_relation_source(&detached_clone, "contacts/Contact", "catalog")
+            .unwrap()
+            .0,
+        catalog_commit
+    );
+    assert!(routed_relation_source(&detached_clone, "contacts/Contact", "archive").is_none());
+
+    old_clone.detach_database("catalog").unwrap();
+    assert!(routed_relation_source(&old_clone, "contacts/Contact", "catalog").is_none());
+    assert!(routed_relation_source(&old_clone, "contacts/Contact", "archive").is_some());
+    assert!(matches!(
+        old_clone.validate_write_target("catalog"),
+        Err(AttachmentError::DatabaseUnavailable)
+    ));
+    assert!(matches!(
+        session.validate_write_target("archive"),
+        Err(AttachmentError::AttachedSnapshotReadOnly)
+    ));
+    assert!(matches!(
+        session.validate_write_target("catalog"),
+        Err(AttachmentError::AttachedSnapshotReadOnly)
+    ));
 }
 
 #[test]

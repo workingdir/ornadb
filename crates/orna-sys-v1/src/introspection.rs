@@ -1555,6 +1555,8 @@ fn build_plan(
         .collect::<Vec<_>>();
 
     let root = references[positions[root_index]].clone();
+    // Keep the known lower bound independent of the nullable total: an
+    // unknown estimate must not discard known cost across later plan tails.
     let mut known_work_overflow = false;
     let mut known_work_total = Some(0u64);
     let mut total_work = Some(0u64);

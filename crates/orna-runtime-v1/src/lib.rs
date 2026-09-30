@@ -20073,6 +20073,45 @@ mod tests {
             "unadmitted take(0) reports visibility without enumerating rows"
         );
 
+        // Even a sorted union must preserve each source's admission boundary
+        // before the zero-row shortcut skips scans and sort-key evaluation.
+        let (union_zero, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-take-zero-union-sorted.orna"),
+        );
+        assert_eq!(
+            union_zero.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 0), "admitted zero-take union does no query work");
+
+        let storage_only = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let storage_only = storage_only.query_session();
+        let (missing_right, lookups, scans) = invoke_query_fixture_with_counts(
+            &storage_only,
+            include_str!("../tests/fixtures/query-session-take-zero-union-sorted.orna"),
+        );
+        assert_eq!(
+            missing_right.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 0), "unadmitted right source fails before scanning");
+
+        let maintenance_only = state
+            .begin_table_activation(&["sys.MaintenanceJob"])
+            .await
+            .unwrap();
+        let maintenance_only = maintenance_only.query_session();
+        let (missing_left, lookups, scans) = invoke_query_fixture_with_counts(
+            &maintenance_only,
+            include_str!("../tests/fixtures/query-session-take-zero-union-sorted.orna"),
+        );
+        assert_eq!(
+            missing_left.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 0), "unadmitted left source fails before scanning");
+
         let (missing, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
             include_str!("../tests/fixtures/query-session-projection-missing.orna"),
@@ -23526,6 +23565,95 @@ mod tests {
             4,
             "startup reconciliation must not duplicate already-retained tail events"
         );
+    }
+
+    #[tokio::test]
+    async fn sys_invocation_tail_empty_end_poll_survives_admin_receipt_and_sees_later_event() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(90)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let invocation_id = id(91);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(92)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let first = state
+            .invocation_observation_tail(None, 1)
+            .await
+            .unwrap();
+        assert_eq!(first.entries.len(), 1);
+        assert!(!first.has_more, "the page ends exactly at the current tail");
+        assert_eq!(first.entries[0].sequence, 1);
+        assert_eq!(first.entries[0].status, InvocationObservationStatus::Running);
+        let cursor = first.next_cursor.expect("the page boundary is resumable");
+
+        let empty = state
+            .invocation_observation_tail(Some(cursor.clone()), 1)
+            .await
+            .unwrap();
+        assert!(empty.entries.is_empty());
+        assert!(!empty.has_more);
+        assert_eq!(empty.next_cursor, Some(cursor.clone()));
+
+        let key = stream_delivery("tail-empty-poll-receipt", "tail-empty-poll-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key,
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("tail-empty-poll:reset").unwrap(),
+            },
+            reason: "tail empty-poll receipt boundary".into(),
+        };
+        let receipt_id = id(93);
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request.clone(), receipt_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(writer, request, receipt_id)
+                .await,
+            Ok(receipt),
+            "replaying the admin receipt has no invocation-tail transition"
+        );
+        let after_receipt = state
+            .invocation_observation_tail(Some(cursor.clone()), 1)
+            .await
+            .unwrap();
+        assert!(after_receipt.entries.is_empty());
+        assert_eq!(after_receipt.next_cursor, Some(cursor.clone()));
+
+        state
+            .finish_invocation_observation(writer, invocation_id, InvocationCompletion::Succeeded)
+            .await
+            .unwrap();
+        let later = state
+            .invocation_observation_tail(Some(cursor), 1)
+            .await
+            .unwrap();
+        assert_eq!(later.entries.len(), 1);
+        assert!(!later.has_more);
+        assert_eq!(later.entries[0].sequence, 2);
+        assert_eq!(later.entries[0].invocation_id, invocation_id);
+        assert_eq!(later.entries[0].status, InvocationObservationStatus::Succeeded);
     }
 
     #[tokio::test]

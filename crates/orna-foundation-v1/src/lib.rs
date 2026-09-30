@@ -1448,7 +1448,10 @@ impl Diagnostic {
             .map_err(FoundationError::Value)
     }
     pub fn decode_ovb(bytes: &[u8]) -> Result<Self, FoundationError> {
-        Self::from_raw(Value::decode(bytes).map_err(FoundationError::Value)?.raw())
+        let diagnostic = Self::from_raw(Value::decode(bytes).map_err(FoundationError::Value)?.raw())?;
+        // Decoding is a disclosure boundary too. The producer's redacted bit
+        // admits only its root message; composed notes and causes are rechecked.
+        Ok(diagnostic.boundary_projection())
     }
     fn validate_redaction_consistency(&self) -> Result<(), FoundationError> {
         // The explicit span marker is itself a redaction claim. Do not let a
