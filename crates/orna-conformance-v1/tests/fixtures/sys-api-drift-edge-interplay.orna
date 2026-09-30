@@ -8,6 +8,7 @@ pub fn generated_source_byte_offsets(document: sys.SourceDocument): Relation<Int
 pub fn projected_source_byte_offsets(document: sys.SourceDocument): Relation<Int> = document.maps | map(entry => entry.generated) | map(span => span.start_byte);
 pub fn original_source_names(document: sys.SourceDocument): Relation<Str?> = document.maps | map(entry => entry.original_name);
 pub fn named_source_byte_offsets(document: sys.SourceDocument): Relation<Int> = document.maps | filter(entry => entry.original_name != null) | map(entry => entry.generated.start_byte);
+pub fn document_source_byte_offsets(document: sys.SourceDocument): Relation<Int> = document.maps | filter(entry => entry.generated.file == document.file) | map(entry => entry.generated.start_byte);
 pub fn metadata_rows(rows: Relation<sys.ValueMetadata<sys.Value>>): Relation<sys.ValueMetadata<sys.Value>> = rows;
 pub fn generic_metadata_rows<T>(rows: Relation<sys.ValueMetadata<T>>): Relation<sys.ValueMetadata<T>> = rows;
 pub fn metadata_protocols<T>(metadata: sys.ValueMetadata<T>): Relation<sys.Protocol> = metadata.protocols;
