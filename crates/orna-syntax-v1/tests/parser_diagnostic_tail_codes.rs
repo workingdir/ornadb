@@ -5301,6 +5301,97 @@ fn recovered_block_control_keeps_following_closure_tail() {
 }
 
 #[test]
+fn recovered_block_control_trailing_comma_keeps_closure_tail() {
+    let source = include_str!("fixtures/malformed-case-arm-block-control-trailing-comma-before-tail.orna");
+    let parsed = parse_module(source);
+
+    assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+    let diagnostic = &parsed.diagnostics[0];
+    assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+    assert_eq!(diagnostic.message, "expected `:` after case pattern");
+    let malformed_separator = source.find("false 0").expect("fixture has malformed arm") + 6;
+    assert_eq!(diagnostic.span.start, malformed_separator);
+    assert_eq!(diagnostic.span.end, malformed_separator + 1);
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block { tail: Some(root_tail), .. } = body else {
+        panic!("expected the root case tail");
+    };
+    let Expr::Control { arms: root_arms, .. } = root_tail.as_ref() else {
+        panic!("expected the root case expression");
+    };
+    assert_eq!(root_arms.len(), 2, "{root_arms:?}");
+    let Expr::InterpolatedString { segments, .. } = &root_arms[0].body else {
+        panic!("root arm lost its closure string");
+    };
+    let [
+        StringSegment::Text { text: prefix, .. },
+        StringSegment::Expression { value: closure, .. },
+        StringSegment::Text { text: suffix, .. },
+    ] = segments.as_slice()
+    else {
+        panic!("outer interpolation lost its suffix boundary: {segments:?}");
+    };
+    assert_eq!(prefix, "before ");
+    assert_eq!(suffix, " after");
+
+    let Expr::Lambda { body: closure_body, .. } = closure else {
+        panic!("outer interpolation lost its closure");
+    };
+    let Expr::Block {
+        statements,
+        tail: Some(final_closure),
+        ..
+    } = closure_body.as_ref()
+    else {
+        panic!("case semicolon swallowed the closure block tail");
+    };
+    let [
+        Statement::Let { .. },
+        Statement::Control {
+            value: Expr::Control { arms, .. },
+            ..
+        },
+    ] = statements.as_slice()
+    else {
+        panic!("case was not retained as a block control statement: {statements:?}");
+    };
+    assert_eq!(arms.len(), 1, "{arms:?}");
+    assert!(matches!(final_closure.as_ref(), Expr::Lambda { .. }));
+    let Expr::Lambda { body: final_body, .. } = final_closure.as_ref() else {
+        unreachable!();
+    };
+    let Expr::Block {
+        tail: Some(final_tail),
+        ..
+    } = final_body.as_ref()
+    else {
+        panic!("following closure lost its case tail");
+    };
+    let Expr::Control {
+        arms: final_arms, ..
+    } = final_tail.as_ref()
+    else {
+        panic!("following closure tail is not a case expression");
+    };
+    assert_eq!(final_arms.len(), 2, "{final_arms:?}");
+    assert!(matches!(
+        &root_arms[1].body,
+        Expr::InterpolatedString { segments, .. }
+            if matches!(segments.as_slice(), [
+                StringSegment::Text { text: prefix, .. },
+                StringSegment::Expression { value: Expr::Name { text: name, .. }, .. },
+                StringSegment::Text { text: suffix, .. }
+            ] if prefix == "fallback " && name == "flag" && suffix == " done")
+    ));
+
+    // A trailing arm comma before the block statement's semicolon must not
+    // blur the statement boundary or consume the closure's final case tail.
+}
+
+#[test]
 fn semicolon_keeps_control_expression_as_a_statement() {
     let parsed = parse_module(include_str!("fixtures/semicolon-control-block-item.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);

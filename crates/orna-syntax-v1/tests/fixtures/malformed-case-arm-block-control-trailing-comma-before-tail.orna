@@ -1,0 +1,12 @@
+pub fn bad(flag: Bool): Int { case flag {
+true: "before {outer => { let outer_saved = outer; case outer {
+true: outer_saved,
+false 0 { value: 6 },
+};
+final => { let final_saved = final; case final {
+true: final_saved,
+false: "done {flag} tail"
+} }
+}} after",
+false: "fallback {flag} done"
+}}
