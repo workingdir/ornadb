@@ -2,7 +2,7 @@ use orna_semantic_v1::{ModuleInput, analyze_with_catalogue};
 
 use crate::{
     REFERENCE_STANDARD_COLLECTION_PATH_V1, REFERENCE_STANDARD_MATH_PATH_V1,
-    REFERENCE_STANDARD_QUERY_PATH_V1,
+    REFERENCE_STANDARD_QUERY_PATH_V1, REFERENCE_STANDARD_TEXT_PATH_V1,
     reference_standard_catalogue_v1,
     reference_standard_profile_v1, reference_standard_sources_v1,
 };
@@ -16,6 +16,8 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     assert!(sources[1].1.contains("pub fn asof_join<T, Time, Key>"));
     assert_eq!(sources[2].0, REFERENCE_STANDARD_QUERY_PATH_V1);
     assert!(sources[2].1.contains("pub fn filter<T>"));
+    assert_eq!(sources[3].0, REFERENCE_STANDARD_TEXT_PATH_V1);
+    assert!(sources[3].1.contains("pub fn normalise(value: Str, form: Str)"));
 
     let profile = reference_standard_profile_v1();
     assert_eq!(profile.snapshot(), "orna.std/v1-reference-library");

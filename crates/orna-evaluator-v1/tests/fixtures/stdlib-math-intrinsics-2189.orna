@@ -1,0 +1,6 @@
+std.math.increment(41) == 42
+&& std.math.decrement(41) == 40
+&& std.math.is_zero(0)
+&& std.math.min(3, 2) == 2
+&& std.math.max(3, 2) == 3
+&& std.math.clamp(99, lower: 10, upper: 20) == 20
