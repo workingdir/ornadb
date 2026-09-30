@@ -7632,6 +7632,8 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
     let full_base_reset_tail_id = b"consumer/zzz-full-base-reset-tail".to_vec();
     let one_sided_full_base_reset_tail_id =
         b"consumer/zzzz-one-sided-full-base-reset-tail".to_vec();
+    let opposite_full_base_delete_before_reset_id =
+        b"consumer/zzzy-opposite-full-base-delete-before-reset".to_vec();
     let opposite_full_base_delete_tail_id =
         b"consumer/zzzzz-opposite-full-base-delete-tail".to_vec();
     let deleted_row = parse_fixture(BASE, RowKeyKind::Explicit);
@@ -7648,8 +7650,8 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
     // middle and after the terminal conflict. The final full-base reset also
     // follows a clean tombstone, proving tail closure keeps it out of impacts.
     // A final one-sided full-base reset likewise resolves without adding an
-    // impact or consuming conflict detail. Follow it with a clean full-base
-    // tombstone on the opposite branch to cover both tail closure orientations.
+    // impact or consuming conflict detail. Full-base tombstones on the opposite
+    // branch before and after it cover both stable-ID tail orderings.
     let build_inputs = |
         row_delete_left: bool,
         checkpoint_delete_left: bool,
@@ -7738,19 +7740,34 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
         if tail_reset_left {
             left.checkpoints.insert(
                 one_sided_full_base_reset_tail_id.clone(),
+                reset_fixture.clone(),
+            );
+            right.checkpoints.insert(
+                one_sided_full_base_reset_tail_id.clone(),
+                full_checkpoint.clone(),
+            );
+        } else {
+            left.checkpoints.insert(
+                one_sided_full_base_reset_tail_id.clone(),
                 full_checkpoint.clone(),
             );
             right.checkpoints.insert(
                 one_sided_full_base_reset_tail_id.clone(),
                 reset_fixture.clone(),
             );
-        } else {
+        }
+        base.checkpoints.insert(
+            opposite_full_base_delete_before_reset_id.clone(),
+            full_checkpoint.clone(),
+        );
+        if tail_reset_left {
             left.checkpoints.insert(
-                one_sided_full_base_reset_tail_id.clone(),
-                reset_fixture.clone(),
+                opposite_full_base_delete_before_reset_id.clone(),
+                full_checkpoint.clone(),
             );
+        } else {
             right.checkpoints.insert(
-                one_sided_full_base_reset_tail_id.clone(),
+                opposite_full_base_delete_before_reset_id.clone(),
                 full_checkpoint.clone(),
             );
         }
@@ -7862,6 +7879,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
                     assert!(!report.affected_checkpoints.contains(trailing_delete_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(full_base_reset_tail_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(one_sided_full_base_reset_tail_id.as_slice()));
+                    assert!(!report.affected_checkpoints.contains(opposite_full_base_delete_before_reset_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(opposite_full_base_delete_tail_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(agreed_reset_after_id.as_slice()));
                     assert_eq!(source.visited.len(), 3);
@@ -7905,6 +7923,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
                 assert!(!report.affected_checkpoints.contains(trailing_delete_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(full_base_reset_tail_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(one_sided_full_base_reset_tail_id.as_slice()));
+                assert!(!report.affected_checkpoints.contains(opposite_full_base_delete_before_reset_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(opposite_full_base_delete_tail_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(agreed_reset_after_id.as_slice()));
                 assert_eq!(source.visited.len(), 3);
