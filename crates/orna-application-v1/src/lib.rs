@@ -833,6 +833,8 @@ impl SourceMutationEffectHandler {
         if let Some(row) = self.overlay.get(table).and_then(|rows| rows.get(key)) {
             return Ok(row.clone());
         }
+        // An overlay tombstone shadows the captured row so a recovered delete
+        // can free a key for a later re-key in the same activation.
         Ok(self
             .captured_rows
             .as_ref()
@@ -3077,6 +3079,75 @@ mod tests {
         assert_eq!(
             CanonicalValue::decode(mutations[4].value().unwrap()).unwrap(),
             row(2, "first", 16)
+        );
+    }
+
+    #[test]
+    fn recovered_delete_allows_a_failed_destination_rekey_to_retry() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "table-rekey-delete-retry-tail.orna",
+                include_str!("../tests/fixtures/table-rekey-delete-retry-tail.orna"),
+                "main",
+            )
+            .expect("checked-in delete-and-retry fixture should be admitted");
+
+        let int = |value: i64| {
+            CanonicalValue::new(OvbRaw::Int(value.into())).expect("integer is canonical")
+        };
+        let row = |id: i64, text: &str, quantity: i64| {
+            CanonicalValue::new(OvbRaw::Map(vec![
+                (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
+                (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
+                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+            ]))
+            .expect("row is canonical")
+        };
+        let key = |value: i64| int(value).encode().expect("key is canonical");
+        let rows = BTreeMap::from([(
+            "Note".to_owned(),
+            vec![
+                (key(1), row(1, "moving", 10).encode().unwrap()),
+                (key(2), row(2, "conflict", 20).encode().unwrap()),
+            ],
+        )]);
+        let tables = admitted_table_schemas(&application.module_header);
+        let mut handler =
+            SourceMutationEffectHandler::with_table_rows(tables, rows).expect("valid snapshot");
+
+        invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            &Environment::new(),
+            application.limits,
+            &mut handler,
+        )
+        .expect("recovery deletes the conflict before retrying the re-key");
+
+        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        assert_eq!(mutations.len(), 4);
+        assert_eq!(mutations[0].key(), key(2));
+        assert_eq!(mutations[0].rekey_to(), None);
+        assert_eq!(mutations[0].value(), None);
+        assert_eq!(mutations[1].key(), key(1));
+        assert_eq!(mutations[1].rekey_to(), None);
+        assert_eq!(
+            CanonicalValue::decode(mutations[1].value().unwrap()).unwrap(),
+            row(1, "moving", 8)
+        );
+        assert_eq!(mutations[2].key(), key(1));
+        assert_eq!(mutations[2].rekey_to(), Some(key(2).as_slice()));
+        assert_eq!(
+            CanonicalValue::decode(mutations[2].value().unwrap()).unwrap(),
+            row(2, "moving", 8)
+        );
+        assert_eq!(mutations[3].key(), key(2));
+        assert_eq!(mutations[3].rekey_to(), None);
+        assert_eq!(
+            CanonicalValue::decode(mutations[3].value().unwrap()).unwrap(),
+            row(2, "moving", 9)
         );
     }
 
