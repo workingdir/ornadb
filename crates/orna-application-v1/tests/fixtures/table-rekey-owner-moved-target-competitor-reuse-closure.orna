@@ -73,7 +73,16 @@ fn main() {
                         Note.rekey(10, 11);
                         Note.update(11, { quantity: 96 });
                         Note.rekey(9, 10);
-                        Note.update(10, { quantity: 47 })
+                        Note.update(10, { quantity: 47 });
+                        Note.rekey(11, 10) |? (inserted_reclaims_competitor_target => {
+                            Note.update(10, { quantity: 48 });
+                            Note.rekey(10, 12);
+                            Note.update(12, { quantity: 49 });
+                            Note.rekey(11, 10);
+                            Note.update(10, { quantity: 97 });
+                            Note.rekey(12, 11);
+                            Note.update(11, { quantity: 50 })
+                        })
                     })
                 });
                 Note.rekey(8, 2);
