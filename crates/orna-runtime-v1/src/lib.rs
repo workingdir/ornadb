@@ -55,6 +55,7 @@ use uuid::Uuid;
 mod activation;
 pub use activation::{
     ActivationError, ActivationWork, run_table_activation, with_activation_scope,
+    with_terminal_admin_effect,
 };
 mod checkpoint_bootstrap;
 mod catalogue;
@@ -1016,6 +1017,19 @@ pub struct RequestIdentity {
     pub request_id: [u8; 16],
 }
 
+/// Derives the stable administrative receipt identity for one admitted
+/// request. Keeping the session in the digest prevents request IDs that are
+/// only unique within a session from aliasing in the runtime-wide receipt log.
+pub fn admin_invocation_id(request: RequestIdentity) -> [u8; 16] {
+    let mut digest = Sha256::new();
+    digest.update(b"orna.admin.invocation.v1\0");
+    digest.update(request.session_id);
+    digest.update(request.request_id);
+    digest.finalize()[..16]
+        .try_into()
+        .expect("SHA-256 has at least 16 bytes")
+}
+
 /// Durable identity of the activation that owns a running request.
 ///
 /// The epoch is a fence: recovery is permitted only after a different writer
@@ -1674,6 +1688,7 @@ pub enum RuntimeError {
     SnapshotContextMismatch,
     LeaseHeld,
     AdminBusy,
+    AdminInvocationConflict,
     OwnerLost,
     RecoveryPending,
     StaleCapture { current: Box<CwdCapture> },
@@ -1740,6 +1755,7 @@ impl fmt::Display for RuntimeError {
             Self::SnapshotContextMismatch => "historical snapshot contexts do not match",
             Self::LeaseHeld => "runtime writer is held",
             Self::AdminBusy => "runtime administration callback is busy",
+            Self::AdminInvocationConflict => "administrative invocation identity was reused",
             Self::OwnerLost => "runtime writer ownership was lost",
             Self::RecoveryPending => "runtime takeover recovery is pending",
             Self::StaleCapture { .. } => "runtime capture is stale",
@@ -1960,6 +1976,14 @@ impl RuntimeQuerySession<'_> {
         self.snapshot.query_exact(table, key)
     }
 
+    /// Returns the exact row or the typed miss used by a required `lookup`
+    /// effect. An admitted table with no matching key is distinct from a
+    /// relation the activation did not admit.
+    pub fn lookup_exact(&self, table: &str, key: &[u8]) -> Result<&[u8], RuntimeQueryError> {
+        self.query_exact(table, key)?
+            .ok_or(RuntimeQueryError::RowNotFound)
+    }
+
     /// Adds one already validated mutation to this private session.
     ///
     /// A repeated key replaces the session's query view in order of staging,
@@ -1991,11 +2015,15 @@ impl RuntimeQuerySession<'_> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeQueryError {
     TableNotAdmitted,
+    RowNotFound,
 }
 
 impl fmt::Display for RuntimeQueryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("table was not admitted to this query session")
+        formatter.write_str(match self {
+            Self::TableNotAdmitted => "table was not admitted to this query session",
+            Self::RowNotFound => "exact query did not match a row",
+        })
     }
 }
 
@@ -3245,6 +3273,13 @@ fn admin_checkpoint_result(
 fn admin_invocation_descriptor(
     operation: &AdminInvocationOperation,
 ) -> AdminInvocationDescriptor {
+    admin_invocation_descriptor_with_id(operation, Uuid::new_v4().into_bytes())
+}
+
+fn admin_invocation_descriptor_with_id(
+    operation: &AdminInvocationOperation,
+    invocation_id: [u8; 16],
+) -> AdminInvocationDescriptor {
     let (function, arguments, redacted) = match operation {
         AdminInvocationOperation::Pause { key, reason } => {
             let has_reason = reason.is_some();
@@ -3309,10 +3344,95 @@ fn admin_invocation_descriptor(
         ),
     };
     AdminInvocationDescriptor {
-        invocation_id: Uuid::new_v4().into_bytes(),
+        invocation_id,
         function,
         safe_arguments: arguments,
         redacted,
+    }
+}
+
+fn admin_reference_descriptor(
+    invocation_id: [u8; 16],
+    function: &'static str,
+    reference: &Value,
+    reason: Option<&str>,
+) -> AdminInvocationDescriptor {
+    let reason_redacted = reason.is_some_and(admin_argument_redacted);
+    let reason_digest = reason
+        .map(|value| admin_digest(value.as_bytes()))
+        .unwrap_or_else(|| "none".into());
+    let reason_marker = match reason {
+        None => "<none>",
+        Some(_) if reason_redacted => "<redacted>",
+        Some(_) => "<safe>",
+    };
+    let reference_digest = reference
+        .encode()
+        .ok()
+        .map(|encoded| admin_digest(&encoded))
+        .unwrap_or_else(|| "unavailable".into());
+    AdminInvocationDescriptor {
+        invocation_id,
+        function,
+        safe_arguments: format!(
+            "stream_ref_digest={reference_digest};reason_digest={reason_digest};reason={reason_marker}"
+        ),
+        redacted: reason_redacted,
+    }
+}
+
+fn replay_admin_stream_result(
+    receipt: &AdminInvocationAudit,
+) -> Result<AdminOperationResult, RuntimeError> {
+    if let Some(failure) = receipt.terminal_outcome.strip_prefix("failure:") {
+        return Err(match failure {
+            "admin_busy" | "runtime administration callback is busy" => RuntimeError::AdminBusy,
+            "invalid_observation_reference" => RuntimeError::InvalidObservationReference,
+            "checkpoint_not_replayable" => RuntimeError::CheckpointNotReplayable,
+            "stream_checkpoint_stale" => RuntimeError::StreamCheckpointStale,
+            _ => RuntimeError::StorageUnavailable,
+        });
+    }
+    let result = match receipt.terminal_outcome.as_str() {
+        "paused" => StreamAdministrationOutcome::Paused { changed: true },
+        "paused_noop" => StreamAdministrationOutcome::Paused { changed: false },
+        "pause_pending" => StreamAdministrationOutcome::PausePending { changed: true },
+        "pause_pending_noop" => StreamAdministrationOutcome::PausePending { changed: false },
+        "resumed" => StreamAdministrationOutcome::Running { changed: true },
+        "resumed_noop" => StreamAdministrationOutcome::Running { changed: false },
+        "busy" => StreamAdministrationOutcome::Busy,
+        "blocking_failure" => StreamAdministrationOutcome::BlockingFailure,
+        _ => return Err(RuntimeError::AdminInvocationConflict),
+    };
+    Ok(AdminOperationResult::Stream(result))
+}
+
+fn admin_failure_outcome(error: &RuntimeError) -> &'static str {
+    match error {
+        RuntimeError::AdminBusy => "admin_busy",
+        RuntimeError::InvalidObservationReference => "invalid_observation_reference",
+        RuntimeError::CheckpointNotReplayable => "checkpoint_not_replayable",
+        RuntimeError::StreamCheckpointStale => "stream_checkpoint_stale",
+        _ => "unavailable",
+    }
+}
+
+fn admin_result_from_receipt(
+    operation: &AdminInvocationOperation,
+    descriptor: &AdminInvocationDescriptor,
+    receipt: &AdminInvocationAudit,
+) -> Result<AdminOperationResult, RuntimeError> {
+    if receipt.function != descriptor.function
+        || receipt.safe_arguments != descriptor.safe_arguments
+        || receipt.redacted != descriptor.redacted
+    {
+        return Err(RuntimeError::AdminInvocationConflict);
+    }
+    match operation {
+        AdminInvocationOperation::Pause { .. } | AdminInvocationOperation::Resume { .. } => {
+            replay_admin_stream_result(receipt)
+        }
+        AdminInvocationOperation::Reset { .. } => Err(RuntimeError::AdminInvocationConflict),
     }
 }
 
@@ -4278,6 +4398,40 @@ impl RuntimeState {
         .and_then(admin_stream_result)
     }
 
+    /// Applies a pause with a caller-stable invocation identity. A repeated
+    /// identity with the same operation returns its retained outcome without
+    /// reapplying the transition; reusing it for different arguments fails.
+    pub async fn pause_stream_with_invocation_id(
+        &self,
+        lease: WriterLease,
+        key: CheckpointKey,
+        invocation_id: [u8; 16],
+    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
+        let operation = AdminInvocationOperation::Pause { key, reason: None };
+        let descriptor = admin_invocation_descriptor_with_id(&operation, invocation_id);
+        self.apply_admin_invocation_with_descriptor(lease, None, operation, descriptor)
+            .await
+            .and_then(admin_stream_result)
+    }
+
+    /// Reason-bearing stable-receipt form of a stream pause.
+    pub async fn pause_stream_with_reason_and_invocation_id(
+        &self,
+        lease: WriterLease,
+        key: CheckpointKey,
+        reason: String,
+        invocation_id: [u8; 16],
+    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
+        let operation = AdminInvocationOperation::Pause {
+            key,
+            reason: Some(reason),
+        };
+        let descriptor = admin_invocation_descriptor_with_id(&operation, invocation_id);
+        self.apply_admin_invocation_with_descriptor(lease, None, operation, descriptor)
+            .await
+            .and_then(admin_stream_result)
+    }
+
     /// Resolves an admitted portable `sys.StreamRef` against the live writer's
     /// owner-fenced current-runtime observations, then pauses that exact stream
     /// only while its activation capture remains current.
@@ -4288,53 +4442,87 @@ impl RuntimeState {
         reason: Option<String>,
         expected_capture: &CwdCapture,
     ) -> Result<StreamAdministrationOutcome, RuntimeError> {
+        self.pause_stream_reference_at_capture_with_invocation_id(
+            lease,
+            reference,
+            reason,
+            expected_capture,
+            Uuid::new_v4().into_bytes(),
+        )
+        .await
+    }
+
+    /// Stable-receipt form of [`Self::pause_stream_reference_at_capture`].
+    /// The public reference digest is the argument identity, so an exact
+    /// request replay can recover its result before resolving a now-stale
+    /// observation reference.
+    pub async fn pause_stream_reference_at_capture_with_invocation_id(
+        &self,
+        lease: WriterLease,
+        reference: Value,
+        reason: Option<String>,
+        expected_capture: &CwdCapture,
+        invocation_id: [u8; 16],
+    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
+        let function = if reason.is_some() {
+            "sys.admin.pause_stream_with_reason"
+        } else {
+            "sys.admin.pause_stream"
+        };
+        let descriptor = admin_reference_descriptor(
+            invocation_id,
+            function,
+            &reference,
+            reason.as_deref(),
+        );
+        if let Some(result) = self
+            .replay_admin_invocation_receipt(lease, &descriptor)
+            .await?
+        {
+            return admin_stream_result(result);
+        }
         if activation::runtime_activation_active(self) {
-            let reason_redacted = reason
-                .as_deref()
-                .map(admin_argument_redacted)
-                .unwrap_or(false);
-            let reason_digest = reason
-                .as_deref()
-                .map(|value| admin_digest(value.as_bytes()))
-                .unwrap_or_else(|| "none".into());
-            let reason_marker = match reason.as_deref() {
-                None => "<none>",
-                Some(_) if reason_redacted => "<redacted>",
-                Some(_) => "<safe>",
-            };
-            let reference_digest = reference
-                .encode()
-                .ok()
-                .map(|encoded| admin_digest(&encoded))
-                .unwrap_or_else(|| "unavailable".into());
-            let descriptor = AdminInvocationDescriptor {
-                invocation_id: Uuid::new_v4().into_bytes(),
-                function: if reason.is_some() {
-                    "sys.admin.pause_stream_with_reason"
-                } else {
-                    "sys.admin.pause_stream"
-                },
-                safe_arguments: format!(
-                    "stream_ref_digest={reference_digest};reason_digest={reason_digest};reason={reason_marker}"
-                ),
-                redacted: reason_redacted,
-            };
             return Err(self.reentrant_admin_busy_error(&descriptor, lease).await);
         }
-        let row = decode_row_ref(
-            reference
-                .encode()
-                .map_err(|_| RuntimeError::InvalidObservationReference)?,
-        )?;
-        let requested = validate_stream_reference(row, expected_capture)
-            .map_err(|_| RuntimeError::InvalidObservationReference)?;
-        let fence = self.runtime_observation_fence(lease).await?;
+        let row = match reference
+            .encode()
+            .map_err(|_| RuntimeError::InvalidObservationReference)
+            .and_then(decode_row_ref)
+        {
+            Ok(row) => row,
+            Err(error) => return Err(self.record_failed_admin_and_return(&descriptor, lease, error).await),
+        };
+        let requested = match validate_stream_reference(row, expected_capture) {
+            Ok(requested) => requested,
+            Err(_) => {
+                return Err(self
+                    .record_failed_admin_and_return(
+                        &descriptor,
+                        lease,
+                        RuntimeError::InvalidObservationReference,
+                    )
+                    .await);
+            }
+        };
+        let fence = match self.runtime_observation_fence(lease).await {
+            Ok(fence) => fence,
+            Err(error) => return Err(self.record_failed_admin_and_return(&descriptor, lease, error).await),
+        };
         if fence.capture() != expected_capture {
-            return Err(RuntimeError::StaleCapture {
-                current: Box::new(fence.capture().clone()),
-            });
+            return Err(self
+                .record_failed_admin_and_return(
+                    &descriptor,
+                    lease,
+                    RuntimeError::StaleCapture {
+                        current: Box::new(fence.capture().clone()),
+                    },
+                )
+                .await);
         }
-        let view = self.current_runtime_observations(&fence).await?;
+        let view = match self.current_runtime_observations(&fence).await {
+            Ok(view) => view,
+            Err(error) => return Err(self.record_failed_admin_and_return(&descriptor, lease, error).await),
+        };
         let key = view
             .streams
             .iter()
@@ -4343,22 +4531,20 @@ impl RuntimeState {
                 (stream.reference(run).ok().as_ref() == Some(&requested))
                     .then(|| stream.checkpoint.clone())
             })
-            .ok_or(RuntimeError::InvalidObservationReference)?;
-        match reason {
-            Some(reason) => {
-                self.pause_stream_with_reason_at_capture(
-                    lease,
-                    key,
-                    reason,
-                    Some(expected_capture),
-                )
-                .await
-            }
-            None => {
-                self.pause_stream_at_capture(lease, key, Some(expected_capture))
-                    .await
-            }
-        }
+            .ok_or(RuntimeError::InvalidObservationReference);
+        let key = match key {
+            Ok(key) => key,
+            Err(error) => return Err(self.record_failed_admin_and_return(&descriptor, lease, error).await),
+        };
+        let operation = AdminInvocationOperation::Pause { key, reason };
+        self.apply_admin_invocation_with_descriptor(
+            lease,
+            Some(expected_capture),
+            operation,
+            descriptor,
+        )
+        .await
+        .and_then(admin_stream_result)
     }
 
     /// Applies a writer-fenced pause while retaining its supplied reason in
@@ -4490,6 +4676,47 @@ impl RuntimeState {
         load_admin_invocation_audits(&self.connection).await
     }
 
+    /// Reads one durable administrative receipt by its stable invocation ID.
+    pub async fn admin_invocation_receipt(
+        &self,
+        invocation_id: [u8; 16],
+    ) -> Result<Option<AdminInvocationAudit>, RuntimeError> {
+        load_admin_invocation_receipt(&self.connection, invocation_id).await
+    }
+
+    /// Retains the failed receipt for an admin stream effect that is rejected
+    /// because its source activation still owns staged table writes.
+    pub async fn reject_admin_stream_effect_as_busy(
+        &self,
+        lease: WriterLease,
+        function: &'static str,
+        reference: Value,
+        reason: Option<String>,
+        invocation_id: [u8; 16],
+    ) -> Result<(), RuntimeError> {
+        if !matches!(
+            (function, reason.is_some()),
+            ("sys.admin.pause_stream", false)
+                | ("sys.admin.pause_stream_with_reason", true)
+                | ("sys.admin.resume_stream", false)
+        ) {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        let descriptor = admin_reference_descriptor(
+            invocation_id,
+            function,
+            &reference,
+            reason.as_deref(),
+        );
+        match self
+            .record_failed_admin_descriptor(&descriptor, lease, &RuntimeError::AdminBusy)
+            .await
+        {
+            Ok(()) | Err(RuntimeError::OwnerLost) => Err(RuntimeError::AdminBusy),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Reads reset audits in admission order. This is intentionally a
     /// redaction-safe projection and never exposes the runtime connection.
     pub async fn checkpoint_reset_audits(
@@ -4526,6 +4753,79 @@ impl RuntimeState {
         .await
         .and_then(admin_stream_result)
     }
+
+    /// Applies a resume with a caller-stable invocation identity, replaying
+    /// the durable outcome when the same request is submitted again.
+    pub async fn resume_stream_with_invocation_id(
+        &self,
+        lease: WriterLease,
+        key: CheckpointKey,
+        invocation_id: [u8; 16],
+    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
+        let operation = AdminInvocationOperation::Resume { key };
+        let descriptor = admin_invocation_descriptor_with_id(&operation, invocation_id);
+        self.apply_admin_invocation_with_descriptor(lease, None, operation, descriptor)
+            .await
+            .and_then(admin_stream_result)
+    }
+
+    /// Resolves and resumes one public stream reference under the captured
+    /// writer generation. Its durable receipt is keyed by the request ID.
+    pub async fn resume_stream_reference_at_capture_with_invocation_id(
+        &self,
+        lease: WriterLease,
+        reference: Value,
+        expected_capture: &CwdCapture,
+        invocation_id: [u8; 16],
+    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
+        let descriptor = admin_reference_descriptor(
+            invocation_id,
+            "sys.admin.resume_stream",
+            &reference,
+            None,
+        );
+        if let Some(result) = self
+            .replay_admin_invocation_receipt(lease, &descriptor)
+            .await?
+        {
+            return admin_stream_result(result);
+        }
+        if activation::runtime_activation_active(self) {
+            return Err(self.reentrant_admin_busy_error(&descriptor, lease).await);
+        }
+        let row = decode_row_ref(
+            reference
+                .encode()
+                .map_err(|_| RuntimeError::InvalidObservationReference)?,
+        )?;
+        let requested = validate_stream_reference(row, expected_capture)
+            .map_err(|_| RuntimeError::InvalidObservationReference)?;
+        let fence = self.runtime_observation_fence(lease).await?;
+        if fence.capture() != expected_capture {
+            return Err(RuntimeError::StaleCapture {
+                current: Box::new(fence.capture().clone()),
+            });
+        }
+        let view = self.current_runtime_observations(&fence).await?;
+        let key = view
+            .streams
+            .iter()
+            .find_map(|stream| {
+                let run = view.runs.iter().find(|run| run.id == stream.run)?;
+                (stream.reference(run).ok().as_ref() == Some(&requested))
+                    .then(|| stream.checkpoint.clone())
+            })
+            .ok_or(RuntimeError::InvalidObservationReference)?;
+        let operation = AdminInvocationOperation::Resume { key };
+        self.apply_admin_invocation_with_descriptor(
+            lease,
+            Some(expected_capture),
+            operation,
+            descriptor,
+        )
+        .await
+        .and_then(admin_stream_result)
+    }
     async fn apply_admin_invocation(
         &self,
         lease: WriterLease,
@@ -4533,6 +4833,23 @@ impl RuntimeState {
         operation: AdminInvocationOperation,
     ) -> Result<AdminOperationResult, RuntimeError> {
         let descriptor = admin_invocation_descriptor(&operation);
+        self.apply_admin_invocation_with_descriptor(lease, expected_capture, operation, descriptor)
+            .await
+    }
+
+    async fn apply_admin_invocation_with_descriptor(
+        &self,
+        lease: WriterLease,
+        expected_capture: Option<&CwdCapture>,
+        operation: AdminInvocationOperation,
+        descriptor: AdminInvocationDescriptor,
+    ) -> Result<AdminOperationResult, RuntimeError> {
+        if let Some(result) = self
+            .replay_admin_invocation_receipt(lease, &descriptor)
+            .await?
+        {
+            return Ok(result);
+        }
         if activation::runtime_activation_active(self) {
             return Err(self.reentrant_admin_busy_error(&descriptor, lease).await);
         }
@@ -4543,6 +4860,11 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         let attempt = async {
             self.require_owner(&transaction, lease).await?;
+            if let Some(receipt) =
+                load_admin_invocation_receipt(&transaction, descriptor.invocation_id).await?
+            {
+                return admin_result_from_receipt(&operation, &descriptor, &receipt);
+            }
             let current_capture = capture_tx(&transaction).await?;
             if let Some(expected_capture) = expected_capture {
                 if &current_capture != expected_capture {
@@ -4576,6 +4898,12 @@ impl RuntimeState {
             }
             Err(error) => {
                 drop(transaction);
+                if let Some(receipt) =
+                    load_admin_invocation_receipt(&self.connection, descriptor.invocation_id)
+                        .await?
+                {
+                    return admin_result_from_receipt(&operation, &descriptor, &receipt);
+                }
                 match self
                     .record_failed_admin_descriptor(&descriptor, lease, &error)
                     .await
@@ -4585,6 +4913,37 @@ impl RuntimeState {
                 }
             }
         }
+    }
+
+    async fn replay_admin_invocation_receipt(
+        &self,
+        lease: WriterLease,
+        descriptor: &AdminInvocationDescriptor,
+    ) -> Result<Option<AdminOperationResult>, RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&transaction, lease).await?;
+        let receipt = load_admin_invocation_receipt(&transaction, descriptor.invocation_id).await?;
+        let result = receipt
+            .as_ref()
+            .map(|receipt| {
+                if receipt.function != descriptor.function
+                    || receipt.safe_arguments != descriptor.safe_arguments
+                    || receipt.redacted != descriptor.redacted
+                {
+                    return Err(RuntimeError::AdminInvocationConflict);
+                }
+                replay_admin_stream_result(receipt)
+            })
+            .transpose()?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(result)
     }
 
     async fn record_failed_admin_invocation(
@@ -4625,6 +4984,22 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         self.require_owner(&transaction, lease).await?;
+        if let Some(receipt) =
+            load_admin_invocation_receipt(&transaction, descriptor.invocation_id).await?
+        {
+            let same_invocation = receipt.function == descriptor.function
+                && receipt.safe_arguments == descriptor.safe_arguments
+                && receipt.redacted == descriptor.redacted;
+            transaction
+                .commit()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            return if same_invocation {
+                Ok(())
+            } else {
+                Err(RuntimeError::AdminInvocationConflict)
+            };
+        }
         let observed_generation = capture_tx(&transaction)
             .await
             .ok()
@@ -4636,7 +5011,7 @@ impl RuntimeState {
             descriptor,
             lease,
             observed_generation,
-            format!("failure:{error}"),
+            format!("failure:{}", admin_failure_outcome(error)),
             false,
         )
         .await?;
@@ -4644,6 +5019,21 @@ impl RuntimeState {
             .commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    async fn record_failed_admin_and_return(
+        &self,
+        descriptor: &AdminInvocationDescriptor,
+        lease: WriterLease,
+        error: RuntimeError,
+    ) -> RuntimeError {
+        match self
+            .record_failed_admin_descriptor(descriptor, lease, &error)
+            .await
+        {
+            Ok(()) | Err(RuntimeError::OwnerLost) => error,
+            Err(audit_error) => audit_error,
+        }
     }
 
     /// Captures the fixed CWD and activation time for one root activation.
@@ -13507,6 +13897,56 @@ async fn load_admin_invocation_audits(
     Ok(audits)
 }
 
+async fn load_admin_invocation_receipt(
+    connection: &Connection,
+    invocation_id: [u8; 16],
+) -> Result<Option<AdminInvocationAudit>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT sequence, invocation_id, function_name, safe_arguments,
+                    owner_id, owner_epoch, observed_generation,
+                    terminal_outcome, succeeded, redacted
+             FROM admin_invocation_audit WHERE invocation_id = ?1",
+            params![invocation_id.to_vec()],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Ok(None);
+    };
+    let sequence = decode_u64(row.get::<i64>(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let invocation_id = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    validate_id(invocation_id)?;
+    let function: String = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    validate_observation_text(&function)?;
+    let safe_arguments: String = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    validate_observation_text(&safe_arguments)?;
+    let owner = WriterLease {
+        owner_id: fixed(row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        epoch: decode_u64(row.get::<i64>(5).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+    };
+    validate_writer_lease(owner)?;
+    let observed_generation =
+        decode_u64(row.get::<i64>(6).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let terminal_outcome: String = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    validate_observation_text(&terminal_outcome)?;
+    Ok(Some(AdminInvocationAudit {
+        sequence,
+        invocation_id,
+        function,
+        safe_arguments,
+        owner,
+        observed_generation,
+        terminal_outcome,
+        succeeded: decode_bool(row.get::<i64>(8).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        redacted: decode_bool(row.get::<i64>(9).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+    }))
+}
+
 fn redact_reset_reason(reason: String) -> Result<(String, bool), RuntimeError> {
     if reason.len() > 16_777_216 {
         return Err(RuntimeError::InvalidIdentity);
@@ -17724,6 +18164,7 @@ mod tests {
 
     struct QuerySessionEffects<'session, 'snapshot> {
         session: &'session RuntimeQuerySession<'snapshot>,
+        lookups: usize,
     }
 
     impl orna_evaluator_v1::EffectHandler for QuerySessionEffects<'_, '_> {
@@ -17732,9 +18173,9 @@ mod tests {
             callee: &orna_syntax_v1::Expr,
             arguments: &[CanonicalValue],
         ) -> Result<Option<CanonicalValue>, orna_evaluator_v1::EvaluationError> {
-            let failure = || {
+            let failure = |code| {
                 orna_evaluator_v1::EvaluationError::redacted(
-                    SafeText::new("ORNA-EVAL-QUERY").expect("static diagnostic code"),
+                    SafeText::new(code).expect("static diagnostic code"),
                 )
             };
             let orna_syntax_v1::Expr::Field { base, name, .. } = callee else {
@@ -17746,21 +18187,57 @@ mod tests {
             if name != "lookup" {
                 return Ok(None);
             }
+            self.lookups += 1;
             let [key] = arguments else {
-                return Err(failure());
+                return Err(failure("ORNA-EVAL-TABLE-ARGUMENT"));
             };
-            let encoded_key = key.encode().map_err(|_| failure())?;
-            let Some(row) = self
-                .session
-                .query_exact(table, &encoded_key)
-                .map_err(|_| failure())?
-            else {
-                return Ok(None);
-            };
+            let encoded_key = key
+                .encode()
+                .map_err(|_| failure("ORNA-EVAL-TABLE-KEY"))?;
+            let row = self.session.lookup_exact(table, &encoded_key).map_err(|error| {
+                // The reference leaves runtime diagnostic spelling open; use
+                // the table layer's established missing-row code and keep an
+                // unadmitted relation distinct from a present-but-empty one.
+                failure(match error {
+                    RuntimeQueryError::TableNotAdmitted => "ORNA-EVAL-QUERY-TABLE",
+                    RuntimeQueryError::RowNotFound => "ORNA-EVAL-TABLE-MISSING",
+                })
+            })?;
             CanonicalValue::decode(row)
                 .map(Some)
-                .map_err(|_| failure())
+                .map_err(|_| failure("ORNA-EVAL-QUERY-ROW"))
         }
+    }
+
+    fn invoke_query_fixture(
+        session: &RuntimeQuerySession<'_>,
+        source: &str,
+    ) -> (
+        Result<CanonicalValue, orna_evaluator_v1::EvaluationError>,
+        usize,
+    ) {
+        let parsed = orna_syntax_v1::parse_expression(source);
+        assert!(parsed.is_ok(), "the in-crate query fixture must parse: {source}");
+        let functions = orna_evaluator_v1::Functions::from([(
+            "query".into(),
+            orna_evaluator_v1::PureFunction {
+                parameters: Vec::new(),
+                body: parsed.value,
+                environment: BTreeMap::new(),
+            },
+        )]);
+        let mut effects = QuerySessionEffects {
+            session,
+            lookups: 0,
+        };
+        let result = orna_evaluator_v1::invoke_named_with_effects(
+            "query",
+            &functions,
+            &BTreeMap::new(),
+            orna_evaluator_v1::Limits::default(),
+            &mut effects,
+        );
+        (result, effects.lookups)
     }
 
     #[tokio::test]
@@ -17827,30 +18304,27 @@ mod tests {
             Some(&replacement_bytes[..])
         );
 
-        let parsed = orna_syntax_v1::parse_expression(include_str!(
-            "../tests/fixtures/exact-query-session.orna"
-        ));
-        assert!(parsed.is_ok(), "the in-crate exact-query fixture must parse");
-        let functions = orna_evaluator_v1::Functions::from([(
-            "read_book".into(),
-            orna_evaluator_v1::PureFunction {
-                parameters: Vec::new(),
-                body: parsed.value,
-                environment: BTreeMap::new(),
-            },
-        )]);
-        let result = {
-            let mut effects = QuerySessionEffects { session: &session };
-            orna_evaluator_v1::invoke_named_with_effects(
-                "read_book",
-                &functions,
-                &BTreeMap::new(),
-                orna_evaluator_v1::Limits::default(),
-                &mut effects,
-            )
-            .unwrap()
-        };
+        let (result, lookup_calls) = invoke_query_fixture(
+            &session,
+            include_str!("../tests/fixtures/exact-query-session.orna"),
+        );
+        let result = result.expect("an exact query sees the staged replacement");
         assert_eq!(result, replacement);
+        assert_eq!(lookup_calls, 1);
+
+        let (repeated, lookup_calls) = invoke_query_fixture(
+            &session,
+            include_str!("../tests/fixtures/exact-query-repeat.orna"),
+        );
+        assert_eq!(
+            repeated.expect("repeated exact queries both resolve"),
+            CanonicalValue::new(OvbRaw::Array(vec![
+                replacement.raw().clone(),
+                replacement.raw().clone(),
+            ]))
+            .unwrap()
+        );
+        assert_eq!(lookup_calls, 2, "matching calls are evaluated independently");
 
         session
             .stage_mutation(
@@ -17858,6 +18332,41 @@ mod tests {
             )
             .unwrap();
         assert_eq!(session.query_exact("books", &key).unwrap(), None);
+        let (missing, lookup_calls) = invoke_query_fixture(
+            &session,
+            include_str!("../tests/fixtures/exact-query-missing.orna"),
+        );
+        assert_eq!(
+            missing.unwrap_err().code(),
+            "ORNA-EVAL-TABLE-MISSING",
+            "a staged delete is a failed required lookup"
+        );
+        assert_eq!(lookup_calls, 1);
+
+        let (recovered, lookup_calls) = invoke_query_fixture(
+            &session,
+            include_str!("../tests/fixtures/exact-query-missing-recovery.orna"),
+        );
+        assert_eq!(
+            recovered.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(lookup_calls, 1, "one failure reaches one recovery boundary");
+
+        let (unadmitted, lookup_calls) = invoke_query_fixture(
+            &session,
+            include_str!("../tests/fixtures/exact-query-unadmitted.orna"),
+        );
+        assert_eq!(unadmitted.unwrap_err().code(), "ORNA-EVAL-QUERY-TABLE");
+        assert_eq!(lookup_calls, 1);
+
+        let (invalid_arity, lookup_calls) = invoke_query_fixture(
+            &session,
+            include_str!("../tests/fixtures/exact-query-invalid-arity.orna"),
+        );
+        assert_eq!(invalid_arity.unwrap_err().code(), "ORNA-EVAL-TABLE-ARGUMENT");
+        assert_eq!(lookup_calls, 1);
+
         assert_eq!(
             snapshot.query_exact("books", &key).unwrap(),
             Some(&original_bytes[..])
@@ -22751,6 +23260,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_request_replay_returns_its_durable_receipt_without_reapplying() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let key = stream_delivery("admin-receipt", "admin-receipt-next").checkpoint_key();
+        let invocation_id = id(71);
+        let first = state
+            .pause_stream_with_reason_and_invocation_id(
+                writer,
+                key.clone(),
+                "maintenance boundary".into(),
+                invocation_id,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first, StreamAdministrationOutcome::Paused { changed: true });
+        assert_eq!(
+            state.resume_stream(writer, key.clone()).await.unwrap(),
+            StreamAdministrationOutcome::Running { changed: true },
+        );
+
+        let replay = state
+            .pause_stream_with_reason_and_invocation_id(
+                writer,
+                key.clone(),
+                "maintenance boundary".into(),
+                invocation_id,
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay, first);
+        assert_eq!(
+            state.resume_stream(writer, key.clone()).await.unwrap(),
+            StreamAdministrationOutcome::Running { changed: false },
+            "replaying the old pause receipt must not pause the live stream again",
+        );
+        assert_eq!(
+            state
+                .pause_stream_with_reason_and_invocation_id(
+                    writer,
+                    key,
+                    "different request arguments".into(),
+                    invocation_id,
+                )
+                .await,
+            Err(RuntimeError::AdminInvocationConflict),
+        );
+
+        let receipt = state
+            .admin_invocation_receipt(invocation_id)
+            .await
+            .unwrap()
+            .expect("the terminal admin receipt is durable");
+        assert_eq!(receipt.function, "sys.admin.pause_stream_with_reason");
+        assert_eq!(receipt.terminal_outcome, "paused");
+        assert!(receipt.succeeded);
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(
+            reopened
+                .admin_invocation_receipt(invocation_id)
+                .await
+                .unwrap(),
+            Some(receipt),
+        );
+    }
+
+    #[tokio::test]
     async fn reentrant_stream_reference_pause_retains_failed_invocation_audit() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
@@ -22792,7 +23370,7 @@ mod tests {
             state
                 .pause_stream_reference_at_capture(
                     writer,
-                    reference,
+                    reference.clone(),
                     Some("maintenance boundary".into()),
                     &capture_before,
                 )
@@ -22816,15 +23394,81 @@ mod tests {
                 .streams,
             streams_before
         );
+
+        let rejected_invocation_id = id(50);
+        assert_eq!(
+            state
+                .reject_admin_stream_effect_as_busy(
+                    writer,
+                    "sys.admin.pause_stream",
+                    reference.clone(),
+                    None,
+                    rejected_invocation_id,
+                )
+                .await,
+            Err(RuntimeError::AdminBusy),
+        );
+        assert_eq!(
+            state
+                .reject_admin_stream_effect_as_busy(
+                    writer,
+                    "sys.admin.pause_stream",
+                    reference.clone(),
+                    None,
+                    rejected_invocation_id,
+                )
+                .await,
+            Err(RuntimeError::AdminBusy),
+            "retrying a terminal busy receipt must replay the same outcome",
+        );
+
+        let invocation_id = id(49);
+        let terminal_effect = with_activation_scope(&state, writer, || async {
+            with_terminal_admin_effect(&state, writer, || async {
+                state
+                    .pause_stream_reference_at_capture_with_invocation_id(
+                        writer,
+                        reference,
+                        Some("maintenance boundary".into()),
+                        &capture_before,
+                        invocation_id,
+                    )
+                    .await
+            })
+            .await
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            terminal_effect,
+            Ok(StreamAdministrationOutcome::Paused { changed: true }),
+        );
         drop(state);
         let reopened = open_state(&repo).await;
         let audits = reopened.admin_invocation_audits().await.unwrap();
-        assert_eq!(audits.len(), 1);
-        assert_eq!(audits[0].function, "sys.admin.pause_stream_with_reason");
-        assert!(audits[0].safe_arguments.contains("stream_ref_digest="));
-        assert!(audits[0].safe_arguments.contains("reason_digest="));
-        assert!(!audits[0].succeeded);
-        assert!(audits[0].terminal_outcome.starts_with("failure:"));
+        assert_eq!(audits.len(), 3);
+        let failed = audits
+            .iter()
+            .find(|audit| !audit.succeeded)
+            .expect("the direct reentrant attempt retains a failure receipt");
+        assert_eq!(failed.function, "sys.admin.pause_stream_with_reason");
+        assert!(failed.safe_arguments.contains("stream_ref_digest="));
+        assert!(failed.safe_arguments.contains("reason_digest="));
+        assert!(failed.terminal_outcome.starts_with("failure:"));
+        let receipt = reopened
+            .admin_invocation_receipt(invocation_id)
+            .await
+            .unwrap()
+            .expect("the terminal effect retains its request receipt");
+        assert!(receipt.succeeded);
+        assert_eq!(receipt.terminal_outcome, "paused");
+        let rejected_receipt = reopened
+            .admin_invocation_receipt(rejected_invocation_id)
+            .await
+            .unwrap()
+            .expect("the staged-write rejection retains the request receipt");
+        assert!(!rejected_receipt.succeeded);
+        assert_eq!(rejected_receipt.terminal_outcome, "failure:admin_busy");
     }
 
     #[tokio::test]

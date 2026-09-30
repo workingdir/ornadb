@@ -1,3 +1,3 @@
 pub fn main(stream: sys.StreamRef) {
-  sys.admin.pause_stream(stream)
+  sys.admin.resume_stream(stream)
 }

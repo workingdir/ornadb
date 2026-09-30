@@ -945,7 +945,10 @@ impl PresentNode {
             Box::new(Node::Array(vec![
                 Node::Text("value".into()),
                 Node::Null,
-                Node::Map(vec![(Node::Text("value".into()), value_node(&value)?)]),
+                Node::Map(vec![(
+                    Node::Text("value".into()),
+                    present_value_node(value.raw())?,
+                )]),
                 Node::Array(Vec::new()),
             ])),
         ))
@@ -1561,6 +1564,33 @@ fn to_ovb(node: &Node) -> Result<OvbRaw> {
         Node::Tag(tag, value) => OvbRaw::Tag(*tag, Box::new(to_ovb(value)?)),
     })
 }
+fn present_value_node(value: &OvbRaw) -> Result<Node> {
+    match value {
+        OvbRaw::Tag(0, _) => {
+            // The generic fallback has no type witness to preserve. ORNA-SYS-100
+            // requires an explicit marker, so discard protected payloads here
+            // and use the unmistakable redaction label instead of a fake value.
+            Ok(Node::Text("<redacted>".into()))
+        }
+        OvbRaw::Array(values) => Ok(Node::Array(
+            values
+                .iter()
+                .map(present_value_node)
+                .collect::<Result<Vec<_>>>()?,
+        )),
+        OvbRaw::Map(entries) => Ok(Node::Map(
+            entries
+                .iter()
+                .map(|(key, value)| Ok((present_value_node(key)?, present_value_node(value)?)))
+                .collect::<Result<Vec<_>>>()?,
+        )),
+        OvbRaw::Tag(tag, value) => Ok(Node::Tag(
+            *tag,
+            Box::new(present_value_node(value)?),
+        )),
+        value => from_ovb(value),
+    }
+}
 fn value_node(value: &CanonicalValue) -> Result<Node> {
     from_ovb(value.raw())
 }
@@ -2004,6 +2034,32 @@ mod tests {
     fn present_from_value_uses_the_renderer_neutral_value_fallback() {
         let present = PresentNode::from_value(value()).unwrap();
         present.validate_with_limits(Limits::default()).unwrap();
+    }
+
+    #[test]
+    fn present_value_fallback_discards_nested_protected_payloads() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let value = OvbRaw::Map(vec![(
+            OvbRaw::Text("credential".into()),
+            OvbRaw::Array(vec![OvbRaw::Tag(
+                0,
+                Box::new(OvbRaw::Text(fixture.to_owned())),
+            )]),
+        )]);
+
+        assert_eq!(
+            present_value_node(&value).unwrap(),
+            Node::Map(vec![(
+                Node::Text("credential".into()),
+                Node::Array(vec![Node::Text("<redacted>".into())]),
+            )]),
+        );
+        assert!(!format!("{:?}", present_value_node(&value).unwrap()).contains(fixture));
+
+        let marker = PresentNode::from_value(CanonicalValue::protected()).unwrap();
+        let rendered = format!("{marker:?}");
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains("Tag(0"));
     }
 
     #[test]
