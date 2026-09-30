@@ -765,10 +765,11 @@ fn positionless_checkpoint_delete_update_follows_row_delete_edit_at_budget_tail(
 
     // ORNA-MERGE-011 requires a conflict for divergent checkpoint state but
     // leaves cross-phase ordering open. Storage reports row conflicts first,
-    // so the positionless delete/update impact is the next shared-budget tail.
+    // so a zero-detail budget stops at the row impact before the checkpoint
+    // tail; one slot makes the checkpoint the crossing impact, and two retain it.
     for row_delete_on_left in [true, false] {
         for checkpoint_delete_on_left in [true, false] {
-            for max_conflicts in [1, 2] {
+            for max_conflicts in [0, 1, 2] {
                 let (base, left, right, mut source, checkpoint_id, base_checkpoint, updated_checkpoint) =
                     build_inputs(row_delete_on_left, checkpoint_delete_on_left);
                 let error = merge_three_way_snapshots(
@@ -781,6 +782,11 @@ fn positionless_checkpoint_delete_update_follows_row_delete_edit_at_budget_tail(
                 .unwrap_err();
 
                 match error {
+                    BranchMergeError::BudgetExceeded { report } if max_conflicts == 0 => {
+                        assert_eq!(report.conflicts_lower_bound, 1);
+                        assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+                        assert!(report.affected_checkpoints.is_empty());
+                    }
                     BranchMergeError::BudgetExceeded { report } if max_conflicts == 1 => {
                         assert_eq!(report.conflicts_lower_bound, 2);
                         assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
