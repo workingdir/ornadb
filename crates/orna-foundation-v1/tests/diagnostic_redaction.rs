@@ -11181,3 +11181,268 @@ fn shared_deep_parent_codes_preserve_unequal_tail_recovery_generations() {
     );
     assert_eq!(decoded_causes, causes);
 }
+
+#[test]
+fn reused_decoded_deep_recovery_tail_survives_parent_replacements() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    fn cause_shape(diagnostic: &serde_json::Value) -> Vec<usize> {
+        let causes = diagnostic["causes"].as_array().unwrap();
+        let mut shape = vec![causes.len()];
+        for cause in causes {
+            shape.extend(cause_shape(cause));
+        }
+        shape
+    }
+    fn terminal_parent(diagnostic: &serde_json::Value) -> &serde_json::Value {
+        &diagnostic["causes"][0]["causes"][0]["causes"][0]["causes"][0]
+    }
+    fn deep_tail_codes(diagnostic: &serde_json::Value) -> Vec<String> {
+        terminal_parent(diagnostic)["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tail| tail["code"].as_str().unwrap().to_owned())
+            .collect()
+    }
+    fn reused_recovery(diagnostic: &serde_json::Value) -> Option<&serde_json::Value> {
+        terminal_parent(diagnostic)["causes"].as_array().unwrap().first()
+    }
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let recover = |diagnostic: &Diagnostic| {
+        Diagnostic::decode_ovb(&diagnostic.encode_ovb().unwrap()).unwrap()
+    };
+    let shared_source = admitted("ORNA-E-SHARED-RECOVERY", "shared recovery root payload")
+        .with_cause(
+            admitted("ORNA-E-SHARED-RECOVERY-BRANCH", "shared recovery branch payload")
+                .with_cause(admitted(
+                    "ORNA-E-SHARED-RECOVERY-A",
+                    "shared recovery first tail payload",
+                ))
+                .with_cause(admitted(
+                    "ORNA-E-SHARED-RECOVERY-B",
+                    "shared recovery final tail payload",
+                )),
+        );
+    let shared_recovery = recover(&shared_source);
+    let shared_projection = serde_json::to_value(&shared_recovery).unwrap();
+    let make_parent = |generation: &str, unique_tail: Option<(&str, &str)>| {
+        let parent_message = format!("{generation} deep parent payload");
+        let terminal = match unique_tail {
+            Some((code, message)) => admitted("ORNA-E-REUSED-DEEP-TERMINAL", &parent_message)
+                .with_cause(shared_recovery.clone())
+                .with_cause(admitted(code, message)),
+            None => admitted("ORNA-E-REUSED-DEEP-TERMINAL", &parent_message),
+        };
+        let nested = admitted("ORNA-E-REUSED-DEEP-NESTED", &parent_message).with_cause(terminal);
+        let parent = admitted("ORNA-E-REUSED-DEEP-PARENT", &parent_message).with_cause(nested);
+        let branch = admitted("ORNA-E-REUSED-DEEP-BRANCH", &parent_message).with_cause(parent);
+        admitted("ORNA-E-REUSED-DEEP-ROOT", &parent_message).with_cause(branch)
+    };
+    let old_recovery = recover(&make_parent(
+        "old shared",
+        Some(("ORNA-E-REUSED-OLD-TAIL", "old unique tail payload")),
+    ));
+    let new_recovery = recover(&make_parent(
+        "new shared",
+        Some(("ORNA-E-REUSED-NEW-TAIL", "new unique tail payload")),
+    ));
+    let empty_recovery = recover(&make_parent("empty shared", None));
+    let capture = |snapshot: Diagnostic| move || snapshot.clone();
+
+    // ORNA-SECRET-002 requires recursive redaction but leaves reuse of one
+    // decoded deep subtree across sibling parent generations unspecified. Each
+    // closure retains the recovered subtree with the parent generation captured.
+    let capture_old = capture(old_recovery.clone());
+    let capture_new = capture(new_recovery.clone());
+    let capture_empty = capture(empty_recovery.clone());
+    let mut left = old_recovery.clone();
+    let mut right = new_recovery.clone();
+    let capture_left_old = capture(left.clone());
+    let capture_right_new = capture(right.clone());
+
+    left.clone_from(&capture_empty());
+    right.clone_from(&capture_empty());
+    let capture_left_empty = capture(left.clone());
+    let capture_right_empty = capture(right.clone());
+
+    left.clone_from(&capture_new());
+    right.clone_from(&capture_old());
+    let capture_left_crossed = capture(left.clone());
+    let capture_right_crossed = capture(right.clone());
+
+    left.clone_from(&capture_old());
+    right.clone_from(&capture_new());
+    let capture_left_restored = capture(left.clone());
+    let capture_right_restored = capture(right.clone());
+
+    left.clone_from(&capture_empty());
+    let capture_left_empty_again = capture(left.clone());
+    let capture_right_new_again = capture(right.clone());
+
+    assert_eq!(capture_left_old(), old_recovery);
+    assert_eq!(capture_right_new(), new_recovery);
+    assert_eq!(capture_left_empty(), empty_recovery);
+    assert_eq!(capture_right_empty(), empty_recovery);
+    assert_eq!(capture_left_crossed(), new_recovery);
+    assert_eq!(capture_right_crossed(), old_recovery);
+    assert_eq!(capture_left_restored(), old_recovery);
+    assert_eq!(capture_right_restored(), new_recovery);
+    assert_eq!(capture_left_empty_again(), empty_recovery);
+    assert_eq!(capture_right_new_again(), new_recovery);
+
+    let compose_generations = {
+        let capture_left_old = capture_left_old;
+        let capture_right_new = capture_right_new;
+        let capture_left_empty = capture_left_empty;
+        let capture_right_empty = capture_right_empty;
+        let capture_left_crossed = capture_left_crossed;
+        let capture_right_crossed = capture_right_crossed;
+        let capture_left_restored = capture_left_restored;
+        let capture_right_restored = capture_right_restored;
+        let capture_left_empty_again = capture_left_empty_again;
+        let capture_right_new_again = capture_right_new_again;
+        move || {
+            admitted("ORNA-E-REUSED-DEEP-OUTER", "reused deep outer admission")
+                .with_cause(capture_left_old())
+                .with_cause(capture_right_new())
+                .with_cause(capture_left_empty())
+                .with_cause(capture_right_empty())
+                .with_cause(capture_left_crossed())
+                .with_cause(capture_right_crossed())
+                .with_cause(capture_left_restored())
+                .with_cause(capture_right_restored())
+                .with_cause(capture_left_empty_again())
+                .with_cause(capture_right_new_again())
+        }
+    };
+    left.clone_from(&capture_empty());
+    right.clone_from(&capture_empty());
+    let outer = compose_generations();
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["message"], "reused deep outer admission");
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 10);
+    for cause in causes {
+        assert_redacted_tree(cause);
+    }
+    let expected_causes = [
+        old_recovery.clone(),
+        new_recovery.clone(),
+        empty_recovery.clone(),
+        empty_recovery.clone(),
+        new_recovery.clone(),
+        old_recovery.clone(),
+        old_recovery.clone(),
+        new_recovery.clone(),
+        empty_recovery.clone(),
+        new_recovery.clone(),
+    ]
+    .into_iter()
+    .map(|generation| serde_json::to_value(generation).unwrap())
+    .collect::<Vec<_>>();
+    assert_eq!(causes, expected_causes.as_slice());
+    for cause in causes.iter().filter(|cause| !cause["causes"].is_null()) {
+        if let Some(reused) = reused_recovery(cause) {
+            assert_eq!(reused, &shared_projection);
+        }
+    }
+    assert_eq!(
+        causes.iter().map(cause_shape).collect::<Vec<_>>(),
+        vec![
+            vec![1, 1, 1, 1, 2, 1, 2, 0, 0, 0],
+            vec![1, 1, 1, 1, 2, 1, 2, 0, 0, 0],
+            vec![1, 1, 1, 1, 0],
+            vec![1, 1, 1, 1, 0],
+            vec![1, 1, 1, 1, 2, 1, 2, 0, 0, 0],
+            vec![1, 1, 1, 1, 2, 1, 2, 0, 0, 0],
+            vec![1, 1, 1, 1, 2, 1, 2, 0, 0, 0],
+            vec![1, 1, 1, 1, 2, 1, 2, 0, 0, 0],
+            vec![1, 1, 1, 1, 0],
+            vec![1, 1, 1, 1, 2, 1, 2, 0, 0, 0],
+        ],
+    );
+    assert_eq!(
+        causes.iter().map(deep_tail_codes).collect::<Vec<_>>(),
+        vec![
+            vec![
+                "ORNA-E-SHARED-RECOVERY".to_owned(),
+                "ORNA-E-REUSED-OLD-TAIL".to_owned(),
+            ],
+            vec![
+                "ORNA-E-SHARED-RECOVERY".to_owned(),
+                "ORNA-E-REUSED-NEW-TAIL".to_owned(),
+            ],
+            vec![],
+            vec![],
+            vec![
+                "ORNA-E-SHARED-RECOVERY".to_owned(),
+                "ORNA-E-REUSED-NEW-TAIL".to_owned(),
+            ],
+            vec![
+                "ORNA-E-SHARED-RECOVERY".to_owned(),
+                "ORNA-E-REUSED-OLD-TAIL".to_owned(),
+            ],
+            vec![
+                "ORNA-E-SHARED-RECOVERY".to_owned(),
+                "ORNA-E-REUSED-OLD-TAIL".to_owned(),
+            ],
+            vec![
+                "ORNA-E-SHARED-RECOVERY".to_owned(),
+                "ORNA-E-REUSED-NEW-TAIL".to_owned(),
+            ],
+            vec![],
+            vec![
+                "ORNA-E-SHARED-RECOVERY".to_owned(),
+                "ORNA-E-REUSED-NEW-TAIL".to_owned(),
+            ],
+        ],
+    );
+
+    let json = serde_json::to_vec(&outer).unwrap();
+    let wire = outer.encode_ovb().unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"shared recovery root payload".as_slice(),
+            b"shared recovery branch payload".as_slice(),
+            b"shared recovery first tail payload".as_slice(),
+            b"shared recovery final tail payload".as_slice(),
+            b"old shared deep parent payload".as_slice(),
+            b"old unique tail payload".as_slice(),
+            b"new shared deep parent payload".as_slice(),
+            b"new unique tail payload".as_slice(),
+            b"empty shared deep parent payload".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
+    assert_redacted_tree(&decoded);
+    let decoded_causes = decoded["causes"].as_array().unwrap();
+    assert_eq!(decoded_causes, causes);
+}
