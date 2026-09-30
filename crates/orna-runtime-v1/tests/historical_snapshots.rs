@@ -912,7 +912,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     let writer = state.acquire_lease([65; 16]).await.expect("acquire writer");
     let mut pins = Vec::new();
 
-    for generation in 1..=268_u64 {
+    for generation in 1..=269_u64 {
         let mut mutation_id = [0; 16];
         mutation_id[8..].copy_from_slice(&generation.to_be_bytes());
         // Delete the prefix while its extended neighbor remains stable, restore an
@@ -920,7 +920,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         // identical restoration twice, then retain the terminal delete after the
         // third restoration. Restore the prefix once more after the neighbor update,
         // then prove the following terminal delete remains visible before restoring
-        // the prefix again at the final retained generation.
+        // the prefix again at the final retained generation. Finally restore the
+        // neighboring extension to its original bytes without rewriting the
+        // restored prefix, proving that an identical neighbor image does not
+        // collapse the generation-specific snapshot pin.
         let prefix_value = match generation {
             256 | 259 | 261 | 263 | 264 | 266 => None,
             257 => Some(b"intermediate-prefix".to_vec()),
@@ -928,7 +931,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             _ => Some(b"original-prefix".to_vec()),
         };
         let mut mutations = Vec::new();
-        if !matches!(generation, 264 | 268) {
+        if !matches!(generation, 264 | 268 | 269) {
             mutations.push(
                 TableMutation::new(mutation_id, "records", vec![5], prefix_value)
                     .expect("valid prefix-row generation mutation"),
@@ -972,10 +975,25 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                 )
                 .expect("valid post-restoration extension update"),
             );
+        } else if generation == 269 {
+            // The format does not prescribe a special merge rule for restoring
+            // an adjacent row after prefix restoration; retain the captured
+            // generation's ordinary row image and leave the prefix untouched.
+            let mut extension_mutation_id = mutation_id;
+            extension_mutation_id[0] = 1;
+            mutations.push(
+                TableMutation::new(
+                    extension_mutation_id,
+                    "records",
+                    vec![5, 0],
+                    Some(b"stable-extension".to_vec()),
+                )
+                .expect("valid restored extension-row mutation"),
+            );
         }
         commit(&state, writer, &mutations, 57).await;
 
-        if matches!(generation, 255 | 256 | 257 | 258 | 259 | 260 | 261 | 262 | 263 | 264 | 265 | 266 | 267 | 268) {
+        if matches!(generation, 255 | 256 | 257 | 258 | 259 | 260 | 261 | 262 | 263 | 264 | 265 | 266 | 267 | 268 | 269) {
             let selected = state
                 .select_historical_snapshot(generation)
                 .await
@@ -990,7 +1008,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
 
     assert_eq!(
         pins.iter().map(|(generation, _, _)| *generation).collect::<Vec<_>>(),
-        [255, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 267, 268]
+        [255, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 267, 268, 269]
     );
     assert!(pins.windows(2).all(|pair| {
         pair[0].2.capture().generation_digest() == pair[1].2.capture().generation_digest()
@@ -1044,6 +1062,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             (vec![5], b"original-prefix".to_vec()),
             (vec![5, 0], b"post-restoration-extension".to_vec()),
         ],
+        269 => vec![
+            (vec![5], b"original-prefix".to_vec()),
+            (vec![5, 0], b"stable-extension".to_vec()),
+        ],
         _ => unreachable!("only prefix restoration boundary generations are read"),
     };
     assert_eq!(expected_rows(255), expected_rows(258));
@@ -1051,6 +1073,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     assert_eq!(expected_rows(255), expected_rows(262));
     assert_eq!(expected_rows(265), expected_rows(267));
     assert_eq!(expected_rows(267)[0], expected_rows(268)[0]);
+    assert_eq!(expected_rows(255), expected_rows(269));
 
     for (generation, descriptor, selected) in &pins {
         let resolved = state
