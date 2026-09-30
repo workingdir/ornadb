@@ -8409,6 +8409,87 @@ mod tests {
     }
 
     #[test]
+    fn owner_retry_after_nested_competitor_handoff_reclaims_released_key() {
+        // The reference requires failed rekeys to be atomic but leaves nested retry ordering open;
+        // pin the local handoff behavior by asserting every mutation in source order.
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "table-rekey-extended-handoff-retry-tail.orna",
+                include_str!("../tests/fixtures/table-rekey-extended-handoff-retry-tail.orna"),
+                "main",
+            )
+            .expect("checked-in extended handoff fixture should be admitted");
+
+        let int = |value: i64| {
+            CanonicalValue::new(OvbRaw::Int(value.into())).expect("integer is canonical")
+        };
+        let row = |id: i64, text: &str, quantity: i64| {
+            CanonicalValue::new(OvbRaw::Map(vec![
+                (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
+                (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
+                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+            ]))
+            .expect("row is canonical")
+        };
+        let key = |value: i64| int(value).encode().expect("key is canonical");
+        let rows = BTreeMap::from([(
+            "Note".to_owned(),
+            vec![
+                (key(1), row(1, "owner", 10).encode().unwrap()),
+                (key(2), row(2, "competitor", 20).encode().unwrap()),
+                (key(3), row(3, "blocker", 30).encode().unwrap()),
+            ],
+        )]);
+        let tables = admitted_table_schemas(&application.module_header);
+        let mut handler =
+            SourceMutationEffectHandler::with_table_rows(tables, rows).expect("valid snapshot");
+
+        invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            &Environment::new(),
+            application.limits,
+            &mut handler,
+        )
+        .expect("owner retries after the competitor's nested handoff");
+
+        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let expected = [
+            (3, None, false, None),
+            (2, Some(3), false, Some(row(3, "competitor", 20))),
+            (1, Some(2), false, Some(row(2, "owner", 10))),
+            (2, None, false, Some(row(2, "owner", 11))),
+            (3, Some(4), false, Some(row(4, "competitor", 20))),
+            (4, None, false, Some(row(4, "competitor", 21))),
+            (2, Some(3), false, Some(row(3, "owner", 11))),
+            (4, Some(2), false, Some(row(2, "competitor", 21))),
+        ];
+        assert_eq!(mutations.len(), expected.len());
+        for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in
+            mutations.iter().zip(expected).enumerate()
+        {
+            assert_eq!(mutation.key(), key(old_key), "handoff mutation {index} source key");
+            let expected_key = new_key.map(key);
+            assert_eq!(
+                mutation.rekey_to(),
+                expected_key.as_deref(),
+                "handoff mutation {index} destination"
+            );
+            assert_eq!(mutation.is_insert(), is_insert, "handoff mutation {index} insert flag");
+            match expected_row {
+                Some(expected_row) => assert_eq!(
+                    CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
+                    expected_row,
+                    "handoff mutation {index} row value"
+                ),
+                None => assert_eq!(mutation.value(), None, "handoff mutation {index} deletion value"),
+            }
+        }
+    }
+
+    #[test]
     fn competitor_retry_survives_successive_inserted_target_moves() {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
