@@ -27,3 +27,5 @@ The reference publishes `ValueMetadata<T>.protocols` and `Protocol.members` as r
 The fixture also carries the `Relation<Protocol>` returned by the first generic `flat_map` into a second `flat_map` over `Protocol.members`. The reference does not define this chained callback descriptor rule; this implementation preserves the declared row type across the helper result so the second callback resolves its input field against `sys.Protocol`.
 
 The fixture extends the same rule over three published edges: `Type.parameters -> TypeParameter.bounds -> Protocol.members`, ending at `Relation<ProtocolMember>`. The reference lists these relation fields but does not state whether each successive `flat_map` callback must see the row descriptor produced by the prior callback; the semantic choice is to propagate that descriptor at each step.
+
+The fixture also proves a four-edge chain from `Function.failure_types` through type parameters and protocol bounds to protocol members. The frozen descriptors define each relation edge but are silent on carrying row types across a longer callback pipeline; the semantic loader follows the declared descriptor at every `flat_map` step.

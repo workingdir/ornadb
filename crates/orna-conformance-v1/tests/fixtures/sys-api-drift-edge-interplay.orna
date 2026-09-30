@@ -20,3 +20,4 @@ pub fn generic_metadata_protocol_members<T>(rows: Relation<sys.ValueMetadata<T>>
 pub fn type_parameters_from_types(types: Relation<sys.Type>): Relation<sys.TypeParameter> = types | flat_map(definition => definition.parameters);
 pub fn bounded_protocols_from_types(types: Relation<sys.Type>): Relation<sys.Protocol> = type_parameters_from_types(types) | flat_map(parameter => parameter.bounds);
 pub fn bounded_protocol_members_from_types(types: Relation<sys.Type>): Relation<sys.ProtocolMember> = bounded_protocols_from_types(types) | flat_map(bound => bound.members);
+pub fn function_failure_protocol_members(functions: Relation<sys.Function>): Relation<sys.ProtocolMember> = functions | flat_map(source => source.failure_types) | flat_map(definition => definition.parameters) | flat_map(parameter => parameter.bounds) | flat_map(bound => bound.members);
