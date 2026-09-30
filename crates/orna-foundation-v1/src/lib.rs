@@ -1345,7 +1345,7 @@ pub struct Diagnostic {
     // Clone state follows the record; clone_from replaces this admission from
     // its source rather than preserving a destination's stale trust mark.
     // That copied mark still authorizes only this record's root projection;
-    // sequential replacements do not rewrite marks on earlier clones.
+    // replacements do not rewrite marks on earlier or sibling snapshots.
     root_message_admitted: bool,
     reference: Option<[u8; 16]>,
 }
