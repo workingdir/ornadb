@@ -2136,6 +2136,9 @@ fn validate_raw(v: &Raw, depth: usize) -> Result<()> {
         return Err(Error::Limit);
     }
     match v {
+        // Resolved secrets are not portable values. Reject this marker at
+        // every depth before values can enter snapshots, digests, or wire
+        // bytes; schema and typed wrappers do not grant disclosure authority.
         Raw::Tag(0, _) => return Err(Error::ProtectedValue),
         Raw::Float(bits) if is_nan_bits(*bits) && *bits != CANONICAL_NAN_BITS => {
             return Err(Error::NonCanonical);
@@ -3887,6 +3890,27 @@ mod tests {
         assert!(Value::new(tag(60011, Raw::Map(vec![]))).is_err());
         assert!(Value::new(tag(60016, Raw::Map(vec![]))).is_err());
         assert!(Value::new(tag(60012, Raw::Array(vec![]))).is_err());
+    }
+
+    #[test]
+    fn protected_payloads_cannot_enter_snapshot_key_serialization() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let snapshot = Snapshot::cwd([1; 16], [2; 16], 0.into()).unwrap();
+        let row_reference = tag(
+            60010,
+            Raw::Array(vec![
+                uuid_raw([3; 16]),
+                uuid_raw([4; 16]),
+                tag(0, Raw::Text(fixture.to_owned())),
+                snapshot.raw(),
+            ]),
+        );
+
+        assert_eq!(Value::new(row_reference.clone()), Err(Error::ProtectedValue));
+        let mut unvalidated_bytes = Vec::new();
+        write_raw(&row_reference, &mut unvalidated_bytes).unwrap();
+        assert_eq!(Value::decode(&unvalidated_bytes), Err(Error::ProtectedValue));
+        assert!(!Error::ProtectedValue.to_string().contains(fixture));
     }
 
     #[test]

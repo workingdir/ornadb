@@ -279,6 +279,45 @@ fn structural_inspect_and_trace_events_do_not_publish_secret_fixture_values() {
         orna_core::inspect::InspectTracePayload::ValueBatchRedacted { value_count: 1 }
     ));
     assert!(!format!("{event:?}").contains(fixture));
+
+    let invocation = InvocationId::from_bytes([0x66; 16]);
+    let mut trace = orna_core::inspect::InspectTrace::new(invocation);
+    let failed = orna_core::inspect::InspectTraceEvent::new(
+        invocation,
+        0,
+        orna_core::inspect::InspectTracePayload::Failed {
+            code: fixture.to_owned(),
+        },
+        SystemTime::UNIX_EPOCH,
+        None,
+        Some(fixture.to_owned()),
+    )
+    .expect("failure trace text is redacted before retention");
+    assert!(matches!(
+        failed.payload(),
+        orna_core::inspect::InspectTracePayload::Failed { code } if code == "<redacted>"
+    ));
+    assert_eq!(failed.purpose(), Some("<redacted>"));
+    trace.push(failed).unwrap();
+
+    let cancelled = orna_core::inspect::InspectTraceEvent::new(
+        invocation,
+        1,
+        orna_core::inspect::InspectTracePayload::Cancelled {
+            reason: Some(fixture.to_owned()),
+        },
+        SystemTime::UNIX_EPOCH,
+        None,
+        None,
+    )
+    .expect("cancellation trace text is redacted before retention");
+    assert!(matches!(
+        cancelled.payload(),
+        orna_core::inspect::InspectTracePayload::Cancelled { reason: Some(reason) }
+            if reason == "<redacted>"
+    ));
+    trace.push(cancelled).unwrap();
+    assert!(!format!("{trace:?}").contains(fixture));
 }
 
 #[test]
