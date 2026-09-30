@@ -63,3 +63,9 @@ follow-on owner cycle: the competitor returns to its vacated source key before
 the final source claims the returned key, then retries that key and deletes the
 new owner before claiming it. The fixture proves the ordered ownership changes;
 the reference remains silent on this caught-retry ordering.
+
+`returned_key_competitor_retry_after_final_owner_rekeys_away` covers the paired
+release path: when the final owner re-keys away instead, the competitor's retry
+claims the contested key and the prior owner returns to its original source
+key. The fixture checks every update and owner transition in order, using the
+same evaluation-order choice where the reference is silent.
