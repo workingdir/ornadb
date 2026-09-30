@@ -454,7 +454,7 @@ fn relation_natural_key_summary_stays_aligned_with_key_paths() {
         "human-readable natural keys must describe their structured key paths: {error}"
     );
 
-    let mut stale_paths = generated;
+    let mut stale_paths = generated.clone();
     let storage = stale_paths["relations"]
         .as_array_mut()
         .unwrap()
@@ -466,6 +466,89 @@ fn relation_natural_key_summary_stays_aligned_with_key_paths() {
     assert!(
         error.contains("relation `sys.Storage` key `object` does not match key_fields `profile`"),
         "structured key paths must not drift from their published summary: {error}"
+    );
+
+    let mut duplicate_paths = generated;
+    let storage = duplicate_paths["relations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|relation| relation["name"] == "sys.Storage")
+        .unwrap();
+    storage["key_fields"] = serde_json::json!(["object", "object"]);
+    storage["key"] = serde_json::json!("object + object");
+    let error = build_support::validate_api_document(&duplicate_paths).unwrap_err();
+    assert!(
+        error.contains("key_fields contains duplicate `object`"),
+        "natural keys must not repeat the same path: {error}"
+    );
+}
+
+#[test]
+fn removed_name_edges_resolve_and_reserve_all_public_api_paths() {
+    let generated: Value = serde_json::from_str(&orna_sys_v1::system_api_json()).unwrap();
+    build_support::validate_api_document(&generated).expect("published replacement edges are valid");
+
+    for replacement in [
+        "sys.Database",
+        "sys.DatabaseRef",
+        "sys.catalog.databases",
+        "sys.history",
+        "sys.DiffScope.all",
+    ] {
+        let mut valid_replacement = generated.clone();
+        valid_replacement["removed_names"]["sys.runtime"]["replacement"] =
+            serde_json::json!(replacement);
+        build_support::validate_api_document(&valid_replacement)
+            .unwrap_or_else(|error| panic!("live replacement path `{replacement}` rejected: {error}"));
+    }
+
+    for live_name in [
+        "sys.Database",
+        "sys.DatabaseRef",
+        "sys.catalog.databases",
+        "sys.history",
+        "sys.DiffScope.all",
+    ] {
+        let mut shadowed_name = generated.clone();
+        let descriptor = shadowed_name["removed_names"]["sys.runtime"].clone();
+        shadowed_name["removed_names"][live_name] = descriptor;
+        let error = build_support::validate_api_document(&shadowed_name).unwrap_err();
+        assert!(
+            error.contains(&format!("removed system API name `{live_name}` is still publicly declared")),
+            "removed-name key `{live_name}` must not shadow a live path: {error}"
+        );
+    }
+
+    let mut singleton_function_collision = generated.clone();
+    singleton_function_collision["singletons"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "availability": "fixture singleton",
+            "name": "sys.history",
+            "type": "sys.DatabaseView"
+        }));
+    let singleton_count = singleton_function_collision["singletons"]
+        .as_array()
+        .unwrap()
+        .len();
+    singleton_function_collision["counts"]["singletons"] = serde_json::json!(singleton_count);
+    assert!(
+        build_support::validate_api_document(&singleton_function_collision)
+            .unwrap_err()
+            .contains("system API public value `sys.history` is declared more than once"),
+        "singleton names must not collide with overloaded callable base paths"
+    );
+
+    let mut dangling_replacement = generated;
+    dangling_replacement["removed_names"]["sys.runtime"]["replacement"] =
+        serde_json::json!("sys.unknown");
+    assert!(
+        build_support::validate_api_document(&dangling_replacement)
+            .unwrap_err()
+            .contains("has unresolved replacement `sys.unknown`"),
+        "replacement paths outside the published schema must fail closed"
     );
 }
 

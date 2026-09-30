@@ -705,22 +705,51 @@ fn validate_cross_inventory_names(api: &Value) -> Result<(), String> {
         add_type(alias["name"].as_str().expect("validated alias name"), "reference_aliases")?;
     }
 
-    let mut public_values = BTreeSet::new();
-    for singleton in api["singletons"].as_array().into_iter().flatten() {
-        public_values.insert(singleton["name"].as_str().expect("validated singleton name"));
-    }
+    let singleton_names = api["singletons"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|singleton| {
+            singleton["name"]
+                .as_str()
+                .expect("validated singleton name")
+                .to_owned()
+        })
+        .collect::<BTreeSet<_>>();
+    let mut api_paths = type_names.keys().cloned().collect::<BTreeSet<_>>();
+    api_paths.extend(singleton_names.iter().cloned());
     for function in api["functions"].as_array().into_iter().flatten() {
-        let name = function["name"].as_str().expect("validated function name");
-        if !public_values.insert(name) {
+        let signature = function["signature"].as_str().expect("validated function signature");
+        let name = parse_signature_identity(signature)?.name;
+        if singleton_names.contains(&name) {
             return Err(format!("system API public value `{name}` is declared more than once"));
+        }
+        // Multiple signatures form one callable path; retain that base name
+        // for removed-name replacement and collision checks.
+        api_paths.insert(name);
+    }
+    for relation in api["relations"].as_array().into_iter().flatten() {
+        api_paths.insert(
+            relation["grouped_handle"]
+                .as_str()
+                .expect("validated grouped relation handle")
+                .to_owned(),
+        );
+    }
+    for (name, variants) in api["enums"].as_object().into_iter().flatten() {
+        for variant in variants.as_array().into_iter().flatten() {
+            api_paths.insert(format!(
+                "{name}.{}",
+                variant.as_str().expect("validated enum variant")
+            ));
         }
     }
     for (removed, descriptor) in api["removed_names"].as_object().into_iter().flatten() {
-        if public_values.contains(removed.as_str()) {
+        if api_paths.contains(removed.as_str()) {
             return Err(format!("removed system API name `{removed}` is still publicly declared"));
         }
         let replacement = descriptor["replacement"].as_str().expect("validated replacement");
-        if !public_values.contains(replacement) {
+        if !api_paths.contains(replacement) {
             return Err(format!(
                 "removed system API name `{removed}` has unresolved replacement `{replacement}`"
             ));
