@@ -3935,7 +3935,7 @@ fn durable_status_retry_replays_unknown_after_target_completes_and_host_recovers
 }
 
 #[test]
-fn durable_unknown_status_retry_replays_after_target_becomes_orphaned() {
+fn durable_unknown_status_retry_survives_orphan_resolution() {
     let (root, repository) = durable_repository();
     let runtime = open_durable_state(&repository);
     let old_owner = RequestOwner::from(block_on(runtime.acquire_lease([77; 16])).unwrap());
@@ -4080,18 +4080,81 @@ fn durable_unknown_status_retry_replays_after_target_becomes_orphaned() {
     };
     let orphan_status = Envelope::decode(payload, Limits::default().protocol).unwrap();
     assert!(matches!(
-        orphan_status.message,
+        &orphan_status.message,
         Message::RequestStatusResult {
             target,
             state: orna_protocol_v1::RequestState::Orphaned,
             fingerprint: Some(fingerprint),
             ..
-        } if target == [37; 16] && fingerprint == event_fingerprint
+        } if *target == [37; 16] && *fingerprint == event_fingerprint
+    ));
+
+    // Recovery finalizes a still-running Event conservatively. Its exact
+    // retry remains replayable even though the process-local watch was lost.
+    let orphan_event_retry = block_on(recovered_transport.receive_with_application(
+        &mut recovered_socket,
+        8,
+        &masked_binary_payload(&event_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &orphan_event_retry[0] else {
+        panic!("the orphaned Event retry returns its recovered outcome");
+    };
+    let orphan_event_outcome = Envelope::decode(payload, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        &orphan_event_outcome.message,
+        Message::Result {
+            status: ResultStatus::RetainedWithoutValue,
+            value: None,
+            fingerprint,
+            diagnostic: None,
+        } if *fingerprint == event_fingerprint
+    ));
+    assert_eq!(recovered_application.calls, 0);
+
+    let advanced_status_request = Envelope {
+        request: Some([40; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [37; 16],
+            fingerprint: event_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let advanced_status_output = block_on(recovered_transport.receive_with_application(
+        &mut recovered_socket,
+        9,
+        &masked_binary_payload(&advanced_status_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &advanced_status_output[0] else {
+        panic!("a new status query observes the retained orphan outcome");
+    };
+    let advanced_status = Envelope::decode(payload, Limits::default().protocol).unwrap();
+    let expected_result = ResultBody::from_result(
+        &orphan_event_outcome,
+        Limits::default().protocol,
+    )
+    .unwrap();
+    assert!(matches!(
+        &advanced_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Orphaned,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [37; 16]
+            && *fingerprint == event_fingerprint
+            && result == &expected_result
     ));
 
     let unknown_retry = block_on(recovered_transport.receive_with_application(
         &mut recovered_socket,
-        8,
+        10,
         &masked_binary_payload(&unknown_status_request),
         &mut recovered_application,
     ))
@@ -4102,6 +4165,21 @@ fn durable_unknown_status_retry_replays_after_target_becomes_orphaned() {
     assert_eq!(
         Envelope::decode(payload, Limits::default().protocol).unwrap(),
         unknown_status
+    );
+
+    let orphan_status_retry = block_on(recovered_transport.receive_with_application(
+        &mut recovered_socket,
+        11,
+        &masked_binary_payload(&orphan_status_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &orphan_status_retry[0] else {
+        panic!("the exact orphan status retry preserves its earlier snapshot");
+    };
+    assert_eq!(
+        Envelope::decode(payload, Limits::default().protocol).unwrap(),
+        orphan_status
     );
     assert_eq!(recovered_application.calls, 0);
 
