@@ -16169,7 +16169,7 @@ fn infer_numeric_postfix(base: &Type, name: &str, scope: &Scope) -> Option<Type>
         // their static type aligned with the runtime representation so the
         // ordinary Duration APIs (including optional std formatters) accept
         // them without requiring std to define the core temporal value.
-        Type::Int
+        Type::Int | Type::Decimal
             if matches!(name, "hour" | "hours" | "minute" | "minutes" | "min" | "second" | "seconds" | "s") =>
         {
             Some(Type::Named("std.DURATION".into()))
