@@ -33,3 +33,5 @@ The fixture also proves a four-edge chain from `Function.failure_types` through 
 The fixture extends that path through `Function.calls`, so the five-edge proof starts with a function row, enters its called functions, and continues through failure types, generic parameters, bounds, and members. `Function.calls` returns the same declared row type recursively; the loader preserves that descriptor before resolving the rest of the chain.
 
 The fixture also follows `Function.calls` for three successive `flat_map` steps. The reference declares the recursive row field but does not detail repeated callback closure over its returned `Relation<Function>`; each step keeps the `sys.Function` descriptor for the next callback.
+
+The fixture nests two recursive `Function.calls` callbacks and returns a relation containing the root, child, and descendant rows. The reference does not specify capture of rows from enclosing recursive callbacks; the implementation preserves each lexical row descriptor through the nested callbacks, allowing all three `sys.Function` rows to share the emitted relation.
