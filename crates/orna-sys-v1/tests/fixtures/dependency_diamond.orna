@@ -1,0 +1,3 @@
+pub fn dashboard(): Int = render_contacts() + active_contacts();
+pub fn render_contacts(): Int = active_contacts();
+pub fn active_contacts(): Int = 1;
