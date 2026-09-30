@@ -136,3 +136,9 @@ competitor closure's own release move. That closure moves the secondary blocker
 aside, releases the competitor target, and then lets the owner retry its original
 key. The full log is adapter behavior because the reference is silent on this
 nested caught-retry order.
+
+`original_owner_participates_in_nested_competitor_closure` extends that edge
+with the owner occupying the secondary blocker's release key. A nested closure
+moves the owner aside, releases both competitor moves, and then returns the owner
+to its original key. Its complete log documents the local adapter order where
+the reference is silent.
