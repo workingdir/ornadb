@@ -773,6 +773,64 @@ fn zero_budget_checkpoint_delete_update_tail_reports_first_identity() {
 }
 
 #[test]
+fn zero_budget_stops_at_first_of_oppositely_oriented_checkpoint_delete_conflicts() {
+    for delete_first_on_left in [true, false] {
+        let mut source = FixtureRows::default();
+        source.add(MergeSide::Base, b"base", vec![parse_fixture(BASE, RowKeyKind::Explicit)]);
+        source.add(MergeSide::Left, b"left", vec![parse_fixture(LEFT, RowKeyKind::Explicit)]);
+        source.add(MergeSide::Right, b"right", vec![parse_fixture(RIGHT, RowKeyKind::Explicit)]);
+
+        let mut base = snapshot(schema(true, FieldType::Str), manifest(1, 1, b"base"), None);
+        let mut left = snapshot(schema(true, FieldType::Str), manifest(2, 2, b"left"), None);
+        let mut right = snapshot(schema(true, FieldType::Str), manifest(3, 3, b"right"), None);
+
+        let first_id = b"consumer/a-first-delete-update".to_vec();
+        let second_id = b"consumer/b-second-delete-update".to_vec();
+        for (checkpoint_id, generation, delete_on_left) in [
+            (&first_id, 4, delete_first_on_left),
+            (&second_id, 6, !delete_first_on_left),
+        ] {
+            base.checkpoints.insert(
+                checkpoint_id.clone(),
+                CheckpointGeneration { generation, position: None },
+            );
+            let update_side = if delete_on_left { &mut right } else { &mut left };
+            update_side.checkpoints.insert(
+                checkpoint_id.clone(),
+                CheckpointGeneration { generation: generation + 1, position: None },
+            );
+        }
+
+        let later_id = b"consumer/z-unvisited".to_vec();
+        for (snapshot, generation) in [(&mut base, 20), (&mut left, 21), (&mut right, 22)] {
+            snapshot.checkpoints.insert(
+                later_id.clone(),
+                CheckpointGeneration { generation, position: None },
+            );
+        }
+
+        let error = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 0 },
+        )
+        .unwrap_err();
+        let BranchMergeError::BudgetExceeded { report } = error else {
+            panic!("first checkpoint delete/update exceeds the zero-detail budget")
+        };
+        assert_eq!(report.conflicts_lower_bound, 1);
+        assert_eq!(report.rows_examined, 3);
+        assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+        assert!(report.affected_checkpoints.contains(first_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(second_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(later_id.as_slice()));
+        assert_eq!(source.visited.len(), 3);
+    }
+}
+
+#[test]
 fn checkpoint_delete_update_budget_tail_reports_identity_for_either_deleted_side() {
     for delete_on_left in [true, false] {
         let (mut base, mut left, mut right, mut source) = row_checkpoint_conflict_inputs();
