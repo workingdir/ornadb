@@ -1,0 +1,11 @@
+pub table Contact(id: Str) {
+    first: Str,
+    last: Str,
+    country: Str = "GB",
+    full_name: Str => "{first} {last}",
+}
+
+pub fn british_names() =
+    Contact
+    | filter(contact => contact.country == "GB")
+    | map(Contact.full_name);

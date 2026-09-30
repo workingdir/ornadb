@@ -200,12 +200,10 @@ fn field<'a>(value: &'a Json, key: &str) -> &'a Json { object(value).get(key).un
 
 fn reference_file(name: &str) -> String {
     let root = env::var_os("ORNA_REFERENCE_DIR").map(PathBuf::from).unwrap_or_else(|| {
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        manifest.parent().expect("crate has parent").parent().expect("workspace has parent")
-            .parent().expect("worktree has parent").join("../reference/Orna-1.0.0")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference")
     });
     fs::read_to_string(root.join(name)).unwrap_or_else(|error| {
-        panic!("could not read {name} under ORNA_REFERENCE_DIR/reference sibling: {error}")
+        panic!("could not read {name} from the selected Orna reference root: {error}")
     })
 }
 fn profile() -> Json { Parser::parse(reference_file("profiles/live-messages.json").as_bytes()).unwrap() }

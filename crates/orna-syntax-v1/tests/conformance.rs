@@ -3,15 +3,6 @@ use orna_syntax_v1::{
 };
 use std::path::Path;
 
-fn reference(path: &str) -> String {
-    std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../reference/Orna-1.0.0")
-            .join(path),
-    )
-    .unwrap()
-}
-
 fn fixture(name: &str) -> String {
     std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -20,6 +11,138 @@ fn fixture(name: &str) -> String {
     )
     .unwrap()
 }
+
+
+// Compiled fixtures keep this parser conformance suite independent of a sibling reference checkout.
+fn reference(path: &str) -> &'static str {
+    match path {
+        "examples/invalid/assert-empty.orna" => include_str!("fixtures/reference/invalid/assert-empty.orna"),
+        "examples/invalid/assert-missing-semicolon.orna" => include_str!("fixtures/reference/invalid/assert-missing-semicolon.orna"),
+        "examples/invalid/assignment-expression.orna" => include_str!("fixtures/reference/invalid/assignment-expression.orna"),
+        "examples/invalid/comparison-chain.orna" => include_str!("fixtures/reference/invalid/comparison-chain.orna"),
+        "examples/invalid/legacy-assert-else.orna" => include_str!("fixtures/reference/invalid/legacy-assert-else.orna"),
+        "examples/invalid/legacy-assert-pipe-bang.orna" => include_str!("fixtures/reference/invalid/legacy-assert-pipe-bang.orna"),
+        "examples/invalid/legacy-colon-bound.orna" => include_str!("fixtures/reference/invalid/legacy-colon-bound.orna"),
+        "examples/invalid/legacy-constraints-block.orna" => include_str!("fixtures/reference/invalid/legacy-constraints-block.orna"),
+        "examples/invalid/legacy-currency-declaration.orna" => include_str!("fixtures/reference/invalid/legacy-currency-declaration.orna"),
+        "examples/invalid/legacy-empty-closure.orna" => include_str!("fixtures/reference/invalid/legacy-empty-closure.orna"),
+        "examples/invalid/legacy-ensure.orna" => include_str!("fixtures/reference/invalid/legacy-ensure.orna"),
+        "examples/invalid/legacy-fact.orna" => include_str!("fixtures/reference/invalid/legacy-fact.orna"),
+        "examples/invalid/legacy-field-check.orna" => include_str!("fixtures/reference/invalid/legacy-field-check.orna"),
+        "examples/invalid/legacy-field-unique.orna" => include_str!("fixtures/reference/invalid/legacy-field-unique.orna"),
+        "examples/invalid/legacy-ingest.orna" => include_str!("fixtures/reference/invalid/legacy-ingest.orna"),
+        "examples/invalid/legacy-log.orna" => include_str!("fixtures/reference/invalid/legacy-log.orna"),
+        "examples/invalid/legacy-match.orna" => include_str!("fixtures/reference/invalid/legacy-match.orna"),
+        "examples/invalid/legacy-opaque.orna" => include_str!("fixtures/reference/invalid/legacy-opaque.orna"),
+        "examples/invalid/legacy-pipe-lambda.orna" => include_str!("fixtures/reference/invalid/legacy-pipe-lambda.orna"),
+        "examples/invalid/legacy-postfix-question.orna" => include_str!("fixtures/reference/invalid/legacy-postfix-question.orna"),
+        "examples/invalid/legacy-refined-where.orna" => include_str!("fixtures/reference/invalid/legacy-refined-where.orna"),
+        "examples/invalid/legacy-return-arrow.orna" => include_str!("fixtures/reference/invalid/legacy-return-arrow.orna"),
+        "examples/invalid/legacy-store.orna" => include_str!("fixtures/reference/invalid/legacy-store.orna"),
+        "examples/invalid/legacy-top-level-impl.orna" => include_str!("fixtures/reference/invalid/legacy-top-level-impl.orna"),
+        "examples/invalid/legacy-var.orna" => include_str!("fixtures/reference/invalid/legacy-var.orna"),
+        "examples/invalid/legacy-view.orna" => include_str!("fixtures/reference/invalid/legacy-view.orna"),
+        "examples/invalid/question-coalesce-adjacent.orna" => include_str!("fixtures/reference/invalid/question-coalesce-adjacent.orna"),
+        "examples/invalid/question-on-int.orna" => include_str!("fixtures/reference/invalid/question-on-int.orna"),
+        "examples/invalid/record-punning.orna" => include_str!("fixtures/reference/invalid/record-punning.orna"),
+        "examples/invalid/row-declaration.orna" => include_str!("fixtures/reference/invalid/row-declaration.orna"),
+        "examples/invalid/static-protocol-function.orna" => include_str!("fixtures/reference/invalid/static-protocol-function.orna"),
+        "examples/invalid/top-level-expression.orna" => include_str!("fixtures/reference/invalid/top-level-expression.orna"),
+        "examples/invalid/top-level-on.orna" => include_str!("fixtures/reference/invalid/top-level-on.orna"),
+        "examples/invalid/transaction-block.orna" => include_str!("fixtures/reference/invalid/transaction-block.orna"),
+        "examples/invalid/unparenthesized-lambda-stage.orna" => include_str!("fixtures/reference/invalid/unparenthesized-lambda-stage.orna"),
+        _ => panic!("unknown pinned invalid fixture: {path}"),
+    }
+}
+
+const VALID_FIXTURES: [(&str, &str); 86] = [
+    ("affine-max.orna", include_str!("fixtures/reference/valid/affine-max.orna")),
+    ("affine-mean.orna", include_str!("fixtures/reference/valid/affine-mean.orna")),
+    ("affine-unit.orna", include_str!("fixtures/reference/valid/affine-unit.orna")),
+    ("assignment-statement.orna", include_str!("fixtures/reference/valid/assignment-statement.orna")),
+    ("associated-display.orna", include_str!("fixtures/reference/valid/associated-display.orna")),
+    ("automatic-failure-propagation.orna", include_str!("fixtures/reference/valid/automatic-failure-propagation.orna")),
+    ("blob-vs-information.orna", include_str!("fixtures/reference/valid/blob-vs-information.orna")),
+    ("calendar-bucket.orna", include_str!("fixtures/reference/valid/calendar-bucket.orna")),
+    ("case-record-and-block-arms.orna", include_str!("fixtures/reference/valid/case-record-and-block-arms.orna")),
+    ("case.orna", include_str!("fixtures/reference/valid/case.orna")),
+    ("coalesce-precedence.orna", include_str!("fixtures/reference/valid/coalesce-precedence.orna")),
+    ("codec-json.orna", include_str!("fixtures/reference/valid/codec-json.orna")),
+    ("codec-orna.orna", include_str!("fixtures/reference/valid/codec-orna.orna")),
+    ("computed-and-defaulted-fields.orna", include_str!("fixtures/reference/valid/computed-and-defaulted-fields.orna")),
+    ("computed-field.orna", include_str!("fixtures/reference/valid/computed-field.orna")),
+    ("control-flow.orna", include_str!("fixtures/reference/valid/control-flow.orna")),
+    ("cross-table-assertion.orna", include_str!("fixtures/reference/valid/cross-table-assertion.orna")),
+    ("currency-locale-format.orna", include_str!("fixtures/reference/valid/currency-locale-format.orna")),
+    ("currency.orna", include_str!("fixtures/reference/valid/currency.orna")),
+    ("cwd-head.orna", include_str!("fixtures/reference/valid/cwd-head.orna")),
+    ("decimal-division.orna", include_str!("fixtures/reference/valid/decimal-division.orna")),
+    ("default-and-computed-fields.orna", include_str!("fixtures/reference/valid/default-and-computed-fields.orna")),
+    ("dependency-query.orna", include_str!("fixtures/reference/valid/dependency-query.orna")),
+    ("duration-format.orna", include_str!("fixtures/reference/valid/duration-format.orna")),
+    ("effectful-expression.orna", include_str!("fixtures/reference/valid/effectful-expression.orna")),
+    ("empty-record-lambda.orna", include_str!("fixtures/reference/valid/empty-record-lambda.orna")),
+    ("enum.orna", include_str!("fixtures/reference/valid/enum.orna")),
+    ("executable-assertion.orna", include_str!("fixtures/reference/valid/executable-assertion.orna")),
+    ("explicit-rekey.orna", include_str!("fixtures/reference/valid/explicit-rekey.orna")),
+    ("failure-natural-key.orna", include_str!("fixtures/reference/valid/failure-natural-key.orna")),
+    ("finite-stream.orna", include_str!("fixtures/reference/valid/finite-stream.orna")),
+    ("formatting-does-not-serialize.orna", include_str!("fixtures/reference/valid/formatting-does-not-serialize.orna")),
+    ("function-block.orna", include_str!("fixtures/reference/valid/function-block.orna")),
+    ("function-default.orna", include_str!("fixtures/reference/valid/function-default.orna")),
+    ("function-expression.orna", include_str!("fixtures/reference/valid/function-expression.orna")),
+    ("function-values-and-pipelines.orna", include_str!("fixtures/reference/valid/function-values-and-pipelines.orna")),
+    ("generic-protocol.orna", include_str!("fixtures/reference/valid/generic-protocol.orna")),
+    ("historical-program.orna", include_str!("fixtures/reference/valid/historical-program.orna")),
+    ("historical-query.orna", include_str!("fixtures/reference/valid/historical-query.orna")),
+    ("imports.orna", include_str!("fixtures/reference/valid/imports.orna")),
+    ("inference-first.orna", include_str!("fixtures/reference/valid/inference-first.orna")),
+    ("key-default-allocated-once.orna", include_str!("fixtures/reference/valid/key-default-allocated-once.orna")),
+    ("lambda-empty-record.orna", include_str!("fixtures/reference/valid/lambda-empty-record.orna")),
+    ("lambda.orna", include_str!("fixtures/reference/valid/lambda.orna")),
+    ("live-page-fallback.orna", include_str!("fixtures/reference/valid/live-page-fallback.orna")),
+    ("minimal-root.orna", include_str!("fixtures/reference/valid/minimal-root.orna")),
+    ("money-rate.orna", include_str!("fixtures/reference/valid/money-rate.orna")),
+    ("money-serialization.orna", include_str!("fixtures/reference/valid/money-serialization.orna")),
+    ("nested-lambda.orna", include_str!("fixtures/reference/valid/nested-lambda.orna")),
+    ("nominal-type-nested-impl.orna", include_str!("fixtures/reference/valid/nominal-type-nested-impl.orna")),
+    ("numeric-literal-context.orna", include_str!("fixtures/reference/valid/numeric-literal-context.orna")),
+    ("page.orna", include_str!("fixtures/reference/valid/page.orna")),
+    ("parallel-function-values.orna", include_str!("fixtures/reference/valid/parallel-function-values.orna")),
+    ("parallel-streams.orna", include_str!("fixtures/reference/valid/parallel-streams.orna")),
+    ("parenthesized-lambda-stage.orna", include_str!("fixtures/reference/valid/parenthesized-lambda-stage.orna")),
+    ("pipe-first-argument.orna", include_str!("fixtures/reference/valid/pipe-first-argument.orna")),
+    ("pipeline-precedence.orna", include_str!("fixtures/reference/valid/pipeline-precedence.orna")),
+    ("pipeline.orna", include_str!("fixtures/reference/valid/pipeline.orna")),
+    ("presentation-watch.orna", include_str!("fixtures/reference/valid/presentation-watch.orna")),
+    ("programmable-watch-expression.orna", include_str!("fixtures/reference/valid/programmable-watch-expression.orna")),
+    ("question-coalesce-parenthesized.orna", include_str!("fixtures/reference/valid/question-coalesce-parenthesized.orna")),
+    ("ranges.orna", include_str!("fixtures/reference/valid/ranges.orna")),
+    ("record-pattern-shorthand.orna", include_str!("fixtures/reference/valid/record-pattern-shorthand.orna")),
+    ("recovery-pipeline.orna", include_str!("fixtures/reference/valid/recovery-pipeline.orna")),
+    ("refined-type-assertions.orna", include_str!("fixtures/reference/valid/refined-type-assertions.orna")),
+    ("row-body.orna", include_str!("fixtures/reference/valid/row-body.orna")),
+    ("secret-reference.orna", include_str!("fixtures/reference/valid/secret-reference.orna")),
+    ("stream-admin-repl.orna", include_str!("fixtures/reference/valid/stream-admin-repl.orna")),
+    ("sys-checkpoint.orna", include_str!("fixtures/reference/valid/sys-checkpoint.orna")),
+    ("sys-definition-file.orna", include_str!("fixtures/reference/valid/sys-definition-file.orna")),
+    ("sys-file-history.orna", include_str!("fixtures/reference/valid/sys-file-history.orna")),
+    ("sys-run-history.orna", include_str!("fixtures/reference/valid/sys-run-history.orna")),
+    ("sys-storage.orna", include_str!("fixtures/reference/valid/sys-storage.orna")),
+    ("sys-table-query.orna", include_str!("fixtures/reference/valid/sys-table-query.orna")),
+    ("table-assertions.orna", include_str!("fixtures/reference/valid/table-assertions.orna")),
+    ("table-automatic-key.orna", include_str!("fixtures/reference/valid/table-automatic-key.orna")),
+    ("table-composite-key.orna", include_str!("fixtures/reference/valid/table-composite-key.orna")),
+    ("table-explicit-key.orna", include_str!("fixtures/reference/valid/table-explicit-key.orna")),
+    ("table-key-default.orna", include_str!("fixtures/reference/valid/table-key-default.orna")),
+    ("table-reference.orna", include_str!("fixtures/reference/valid/table-reference.orna")),
+    ("transactional-scope.orna", include_str!("fixtures/reference/valid/transactional-scope.orna")),
+    ("transparent-alias.orna", include_str!("fixtures/reference/valid/transparent-alias.orna")),
+    ("unbounded-stream.orna", include_str!("fixtures/reference/valid/unbounded-stream.orna")),
+    ("unit-cross-database.orna", include_str!("fixtures/reference/valid/unit-cross-database.orna")),
+    ("unit-postfix.orna", include_str!("fixtures/reference/valid/unit-postfix.orna")),
+    ("units.orna", include_str!("fixtures/reference/valid/units.orna")),
+];
 
 #[test]
 fn accepts_reference_language_shapes() {
@@ -216,23 +339,14 @@ fn grammar_recovery_codes_are_token_driven_under_layout_variations() {
 
 #[test]
 fn authoritative_valid_fixture_corpus_parses() {
-    let root =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../reference/Orna-1.0.0/examples/valid");
-    let mut files = std::fs::read_dir(root)
-        .unwrap()
-        .map(Result::unwrap)
-        .map(|e| e.path())
-        .collect::<Vec<_>>();
-    files.sort();
-    assert_eq!(files.len(), 86, "authoritative valid corpus changed");
-    for file in files {
-        let source = std::fs::read_to_string(&file).unwrap();
-        let p = if file.file_name().unwrap() == "row-body.orna" {
-            parse_row(&source).diagnostics
+    assert_eq!(VALID_FIXTURES.len(), 86, "authoritative valid corpus changed");
+    for (name, source) in VALID_FIXTURES {
+        let diagnostics = if name == "row-body.orna" {
+            parse_row(source).diagnostics
         } else {
-            parse_module(&source).diagnostics
+            parse_module(source).diagnostics
         };
-        assert!(p.is_empty(), "{}: {:?}", file.display(), p);
+        assert!(diagnostics.is_empty(), "{name}: {diagnostics:?}");
     }
 }
 

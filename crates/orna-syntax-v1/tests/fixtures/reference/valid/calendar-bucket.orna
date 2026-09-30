@@ -1,0 +1,2 @@
+pub fn days() =
+    energy.Reading | bucket_by(1.day, zone: Europe.London);

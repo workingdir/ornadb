@@ -1,0 +1,4 @@
+pub fn threshold(value: Int?, days: Int?) = {
+    above: value ?? 0 > 5,
+    default_days: days ?? 90 == 90,
+};

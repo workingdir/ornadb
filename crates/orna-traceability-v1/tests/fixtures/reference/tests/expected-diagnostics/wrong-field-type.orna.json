@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/wrong-field-type.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E2001",
+  "message_contains": "expected Float<mph>, found Str",
+  "status": "expected-not-executed"
+}

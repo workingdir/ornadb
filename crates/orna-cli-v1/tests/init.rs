@@ -506,21 +506,19 @@ fn init_ignores_hostile_git_routing_variables() {
 #[test]
 fn init_then_check_accepts_unchanged_authoritative_reference_sources() {
     let fixture = tempfile::tempdir().expect("temporary reference project");
-    let reference = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../reference/Orna-1.0.0/examples/reference");
-    let names = [
-        "main.orna",
-        "library.orna",
-        "warehouse.orna",
-        "sensors.orna",
-        "values.orna",
+    let original = [
+        ("main.orna", include_str!("fixtures/reference-project/main.orna")),
+        ("library.orna", include_str!("fixtures/reference-project/library.orna")),
+        ("warehouse.orna", include_str!("fixtures/reference-project/warehouse.orna")),
+        ("sensors.orna", include_str!("fixtures/reference-project/sensors.orna")),
+        ("values.orna", include_str!("fixtures/reference-project/values.orna")),
     ];
-    let original = names
+    let original = original
         .iter()
-        .map(|name| {
-            let source = bytes(&reference.join(name));
-            fs::write(fixture.path().join(name), &source).expect("reference source copied");
-            (*name, source)
+        .map(|(name, source)| {
+            let bytes = source.as_bytes().to_vec();
+            fs::write(fixture.path().join(name), &bytes).expect("reference source copied");
+            (*name, bytes)
         })
         .collect::<Vec<_>>();
 

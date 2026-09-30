@@ -1,0 +1,4330 @@
+[
+  {
+    "id": "scope",
+    "title": "1. About this specification",
+    "level": 1,
+    "chapter": "scope",
+    "source": "source/01-scope.md",
+    "source_line": 1
+  },
+  {
+    "id": "scope-document-status",
+    "title": "1.1 Conventions",
+    "level": 2,
+    "chapter": "scope",
+    "source": "source/01-scope.md",
+    "source_line": 7
+  },
+  {
+    "id": "scope-using-this-document",
+    "title": "1.2 Using this document",
+    "level": 2,
+    "chapter": "scope",
+    "source": "source/01-scope.md",
+    "source_line": 13
+  },
+  {
+    "id": "scope-normative-language-and-consistency",
+    "title": "1.3 Normative language and consistency",
+    "level": 2,
+    "chapter": "scope",
+    "source": "source/01-scope.md",
+    "source_line": 27
+  },
+  {
+    "id": "scope-conformance-classes",
+    "title": "1.4 Conformance classes",
+    "level": 2,
+    "chapter": "scope",
+    "source": "source/01-scope.md",
+    "source_line": 35
+  },
+  {
+    "id": "scope-boundaries",
+    "title": "1.5 Boundaries",
+    "level": 2,
+    "chapter": "scope",
+    "source": "source/01-scope.md",
+    "source_line": 64
+  },
+  {
+    "id": "concepts",
+    "title": "2. Concepts and boundaries",
+    "level": 1,
+    "chapter": "concepts",
+    "source": "source/02-concepts.md",
+    "source_line": 1
+  },
+  {
+    "id": "concepts-the-four-states-of-a-worktree",
+    "title": "2.1 The four states of a worktree",
+    "level": 2,
+    "chapter": "concepts",
+    "source": "source/02-concepts.md",
+    "source_line": 5
+  },
+  {
+    "id": "concepts-values-declarations-and-relations",
+    "title": "2.2 Values, declarations and relations",
+    "level": 2,
+    "chapter": "concepts",
+    "source": "source/02-concepts.md",
+    "source_line": 21
+  },
+  {
+    "id": "concepts-execution-and-progress",
+    "title": "2.3 Execution and progress",
+    "level": 2,
+    "chapter": "concepts",
+    "source": "source/02-concepts.md",
+    "source_line": 29
+  },
+  {
+    "id": "concepts-identity-and-snapshots",
+    "title": "2.4 Identity and snapshots",
+    "level": 2,
+    "chapter": "concepts",
+    "source": "source/02-concepts.md",
+    "source_line": 37
+  },
+  {
+    "id": "concepts-presentation-and-encoding",
+    "title": "2.5 Presentation and encoding",
+    "level": 2,
+    "chapter": "concepts",
+    "source": "source/02-concepts.md",
+    "source_line": 43
+  },
+  {
+    "id": "source-modules",
+    "title": "3. Source, modules and namespaces",
+    "level": 1,
+    "chapter": "source-modules",
+    "source": "source/03-source-modules.md",
+    "source_line": 1
+  },
+  {
+    "id": "source-modules-file-extension",
+    "title": "3.1 File extension",
+    "level": 2,
+    "chapter": "source-modules",
+    "source": "source/03-source-modules.md",
+    "source_line": 3
+  },
+  {
+    "id": "source-modules-namespace-mapping",
+    "title": "3.2 Namespace mapping",
+    "level": 2,
+    "chapter": "source-modules",
+    "source": "source/03-source-modules.md",
+    "source_line": 13
+  },
+  {
+    "id": "source-modules-reserved-namespaces",
+    "title": "3.3 Reserved namespaces",
+    "level": 2,
+    "chapter": "source-modules",
+    "source": "source/03-source-modules.md",
+    "source_line": 30
+  },
+  {
+    "id": "source-modules-imports",
+    "title": "3.4 Imports",
+    "level": 2,
+    "chapter": "source-modules",
+    "source": "source/03-source-modules.md",
+    "source_line": 40
+  },
+  {
+    "id": "lexical",
+    "title": "4. Lexical structure and literal forms",
+    "level": 1,
+    "chapter": "lexical",
+    "source": "source/04-lexical.md",
+    "source_line": 1
+  },
+  {
+    "id": "lexical-source-encoding",
+    "title": "4.1 Source encoding",
+    "level": 2,
+    "chapter": "lexical",
+    "source": "source/04-lexical.md",
+    "source_line": 3
+  },
+  {
+    "id": "lexical-comments",
+    "title": "4.2 Comments",
+    "level": 2,
+    "chapter": "lexical",
+    "source": "source/04-lexical.md",
+    "source_line": 9
+  },
+  {
+    "id": "lexical-identifiers-and-keywords",
+    "title": "4.3 Identifiers and keywords",
+    "level": 2,
+    "chapter": "lexical",
+    "source": "source/04-lexical.md",
+    "source_line": 21
+  },
+  {
+    "id": "lexical-core-literals",
+    "title": "4.4 Core literals",
+    "level": 2,
+    "chapter": "lexical",
+    "source": "source/04-lexical.md",
+    "source_line": 37
+  },
+  {
+    "id": "lexical-collections-records-and-direct-braced-bodies",
+    "title": "4.5 Collections, records and direct braced bodies",
+    "level": 2,
+    "chapter": "lexical",
+    "source": "source/04-lexical.md",
+    "source_line": 71
+  },
+  {
+    "id": "lexical-contextual-names-and-construction",
+    "title": "4.6 Contextual names and construction",
+    "level": 2,
+    "chapter": "lexical",
+    "source": "source/04-lexical.md",
+    "source_line": 130
+  },
+  {
+    "id": "lexical-tuples-and-function-types",
+    "title": "4.7 Tuples and function types",
+    "level": 2,
+    "chapter": "lexical",
+    "source": "source/04-lexical.md",
+    "source_line": 148
+  },
+  {
+    "id": "lexical-numeric-and-string-token-boundaries",
+    "title": "4.8 Numeric and string token boundaries",
+    "level": 2,
+    "chapter": "lexical",
+    "source": "source/04-lexical.md",
+    "source_line": 161
+  },
+  {
+    "id": "types",
+    "title": "5. Types, numbers and nominal values",
+    "level": 1,
+    "chapter": "types",
+    "source": "source/05-types.md",
+    "source_line": 1
+  },
+  {
+    "id": "types-core-type-forms",
+    "title": "5.1 Core type forms",
+    "level": 2,
+    "chapter": "types",
+    "source": "source/05-types.md",
+    "source_line": 3
+  },
+  {
+    "id": "types-value-and-binding-model",
+    "title": "5.2 Value and binding model",
+    "level": 2,
+    "chapter": "types",
+    "source": "source/05-types.md",
+    "source_line": 61
+  },
+  {
+    "id": "types-numeric-types-and-exact-decimals",
+    "title": "5.3 Numeric types and exact decimals",
+    "level": 2,
+    "chapter": "types",
+    "source": "source/05-types.md",
+    "source_line": 79
+  },
+  {
+    "id": "types-float-equality-sorting-and-aggregation",
+    "title": "5.4 Float equality, sorting and aggregation",
+    "level": 2,
+    "chapter": "types",
+    "source": "source/05-types.md",
+    "source_line": 101
+  },
+  {
+    "id": "types-algorithm-float-total-1",
+    "title": "5.4.1 Algorithm FLOAT-TOTAL-1",
+    "level": 3,
+    "chapter": "types",
+    "source": "source/05-types.md",
+    "source_line": 117
+  },
+  {
+    "id": "types-blob-and-information-quantity",
+    "title": "5.5 Blob and information quantity",
+    "level": 2,
+    "chapter": "types",
+    "source": "source/05-types.md",
+    "source_line": 128
+  },
+  {
+    "id": "types-time-model",
+    "title": "5.6 Time model",
+    "level": 2,
+    "chapter": "types",
+    "source": "source/05-types.md",
+    "source_line": 137
+  },
+  {
+    "id": "types-ranges",
+    "title": "5.7 Ranges",
+    "level": 2,
+    "chapter": "types",
+    "source": "source/05-types.md",
+    "source_line": 163
+  },
+  {
+    "id": "types-dimensions-and-units",
+    "title": "5.8 Dimensions and units",
+    "level": 2,
+    "chapter": "types",
+    "source": "source/05-types.md",
+    "source_line": 189
+  },
+  {
+    "id": "types-money-and-currencies",
+    "title": "5.9 Money and currencies",
+    "level": 2,
+    "chapter": "types",
+    "source": "source/05-types.md",
+    "source_line": 254
+  },
+  {
+    "id": "types-inference-first-static-typing",
+    "title": "5.10 Inference-first static typing",
+    "level": 2,
+    "chapter": "types",
+    "source": "source/05-types.md",
+    "source_line": 300
+  },
+  {
+    "id": "types-transparent-aliases-and-nominal-types",
+    "title": "5.11 Transparent aliases and nominal types",
+    "level": 2,
+    "chapter": "types",
+    "source": "source/05-types.md",
+    "source_line": 331
+  },
+  {
+    "id": "types-refined-types",
+    "title": "5.12 Refined types",
+    "level": 2,
+    "chapter": "types",
+    "source": "source/05-types.md",
+    "source_line": 386
+  },
+  {
+    "id": "types-explicit-conversions",
+    "title": "5.13 Explicit conversions",
+    "level": 2,
+    "chapter": "types",
+    "source": "source/05-types.md",
+    "source_line": 409
+  },
+  {
+    "id": "types-inference-boundary-algorithm",
+    "title": "5.14 Inference boundary algorithm",
+    "level": 2,
+    "chapter": "types",
+    "source": "source/05-types.md",
+    "source_line": 454
+  },
+  {
+    "id": "types-algorithm-infer-1",
+    "title": "5.14.1 Algorithm INFER-1",
+    "level": 3,
+    "chapter": "types",
+    "source": "source/05-types.md",
+    "source_line": 456
+  },
+  {
+    "id": "types-nested-implementation-ownership",
+    "title": "5.15 Nested implementation ownership",
+    "level": 2,
+    "chapter": "types",
+    "source": "source/05-types.md",
+    "source_line": 475
+  },
+  {
+    "id": "types-conversion-selection-algorithm",
+    "title": "5.16 Conversion selection algorithm",
+    "level": 2,
+    "chapter": "types",
+    "source": "source/05-types.md",
+    "source_line": 499
+  },
+  {
+    "id": "types-algorithm-convert-1",
+    "title": "5.16.1 Algorithm CONVERT-1",
+    "level": 3,
+    "chapter": "types",
+    "source": "source/05-types.md",
+    "source_line": 501
+  },
+  {
+    "id": "expressions",
+    "title": "6. Declarations, expressions and failure",
+    "level": 1,
+    "chapter": "expressions",
+    "source": "source/06-expressions.md",
+    "source_line": 1
+  },
+  {
+    "id": "expressions-top-level-declarations",
+    "title": "6.1 Top-level declarations",
+    "level": 2,
+    "chapter": "expressions",
+    "source": "source/06-expressions.md",
+    "source_line": 3
+  },
+  {
+    "id": "expressions-functions-and-function-values",
+    "title": "6.2 Functions and function values",
+    "level": 2,
+    "chapter": "expressions",
+    "source": "source/06-expressions.md",
+    "source_line": 27
+  },
+  {
+    "id": "expressions-enums-and-case",
+    "title": "6.3 Enums and case",
+    "level": 2,
+    "chapter": "expressions",
+    "source": "source/06-expressions.md",
+    "source_line": 90
+  },
+  {
+    "id": "expressions-generics-protocols-and-nested-implementations",
+    "title": "6.4 Generics, protocols and nested implementations",
+    "level": 2,
+    "chapter": "expressions",
+    "source": "source/06-expressions.md",
+    "source_line": 131
+  },
+  {
+    "id": "expressions-control-flow-and-local-bindings",
+    "title": "6.5 Control flow and local bindings",
+    "level": 2,
+    "chapter": "expressions",
+    "source": "source/06-expressions.md",
+    "source_line": 191
+  },
+  {
+    "id": "expressions-entry-functions-and-orna-run",
+    "title": "6.6 Entry functions and orna run",
+    "level": 2,
+    "chapter": "expressions",
+    "source": "source/06-expressions.md",
+    "source_line": 239
+  },
+  {
+    "id": "expressions-anonymous-functions-and-closures",
+    "title": "6.7 Anonymous functions and closures",
+    "level": 2,
+    "chapter": "expressions",
+    "source": "source/06-expressions.md",
+    "source_line": 249
+  },
+  {
+    "id": "expressions-operators-success-pipelines-and-recovery-pipelines",
+    "title": "6.8 Operators, success pipelines and recovery pipelines",
+    "level": 2,
+    "chapter": "expressions",
+    "source": "source/06-expressions.md",
+    "source_line": 286
+  },
+  {
+    "id": "expressions-fields-selectors-and-member-calls",
+    "title": "6.9 Fields, selectors and member calls",
+    "level": 2,
+    "chapter": "expressions",
+    "source": "source/06-expressions.md",
+    "source_line": 352
+  },
+  {
+    "id": "expressions-failure-propagation-and-recovery",
+    "title": "6.10 Failure propagation and recovery",
+    "level": 2,
+    "chapter": "expressions",
+    "source": "source/06-expressions.md",
+    "source_line": 376
+  },
+  {
+    "id": "expressions-algorithm-failure-1-expression-propagation",
+    "title": "6.10.1 Algorithm FAILURE-1: expression propagation",
+    "level": 3,
+    "chapter": "expressions",
+    "source": "source/06-expressions.md",
+    "source_line": 417
+  },
+  {
+    "id": "expressions-completion-states",
+    "title": "6.11 Completion states",
+    "level": 2,
+    "chapter": "expressions",
+    "source": "source/06-expressions.md",
+    "source_line": 428
+  },
+  {
+    "id": "expressions-recovery-examples",
+    "title": "6.12 Recovery examples",
+    "level": 2,
+    "chapter": "expressions",
+    "source": "source/06-expressions.md",
+    "source_line": 458
+  },
+  {
+    "id": "tables",
+    "title": "7. Tables, rows and assertions",
+    "level": 1,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 1
+  },
+  {
+    "id": "tables-one-persistent-relational-noun",
+    "title": "7.1 One persistent relational noun",
+    "level": 2,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 3
+  },
+  {
+    "id": "tables-explicit-primary-keys",
+    "title": "7.2 Explicit primary keys",
+    "level": 2,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 18
+  },
+  {
+    "id": "tables-composite-keys",
+    "title": "7.3 Composite keys",
+    "level": 2,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 33
+  },
+  {
+    "id": "tables-automatic-keys",
+    "title": "7.4 Automatic keys",
+    "level": 2,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 44
+  },
+  {
+    "id": "tables-key-defaults",
+    "title": "7.5 Key defaults",
+    "level": 2,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 80
+  },
+  {
+    "id": "tables-stored-defaulted-and-computed-fields",
+    "title": "7.6 Stored, defaulted and computed fields",
+    "level": 2,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 99
+  },
+  {
+    "id": "tables-table-owned-assertions",
+    "title": "7.7 Table-owned assertions",
+    "level": 2,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 142
+  },
+  {
+    "id": "tables-algorithm-assert-table-1-candidate-relation-validation",
+    "title": "7.7.1 Algorithm ASSERT-TABLE-1: candidate-relation validation",
+    "level": 3,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 212
+  },
+  {
+    "id": "tables-cross-table-module-assertions",
+    "title": "7.8 Cross-table module assertions",
+    "level": 2,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 225
+  },
+  {
+    "id": "tables-algorithm-assert-database-1-cross-table-validation",
+    "title": "7.8.1 Algorithm ASSERT-DATABASE-1: cross-table validation",
+    "level": 3,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 257
+  },
+  {
+    "id": "tables-permitted-key-values",
+    "title": "7.9 Permitted key values",
+    "level": 2,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 268
+  },
+  {
+    "id": "tables-key-to-path-encoding",
+    "title": "7.10 Key-to-path encoding",
+    "level": 2,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 293
+  },
+  {
+    "id": "tables-type-specific-key-text",
+    "title": "7.10.1 Type-specific key text",
+    "level": 3,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 297
+  },
+  {
+    "id": "tables-loose-row-units",
+    "title": "7.11 Loose row units",
+    "level": 2,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 372
+  },
+  {
+    "id": "tables-mutations",
+    "title": "7.12 Mutations",
+    "level": 2,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 399
+  },
+  {
+    "id": "tables-stable-semantic-identity-and-rename",
+    "title": "7.13 Stable semantic identity and rename",
+    "level": 2,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 436
+  },
+  {
+    "id": "tables-stored-table-references",
+    "title": "7.14 Stored table references",
+    "level": 2,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 450
+  },
+  {
+    "id": "tables-filesystem-equivalence",
+    "title": "7.15 Filesystem equivalence",
+    "level": 2,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 466
+  },
+  {
+    "id": "tables-crash-safe-loose-row-projection",
+    "title": "7.16 Crash-safe loose-row projection",
+    "level": 2,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 479
+  },
+  {
+    "id": "tables-assertion-categories",
+    "title": "7.17 Assertion categories",
+    "level": 2,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 502
+  },
+  {
+    "id": "tables-validation-boundaries",
+    "title": "7.18 Validation boundaries",
+    "level": 2,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 531
+  },
+  {
+    "id": "tables-diagnostics-and-privacy",
+    "title": "7.19 Diagnostics and privacy",
+    "level": 2,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 553
+  },
+  {
+    "id": "tables-required-assertion-diagnostics",
+    "title": "7.20 Required assertion diagnostics",
+    "level": 2,
+    "chapter": "tables",
+    "source": "source/07-tables.md",
+    "source_line": 575
+  },
+  {
+    "id": "relations",
+    "title": "8. Relations, queries and historical evaluation",
+    "level": 1,
+    "chapter": "relations",
+    "source": "source/08-relations.md",
+    "source_line": 1
+  },
+  {
+    "id": "relations-relation-values-and-bounded-observation",
+    "title": "8.1 Relation values and bounded observation",
+    "level": 2,
+    "chapter": "relations",
+    "source": "source/08-relations.md",
+    "source_line": 3
+  },
+  {
+    "id": "relations-observable-relation-order",
+    "title": "8.2 Observable relation order",
+    "level": 2,
+    "chapter": "relations",
+    "source": "source/08-relations.md",
+    "source_line": 19
+  },
+  {
+    "id": "relations-equality-and-relation-comparison",
+    "title": "8.3 Equality and relation comparison",
+    "level": 2,
+    "chapter": "relations",
+    "source": "source/08-relations.md",
+    "source_line": 29
+  },
+  {
+    "id": "relations-reusable-derived-data",
+    "title": "8.4 Reusable derived data",
+    "level": 2,
+    "chapter": "relations",
+    "source": "source/08-relations.md",
+    "source_line": 35
+  },
+  {
+    "id": "relations-current-code-over-historical-data",
+    "title": "8.5 Current code over historical data",
+    "level": 2,
+    "chapter": "relations",
+    "source": "source/08-relations.md",
+    "source_line": 55
+  },
+  {
+    "id": "relations-whole-program-historical-evaluation",
+    "title": "8.6 Whole-program historical evaluation",
+    "level": 2,
+    "chapter": "relations",
+    "source": "source/08-relations.md",
+    "source_line": 65
+  },
+  {
+    "id": "relations-materialization-and-optimization",
+    "title": "8.7 Materialization and optimization",
+    "level": 2,
+    "chapter": "relations",
+    "source": "source/08-relations.md",
+    "source_line": 85
+  },
+  {
+    "id": "relations-activation-consistency-and-call-reuse",
+    "title": "8.8 Activation consistency and call reuse",
+    "level": 2,
+    "chapter": "relations",
+    "source": "source/08-relations.md",
+    "source_line": 97
+  },
+  {
+    "id": "relations-dependencies-and-lineage",
+    "title": "8.9 Dependencies and lineage",
+    "level": 2,
+    "chapter": "relations",
+    "source": "source/08-relations.md",
+    "source_line": 117
+  },
+  {
+    "id": "relations-attached-databases-and-pinning",
+    "title": "8.10 Attached databases and pinning",
+    "level": 2,
+    "chapter": "relations",
+    "source": "source/08-relations.md",
+    "source_line": 127
+  },
+  {
+    "id": "standard-library",
+    "title": "9. Core operations and the standard library",
+    "level": 1,
+    "chapter": "standard-library",
+    "source": "source/09-standard-library.md",
+    "source_line": 1
+  },
+  {
+    "id": "standard-library-resolution-and-versioning",
+    "title": "9.1 Resolution and versioning",
+    "level": 2,
+    "chapter": "standard-library",
+    "source": "source/09-standard-library.md",
+    "source_line": 5
+  },
+  {
+    "id": "standard-library-signature-notation",
+    "title": "9.2 Signature notation",
+    "level": 2,
+    "chapter": "standard-library",
+    "source": "source/09-standard-library.md",
+    "source_line": 17
+  },
+  {
+    "id": "standard-library-core-relation-operations",
+    "title": "9.3 Core relation operations",
+    "level": 2,
+    "chapter": "standard-library",
+    "source": "source/09-standard-library.md",
+    "source_line": 23
+  },
+  {
+    "id": "standard-library-predicate-factories",
+    "title": "9.3.1 Predicate factories",
+    "level": 3,
+    "chapter": "standard-library",
+    "source": "source/09-standard-library.md",
+    "source_line": 48
+  },
+  {
+    "id": "standard-library-core-table-operations",
+    "title": "9.4 Core table operations",
+    "level": 2,
+    "chapter": "standard-library",
+    "source": "source/09-standard-library.md",
+    "source_line": 63
+  },
+  {
+    "id": "standard-library-core-finite-streams",
+    "title": "9.5 Core finite streams",
+    "level": 2,
+    "chapter": "standard-library",
+    "source": "source/09-standard-library.md",
+    "source_line": 81
+  },
+  {
+    "id": "standard-library-collection-and-query-library",
+    "title": "9.6 Collection and query library",
+    "level": 2,
+    "chapter": "standard-library",
+    "source": "source/09-standard-library.md",
+    "source_line": 91
+  },
+  {
+    "id": "standard-library-standard-stream-operators",
+    "title": "9.7 Standard stream operators",
+    "level": 2,
+    "chapter": "standard-library",
+    "source": "source/09-standard-library.md",
+    "source_line": 112
+  },
+  {
+    "id": "standard-library-concurrency-text-and-bit-operations",
+    "title": "9.8 Concurrency, text and bit operations",
+    "level": 2,
+    "chapter": "standard-library",
+    "source": "source/09-standard-library.md",
+    "source_line": 126
+  },
+  {
+    "id": "standard-library-exact-money-time-and-statistics",
+    "title": "9.9 Exact money, time and statistics",
+    "level": 2,
+    "chapter": "standard-library",
+    "source": "source/09-standard-library.md",
+    "source_line": 134
+  },
+  {
+    "id": "standard-library-codecs-and-host-i-o",
+    "title": "9.10 Codecs and host I/O",
+    "level": 2,
+    "chapter": "standard-library",
+    "source": "source/09-standard-library.md",
+    "source_line": 146
+  },
+  {
+    "id": "standard-library-presentation-helpers-and-tests",
+    "title": "9.11 Presentation helpers and tests",
+    "level": 2,
+    "chapter": "standard-library",
+    "source": "source/09-standard-library.md",
+    "source_line": 156
+  },
+  {
+    "id": "execution",
+    "title": "10. Activations, transactions and task ownership",
+    "level": 1,
+    "chapter": "execution",
+    "source": "source/10-execution.md",
+    "source_line": 1
+  },
+  {
+    "id": "execution-automatic-activation-transactions",
+    "title": "10.1 Automatic activation transactions",
+    "level": 2,
+    "chapter": "execution",
+    "source": "source/10-execution.md",
+    "source_line": 3
+  },
+  {
+    "id": "execution-read-semantics",
+    "title": "10.2 Read semantics",
+    "level": 2,
+    "chapter": "execution",
+    "source": "source/10-execution.md",
+    "source_line": 15
+  },
+  {
+    "id": "execution-external-effects",
+    "title": "10.3 External effects",
+    "level": 2,
+    "chapter": "execution",
+    "source": "source/10-execution.md",
+    "source_line": 21
+  },
+  {
+    "id": "execution-task-ownership-and-termination",
+    "title": "10.4 Task ownership and termination",
+    "level": 2,
+    "chapter": "execution",
+    "source": "source/10-execution.md",
+    "source_line": 36
+  },
+  {
+    "id": "execution-starting-and-awaiting",
+    "title": "10.4.1 Starting and awaiting",
+    "level": 3,
+    "chapter": "execution",
+    "source": "source/10-execution.md",
+    "source_line": 46
+  },
+  {
+    "id": "execution-ownership-termination-algorithm-task-end-1",
+    "title": "10.4.2 Ownership termination algorithm TASK-END-1",
+    "level": 3,
+    "chapter": "execution",
+    "source": "source/10-execution.md",
+    "source_line": 63
+  },
+  {
+    "id": "execution-concurrent-combinators",
+    "title": "10.4.3 Concurrent combinators",
+    "level": 3,
+    "chapter": "execution",
+    "source": "source/10-execution.md",
+    "source_line": 81
+  },
+  {
+    "id": "execution-cancellation-and-bounded-streams",
+    "title": "10.5 Cancellation and bounded streams",
+    "level": 2,
+    "chapter": "execution",
+    "source": "source/10-execution.md",
+    "source_line": 97
+  },
+  {
+    "id": "streams",
+    "title": "11. Stream programs and consumer identity",
+    "level": 1,
+    "chapter": "streams",
+    "source": "source/11-streams.md",
+    "source_line": 1
+  },
+  {
+    "id": "streams-producing-and-consuming-streams",
+    "title": "11.1 Producing and consuming streams",
+    "level": 2,
+    "chapter": "streams",
+    "source": "source/11-streams.md",
+    "source_line": 3
+  },
+  {
+    "id": "streams-durable-consumer-identity",
+    "title": "11.2 Durable consumer identity",
+    "level": 2,
+    "chapter": "streams",
+    "source": "source/11-streams.md",
+    "source_line": 26
+  },
+  {
+    "id": "streams-source-identity",
+    "title": "11.3 Source identity",
+    "level": 2,
+    "chapter": "streams",
+    "source": "source/11-streams.md",
+    "source_line": 44
+  },
+  {
+    "id": "streams-duplicate-consumers",
+    "title": "11.4 Duplicate consumers",
+    "level": 2,
+    "chapter": "streams",
+    "source": "source/11-streams.md",
+    "source_line": 50
+  },
+  {
+    "id": "streams-consumption-requirements",
+    "title": "11.5 Consumption requirements",
+    "level": 2,
+    "chapter": "streams",
+    "source": "source/11-streams.md",
+    "source_line": 61
+  },
+  {
+    "id": "checkpoints",
+    "title": "12. Checkpoints and failed deliveries",
+    "level": 1,
+    "chapter": "checkpoints",
+    "source": "source/12-checkpoints.md",
+    "source_line": 1
+  },
+  {
+    "id": "checkpoints-checkpoint-identity-and-position",
+    "title": "12.1 Checkpoint identity and position",
+    "level": 2,
+    "chapter": "checkpoints",
+    "source": "source/12-checkpoints.md",
+    "source_line": 5
+  },
+  {
+    "id": "checkpoints-processing-algorithm-delivery-1",
+    "title": "12.2 Processing algorithm DELIVERY-1",
+    "level": 2,
+    "chapter": "checkpoints",
+    "source": "source/12-checkpoints.md",
+    "source_line": 21
+  },
+  {
+    "id": "checkpoints-one-record-per-delivery",
+    "title": "12.3 One record per delivery",
+    "level": 2,
+    "chapter": "checkpoints",
+    "source": "source/12-checkpoints.md",
+    "source_line": 34
+  },
+  {
+    "id": "checkpoints-state-machine",
+    "title": "12.4 State machine",
+    "level": 2,
+    "chapter": "checkpoints",
+    "source": "source/12-checkpoints.md",
+    "source_line": 50
+  },
+  {
+    "id": "checkpoints-administration-and-stale-tools",
+    "title": "12.5 Administration and stale tools",
+    "level": 2,
+    "chapter": "checkpoints",
+    "source": "source/12-checkpoints.md",
+    "source_line": 86
+  },
+  {
+    "id": "checkpoints-recovery-between-clones",
+    "title": "12.6 Recovery between clones",
+    "level": 2,
+    "chapter": "checkpoints",
+    "source": "source/12-checkpoints.md",
+    "source_line": 96
+  },
+  {
+    "id": "presentation",
+    "title": "13. Inspection, display, presentation and codecs",
+    "level": 1,
+    "chapter": "presentation",
+    "source": "source/13-presentation.md",
+    "source_line": 1
+  },
+  {
+    "id": "presentation-four-distinct-concepts",
+    "title": "13.1 Four distinct concepts",
+    "level": 2,
+    "chapter": "presentation",
+    "source": "source/13-presentation.md",
+    "source_line": 3
+  },
+  {
+    "id": "presentation-inspect",
+    "title": "13.2 Inspect",
+    "level": 2,
+    "chapter": "presentation",
+    "source": "source/13-presentation.md",
+    "source_line": 14
+  },
+  {
+    "id": "presentation-display",
+    "title": "13.3 Display",
+    "level": 2,
+    "chapter": "presentation",
+    "source": "source/13-presentation.md",
+    "source_line": 27
+  },
+  {
+    "id": "presentation-dynamic-display-formatters",
+    "title": "13.4 Dynamic display formatters",
+    "level": 2,
+    "chapter": "presentation",
+    "source": "source/13-presentation.md",
+    "source_line": 41
+  },
+  {
+    "id": "presentation-user-defined-inspect-display-and-present",
+    "title": "13.5 User-defined Inspect, Display and Present",
+    "level": 2,
+    "chapter": "presentation",
+    "source": "source/13-presentation.md",
+    "source_line": 69
+  },
+  {
+    "id": "presentation-present",
+    "title": "13.6 Present",
+    "level": 2,
+    "chapter": "presentation",
+    "source": "source/13-presentation.md",
+    "source_line": 103
+  },
+  {
+    "id": "presentation-codecs",
+    "title": "13.7 Codecs",
+    "level": 2,
+    "chapter": "presentation",
+    "source": "source/13-presentation.md",
+    "source_line": 119
+  },
+  {
+    "id": "presentation-row-body-encoding-versus-standalone-encoding",
+    "title": "13.8 Row-body encoding versus standalone encoding",
+    "level": 2,
+    "chapter": "presentation",
+    "source": "source/13-presentation.md",
+    "source_line": 137
+  },
+  {
+    "id": "pages",
+    "title": "14. Pages and live views",
+    "level": 1,
+    "chapter": "pages",
+    "source": "source/14-pages.md",
+    "source_line": 1
+  },
+  {
+    "id": "pages-pages-as-ordinary-values",
+    "title": "14.1 Pages as ordinary values",
+    "level": 2,
+    "chapter": "pages",
+    "source": "source/14-pages.md",
+    "source_line": 3
+  },
+  {
+    "id": "pages-watch-model",
+    "title": "14.2 Watch model",
+    "level": 2,
+    "chapter": "pages",
+    "source": "source/14-pages.md",
+    "source_line": 15
+  },
+  {
+    "id": "pages-stable-presentation-identity",
+    "title": "14.3 Stable presentation identity",
+    "level": 2,
+    "chapter": "pages",
+    "source": "source/14-pages.md",
+    "source_line": 31
+  },
+  {
+    "id": "pages-live-transport-and-programmable-clients",
+    "title": "14.4 Live transport and programmable clients",
+    "level": 2,
+    "chapter": "pages",
+    "source": "source/14-pages.md",
+    "source_line": 42
+  },
+  {
+    "id": "pages-page-actions",
+    "title": "14.4.1 Page actions",
+    "level": 3,
+    "chapter": "pages",
+    "source": "source/14-pages.md",
+    "source_line": 58
+  },
+  {
+    "id": "pages-explicit-remote-orna-evaluation",
+    "title": "14.4.2 Explicit remote Orna evaluation",
+    "level": 3,
+    "chapter": "pages",
+    "source": "source/14-pages.md",
+    "source_line": 66
+  },
+  {
+    "id": "pages-request-recovery",
+    "title": "14.4.3 Request recovery",
+    "level": 3,
+    "chapter": "pages",
+    "source": "source/14-pages.md",
+    "source_line": 82
+  },
+  {
+    "id": "pages-wire-messages-and-values",
+    "title": "14.4.4 Wire messages and values",
+    "level": 3,
+    "chapter": "pages",
+    "source": "source/14-pages.md",
+    "source_line": 94
+  },
+  {
+    "id": "system",
+    "title": "15. The system model",
+    "level": 1,
+    "chapter": "system",
+    "source": "source/15-system.md",
+    "source_line": 1
+  },
+  {
+    "id": "system-role-and-namespace",
+    "title": "15.1 Role and namespace",
+    "level": 2,
+    "chapter": "system",
+    "source": "source/15-system.md",
+    "source_line": 3
+  },
+  {
+    "id": "system-compatibility-and-observations",
+    "title": "15.2 Compatibility and observations",
+    "level": 2,
+    "chapter": "system",
+    "source": "source/15-system.md",
+    "source_line": 30
+  },
+  {
+    "id": "system-identity-references-and-context",
+    "title": "15.3 Identity, references and context",
+    "level": 2,
+    "chapter": "system",
+    "source": "source/15-system.md",
+    "source_line": 78
+  },
+  {
+    "id": "system-catalogue-and-dependency-graph",
+    "title": "15.4 Catalogue and dependency graph",
+    "level": 2,
+    "chapter": "system",
+    "source": "source/15-system.md",
+    "source_line": 118
+  },
+  {
+    "id": "system-redaction",
+    "title": "15.5 Sources, diagnostics and redaction",
+    "level": 2,
+    "chapter": "system",
+    "source": "source/15-system.md",
+    "source_line": 158
+  },
+  {
+    "id": "system-history-plans-and-storage",
+    "title": "15.6 History, plans and storage",
+    "level": 2,
+    "chapter": "system",
+    "source": "source/15-system.md",
+    "source_line": 198
+  },
+  {
+    "id": "system-reflective-invocation",
+    "title": "15.7 Reflective invocation",
+    "level": 2,
+    "chapter": "system",
+    "source": "source/15-system.md",
+    "source_line": 252
+  },
+  {
+    "id": "system-algorithm-invoke-1",
+    "title": "15.7.1 Algorithm INVOKE-1",
+    "level": 3,
+    "chapter": "system",
+    "source": "source/15-system.md",
+    "source_line": 258
+  },
+  {
+    "id": "system-result-invariants",
+    "title": "15.7.2 Result invariants",
+    "level": 3,
+    "chapter": "system",
+    "source": "source/15-system.md",
+    "source_line": 271
+  },
+  {
+    "id": "system-mutation-and-observation-consistency",
+    "title": "15.8 Mutation and observation consistency",
+    "level": 2,
+    "chapter": "system",
+    "source": "source/15-system.md",
+    "source_line": 305
+  },
+  {
+    "id": "system-conformance-obligations",
+    "title": "15.9 Conformance obligations",
+    "level": 2,
+    "chapter": "system",
+    "source": "source/15-system.md",
+    "source_line": 339
+  },
+  {
+    "id": "administration",
+    "title": "16. Administrative operations",
+    "level": 1,
+    "chapter": "administration",
+    "source": "source/16-administration.md",
+    "source_line": 1
+  },
+  {
+    "id": "administration-administrative-boundary",
+    "title": "16.1 Administrative boundary",
+    "level": 2,
+    "chapter": "administration",
+    "source": "source/16-administration.md",
+    "source_line": 3
+  },
+  {
+    "id": "administration-shared-preconditions-and-failure-classes",
+    "title": "16.1.1 Shared preconditions and failure classes",
+    "level": 3,
+    "chapter": "administration",
+    "source": "source/16-administration.md",
+    "source_line": 15
+  },
+  {
+    "id": "administration-repository-operations",
+    "title": "16.2 Repository operations",
+    "level": 2,
+    "chapter": "administration",
+    "source": "source/16-administration.md",
+    "source_line": 21
+  },
+  {
+    "id": "administration-unborn-branches",
+    "title": "16.2.1 Unborn branches",
+    "level": 3,
+    "chapter": "administration",
+    "source": "source/16-administration.md",
+    "source_line": 32
+  },
+  {
+    "id": "administration-storage-operations",
+    "title": "16.3 Storage operations",
+    "level": 2,
+    "chapter": "administration",
+    "source": "source/16-administration.md",
+    "source_line": 36
+  },
+  {
+    "id": "administration-runs-streams-and-delivery-state",
+    "title": "16.4 Runs, streams and delivery state",
+    "level": 2,
+    "chapter": "administration",
+    "source": "source/16-administration.md",
+    "source_line": 48
+  },
+  {
+    "id": "administration-cancellation-and-crash-recovery",
+    "title": "16.5 Cancellation and crash recovery",
+    "level": 2,
+    "chapter": "administration",
+    "source": "source/16-administration.md",
+    "source_line": 63
+  },
+  {
+    "id": "repl",
+    "title": "17. The interactive session",
+    "level": 1,
+    "chapter": "repl",
+    "source": "source/17-repl.md",
+    "source_line": 1
+  },
+  {
+    "id": "repl-session-model",
+    "title": "17.1 Session model",
+    "level": 2,
+    "chapter": "repl",
+    "source": "source/17-repl.md",
+    "source_line": 3
+  },
+  {
+    "id": "repl-last-result-and-status",
+    "title": "17.2 Last result and status",
+    "level": 2,
+    "chapter": "repl",
+    "source": "source/17-repl.md",
+    "source_line": 15
+  },
+  {
+    "id": "repl-syntax-aware-editing",
+    "title": "17.3 Syntax-aware editing",
+    "level": 2,
+    "chapter": "repl",
+    "source": "source/17-repl.md",
+    "source_line": 31
+  },
+  {
+    "id": "repl-eager-previews",
+    "title": "17.4 Eager previews",
+    "level": 2,
+    "chapter": "repl",
+    "source": "source/17-repl.md",
+    "source_line": 45
+  },
+  {
+    "id": "repl-default-presentation",
+    "title": "17.5 Default presentation",
+    "level": 2,
+    "chapter": "repl",
+    "source": "source/17-repl.md",
+    "source_line": 70
+  },
+  {
+    "id": "repl-console-commands",
+    "title": "17.6 Console commands",
+    "level": 2,
+    "chapter": "repl",
+    "source": "source/17-repl.md",
+    "source_line": 89
+  },
+  {
+    "id": "cli",
+    "title": "18. Command-line interface",
+    "level": 1,
+    "chapter": "cli",
+    "source": "source/18-cli.md",
+    "source_line": 1
+  },
+  {
+    "id": "cli-git-compatible-commands",
+    "title": "18.1 Git-compatible commands",
+    "level": 2,
+    "chapter": "cli",
+    "source": "source/18-cli.md",
+    "source_line": 3
+  },
+  {
+    "id": "cli-small-orna-specific-surface",
+    "title": "18.2 Orna-specific commands",
+    "level": 2,
+    "chapter": "cli",
+    "source": "source/18-cli.md",
+    "source_line": 14
+  },
+  {
+    "id": "cli-status",
+    "title": "18.3 Status",
+    "level": 2,
+    "chapter": "cli",
+    "source": "source/18-cli.md",
+    "source_line": 33
+  },
+  {
+    "id": "cli-diagnostics",
+    "title": "18.4 Diagnostics",
+    "level": 2,
+    "chapter": "cli",
+    "source": "source/18-cli.md",
+    "source_line": 60
+  },
+  {
+    "id": "cli-output-controls",
+    "title": "18.5 Output controls",
+    "level": 2,
+    "chapter": "cli",
+    "source": "source/18-cli.md",
+    "source_line": 78
+  },
+  {
+    "id": "cli-visual-language",
+    "title": "18.6 Visual language",
+    "level": 2,
+    "chapter": "cli",
+    "source": "source/18-cli.md",
+    "source_line": 91
+  },
+  {
+    "id": "cli-user-facing-diagnostics",
+    "title": "18.7 User-facing diagnostics",
+    "level": 2,
+    "chapter": "cli",
+    "source": "source/18-cli.md",
+    "source_line": 104
+  },
+  {
+    "id": "repository",
+    "title": "19. Repository, CWD, index and HEAD",
+    "level": 1,
+    "chapter": "repository",
+    "source": "source/19-repository.md",
+    "source_line": 1
+  },
+  {
+    "id": "repository-required-repository-form",
+    "title": "19.1 Required repository form",
+    "level": 2,
+    "chapter": "repository",
+    "source": "source/19-repository.md",
+    "source_line": 3
+  },
+  {
+    "id": "repository-cwd-index-and-head",
+    "title": "19.2 CWD, index and HEAD",
+    "level": 2,
+    "chapter": "repository",
+    "source": "source/19-repository.md",
+    "source_line": 22
+  },
+  {
+    "id": "repository-committed-orna-metadata",
+    "title": "19.3 Committed Orna metadata",
+    "level": 2,
+    "chapter": "repository",
+    "source": "source/19-repository.md",
+    "source_line": 56
+  },
+  {
+    "id": "repository-local-runtime-files",
+    "title": "19.4 Local runtime files",
+    "level": 2,
+    "chapter": "repository",
+    "source": "source/19-repository.md",
+    "source_line": 80
+  },
+  {
+    "id": "repository-any-clone-may-operate-independently",
+    "title": "19.5 Any clone may operate independently",
+    "level": 2,
+    "chapter": "repository",
+    "source": "source/19-repository.md",
+    "source_line": 102
+  },
+  {
+    "id": "repository-independent-clones",
+    "title": "19.6 Independent clones",
+    "level": 2,
+    "chapter": "repository",
+    "source": "source/19-repository.md",
+    "source_line": 112
+  },
+  {
+    "id": "repository-repository-compatibility",
+    "title": "19.7 Repository compatibility",
+    "level": 2,
+    "chapter": "repository",
+    "source": "source/19-repository.md",
+    "source_line": 125
+  },
+  {
+    "id": "embedded",
+    "title": "20. Embedded ownership and local durability",
+    "level": 1,
+    "chapter": "embedded",
+    "source": "source/20-embedded.md",
+    "source_line": 1
+  },
+  {
+    "id": "embedded-purpose",
+    "title": "20.1 Purpose",
+    "level": 2,
+    "chapter": "embedded",
+    "source": "source/20-embedded.md",
+    "source_line": 3
+  },
+  {
+    "id": "embedded-local-ownership",
+    "title": "20.2 Local ownership",
+    "level": 2,
+    "chapter": "embedded",
+    "source": "source/20-embedded.md",
+    "source_line": 20
+  },
+  {
+    "id": "embedded-git-implementation-boundary",
+    "title": "20.3 Git implementation boundary",
+    "level": 2,
+    "chapter": "embedded",
+    "source": "source/20-embedded.md",
+    "source_line": 31
+  },
+  {
+    "id": "branching",
+    "title": "21. Branching, staging and checkout",
+    "level": 1,
+    "chapter": "branching",
+    "source": "source/21-branching.md",
+    "source_line": 1
+  },
+  {
+    "id": "branching-branches-and-pending-changes",
+    "title": "21.1 Branches and pending changes",
+    "level": 2,
+    "chapter": "branching",
+    "source": "source/21-branching.md",
+    "source_line": 3
+  },
+  {
+    "id": "branching-staging-logical-changes",
+    "title": "21.1.1 Staging logical changes",
+    "level": 3,
+    "chapter": "branching",
+    "source": "source/21-branching.md",
+    "source_line": 24
+  },
+  {
+    "id": "branching-checkout-preview-and-consent",
+    "title": "21.1.2 Checkout preview and consent",
+    "level": 3,
+    "chapter": "branching",
+    "source": "source/21-branching.md",
+    "source_line": 32
+  },
+  {
+    "id": "branching-checkout-algorithm-checkout-1",
+    "title": "21.1.3 Checkout algorithm CHECKOUT-1",
+    "level": 3,
+    "chapter": "branching",
+    "source": "source/21-branching.md",
+    "source_line": 42
+  },
+  {
+    "id": "publication",
+    "title": "22. Publication and crash recovery",
+    "level": 1,
+    "chapter": "publication",
+    "source": "source/22-publication.md",
+    "source_line": 1
+  },
+  {
+    "id": "publication-pending-state-and-policy",
+    "title": "22.1 Pending state and policy",
+    "level": 2,
+    "chapter": "publication",
+    "source": "source/22-publication.md",
+    "source_line": 5
+  },
+  {
+    "id": "publication-index-and-worktree-invariants",
+    "title": "22.2 Index and worktree invariants",
+    "level": 2,
+    "chapter": "publication",
+    "source": "source/22-publication.md",
+    "source_line": 19
+  },
+  {
+    "id": "publication-publication-algorithm-pub-1",
+    "title": "22.3 Publication algorithm PUB-1",
+    "level": 2,
+    "chapter": "publication",
+    "source": "source/22-publication.md",
+    "source_line": 33
+  },
+  {
+    "id": "publication-recovery-states",
+    "title": "22.3.1 Recovery states",
+    "level": 3,
+    "chapter": "publication",
+    "source": "source/22-publication.md",
+    "source_line": 63
+  },
+  {
+    "id": "publication-shutdown-and-transfer",
+    "title": "22.4 Shutdown and transfer",
+    "level": 2,
+    "chapter": "publication",
+    "source": "source/22-publication.md",
+    "source_line": 76
+  },
+  {
+    "id": "storage",
+    "title": "23. Physical storage and representation",
+    "level": 1,
+    "chapter": "storage",
+    "source": "source/23-storage.md",
+    "source_line": 1
+  },
+  {
+    "id": "storage-logical-transparency",
+    "title": "23.1 Logical transparency",
+    "level": 2,
+    "chapter": "storage",
+    "source": "source/23-storage.md",
+    "source_line": 3
+  },
+  {
+    "id": "storage-loose-profile",
+    "title": "23.2 Loose profile",
+    "level": 2,
+    "chapter": "storage",
+    "source": "source/23-storage.md",
+    "source_line": 9
+  },
+  {
+    "id": "storage-compact-storage-profile",
+    "title": "23.3 Compact storage profile",
+    "level": 2,
+    "chapter": "storage",
+    "source": "source/23-storage.md",
+    "source_line": 17
+  },
+  {
+    "id": "storage-hybrid-storage-and-placement",
+    "title": "23.4 Hybrid storage and placement",
+    "level": 2,
+    "chapter": "storage",
+    "source": "source/23-storage.md",
+    "source_line": 61
+  },
+  {
+    "id": "storage-compact-repository-layout",
+    "title": "23.5 Compact repository layout",
+    "level": 2,
+    "chapter": "storage",
+    "source": "source/23-storage.md",
+    "source_line": 88
+  },
+  {
+    "id": "storage-segment-closure",
+    "title": "23.6 Segment closure",
+    "level": 2,
+    "chapter": "storage",
+    "source": "source/23-storage.md",
+    "source_line": 107
+  },
+  {
+    "id": "storage-generations-and-visibility",
+    "title": "23.7 Generations and visibility",
+    "level": 2,
+    "chapter": "storage",
+    "source": "source/23-storage.md",
+    "source_line": 123
+  },
+  {
+    "id": "storage-publication-allocation-and-retry",
+    "title": "23.7.1 Publication allocation and retry",
+    "level": 3,
+    "chapter": "storage",
+    "source": "source/23-storage.md",
+    "source_line": 149
+  },
+  {
+    "id": "storage-exact-physical-encoding-profile",
+    "title": "23.8 Exact physical encoding profile",
+    "level": 2,
+    "chapter": "storage",
+    "source": "source/23-storage.md",
+    "source_line": 158
+  },
+  {
+    "id": "storage-manifest-fields",
+    "title": "23.8.1 Manifest fields",
+    "level": 3,
+    "chapter": "storage",
+    "source": "source/23-storage.md",
+    "source_line": 212
+  },
+  {
+    "id": "storage-cross-reader-obligation",
+    "title": "23.8.2 Cross-reader obligation",
+    "level": 3,
+    "chapter": "storage",
+    "source": "source/23-storage.md",
+    "source_line": 220
+  },
+  {
+    "id": "storage-statistics-and-safe-pruning",
+    "title": "23.9 Statistics and safe pruning",
+    "level": 2,
+    "chapter": "storage",
+    "source": "source/23-storage.md",
+    "source_line": 224
+  },
+  {
+    "id": "storage-hybrid-disjointness",
+    "title": "23.10 Hybrid disjointness",
+    "level": 2,
+    "chapter": "storage",
+    "source": "source/23-storage.md",
+    "source_line": 251
+  },
+  {
+    "id": "storage-placement",
+    "title": "23.11 Placement",
+    "level": 2,
+    "chapter": "storage",
+    "source": "source/23-storage.md",
+    "source_line": 272
+  },
+  {
+    "id": "storage-disjointness-enforcement",
+    "title": "23.12 Disjointness enforcement",
+    "level": 2,
+    "chapter": "storage",
+    "source": "source/23-storage.md",
+    "source_line": 280
+  },
+  {
+    "id": "storage-re-key",
+    "title": "23.13 Re-key",
+    "level": 2,
+    "chapter": "storage",
+    "source": "source/23-storage.md",
+    "source_line": 296
+  },
+  {
+    "id": "git-history",
+    "title": "24. Git history, remotes and partial clones",
+    "level": 1,
+    "chapter": "git-history",
+    "source": "source/24-git-history.md",
+    "source_line": 1
+  },
+  {
+    "id": "git-history-complete-logical-commits",
+    "title": "24.1 Complete logical commits",
+    "level": 2,
+    "chapter": "git-history",
+    "source": "source/24-git-history.md",
+    "source_line": 3
+  },
+  {
+    "id": "git-history-partial-clone",
+    "title": "24.2 Partial clone",
+    "level": 2,
+    "chapter": "git-history",
+    "source": "source/24-git-history.md",
+    "source_line": 11
+  },
+  {
+    "id": "git-history-large-object-promisors",
+    "title": "24.3 Large Object Promisors",
+    "level": 2,
+    "chapter": "git-history",
+    "source": "source/24-git-history.md",
+    "source_line": 27
+  },
+  {
+    "id": "git-history-remotes",
+    "title": "24.4 Remotes",
+    "level": 2,
+    "chapter": "git-history",
+    "source": "source/24-git-history.md",
+    "source_line": 35
+  },
+  {
+    "id": "git-history-no-rolling-window-history",
+    "title": "24.5 No rolling-window history",
+    "level": 2,
+    "chapter": "git-history",
+    "source": "source/24-git-history.md",
+    "source_line": 54
+  },
+  {
+    "id": "evolution",
+    "title": "25. Schema evolution, semantic diff and merge",
+    "level": 1,
+    "chapter": "evolution",
+    "source": "source/25-evolution.md",
+    "source_line": 1
+  },
+  {
+    "id": "evolution-no-migration-files",
+    "title": "25.1 No migration files",
+    "level": 2,
+    "chapter": "evolution",
+    "source": "source/25-evolution.md",
+    "source_line": 3
+  },
+  {
+    "id": "evolution-rename",
+    "title": "25.2 Rename",
+    "level": 2,
+    "chapter": "evolution",
+    "source": "source/25-evolution.md",
+    "source_line": 9
+  },
+  {
+    "id": "evolution-adding-and-changing-fields",
+    "title": "25.3 Adding and changing fields",
+    "level": 2,
+    "chapter": "evolution",
+    "source": "source/25-evolution.md",
+    "source_line": 15
+  },
+  {
+    "id": "evolution-references",
+    "title": "25.4 References",
+    "level": 2,
+    "chapter": "evolution",
+    "source": "source/25-evolution.md",
+    "source_line": 57
+  },
+  {
+    "id": "evolution-three-way-merge-algorithm-merge-1",
+    "title": "25.5 Three-way merge algorithm MERGE-1",
+    "level": 2,
+    "chapter": "evolution",
+    "source": "source/25-evolution.md",
+    "source_line": 63
+  },
+  {
+    "id": "evolution-semantic-diff",
+    "title": "25.6 Semantic diff",
+    "level": 2,
+    "chapter": "evolution",
+    "source": "source/25-evolution.md",
+    "source_line": 99
+  },
+  {
+    "id": "security",
+    "title": "26. Trust, isolation and extensions",
+    "level": 1,
+    "chapter": "security",
+    "source": "source/26-security.md",
+    "source_line": 1
+  },
+  {
+    "id": "security-extensions",
+    "title": "26.1 Extensions",
+    "level": 2,
+    "chapter": "security",
+    "source": "source/26-security.md",
+    "source_line": 11
+  },
+  {
+    "id": "security-sops-and-repository-privacy",
+    "title": "26.2 SOPS and repository privacy",
+    "level": 2,
+    "chapter": "security",
+    "source": "source/26-security.md",
+    "source_line": 25
+  },
+  {
+    "id": "security-public-multi-user-deployments",
+    "title": "26.3 Public multi-user deployments",
+    "level": 2,
+    "chapter": "security",
+    "source": "source/26-security.md",
+    "source_line": 31
+  },
+  {
+    "id": "secrets",
+    "title": "27. Secrets and encrypted files",
+    "level": 1,
+    "chapter": "secrets",
+    "source": "source/27-secrets.md",
+    "source_line": 1
+  },
+  {
+    "id": "secrets-principles",
+    "title": "27.1 Principles",
+    "level": 2,
+    "chapter": "secrets",
+    "source": "source/27-secrets.md",
+    "source_line": 3
+  },
+  {
+    "id": "secrets-sops-profile",
+    "title": "27.2 SOPS profile",
+    "level": 2,
+    "chapter": "secrets",
+    "source": "source/27-secrets.md",
+    "source_line": 11
+  },
+  {
+    "id": "secrets-secret-references",
+    "title": "27.3 Secret references",
+    "level": 2,
+    "chapter": "secrets",
+    "source": "source/27-secrets.md",
+    "source_line": 28
+  },
+  {
+    "id": "serving",
+    "title": "28. Serving a database",
+    "level": 1,
+    "chapter": "serving",
+    "source": "source/28-serving.md",
+    "source_line": 1
+  },
+  {
+    "id": "serving-optional-network-host",
+    "title": "28.1 Optional network host",
+    "level": 2,
+    "chapter": "serving",
+    "source": "source/28-serving.md",
+    "source_line": 3
+  },
+  {
+    "id": "serving-trusted-personal-deployment-model",
+    "title": "28.2 Deployment trust",
+    "level": 2,
+    "chapter": "serving",
+    "source": "source/28-serving.md",
+    "source_line": 15
+  },
+  {
+    "id": "serving-git-transport-and-browser-frontend",
+    "title": "28.3 Git transport and browser frontend",
+    "level": 2,
+    "chapter": "serving",
+    "source": "source/28-serving.md",
+    "source_line": 27
+  },
+  {
+    "id": "serving-applications-and-renderers",
+    "title": "28.4 Applications and renderers",
+    "level": 2,
+    "chapter": "serving",
+    "source": "source/28-serving.md",
+    "source_line": 35
+  },
+  {
+    "id": "formats",
+    "title": "29. Canonical values and schema descriptors",
+    "level": 1,
+    "chapter": "formats",
+    "source": "source/29-formats.md",
+    "source_line": 1
+  },
+  {
+    "id": "formats-binary-value-profile-ovb-1",
+    "title": "29.1 Binary value profile OVB-1",
+    "level": 2,
+    "chapter": "formats",
+    "source": "source/29-formats.md",
+    "source_line": 5
+  },
+  {
+    "id": "formats-type-preserving-values",
+    "title": "29.1.1 Type-preserving values",
+    "level": 3,
+    "chapter": "formats",
+    "source": "source/29-formats.md",
+    "source_line": 15
+  },
+  {
+    "id": "formats-snapshot-encoding",
+    "title": "29.1.2 Snapshot encoding",
+    "level": 3,
+    "chapter": "formats",
+    "source": "source/29-formats.md",
+    "source_line": 50
+  },
+  {
+    "id": "formats-domain-separated-digests",
+    "title": "29.2 Domain-separated digests",
+    "level": 2,
+    "chapter": "formats",
+    "source": "source/29-formats.md",
+    "source_line": 65
+  },
+  {
+    "id": "formats-closed-storage-schema-descriptor",
+    "title": "29.3 Closed storage schema descriptor",
+    "level": 2,
+    "chapter": "formats",
+    "source": "source/29-formats.md",
+    "source_line": 83
+  },
+  {
+    "id": "formats-canonical-orna-text",
+    "title": "29.4 Canonical Orna text",
+    "level": 2,
+    "chapter": "formats",
+    "source": "source/29-formats.md",
+    "source_line": 119
+  },
+  {
+    "id": "formats-portable-opaque-and-contextual-values",
+    "title": "29.5 Portable opaque and contextual values",
+    "level": 2,
+    "chapter": "formats",
+    "source": "source/29-formats.md",
+    "source_line": 134
+  },
+  {
+    "id": "protocol",
+    "title": "30. Live protocol and session recovery",
+    "level": 1,
+    "chapter": "protocol",
+    "source": "source/30-protocol.md",
+    "source_line": 1
+  },
+  {
+    "id": "protocol-transport-and-value-profile",
+    "title": "30.1 Transport and value profile",
+    "level": 2,
+    "chapter": "protocol",
+    "source": "source/30-protocol.md",
+    "source_line": 3
+  },
+  {
+    "id": "protocol-session-creation-and-ownership",
+    "title": "30.2 Session creation and ownership",
+    "level": 2,
+    "chapter": "protocol",
+    "source": "source/30-protocol.md",
+    "source_line": 11
+  },
+  {
+    "id": "protocol-envelope-and-field-rules",
+    "title": "30.3 Envelope and field rules",
+    "level": 2,
+    "chapter": "protocol",
+    "source": "source/30-protocol.md",
+    "source_line": 25
+  },
+  {
+    "id": "protocol-complete-message-registry",
+    "title": "30.4 Complete message registry",
+    "level": 2,
+    "chapter": "protocol",
+    "source": "source/30-protocol.md",
+    "source_line": 41
+  },
+  {
+    "id": "protocol-shared-structures",
+    "title": "30.4.1 Shared structures",
+    "level": 3,
+    "chapter": "protocol",
+    "source": "source/30-protocol.md",
+    "source_line": 63
+  },
+  {
+    "id": "protocol-present-nodes-and-patches",
+    "title": "30.5 Present nodes and patches",
+    "level": 2,
+    "chapter": "protocol",
+    "source": "source/30-protocol.md",
+    "source_line": 73
+  },
+  {
+    "id": "protocol-actions-evaluation-and-request-identity",
+    "title": "30.6 Actions, evaluation and request identity",
+    "level": 2,
+    "chapter": "protocol",
+    "source": "source/30-protocol.md",
+    "source_line": 96
+  },
+  {
+    "id": "protocol-algorithm-request-1",
+    "title": "30.6.1 Algorithm REQUEST-1",
+    "level": 3,
+    "chapter": "protocol",
+    "source": "source/30-protocol.md",
+    "source_line": 104
+  },
+  {
+    "id": "protocol-limits-connection-errors-and-reconnection",
+    "title": "30.7 Limits, connection errors and reconnection",
+    "level": 2,
+    "chapter": "protocol",
+    "source": "source/30-protocol.md",
+    "source_line": 115
+  },
+  {
+    "id": "examples",
+    "title": "31. Worked reference database",
+    "level": 1,
+    "chapter": "examples",
+    "source": "source/31-examples.md",
+    "source_line": 1
+  },
+  {
+    "id": "examples-project-layout",
+    "title": "31.1 Project layout",
+    "level": 2,
+    "chapter": "examples",
+    "source": "source/31-examples.md",
+    "source_line": 5
+  },
+  {
+    "id": "examples-lending-keys-and-assertions",
+    "title": "31.2 Lending: keys and assertions",
+    "level": 2,
+    "chapter": "examples",
+    "source": "source/31-examples.md",
+    "source_line": 34
+  },
+  {
+    "id": "examples-inventory-one-atomic-transfer",
+    "title": "31.3 Inventory: one atomic transfer",
+    "level": 2,
+    "chapter": "examples",
+    "source": "source/31-examples.md",
+    "source_line": 70
+  },
+  {
+    "id": "examples-sensors-resumable-finite-input",
+    "title": "31.4 Sensors: resumable finite input",
+    "level": 2,
+    "chapter": "examples",
+    "source": "source/31-examples.md",
+    "source_line": 100
+  },
+  {
+    "id": "examples-values-refinement-variants-and-option",
+    "title": "31.5 Values: refinement, variants and option",
+    "level": 2,
+    "chapter": "examples",
+    "source": "source/31-examples.md",
+    "source_line": 133
+  },
+  {
+    "id": "examples-interactive-inspection",
+    "title": "31.6 Interactive inspection",
+    "level": 2,
+    "chapter": "examples",
+    "source": "source/31-examples.md",
+    "source_line": 161
+  },
+  {
+    "id": "examples-cancellation-without-changing-result-types",
+    "title": "31.7 Cancellation without changing result types",
+    "level": 2,
+    "chapter": "examples",
+    "source": "source/31-examples.md",
+    "source_line": 183
+  },
+  {
+    "id": "examples-testing-these-examples",
+    "title": "31.8 Testing these examples",
+    "level": 2,
+    "chapter": "examples",
+    "source": "source/31-examples.md",
+    "source_line": 200
+  },
+  {
+    "id": "conformance",
+    "title": "32. Conformance cases and evidence",
+    "level": 1,
+    "chapter": "conformance",
+    "source": "source/32-conformance.md",
+    "source_line": 1
+  },
+  {
+    "id": "conformance-conventional-conformance-tests",
+    "title": "32.1 Test corpus",
+    "level": 2,
+    "chapter": "conformance",
+    "source": "source/32-conformance.md",
+    "source_line": 3
+  },
+  {
+    "id": "conformance-branch-based-isolation",
+    "title": "32.2 Branch-based isolation",
+    "level": 2,
+    "chapter": "conformance",
+    "source": "source/32-conformance.md",
+    "source_line": 35
+  },
+  {
+    "id": "conformance-mandatory-behavioral-scenarios",
+    "title": "32.3 Mandatory behavioral scenarios",
+    "level": 2,
+    "chapter": "conformance",
+    "source": "source/32-conformance.md",
+    "source_line": 43
+  },
+  {
+    "id": "conformance-evidence-levels",
+    "title": "32.4 Evidence levels",
+    "level": 2,
+    "chapter": "conformance",
+    "source": "source/32-conformance.md",
+    "source_line": 63
+  },
+  {
+    "id": "conformance-scope-of-conformance",
+    "title": "32.5 Scope of conformance",
+    "level": 2,
+    "chapter": "conformance",
+    "source": "source/32-conformance.md",
+    "source_line": 74
+  },
+  {
+    "id": "diagnostics",
+    "title": "33. Diagnostic reference",
+    "level": 1,
+    "chapter": "diagnostics",
+    "source": "source/33-diagnostics.md",
+    "source_line": 1
+  },
+  {
+    "id": "diagnostics-invalid-forms-and-corrections",
+    "title": "33.1 Invalid forms and corrections",
+    "level": 2,
+    "chapter": "diagnostics",
+    "source": "source/33-diagnostics.md",
+    "source_line": 3
+  },
+  {
+    "id": "diagnostics-automated-corrections",
+    "title": "33.2 Automated corrections",
+    "level": 2,
+    "chapter": "diagnostics",
+    "source": "source/33-diagnostics.md",
+    "source_line": 32
+  },
+  {
+    "id": "diagnostics-diagnostic-classifications",
+    "title": "33.3 Diagnostic classifications",
+    "level": 2,
+    "chapter": "diagnostics",
+    "source": "source/33-diagnostics.md",
+    "source_line": 39
+  },
+  {
+    "id": "system-reference",
+    "title": "34. System API reference",
+    "level": 1,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1
+  },
+  {
+    "id": "system-reference-namespace-index",
+    "title": "34.1 Namespace index",
+    "level": 2,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 9
+  },
+  {
+    "id": "system-reference-singleton-views",
+    "title": "34.2 Singleton views",
+    "level": 2,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 20
+  },
+  {
+    "id": "system-reference-opaque-identifiers",
+    "title": "34.3 Opaque identifiers",
+    "level": 2,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 29
+  },
+  {
+    "id": "api-type-sys-databaseid",
+    "title": "34.3.1 sys.DatabaseId",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 33
+  },
+  {
+    "id": "api-type-sys-fileid",
+    "title": "34.3.2 sys.FileId",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 37
+  },
+  {
+    "id": "api-type-sys-definitionid",
+    "title": "34.3.3 sys.DefinitionId",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 41
+  },
+  {
+    "id": "api-type-sys-objectid",
+    "title": "34.3.4 sys.ObjectId",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 45
+  },
+  {
+    "id": "api-type-sys-revisionid",
+    "title": "34.3.5 sys.RevisionId",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 49
+  },
+  {
+    "id": "api-type-sys-snapshotid",
+    "title": "34.3.6 sys.SnapshotId",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 53
+  },
+  {
+    "id": "api-type-sys-runtimeid",
+    "title": "34.3.7 sys.RuntimeId",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 57
+  },
+  {
+    "id": "api-type-sys-transactionid",
+    "title": "34.3.8 sys.TransactionId",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 61
+  },
+  {
+    "id": "api-type-sys-invocationid",
+    "title": "34.3.9 sys.InvocationId",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 65
+  },
+  {
+    "id": "api-type-sys-runid",
+    "title": "34.3.10 sys.RunId",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 69
+  },
+  {
+    "id": "api-type-sys-queryid",
+    "title": "34.3.11 sys.QueryId",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 73
+  },
+  {
+    "id": "api-type-sys-sessionid",
+    "title": "34.3.12 sys.SessionId",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 77
+  },
+  {
+    "id": "api-type-sys-clientid",
+    "title": "34.3.13 sys.ClientId",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 81
+  },
+  {
+    "id": "api-type-sys-traceid",
+    "title": "34.3.14 sys.TraceId",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 85
+  },
+  {
+    "id": "api-type-sys-spanid",
+    "title": "34.3.15 sys.SpanId",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 89
+  },
+  {
+    "id": "api-type-sys-checkpointversion",
+    "title": "34.3.16 sys.CheckpointVersion",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 93
+  },
+  {
+    "id": "api-type-sys-segmentid",
+    "title": "34.3.17 sys.SegmentId",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 97
+  },
+  {
+    "id": "api-type-sys-buildid",
+    "title": "34.3.18 sys.BuildId",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 101
+  },
+  {
+    "id": "api-type-sys-gitoid",
+    "title": "34.3.19 sys.GitOid",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 105
+  },
+  {
+    "id": "api-type-sys-failureversion",
+    "title": "34.3.20 sys.FailureVersion",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 109
+  },
+  {
+    "id": "api-type-sys-consumeridentity",
+    "title": "34.3.21 sys.ConsumerIdentity",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 113
+  },
+  {
+    "id": "system-reference-typed-row-reference-aliases",
+    "title": "34.4 Typed row-reference aliases",
+    "level": 2,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 117
+  },
+  {
+    "id": "system-reference-closed-enumerations",
+    "title": "34.5 Closed enumerations",
+    "level": 2,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 202
+  },
+  {
+    "id": "api-type-sys-runtimemode",
+    "title": "34.5.1 sys.RuntimeMode",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 204
+  },
+  {
+    "id": "api-type-sys-objectkind",
+    "title": "34.5.2 sys.ObjectKind",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 210
+  },
+  {
+    "id": "api-type-sys-visibility",
+    "title": "34.5.3 sys.Visibility",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 216
+  },
+  {
+    "id": "api-type-sys-severity",
+    "title": "34.5.4 sys.Severity",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 222
+  },
+  {
+    "id": "api-type-sys-snapshotkind",
+    "title": "34.5.5 sys.SnapshotKind",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 228
+  },
+  {
+    "id": "api-type-sys-changekind",
+    "title": "34.5.6 sys.ChangeKind",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 234
+  },
+  {
+    "id": "api-type-sys-changearea",
+    "title": "34.5.7 sys.ChangeArea",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 240
+  },
+  {
+    "id": "api-type-sys-runstatus",
+    "title": "34.5.8 sys.RunStatus",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 246
+  },
+  {
+    "id": "api-type-sys-invocationstatus",
+    "title": "34.5.9 sys.InvocationStatus",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 252
+  },
+  {
+    "id": "api-type-sys-transactionstatus",
+    "title": "34.5.10 sys.TransactionStatus",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 258
+  },
+  {
+    "id": "api-type-sys-streamstatus",
+    "title": "34.5.11 sys.StreamStatus",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 264
+  },
+  {
+    "id": "api-type-sys-failurestatus",
+    "title": "34.5.12 sys.FailureStatus",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 270
+  },
+  {
+    "id": "api-type-sys-leasestatus",
+    "title": "34.5.13 sys.LeaseStatus",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 276
+  },
+  {
+    "id": "api-type-sys-buildstatus",
+    "title": "34.5.14 sys.BuildStatus",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 282
+  },
+  {
+    "id": "api-type-sys-teststatus",
+    "title": "34.5.15 sys.TestStatus",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 288
+  },
+  {
+    "id": "api-type-sys-assertionownerkind",
+    "title": "34.5.16 sys.AssertionOwnerKind",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 294
+  },
+  {
+    "id": "api-type-sys-assertionscope",
+    "title": "34.5.17 sys.AssertionScope",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 300
+  },
+  {
+    "id": "api-type-sys-clientkind",
+    "title": "34.5.18 sys.ClientKind",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 306
+  },
+  {
+    "id": "api-type-sys-dependencyconfidence",
+    "title": "34.5.19 sys.DependencyConfidence",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 312
+  },
+  {
+    "id": "api-type-sys-dependencykind",
+    "title": "34.5.20 sys.DependencyKind",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 318
+  },
+  {
+    "id": "api-type-sys-diffscope",
+    "title": "34.5.21 sys.DiffScope",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 324
+  },
+  {
+    "id": "api-type-sys-effectkind",
+    "title": "34.5.22 sys.EffectKind",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 330
+  },
+  {
+    "id": "api-type-sys-extensiontrust",
+    "title": "34.5.23 sys.ExtensionTrust",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 336
+  },
+  {
+    "id": "api-type-sys-filekind",
+    "title": "34.5.24 sys.FileKind",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 342
+  },
+  {
+    "id": "api-type-sys-gitobjectkind",
+    "title": "34.5.25 sys.GitObjectKind",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 348
+  },
+  {
+    "id": "api-type-sys-hostaccess",
+    "title": "34.5.26 sys.HostAccess",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 354
+  },
+  {
+    "id": "api-type-sys-indexkind",
+    "title": "34.5.27 sys.IndexKind",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 360
+  },
+  {
+    "id": "api-type-sys-invoketransaction",
+    "title": "34.5.28 sys.InvokeTransaction",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 366
+  },
+  {
+    "id": "api-type-sys-listenerkind",
+    "title": "34.5.29 sys.ListenerKind",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 372
+  },
+  {
+    "id": "api-type-sys-maintenancekind",
+    "title": "34.5.30 sys.MaintenanceKind",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 378
+  },
+  {
+    "id": "api-type-sys-plannodekind",
+    "title": "34.5.31 sys.PlanNodeKind",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 384
+  },
+  {
+    "id": "api-type-sys-protocolmemberkind",
+    "title": "34.5.32 sys.ProtocolMemberKind",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 390
+  },
+  {
+    "id": "api-type-sys-referenceaction",
+    "title": "34.5.33 sys.ReferenceAction",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 396
+  },
+  {
+    "id": "api-type-sys-settingscope",
+    "title": "34.5.34 sys.SettingScope",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 402
+  },
+  {
+    "id": "api-type-sys-settingsource",
+    "title": "34.5.35 sys.SettingSource",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 408
+  },
+  {
+    "id": "api-type-sys-statistickind",
+    "title": "34.5.36 sys.StatisticKind",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 414
+  },
+  {
+    "id": "api-type-sys-storagefilekind",
+    "title": "34.5.37 sys.StorageFileKind",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 420
+  },
+  {
+    "id": "api-type-sys-storageprofile",
+    "title": "34.5.38 sys.StorageProfile",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 426
+  },
+  {
+    "id": "api-type-sys-storagepreference",
+    "title": "34.5.39 sys.StoragePreference",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 432
+  },
+  {
+    "id": "api-type-sys-storagerewritetarget",
+    "title": "34.5.40 sys.StorageRewriteTarget",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 438
+  },
+  {
+    "id": "api-type-sys-typekind",
+    "title": "34.5.41 sys.TypeKind",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 444
+  },
+  {
+    "id": "api-type-sys-verificationstatus",
+    "title": "34.5.42 sys.VerificationStatus",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 450
+  },
+  {
+    "id": "api-type-sys-verifyscope",
+    "title": "34.5.43 sys.VerifyScope",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 456
+  },
+  {
+    "id": "api-type-sys-changetargetkind",
+    "title": "34.5.44 sys.ChangeTargetKind",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 462
+  },
+  {
+    "id": "system-reference-supporting-value-types",
+    "title": "34.6 Supporting value types",
+    "level": 2,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 468
+  },
+  {
+    "id": "api-type-sys-rowref-t",
+    "title": "34.6.1 sys.RowRef<T>",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 470
+  },
+  {
+    "id": "api-type-sys-value",
+    "title": "34.6.2 sys.Value",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 482
+  },
+  {
+    "id": "api-type-sys-argument",
+    "title": "34.6.3 sys.Argument",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 498
+  },
+  {
+    "id": "api-type-sys-argumentmap",
+    "title": "34.6.4 sys.ArgumentMap",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 507
+  },
+  {
+    "id": "api-type-sys-valuemetadata-t",
+    "title": "34.6.5 sys.ValueMetadata<T>",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 521
+  },
+  {
+    "id": "api-type-sys-invocationhandle-t",
+    "title": "34.6.6 sys.InvocationHandle<T>",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 533
+  },
+  {
+    "id": "api-type-sys-invocationresult-t",
+    "title": "34.6.7 sys.InvocationResult<T>",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 550
+  },
+  {
+    "id": "api-type-sys-expressionref",
+    "title": "34.6.8 sys.ExpressionRef",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 572
+  },
+  {
+    "id": "api-type-sys-sourcespan",
+    "title": "34.6.9 sys.SourceSpan",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 583
+  },
+  {
+    "id": "api-type-sys-sourcemapentry",
+    "title": "34.6.10 sys.SourceMapEntry",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 601
+  },
+  {
+    "id": "api-type-sys-diagnosticlabel",
+    "title": "34.6.11 sys.DiagnosticLabel",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 611
+  },
+  {
+    "id": "api-type-sys-sourcedocument",
+    "title": "34.6.12 sys.SourceDocument",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 621
+  },
+  {
+    "id": "api-type-sys-attribution",
+    "title": "34.6.13 sys.Attribution",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 640
+  },
+  {
+    "id": "api-type-sys-personidentity",
+    "title": "34.6.14 sys.PersonIdentity",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 655
+  },
+  {
+    "id": "api-type-sys-objectdescription",
+    "title": "34.6.15 sys.ObjectDescription",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 664
+  },
+  {
+    "id": "api-type-sys-explanation",
+    "title": "34.6.16 sys.Explanation",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 679
+  },
+  {
+    "id": "api-type-sys-checkpointposition",
+    "title": "34.6.17 sys.CheckpointPosition",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 692
+  },
+  {
+    "id": "api-type-sys-compatibilityinfo",
+    "title": "34.6.18 sys.CompatibilityInfo",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 707
+  },
+  {
+    "id": "api-type-sys-runtimeinfo",
+    "title": "34.6.19 sys.RuntimeInfo",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 721
+  },
+  {
+    "id": "api-type-sys-flushresult",
+    "title": "34.6.20 sys.FlushResult",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 744
+  },
+  {
+    "id": "api-type-sys-compactionresult",
+    "title": "34.6.21 sys.CompactionResult",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 759
+  },
+  {
+    "id": "api-type-sys-storagerewriteresult",
+    "title": "34.6.22 sys.StorageRewriteResult",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 776
+  },
+  {
+    "id": "api-type-sys-verificationreport",
+    "title": "34.6.23 sys.VerificationReport",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 794
+  },
+  {
+    "id": "api-type-sys-cancellationview",
+    "title": "34.6.24 sys.CancellationView",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 811
+  },
+  {
+    "id": "api-type-sys-presentationoverride",
+    "title": "34.6.25 sys.PresentationOverride",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 821
+  },
+  {
+    "id": "api-type-sys-watch",
+    "title": "34.6.26 sys.Watch",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 832
+  },
+  {
+    "id": "api-type-sys-databaseview",
+    "title": "34.6.27 sys.DatabaseView",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 844
+  },
+  {
+    "id": "api-type-sys-currentcontext",
+    "title": "34.6.28 sys.CurrentContext",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 862
+  },
+  {
+    "id": "api-type-sys-runtimeview",
+    "title": "34.6.29 sys.RuntimeView",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 881
+  },
+  {
+    "id": "api-type-sys-replview",
+    "title": "34.6.30 sys.ReplView",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 913
+  },
+  {
+    "id": "api-type-sys-changetarget",
+    "title": "34.6.31 sys.ChangeTarget",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 928
+  },
+  {
+    "id": "api-type-sys-checkpointconflict",
+    "title": "34.6.32 sys.CheckpointConflict",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 946
+  },
+  {
+    "id": "api-type-sys-rowconflict",
+    "title": "34.6.33 sys.RowConflict",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 966
+  },
+  {
+    "id": "api-type-sys-checkoutplan",
+    "title": "34.6.34 sys.CheckoutPlan",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 983
+  },
+  {
+    "id": "system-reference-canonical-system-relations",
+    "title": "34.7 Canonical system relations",
+    "level": 2,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1007
+  },
+  {
+    "id": "api-type-sys-database",
+    "title": "34.7.1 sys.Database",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1009
+  },
+  {
+    "id": "api-type-sys-namespace",
+    "title": "34.7.2 sys.Namespace",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1030
+  },
+  {
+    "id": "api-type-sys-module",
+    "title": "34.7.3 sys.Module",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1045
+  },
+  {
+    "id": "api-type-sys-import",
+    "title": "34.7.4 sys.Import",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1061
+  },
+  {
+    "id": "api-type-sys-file",
+    "title": "34.7.5 sys.File",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1078
+  },
+  {
+    "id": "api-type-sys-object",
+    "title": "34.7.6 sys.Object",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1098
+  },
+  {
+    "id": "api-type-sys-revision",
+    "title": "34.7.7 sys.Revision",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1115
+  },
+  {
+    "id": "api-type-sys-definition",
+    "title": "34.7.8 sys.Definition",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1132
+  },
+  {
+    "id": "api-type-sys-type",
+    "title": "34.7.9 sys.Type",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1148
+  },
+  {
+    "id": "api-type-sys-typeparameter",
+    "title": "34.7.10 sys.TypeParameter",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1166
+  },
+  {
+    "id": "api-type-sys-field",
+    "title": "34.7.11 sys.Field",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1181
+  },
+  {
+    "id": "api-type-sys-variant",
+    "title": "34.7.12 sys.Variant",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1198
+  },
+  {
+    "id": "api-type-sys-protocol",
+    "title": "34.7.13 sys.Protocol",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1214
+  },
+  {
+    "id": "api-type-sys-protocolmember",
+    "title": "34.7.14 sys.ProtocolMember",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1228
+  },
+  {
+    "id": "api-type-sys-implementation",
+    "title": "34.7.15 sys.Implementation",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1244
+  },
+  {
+    "id": "api-type-sys-function",
+    "title": "34.7.16 sys.Function",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1260
+  },
+  {
+    "id": "api-type-sys-parameter",
+    "title": "34.7.17 sys.Parameter",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1281
+  },
+  {
+    "id": "api-type-sys-effect",
+    "title": "34.7.18 sys.Effect",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1298
+  },
+  {
+    "id": "api-type-sys-table",
+    "title": "34.7.19 sys.Table",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1312
+  },
+  {
+    "id": "api-type-sys-column",
+    "title": "34.7.20 sys.Column",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1331
+  },
+  {
+    "id": "api-type-sys-key",
+    "title": "34.7.21 sys.Key",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1351
+  },
+  {
+    "id": "api-type-sys-assertion",
+    "title": "34.7.22 sys.Assertion",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1367
+  },
+  {
+    "id": "api-type-sys-reference",
+    "title": "34.7.23 sys.Reference",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1387
+  },
+  {
+    "id": "api-type-sys-page",
+    "title": "34.7.24 sys.Page",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1404
+  },
+  {
+    "id": "api-type-sys-dimension",
+    "title": "34.7.25 sys.Dimension",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1418
+  },
+  {
+    "id": "api-type-sys-unit",
+    "title": "34.7.26 sys.Unit",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1431
+  },
+  {
+    "id": "api-type-sys-currency",
+    "title": "34.7.27 sys.Currency",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1447
+  },
+  {
+    "id": "api-type-sys-secretrequirement",
+    "title": "34.7.28 sys.SecretRequirement",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1461
+  },
+  {
+    "id": "api-type-sys-extension",
+    "title": "34.7.29 sys.Extension",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1476
+  },
+  {
+    "id": "api-type-sys-dependency",
+    "title": "34.7.30 sys.Dependency",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1493
+  },
+  {
+    "id": "api-type-sys-diagnostic",
+    "title": "34.7.31 sys.Diagnostic",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1510
+  },
+  {
+    "id": "api-type-sys-snapshot",
+    "title": "34.7.32 sys.Snapshot",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1535
+  },
+  {
+    "id": "api-type-sys-snapshotobject",
+    "title": "34.7.33 sys.SnapshotObject",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1554
+  },
+  {
+    "id": "api-type-sys-change",
+    "title": "34.7.34 sys.Change",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1568
+  },
+  {
+    "id": "api-type-sys-diffentry",
+    "title": "34.7.35 sys.DiffEntry",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1596
+  },
+  {
+    "id": "api-type-sys-fileversion",
+    "title": "34.7.36 sys.FileVersion",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1611
+  },
+  {
+    "id": "api-type-sys-gitrepository",
+    "title": "34.7.37 sys.GitRepository",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1631
+  },
+  {
+    "id": "api-type-sys-commit",
+    "title": "34.7.38 sys.Commit",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1647
+  },
+  {
+    "id": "api-type-sys-treeentry",
+    "title": "34.7.39 sys.TreeEntry",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1666
+  },
+  {
+    "id": "api-type-sys-ref",
+    "title": "34.7.40 sys.Ref",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1681
+  },
+  {
+    "id": "api-type-sys-branch",
+    "title": "34.7.41 sys.Branch",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1696
+  },
+  {
+    "id": "api-type-sys-tag",
+    "title": "34.7.42 sys.Tag",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1712
+  },
+  {
+    "id": "api-type-sys-remote",
+    "title": "34.7.43 sys.Remote",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1727
+  },
+  {
+    "id": "api-type-sys-stash",
+    "title": "34.7.44 sys.Stash",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1742
+  },
+  {
+    "id": "api-type-sys-gitobject",
+    "title": "34.7.45 sys.GitObject",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1756
+  },
+  {
+    "id": "api-type-sys-worktreeentry",
+    "title": "34.7.46 sys.WorktreeEntry",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1771
+  },
+  {
+    "id": "api-type-sys-query",
+    "title": "34.7.47 sys.Query",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1786
+  },
+  {
+    "id": "api-type-sys-plan",
+    "title": "34.7.48 sys.Plan",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1811
+  },
+  {
+    "id": "api-type-sys-plannode",
+    "title": "34.7.49 sys.PlanNode",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1829
+  },
+  {
+    "id": "api-type-sys-invocation",
+    "title": "34.7.50 sys.Invocation",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1853
+  },
+  {
+    "id": "api-type-sys-invocationargument",
+    "title": "34.7.51 sys.InvocationArgument",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1886
+  },
+  {
+    "id": "api-type-sys-run",
+    "title": "34.7.52 sys.Run",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1905
+  },
+  {
+    "id": "api-type-sys-transaction",
+    "title": "34.7.53 sys.Transaction",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1931
+  },
+  {
+    "id": "api-type-sys-trace",
+    "title": "34.7.54 sys.Trace",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1953
+  },
+  {
+    "id": "api-type-sys-span",
+    "title": "34.7.55 sys.Span",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1972
+  },
+  {
+    "id": "api-type-sys-traceevent",
+    "title": "34.7.56 sys.TraceEvent",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 1994
+  },
+  {
+    "id": "api-type-sys-stream",
+    "title": "34.7.57 sys.Stream",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2012
+  },
+  {
+    "id": "api-type-sys-checkpoint",
+    "title": "34.7.58 sys.Checkpoint",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2040
+  },
+  {
+    "id": "api-type-sys-checkpointupdate",
+    "title": "34.7.59 sys.CheckpointUpdate",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2063
+  },
+  {
+    "id": "api-type-sys-failure",
+    "title": "34.7.60 sys.Failure",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2081
+  },
+  {
+    "id": "api-type-sys-session",
+    "title": "34.7.61 sys.Session",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2128
+  },
+  {
+    "id": "api-type-sys-client",
+    "title": "34.7.62 sys.Client",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2147
+  },
+  {
+    "id": "api-type-sys-lease",
+    "title": "34.7.63 sys.Lease",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2166
+  },
+  {
+    "id": "api-type-sys-listener",
+    "title": "34.7.64 sys.Listener",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2184
+  },
+  {
+    "id": "api-type-sys-storage",
+    "title": "34.7.65 sys.Storage",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2203
+  },
+  {
+    "id": "api-type-sys-segment",
+    "title": "34.7.66 sys.Segment",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2228
+  },
+  {
+    "id": "api-type-sys-statistic",
+    "title": "34.7.67 sys.Statistic",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2251
+  },
+  {
+    "id": "api-type-sys-index",
+    "title": "34.7.68 sys.Index",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2267
+  },
+  {
+    "id": "api-type-sys-materialization",
+    "title": "34.7.69 sys.Materialization",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2284
+  },
+  {
+    "id": "api-type-sys-allocator",
+    "title": "34.7.70 sys.Allocator",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2301
+  },
+  {
+    "id": "api-type-sys-hydration",
+    "title": "34.7.71 sys.Hydration",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2316
+  },
+  {
+    "id": "api-type-sys-compaction",
+    "title": "34.7.72 sys.Compaction",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2333
+  },
+  {
+    "id": "api-type-sys-maintenancejob",
+    "title": "34.7.73 sys.MaintenanceJob",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2352
+  },
+  {
+    "id": "api-type-sys-storagefile",
+    "title": "34.7.74 sys.StorageFile",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2370
+  },
+  {
+    "id": "api-type-sys-secret",
+    "title": "34.7.75 sys.Secret",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2387
+  },
+  {
+    "id": "api-type-sys-setting",
+    "title": "34.7.76 sys.Setting",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2404
+  },
+  {
+    "id": "api-type-sys-build",
+    "title": "34.7.77 sys.Build",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2420
+  },
+  {
+    "id": "api-type-sys-test",
+    "title": "34.7.78 sys.Test",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2440
+  },
+  {
+    "id": "system-reference-callable-operations",
+    "title": "34.8 Callable operations",
+    "level": 2,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2458
+  },
+  {
+    "id": "api-call-sys-meta",
+    "title": "34.8.1 sys.meta",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2462
+  },
+  {
+    "id": "api-call-sys-object",
+    "title": "34.8.2 sys.object",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2472
+  },
+  {
+    "id": "api-call-sys-resolve",
+    "title": "34.8.3 sys.resolve",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2482
+  },
+  {
+    "id": "api-call-sys-resolve-function",
+    "title": "34.8.4 sys.resolvefunction",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2492
+  },
+  {
+    "id": "api-call-sys-describe",
+    "title": "34.8.5 sys.describe",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2502
+  },
+  {
+    "id": "api-call-sys-source-objectref",
+    "title": "34.8.6 sys.source(ObjectRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2512
+  },
+  {
+    "id": "api-call-sys-source-fileref",
+    "title": "34.8.7 sys.source(FileRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2522
+  },
+  {
+    "id": "api-call-sys-history-objectref",
+    "title": "34.8.8 sys.history(ObjectRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2532
+  },
+  {
+    "id": "api-call-sys-history-fileref",
+    "title": "34.8.9 sys.history(FileRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2542
+  },
+  {
+    "id": "api-call-sys-blame-fileref",
+    "title": "34.8.10 sys.blame(FileRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2552
+  },
+  {
+    "id": "api-call-sys-blame-rowref",
+    "title": "34.8.11 sys.blame(RowRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2562
+  },
+  {
+    "id": "api-call-sys-dependencies",
+    "title": "34.8.12 sys.dependencies",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2572
+  },
+  {
+    "id": "api-call-sys-dependents",
+    "title": "34.8.13 sys.dependents",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2582
+  },
+  {
+    "id": "api-call-sys-snapshot-snapshotref",
+    "title": "34.8.14 sys.snapshot(SnapshotRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2592
+  },
+  {
+    "id": "api-call-sys-snapshot-commitref",
+    "title": "34.8.15 sys.snapshot(CommitRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2602
+  },
+  {
+    "id": "api-call-sys-snapshot-branchref",
+    "title": "34.8.16 sys.snapshot(BranchRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2612
+  },
+  {
+    "id": "api-call-sys-snapshot-tagref",
+    "title": "34.8.17 sys.snapshot(TagRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2622
+  },
+  {
+    "id": "api-call-sys-snapshot-gitoid",
+    "title": "34.8.18 sys.snapshot(GitOid)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2632
+  },
+  {
+    "id": "api-call-sys-snapshot-str",
+    "title": "34.8.19 sys.snapshot(Str)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2642
+  },
+  {
+    "id": "api-call-sys-diff",
+    "title": "34.8.20 sys.diff",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2652
+  },
+  {
+    "id": "api-call-sys-changes",
+    "title": "34.8.21 sys.changes",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2662
+  },
+  {
+    "id": "api-call-sys-explain-query",
+    "title": "34.8.22 sys.explain(Query)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2672
+  },
+  {
+    "id": "api-call-sys-explain-functionref",
+    "title": "34.8.23 sys.explain(FunctionRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2682
+  },
+  {
+    "id": "api-call-sys-explain-diagnostic",
+    "title": "34.8.24 sys.explain(Diagnostic)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2692
+  },
+  {
+    "id": "api-call-sys-checkpoint",
+    "title": "34.8.25 sys.checkpoint",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2702
+  },
+  {
+    "id": "api-call-sys-render-diagnostic",
+    "title": "34.8.26 sys.renderdiagnostic",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2712
+  },
+  {
+    "id": "api-call-sys-rt-info",
+    "title": "34.8.27 sys.rt.info",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2722
+  },
+  {
+    "id": "api-call-sys-invoke-value",
+    "title": "34.8.28 sys.invoke(Value)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2732
+  },
+  {
+    "id": "api-call-sys-invoke-t",
+    "title": "34.8.29 sys.invoke<T>",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2744
+  },
+  {
+    "id": "api-call-sys-start-value",
+    "title": "34.8.30 sys.start(Value)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2756
+  },
+  {
+    "id": "api-call-sys-start-t",
+    "title": "34.8.31 sys.start<T>",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2770
+  },
+  {
+    "id": "api-call-sys-await",
+    "title": "34.8.32 sys.await",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2784
+  },
+  {
+    "id": "api-call-sys-cancel",
+    "title": "34.8.33 sys.cancel",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2796
+  },
+  {
+    "id": "api-call-sys-admin-commit",
+    "title": "34.8.34 sys.admin.commit",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2808
+  },
+  {
+    "id": "api-call-sys-admin-checkout-snapshotref",
+    "title": "34.8.35 sys.admin.checkout(SnapshotRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2822
+  },
+  {
+    "id": "api-call-sys-admin-checkout-commitref",
+    "title": "34.8.36 sys.admin.checkout(CommitRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2838
+  },
+  {
+    "id": "api-call-sys-admin-checkout-branchref",
+    "title": "34.8.37 sys.admin.checkout(BranchRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2854
+  },
+  {
+    "id": "api-call-sys-admin-checkout-tagref",
+    "title": "34.8.38 sys.admin.checkout(TagRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2870
+  },
+  {
+    "id": "api-call-sys-admin-checkout-gitoid",
+    "title": "34.8.39 sys.admin.checkout(GitOid)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2886
+  },
+  {
+    "id": "api-call-sys-admin-checkout-str",
+    "title": "34.8.40 sys.admin.checkout(Str)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2902
+  },
+  {
+    "id": "api-call-sys-admin-create-branch-snapshotref",
+    "title": "34.8.41 sys.admin.createbranch(SnapshotRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2918
+  },
+  {
+    "id": "api-call-sys-admin-create-branch-commitref",
+    "title": "34.8.42 sys.admin.createbranch(CommitRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2934
+  },
+  {
+    "id": "api-call-sys-admin-create-branch-branchref",
+    "title": "34.8.43 sys.admin.createbranch(BranchRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2950
+  },
+  {
+    "id": "api-call-sys-admin-create-branch-tagref",
+    "title": "34.8.44 sys.admin.createbranch(TagRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2966
+  },
+  {
+    "id": "api-call-sys-admin-create-branch-gitoid",
+    "title": "34.8.45 sys.admin.createbranch(GitOid)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2982
+  },
+  {
+    "id": "api-call-sys-admin-create-branch-str",
+    "title": "34.8.46 sys.admin.createbranch(Str)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 2998
+  },
+  {
+    "id": "api-call-sys-admin-flush",
+    "title": "34.8.47 sys.admin.flush",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 3014
+  },
+  {
+    "id": "api-call-sys-admin-compact",
+    "title": "34.8.48 sys.admin.compact",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 3028
+  },
+  {
+    "id": "api-call-sys-admin-set-storage-preference",
+    "title": "34.8.49 sys.admin.setstoragepreference",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 3042
+  },
+  {
+    "id": "api-call-sys-admin-rewrite-storage",
+    "title": "34.8.50 sys.admin.rewritestorage",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 3056
+  },
+  {
+    "id": "api-call-sys-admin-verify",
+    "title": "34.8.51 sys.admin.verify",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 3070
+  },
+  {
+    "id": "api-call-sys-admin-cancel-run",
+    "title": "34.8.52 sys.admin.cancelrun",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 3084
+  },
+  {
+    "id": "api-call-sys-admin-pause-stream",
+    "title": "34.8.53 sys.admin.pausestream",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 3098
+  },
+  {
+    "id": "api-call-sys-admin-resume-stream",
+    "title": "34.8.54 sys.admin.resumestream",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 3112
+  },
+  {
+    "id": "api-call-sys-admin-reset-checkpoint",
+    "title": "34.8.55 sys.admin.resetcheckpoint",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 3126
+  },
+  {
+    "id": "api-call-sys-admin-retry-failure",
+    "title": "34.8.56 sys.admin.retryfailure",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 3140
+  },
+  {
+    "id": "api-call-sys-admin-skip-failure",
+    "title": "34.8.57 sys.admin.skipfailure",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 3156
+  },
+  {
+    "id": "api-call-sys-admin-replay-failure",
+    "title": "34.8.58 sys.admin.replayfailure",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 3172
+  },
+  {
+    "id": "api-call-sys-admin-resolve-failure",
+    "title": "34.8.59 sys.admin.resolvefailure",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 3188
+  },
+  {
+    "id": "api-call-sys-consumer-identity",
+    "title": "34.8.60 sys.consumeridentity",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 3204
+  },
+  {
+    "id": "api-call-sys-admin-plan-checkout-snapshotref",
+    "title": "34.8.61 sys.admin.plancheckout(SnapshotRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 3214
+  },
+  {
+    "id": "api-call-sys-admin-plan-checkout-commitref",
+    "title": "34.8.62 sys.admin.plancheckout(CommitRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 3228
+  },
+  {
+    "id": "api-call-sys-admin-plan-checkout-branchref",
+    "title": "34.8.63 sys.admin.plancheckout(BranchRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 3242
+  },
+  {
+    "id": "api-call-sys-admin-plan-checkout-tagref",
+    "title": "34.8.64 sys.admin.plancheckout(TagRef)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 3256
+  },
+  {
+    "id": "api-call-sys-admin-plan-checkout-gitoid",
+    "title": "34.8.65 sys.admin.plancheckout(GitOid)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 3270
+  },
+  {
+    "id": "api-call-sys-admin-plan-checkout-str",
+    "title": "34.8.66 sys.admin.plancheckout(Str)",
+    "level": 3,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 3284
+  },
+  {
+    "id": "system-reference-portable-failure-codes",
+    "title": "34.9 Portable failure codes",
+    "level": 2,
+    "chapter": "system-reference",
+    "source": "source/34-system-reference.md",
+    "source_line": 3298
+  },
+  {
+    "id": "grammar",
+    "title": "35. Complete grammar",
+    "level": 1,
+    "chapter": "grammar",
+    "source": "source/34-grammar.md",
+    "source_line": 1
+  },
+  {
+    "id": "references",
+    "title": "36. Normative dependencies",
+    "level": 1,
+    "chapter": "references",
+    "source": "source/35-references.md",
+    "source_line": 1
+  }
+]

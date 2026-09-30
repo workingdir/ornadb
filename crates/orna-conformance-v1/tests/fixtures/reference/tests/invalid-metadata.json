@@ -1,0 +1,487 @@
+{
+  "version": "1.0.0",
+  "meaning": "Reviewed primary diagnostic metadata for every negative source fixture. These are expectations, not evidence of execution.",
+  "fixtures": [
+    {
+      "path": "examples/invalid/affine-addition.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E5002",
+      "message_contains": "cannot add two absolute affine temperatures"
+    },
+    {
+      "path": "examples/invalid/affine-sum.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E5003",
+      "message_contains": "cannot sum absolute affine quantities"
+    },
+    {
+      "path": "examples/invalid/ambiguous-consumer.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E9101",
+      "message_contains": "same durable source consumed twice without distinct consumer identity"
+    },
+    {
+      "path": "examples/invalid/assert-effectful-table.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA-A091-007",
+      "message_contains": "declaration assertion uses forbidden network effect"
+    },
+    {
+      "path": "examples/invalid/assert-empty.orna",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA-A091-011",
+      "message_contains": "assertion requires a proposition before `;`"
+    },
+    {
+      "path": "examples/invalid/assert-missing-semicolon.orna",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA-A091-005",
+      "message_contains": "assertion clause must end with `;`"
+    },
+    {
+      "path": "examples/invalid/assert-owner-type-mismatch.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA-A091-004",
+      "message_contains": "table assertion must be a predicate over Relation<User>"
+    },
+    {
+      "path": "examples/invalid/assignment-expression.orna",
+      "failing_phase": "parse",
+      "diagnostic": "E1301",
+      "message_contains": "assignment is a statement, not an expression"
+    },
+    {
+      "path": "examples/invalid/calendar-bucket-no-zone.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E6001",
+      "message_contains": "calendar bucketing of Instant requires a time zone"
+    },
+    {
+      "path": "examples/invalid/comparison-chain.orna",
+      "failing_phase": "parse",
+      "diagnostic": "E1302",
+      "message_contains": "comparison operators do not chain; write an explicit conjunction"
+    },
+    {
+      "path": "examples/invalid/computed-field-effect.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E3012",
+      "message_contains": "computed field must be deterministic and row-local"
+    },
+    {
+      "path": "examples/invalid/computed-field-insert.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E3010",
+      "message_contains": "computed field `full_name` cannot be supplied during insert"
+    },
+    {
+      "path": "examples/invalid/computed-field-update.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E3011",
+      "message_contains": "computed field `full_name` cannot be updated directly"
+    },
+    {
+      "path": "examples/invalid/cross-database-write.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E9001",
+      "message_contains": "cross-database writes are not atomic/supported"
+    },
+    {
+      "path": "examples/invalid/currency-addition.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E5003",
+      "message_contains": "cannot add different currencies without conversion"
+    },
+    {
+      "path": "examples/invalid/currency-static-symbol.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA091-E-CURRENCY-SYMBOL",
+      "message_contains": "currency symbols belong to locale-aware formatting, not Currency identity"
+    },
+    {
+      "path": "examples/invalid/duplicate-key.orna",
+      "failing_phase": "evaluate",
+      "diagnostic": "E3001",
+      "message_contains": "duplicate primary key"
+    },
+    {
+      "path": "examples/invalid/effectful-display.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E7201",
+      "message_contains": "Display and Present implementations must be read-only"
+    },
+    {
+      "path": "examples/invalid/float-key.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E3003",
+      "message_contains": "Float is not a valid primary-key type"
+    },
+    {
+      "path": "examples/invalid/float-money-implicit.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E5103",
+      "message_contains": "binary Float cannot enter an exact Money calculation implicitly"
+    },
+    {
+      "path": "examples/invalid/implicit-conversion-chain.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA091-E-CONVERSION-CHAIN",
+      "message_contains": "implicit conversion chains are not searched; name each conversion explicitly"
+    },
+    {
+      "path": "examples/invalid/incompatible-dimensions.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E5001",
+      "message_contains": "cannot add Time and Energy"
+    },
+    {
+      "path": "examples/invalid/key-update.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E3002",
+      "message_contains": "primary keys are immutable through update"
+    },
+    {
+      "path": "examples/invalid/legacy-assert-else.orna",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA-A091-006",
+      "message_contains": "assert has no assertion-specific `else` arm"
+    },
+    {
+      "path": "examples/invalid/legacy-assert-owner-pipe.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA-A091-002",
+      "message_contains": "remove the repeated table owner before the assertion predicate"
+    },
+    {
+      "path": "examples/invalid/legacy-assert-pipe-bang.orna",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA-A091-010",
+      "message_contains": "`|!` is not assertion syntax; use `assert`"
+    },
+    {
+      "path": "examples/invalid/legacy-assert-self-pipe.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA-A091-002",
+      "message_contains": "remove `self |`; the table already supplies its candidate relation"
+    },
+    {
+      "path": "examples/invalid/legacy-checkpoint-reset-method.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA100-E-SYS-ADMIN-METHOD",
+      "message_contains": "system rows are read-only; use `sys.admin.reset_checkpoint` with compare-and-set arguments"
+    },
+    {
+      "path": "examples/invalid/legacy-colon-bound.orna",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-BOUND-COLON",
+      "message_contains": "protocol bounds use `<T impl Protocol>`"
+    },
+    {
+      "path": "examples/invalid/legacy-constraints-block.orna",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA-A091-010",
+      "message_contains": "`constraints` is not a declaration; use owner-local `assert`"
+    },
+    {
+      "path": "examples/invalid/legacy-currency-declaration.orna",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-CURRENCY",
+      "message_contains": "declare an ordinary nominal type with a nested Currency implementation"
+    },
+    {
+      "path": "examples/invalid/legacy-empty-closure.orna",
+      "failing_phase": "parse",
+      "diagnostic": "E1012",
+      "message_contains": "`||` is logical OR, not an anonymous function"
+    },
+    {
+      "path": "examples/invalid/legacy-ensure.orna",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA-A091-010",
+      "message_contains": "`ensure` is not an assertion alias; use `assert`"
+    },
+    {
+      "path": "examples/invalid/legacy-fact.orna",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA-A091-010",
+      "message_contains": "`fact` is not an assertion alias; use `assert`"
+    },
+    {
+      "path": "examples/invalid/legacy-failure-replay-method.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA100-E-SYS-ADMIN-METHOD",
+      "message_contains": "system rows are read-only; use `sys.admin.replay_failure(failure.reference, ...)`"
+    },
+    {
+      "path": "examples/invalid/legacy-failure-resolve-method.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA100-E-SYS-ADMIN-METHOD",
+      "message_contains": "system rows are read-only; use `sys.admin.resolve_failure(failure.reference, ...)`"
+    },
+    {
+      "path": "examples/invalid/legacy-field-check.orna",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-FIELD-CONSTRAINT",
+      "message_contains": "field `check` syntax was removed; use a table assertion"
+    },
+    {
+      "path": "examples/invalid/legacy-field-unique.orna",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-FIELD-CONSTRAINT",
+      "message_contains": "field `unique` syntax was removed; use all_unique in the table body"
+    },
+    {
+      "path": "examples/invalid/legacy-ingest.orna",
+      "failing_phase": "parse",
+      "diagnostic": "E1004",
+      "message_contains": "`ingest` is not a declaration"
+    },
+    {
+      "path": "examples/invalid/legacy-log.orna",
+      "failing_phase": "parse",
+      "diagnostic": "E1001",
+      "message_contains": "`log` is not a declaration in Orna 1.0"
+    },
+    {
+      "path": "examples/invalid/legacy-match.orna",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-MATCH",
+      "message_contains": "use `case` with colon-delimited arms"
+    },
+    {
+      "path": "examples/invalid/legacy-opaque.orna",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-OPAQUE",
+      "message_contains": "use the unified `type` declaration"
+    },
+    {
+      "path": "examples/invalid/legacy-pipe-lambda.orna",
+      "failing_phase": "parse",
+      "diagnostic": "E1011",
+      "message_contains": "pipe-delimited anonymous functions are not valid; use `=>`"
+    },
+    {
+      "path": "examples/invalid/legacy-postfix-question.orna",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-POSTFIX-QUESTION",
+      "message_contains": "remove postfix `?`; failure propagation is automatic"
+    },
+    {
+      "path": "examples/invalid/legacy-refined-where.orna",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA-A091-001",
+      "message_contains": "use a brace-delimited refined-type assertion block"
+    },
+    {
+      "path": "examples/invalid/legacy-result.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA091-E-RESULT",
+      "message_contains": "Result/Ok/Err control plumbing was removed; return the success type directly"
+    },
+    {
+      "path": "examples/invalid/legacy-return-arrow.orna",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-RETURN-ARROW",
+      "message_contains": "function return annotations use `: Type`"
+    },
+    {
+      "path": "examples/invalid/legacy-store.orna",
+      "failing_phase": "parse",
+      "diagnostic": "E1003",
+      "message_contains": "`store` is not a logical declaration"
+    },
+    {
+      "path": "examples/invalid/legacy-stream-retry-method.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA100-E-SYS-ADMIN-METHOD",
+      "message_contains": "system rows are read-only; use `sys.admin.retry_failure` on a `sys.FailureRef`"
+    },
+    {
+      "path": "examples/invalid/legacy-stream-skip-method.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA100-E-SYS-ADMIN-METHOD",
+      "message_contains": "system rows are read-only; use `sys.admin.skip_failure` on a `sys.FailureRef`"
+    },
+    {
+      "path": "examples/invalid/legacy-sys-runtime.orna",
+      "failing_phase": "resolve",
+      "diagnostic": "ORNA100-E-SYS-RUNTIME",
+      "message_contains": "`sys.runtime` was renamed to `sys.rt`"
+    },
+    {
+      "path": "examples/invalid/legacy-sys-storage-call.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA100-E-SYS-STORAGE-CALL",
+      "message_contains": "`sys.storage` is a grouping namespace; use `sys.Storage` or `sys.admin` storage functions"
+    },
+    {
+      "path": "examples/invalid/legacy-top-level-impl.orna",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-IMPL-FOR",
+      "message_contains": "move the implementation inside its nominal target and omit `for Type`"
+    },
+    {
+      "path": "examples/invalid/legacy-tryfrom.orna",
+      "failing_phase": "resolve",
+      "diagnostic": "ORNA091-E-TRYFROM",
+      "message_contains": "use From<Source>; From may fail in Orna"
+    },
+    {
+      "path": "examples/invalid/legacy-var.orna",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-VAR",
+      "message_contains": "use `let`; assignment may replace the local slot"
+    },
+    {
+      "path": "examples/invalid/legacy-view.orna",
+      "failing_phase": "parse",
+      "diagnostic": "E1002",
+      "message_contains": "`view` is replaced by an ordinary function"
+    },
+    {
+      "path": "examples/invalid/missing-required-field.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E2002",
+      "message_contains": "missing required field `name`"
+    },
+    {
+      "path": "examples/invalid/module-single-table-assertion.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA-A091-003",
+      "message_contains": "a one-table invariant belongs inside that table"
+    },
+    {
+      "path": "examples/invalid/module-zero-table-assertion.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA-A091-012",
+      "message_contains": "module assertions must depend on at least two distinct tables"
+    },
+    {
+      "path": "examples/invalid/money-float.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E5004",
+      "message_contains": "Money cannot be constructed from an inexact Float without explicit rounding"
+    },
+    {
+      "path": "examples/invalid/mutate-sys-commit.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E7001",
+      "message_contains": "sys.Commit is read-only"
+    },
+    {
+      "path": "examples/invalid/question-coalesce-adjacent.orna",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-POSTFIX-QUESTION",
+      "message_contains": "standalone postfix `?` has no expression meaning in Orna 1.0"
+    },
+    {
+      "path": "examples/invalid/question-on-int.orna",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-POSTFIX-QUESTION",
+      "message_contains": "postfix propagation `?` was removed; failures propagate automatically"
+    },
+    {
+      "path": "examples/invalid/range-key-overlap-magic.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E3010",
+      "message_contains": "Range<T> is not a primary-key type in version 1.0"
+    },
+    {
+      "path": "examples/invalid/record-punning.orna",
+      "failing_phase": "parse",
+      "diagnostic": "E1013",
+      "message_contains": "record fields require `name: expression`"
+    },
+    {
+      "path": "examples/invalid/rekey-auto-id.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E3013",
+      "message_contains": "an automatic-key table cannot be explicitly re-keyed"
+    },
+    {
+      "path": "examples/invalid/relation-equality.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E4107",
+      "message_contains": "relation equality is ambiguous; choose sequence or row-set comparison explicitly"
+    },
+    {
+      "path": "examples/invalid/reserved-std.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E1009",
+      "message_contains": "`std` is reserved"
+    },
+    {
+      "path": "examples/invalid/reserved-sys.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E1008",
+      "message_contains": "`sys` is reserved"
+    },
+    {
+      "path": "examples/invalid/row-declaration.orna",
+      "failing_phase": "parse",
+      "diagnostic": "E8001",
+      "message_contains": "row unit must contain one record expression"
+    },
+    {
+      "path": "examples/invalid/secret-display.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E7002",
+      "message_contains": "secret values cannot be displayed"
+    },
+    {
+      "path": "examples/invalid/static-protocol-function.orna",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-STATIC-FN",
+      "message_contains": "protocols use instance functions and static properties, not static functions"
+    },
+    {
+      "path": "examples/invalid/top-level-expression.orna",
+      "failing_phase": "parse",
+      "diagnostic": "E1006",
+      "message_contains": "module top level accepts declarations only"
+    },
+    {
+      "path": "examples/invalid/top-level-on.orna",
+      "failing_phase": "parse",
+      "diagnostic": "E1005",
+      "message_contains": "`on` is not a declaration"
+    },
+    {
+      "path": "examples/invalid/transaction-block.orna",
+      "failing_phase": "parse",
+      "diagnostic": "E1007",
+      "message_contains": "database writes are transactional by activation; `transaction` is not syntax"
+    },
+    {
+      "path": "examples/invalid/two-durable-sources.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E9102",
+      "message_contains": "a durable consumer function may own only one checkpointed source root"
+    },
+    {
+      "path": "examples/invalid/unknown-field.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E2003",
+      "message_contains": "unknown field `banana`"
+    },
+    {
+      "path": "examples/invalid/unparenthesized-lambda-stage.orna",
+      "failing_phase": "parse",
+      "diagnostic": "E1204",
+      "message_contains": "anonymous function must be parenthesized as a pipeline stage"
+    },
+    {
+      "path": "examples/invalid/unsafe-row-key-repeat.orna",
+      "failing_phase": "row-validation",
+      "diagnostic": "E3004",
+      "message_contains": "loose row body must not repeat path key"
+    },
+    {
+      "path": "examples/invalid/wrong-field-type.orna",
+      "failing_phase": "typecheck",
+      "diagnostic": "E2001",
+      "message_contains": "expected Float<mph>, found Str"
+    }
+  ],
+  "count": 80
+}

@@ -1,0 +1,3 @@
+pub dim Temperature;
+pub unit K : Temperature base;
+pub unit C : Temperature = K offset 273.15 affine;

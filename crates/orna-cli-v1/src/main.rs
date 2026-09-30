@@ -2946,9 +2946,11 @@ mod tests {
     #[test]
     fn project_repl_rejects_an_uncaptured_standard_import() {
         let directory = tempfile::tempdir().expect("temporary project");
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../reference/Orna-1.0.0/examples/valid/page.orna");
-        std::fs::copy(fixture, directory.path().join("main.orna")).expect("accepted source");
+        std::fs::write(
+            directory.path().join("main.orna"),
+            include_str!("../tests/fixtures/reference-project/page.orna"),
+        )
+        .expect("accepted source");
         assert!(
             std::process::Command::new("git")
                 .args(["init", "--quiet"])
@@ -3422,17 +3424,14 @@ mod tests {
     #[test]
     fn authoritative_reference_project_runs_seed_exercise_and_sensor_stream() {
         let directory = tempfile::tempdir().expect("temporary reference project");
-        let reference = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../reference/Orna-1.0.0/examples/reference");
-        for name in [
-            "main.orna",
-            "library.orna",
-            "warehouse.orna",
-            "sensors.orna",
-            "values.orna",
+        for (name, source) in [
+            ("main.orna", include_str!("../tests/fixtures/reference-project/main.orna")),
+            ("library.orna", include_str!("../tests/fixtures/reference-project/library.orna")),
+            ("warehouse.orna", include_str!("../tests/fixtures/reference-project/warehouse.orna")),
+            ("sensors.orna", include_str!("../tests/fixtures/reference-project/sensors.orna")),
+            ("values.orna", include_str!("../tests/fixtures/reference-project/values.orna")),
         ] {
-            std::fs::copy(reference.join(name), directory.path().join(name))
-                .expect("reference source");
+            std::fs::write(directory.path().join(name), source).expect("reference source");
         }
         assert!(
             std::process::Command::new("git")

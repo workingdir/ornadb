@@ -1,0 +1,111 @@
+{
+  "environment": {
+    "network": false,
+    "credentials": false,
+    "intrinsics": "Orna 1.0.0 core",
+    "stdlib": null,
+    "initial_tables": "empty"
+  },
+  "steps": [
+    {
+      "invoke": "seed",
+      "expect": {
+        "library.Book": 2,
+        "library.Loan": 0,
+        "warehouse.Stock": [
+          [
+            "north",
+            "pencil",
+            12
+          ],
+          [
+            "south",
+            "pencil",
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "invoke": "exercise",
+      "expect": {
+        "library.Loan": [
+          [
+            "book-1",
+            "reader-1"
+          ]
+        ],
+        "warehouse.Stock": [
+          [
+            "north",
+            "pencil",
+            9
+          ],
+          [
+            "south",
+            "pencil",
+            7
+          ]
+        ]
+      }
+    },
+    {
+      "invoke": "sensors.ingest",
+      "expect": {
+        "sensors.Reading": [
+          [
+            "greenhouse",
+            0,
+            "18.25"
+          ],
+          [
+            "greenhouse",
+            1,
+            "18.50"
+          ],
+          [
+            "greenhouse",
+            2,
+            "18.75"
+          ]
+        ],
+        "checkpoint_next": 3
+      }
+    },
+    {
+      "invoke": "sensors.ingest",
+      "expect": {
+        "additional_rows": 0,
+        "checkpoint_next": 3
+      }
+    }
+  ],
+  "negative_cases": [
+    {
+      "invoke": "library.lend",
+      "args": [
+        "missing-book",
+        "reader-2"
+      ],
+      "expect": "cross-table assertion failure; no new loan"
+    },
+    {
+      "invoke": "warehouse.transfer",
+      "args": [
+        "north",
+        "south",
+        "pencil",
+        100
+      ],
+      "expect": "assertion failure; both stock rows unchanged"
+    },
+    {
+      "invoke": "library.lend",
+      "args": [
+        "book-1",
+        "reader-2"
+      ],
+      "expect": "duplicate key; existing loan unchanged"
+    }
+  ]
+}
