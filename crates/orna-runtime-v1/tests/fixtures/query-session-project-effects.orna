@@ -1,0 +1,4 @@
+sys.Storage
+    | project(storage => sys.Storage.lookup(storage.id).title == "new" && sys.Storage.lookup(storage.id).title == "new")
+    | filter(matches => matches)
+    | count()
