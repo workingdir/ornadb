@@ -7767,6 +7767,8 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
         b"consumer/zzzz-one-sided-full-base-reset-tail".to_vec();
     let opposite_full_base_delete_before_reset_id =
         b"consumer/zzzy-opposite-full-base-delete-before-reset".to_vec();
+    let same_side_full_base_delete_before_reset_id =
+        b"consumer/zzzy-same-side-full-base-delete-before-reset".to_vec();
     let opposite_full_base_delete_tail_id =
         b"consumer/zzzzz-opposite-full-base-delete-tail".to_vec();
     let same_side_full_base_delete_tail_id =
@@ -7785,8 +7787,9 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
     // middle and after the terminal conflict. The final full-base reset also
     // follows a clean tombstone, proving tail closure keeps it out of impacts.
     // A final one-sided full-base reset likewise resolves without adding an
-    // impact or consuming conflict detail. Opposite-side tombstones before and
-    // after it, plus a same-side tail tombstone, cover both orientations.
+    // impact or consuming conflict detail. Full-base tombstones before and
+    // after the reset on both its own and opposite branches prove the stable-ID
+    // tail closure orderings.
     let build_inputs = |
         row_delete_left: bool,
         checkpoint_delete_left: bool,
@@ -7903,6 +7906,23 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
         } else {
             right.checkpoints.insert(
                 opposite_full_base_delete_before_reset_id.clone(),
+                full_checkpoint.clone(),
+            );
+        }
+        base.checkpoints.insert(
+            same_side_full_base_delete_before_reset_id.clone(),
+            full_checkpoint.clone(),
+        );
+        // The reset branch also tombstones this earlier stable ID; the other
+        // branch retains its full-position base checkpoint.
+        if tail_reset_left {
+            right.checkpoints.insert(
+                same_side_full_base_delete_before_reset_id.clone(),
+                full_checkpoint.clone(),
+            );
+        } else {
+            left.checkpoints.insert(
+                same_side_full_base_delete_before_reset_id.clone(),
                 full_checkpoint.clone(),
             );
         }
@@ -8032,6 +8052,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
                     assert!(!report.affected_checkpoints.contains(full_base_reset_tail_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(one_sided_full_base_reset_tail_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(opposite_full_base_delete_before_reset_id.as_slice()));
+                    assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_before_reset_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(opposite_full_base_delete_tail_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_tail_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(agreed_reset_after_id.as_slice()));
@@ -8077,6 +8098,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
                 assert!(!report.affected_checkpoints.contains(full_base_reset_tail_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(one_sided_full_base_reset_tail_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(opposite_full_base_delete_before_reset_id.as_slice()));
+                assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_before_reset_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(opposite_full_base_delete_tail_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_tail_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(agreed_reset_after_id.as_slice()));
