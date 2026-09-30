@@ -42,3 +42,12 @@ the moved source returns to its original key, is deleted there, and that key is
 reused by a replacement before another retry deletes the replacement and lets
 the original destination row claim it. The fixture asserts every update,
 deletion, and re-key in order.
+
+`returned_source_delete_reuse_by_competitor_allows_final_retry` covers the
+remaining owner edge: after that returned source is deleted, a pending source
+claims its key, blocks another retry, and then moves aside so the last source
+can claim it. The complete mutation log records each owner transition and the
+updates attached to those owners. ORNA-MUT-005/006 are silent on this competition
+between caught retries, so this proof follows evaluation order: the successful
+claim owns the freed key until its later re-key. This remains adapter behavior,
+not a new language-level guarantee.
