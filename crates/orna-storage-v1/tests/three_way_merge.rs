@@ -7410,14 +7410,27 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
             one_sided_full_base_reset_tail_id.clone(),
             full_checkpoint.clone(),
         );
-        left.checkpoints.insert(
-            one_sided_full_base_reset_tail_id.clone(),
-            reset_fixture.clone(),
-        );
-        right.checkpoints.insert(
-            one_sided_full_base_reset_tail_id.clone(),
-            full_checkpoint.clone(),
-        );
+        // Mirror the one-sided reset with the existing reset orientation so
+        // the final stable ID is covered on both Left and Right.
+        if reset_left {
+            left.checkpoints.insert(
+                one_sided_full_base_reset_tail_id.clone(),
+                reset_fixture.clone(),
+            );
+            right.checkpoints.insert(
+                one_sided_full_base_reset_tail_id.clone(),
+                full_checkpoint.clone(),
+            );
+        } else {
+            left.checkpoints.insert(
+                one_sided_full_base_reset_tail_id.clone(),
+                full_checkpoint.clone(),
+            );
+            right.checkpoints.insert(
+                one_sided_full_base_reset_tail_id.clone(),
+                reset_fixture.clone(),
+            );
+        }
 
         base.checkpoints.insert(delete_reset_id.clone(), full_checkpoint.clone());
         if checkpoint_delete_left {
