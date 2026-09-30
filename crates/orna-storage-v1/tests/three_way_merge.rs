@@ -663,6 +663,73 @@ fn checkpoint_delete_update_budget_tail_reports_identity_for_either_deleted_side
 }
 
 #[test]
+fn positionless_delete_update_conflict_keeps_impact_at_shared_budget_tail() {
+    for delete_on_left in [true, false] {
+        for max_conflicts in [1, 2] {
+            let (mut base, mut left, mut right, mut source) = row_checkpoint_conflict_inputs();
+            base.checkpoints.clear();
+            left.checkpoints.clear();
+            right.checkpoints.clear();
+
+            let checkpoint_id = if delete_on_left {
+                b"consumer/positionless-delete-left".to_vec()
+            } else {
+                b"consumer/positionless-delete-right".to_vec()
+            };
+            let unchanged_positionless = CheckpointGeneration { generation: 30, position: None };
+            let advanced_positionless = CheckpointGeneration { generation: 31, position: None };
+            base.checkpoints.insert(checkpoint_id.clone(), unchanged_positionless.clone());
+            let changed_side = if delete_on_left { &mut right } else { &mut left };
+            changed_side
+                .checkpoints
+                .insert(checkpoint_id.clone(), advanced_positionless.clone());
+
+            // The fixture row conflict consumes the first detail. At budget 1,
+            // the positionless delete/update conflict crosses the shared tail;
+            // budget 2 retains that checkpoint conflict with its full states.
+            let error = merge_three_way_snapshots(
+                &base,
+                &left,
+                &right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 100, max_conflicts },
+            )
+            .unwrap_err();
+
+            match error {
+                BranchMergeError::BudgetExceeded { report } if max_conflicts == 1 => {
+                    assert_eq!(report.conflicts_lower_bound, 2);
+                    assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
+                    assert_eq!(source.visited.len(), 3);
+                }
+                BranchMergeError::Conflicts { conflicts, report } if max_conflicts == 2 => {
+                    assert_eq!(report.conflicts_lower_bound, 2);
+                    assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
+                    assert_eq!(source.visited.len(), 3);
+                    let checkpoint_conflict = conflicts.iter().find_map(|conflict| match conflict {
+                        BranchMergeConflict::CheckpointConflict { id, conflict }
+                            if id == &checkpoint_id => Some(conflict),
+                        _ => None,
+                    });
+                    let Some(checkpoint_conflict) = checkpoint_conflict else {
+                        panic!("the retained conflict detail includes the checkpoint identity")
+                    };
+                    assert_eq!(checkpoint_conflict.base.as_ref(), Some(&unchanged_positionless));
+                    if delete_on_left {
+                        assert_eq!(checkpoint_conflict.left, None);
+                        assert_eq!(checkpoint_conflict.right.as_ref(), Some(&advanced_positionless));
+                    } else {
+                        assert_eq!(checkpoint_conflict.left.as_ref(), Some(&advanced_positionless));
+                        assert_eq!(checkpoint_conflict.right, None);
+                    }
+                }
+                other => panic!("unexpected conflict-budget result: {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
 fn both_delete_update_orientations_survive_the_checkpoint_budget_tail() {
     let (mut base, mut left, mut right, mut source) = row_checkpoint_conflict_inputs();
     base.checkpoints.clear();
