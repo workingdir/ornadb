@@ -21232,6 +21232,26 @@ mod tests {
             "last() closes before five rejected branches and the failing tail"
         );
 
+        // The reference is silent when this completed-prefix tail grows
+        // again. Keep all six rejects and the failing source outside the
+        // bracketed take(2) prefix once its second match has arrived.
+        let (last_closes_bracketed_take_two_before_six_rejects_and_failure, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-bracketed-six-rejects-then-failing-tail.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_bracketed_take_two_before_six_rejects_and_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "last() closes before six rejected branches and the failing tail"
+        );
+
         // The reference is silent when the entire bracketed candidate tail
         // is rejected before take(2) naturally exhausts. The empty last()
         // result keeps its explicit coalesce fallback.
