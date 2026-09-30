@@ -78,6 +78,11 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
         "main.orna",
         &include_str!("fixtures/attach-package.orna").replace("42", "99"),
     );
+    let later_head = write_commit(
+        history_dir.path(),
+        "main.orna",
+        &include_str!("fixtures/attach-package.orna").replace("42", "88"),
+    );
     let worktree_source = include_str!("fixtures/attach-package.orna").replace("42", "123");
     fs::write(history_dir.path().join("main.orna"), &worktree_source).unwrap();
     let head_before = git(history_dir.path(), &["rev-parse", "HEAD"]);
@@ -104,7 +109,7 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
     session.attach_database(history).unwrap();
     session.attach_database(standard).unwrap();
 
-    assert_eq!(head_before, moved_head);
+    assert_eq!(head_before, later_head);
     assert!(session.validate_write_target("app").is_ok());
     assert!(session.is_writable_database("app"));
     assert!(matches!(
@@ -181,8 +186,13 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
         Err(AttachmentError::AttachedSnapshotReadOnly)
     ));
     let detached_clone = session.clone();
-    let replacement =
-        PinnedDatabase::resolve("archive", history_repository, &moved_head, loader).unwrap();
+    let replacement = PinnedDatabase::resolve(
+        "archive",
+        history_repository.clone(),
+        &moved_head,
+        loader,
+    )
+    .unwrap();
     session.attach_database(replacement).unwrap();
     assert_eq!(
         session.database("archive").unwrap().pin().commit().as_str(),
@@ -209,6 +219,42 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
         Err(AttachmentError::DatabaseUnavailable)
     ));
     assert!(routed_module_source(&detached_clone, "archive.orna").is_none());
+    let intermediate_clone = session.clone();
+    session.detach_database("archive").unwrap();
+    assert!(matches!(
+        session.validate_write_target("archive"),
+        Err(AttachmentError::DatabaseUnavailable)
+    ));
+    assert!(routed_module_source(&session, "archive.orna").is_none());
+    let newest =
+        PinnedDatabase::resolve("archive", history_repository.clone(), &later_head, loader)
+            .unwrap();
+    session.attach_database(newest).unwrap();
+    assert_eq!(
+        session.database("archive").unwrap().pin().commit().as_str(),
+        later_head
+    );
+    assert!(matches!(
+        session.validate_write_target("archive"),
+        Err(AttachmentError::AttachedSnapshotReadOnly)
+    ));
+    assert!(routed_module_source(&session, "archive.orna")
+        .is_some_and(|source| source.contains("= 88")));
+    assert_eq!(
+        intermediate_clone
+            .database("archive")
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        moved_head
+    );
+    assert!(matches!(
+        intermediate_clone.validate_write_target("archive"),
+        Err(AttachmentError::AttachedSnapshotReadOnly)
+    ));
+    assert!(routed_module_source(&intermediate_clone, "archive.orna")
+        .is_some_and(|source| source.contains("= 99")));
     in_flight.detach_database("archive").unwrap();
     assert!(matches!(
         in_flight.validate_write_target("archive"),
@@ -217,14 +263,14 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
     assert!(routed_module_source(&in_flight, "archive.orna").is_none());
     assert_eq!(
         session.database("archive").unwrap().pin().commit().as_str(),
-        moved_head
+        later_head
     );
     assert!(matches!(
         session.validate_write_target("archive"),
         Err(AttachmentError::AttachedSnapshotReadOnly)
     ));
     assert!(routed_module_source(&session, "archive.orna")
-        .is_some_and(|source| source.contains("= 99")));
+        .is_some_and(|source| source.contains("= 88")));
     assert_eq!(git(history_dir.path(), &["rev-parse", "HEAD"]), head_before);
     assert_eq!(git(history_dir.path(), &["status", "--porcelain"]), status_before);
     assert_eq!(
