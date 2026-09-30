@@ -7621,6 +7621,208 @@ fn durable_request_status_recovers_states_and_enforces_target_fingerprint() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+fn durable_request_status_keeps_duplicate_targets_session_scoped_after_recovery() {
+    let (root, repository) = durable_repository();
+    let first_target_request = eval_with_context([1; 16], [37; 16], [2; 16], None);
+    let first_target_fingerprint = request_fingerprint(&first_target_request, [1; 16]);
+    let second_target_request = eval_with_context([2; 16], [37; 16], [2; 16], None);
+    let second_target_fingerprint = request_fingerprint(&second_target_request, [2; 16]);
+    assert_ne!(first_target_fingerprint, second_target_fingerprint);
+
+    let runtime = open_durable_state(&repository);
+    for (session_id, fingerprint, response) in [
+        (
+            [1; 16],
+            first_target_fingerprint,
+            unit_result([37; 16], first_target_fingerprint),
+        ),
+        (
+            [2; 16],
+            second_target_fingerprint,
+            semantic_failure_result([37; 16], second_target_fingerprint),
+        ),
+    ] {
+        let identity = RequestIdentity {
+            session_id,
+            request_id: [37; 16],
+        };
+        block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
+        block_on(runtime.start_request(identity, fingerprint)).unwrap();
+        let terminal = TerminalOutcome::new(
+            response.encode(Limits::default().protocol).unwrap(),
+        )
+        .unwrap();
+        block_on(runtime.complete_request(identity, fingerprint, terminal)).unwrap();
+    }
+    let old_owner = RequestOwner::from(block_on(runtime.acquire_lease([91; 16])).unwrap());
+    drop(runtime);
+
+    let recovery_runtime = open_durable_state(&repository);
+    block_on(recovery_runtime.recover_abandoned(old_owner.owner_id, [92; 16])).unwrap();
+    drop(recovery_runtime);
+    let mut host = durable_host_after_takeover(
+        open_durable_state(&repository),
+        [92; 16],
+        old_owner,
+    );
+
+    let mut first_issuer = Issuer(1, None);
+    let first_credential = create(&mut host, &mut first_issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &first_credential,
+        attachment: [6; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let second_subscribe = subscribe();
+    let mut second_issuer = Issuer(2, None);
+    let second_credential = block_on(host.create(
+        CreateRequest {
+            id: [2; 16],
+            origin: origin(),
+            expires_at: 100,
+            now: 0,
+            subscribe: &second_subscribe,
+        },
+        &mut second_issuer,
+    ))
+    .unwrap();
+    block_on(host.resume(ResumeRequest {
+        id: [2; 16],
+        origin: &origin(),
+        credential: &second_credential,
+        attachment: [7; 16],
+        now: 1,
+    }))
+    .unwrap();
+
+    // The status request ID is deliberately shared too. Each session must
+    // load its own durable target row and retain its own terminal snapshot.
+    let status_request = |fingerprint| {
+        Envelope {
+            request: Some([44; 16]),
+            watch: None,
+            message: Message::RequestStatus {
+                target: [37; 16],
+                fingerprint,
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap()
+    };
+    let first_status_request = status_request(first_target_fingerprint);
+    let second_status_request = status_request(second_target_fingerprint);
+    let mut application = UnitApplication::default();
+    let first_status = block_on(host.dispatch_frame(
+        [6; 16],
+        2,
+        Frame::Binary(first_status_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the first session reads its recovered target");
+    let second_status = block_on(host.dispatch_frame(
+        [7; 16],
+        2,
+        Frame::Binary(second_status_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the second session reads its recovered target");
+    let first_result = ResultBody::from_result(
+        &unit_result([37; 16], first_target_fingerprint),
+        Limits::default().protocol,
+    )
+    .unwrap();
+    let second_result = ResultBody::from_result(
+        &semantic_failure_result([37; 16], second_target_fingerprint),
+        Limits::default().protocol,
+    )
+    .unwrap();
+    assert!(matches!(
+        &first_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [37; 16]
+            && *fingerprint == first_target_fingerprint
+            && result == &first_result
+    ));
+    assert!(matches!(
+        &second_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [37; 16]
+            && *fingerprint == second_target_fingerprint
+            && result == &second_result
+    ));
+
+    for (attachment, foreign_fingerprint) in [
+        ([6; 16], second_target_fingerprint),
+        ([7; 16], first_target_fingerprint),
+    ] {
+        let mismatch = Envelope {
+            request: Some([45; 16]),
+            watch: None,
+            message: Message::RequestStatus {
+                target: [37; 16],
+                fingerprint: foreign_fingerprint,
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap();
+        let mismatch = block_on(host.dispatch_frame(
+            attachment,
+            3,
+            Frame::Binary(mismatch),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("a foreign fingerprint returns a mismatch diagnostic");
+        assert_eq!(mismatch.request, Some([45; 16]));
+        assert!(matches!(mismatch.message, Message::Diagnostic { .. }));
+    }
+
+    let first_retry = block_on(host.dispatch_frame(
+        [6; 16],
+        4,
+        Frame::Binary(first_status_request),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the first status ID replays in its owning session");
+    let second_retry = block_on(host.dispatch_frame(
+        [7; 16],
+        4,
+        Frame::Binary(second_status_request),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the second status ID replays in its owning session");
+    assert_eq!(first_retry, first_status);
+    assert_eq!(second_retry, second_status);
+    assert_eq!(application.calls, 0);
+
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn durable_runtime_does_not_replay_a_reserved_request_after_host_reconstruction() {
     let (root, repository) = durable_repository();
     let request = eval([1; 16], [24; 16], "1");
