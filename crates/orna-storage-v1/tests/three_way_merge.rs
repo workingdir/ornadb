@@ -3160,6 +3160,221 @@ fn conflict_budget_closes_fixture_row_tombstone_checkpoint_tail() {
 }
 
 #[test]
+fn exact_row_budget_closes_fixture_tombstone_before_conflict_tail() {
+    let mut keys = [integer(10), integer(20), integer(30)];
+    keys.sort_by_key(|key| key.encode().unwrap());
+    let [first_conflict_key, tombstone_key, final_conflict_key] = keys;
+    let first_boundary = tombstone_key.encode().unwrap();
+    let second_boundary = final_conflict_key.encode().unwrap();
+    let ranges = [
+        KeyRange::new(None, Some(first_boundary.clone())).unwrap(),
+        KeyRange::new(Some(first_boundary), Some(second_boundary.clone())).unwrap(),
+        KeyRange::new(Some(second_boundary), None).unwrap(),
+    ];
+    let split_manifest = |table_digest: u8, segment_digests: [u8; 3], locators: [&[u8]; 3]| {
+        TableManifest {
+            digest: [table_digest; 32],
+            segments: (0..3)
+                .map(|index| RowSegmentManifest {
+                    locator: locators[index].to_vec(),
+                    range: ranges[index].clone(),
+                    digest: [segment_digests[index]; 32],
+                })
+                .collect(),
+        }
+    };
+    let fixture_row = |fixture: &str, key: &CanonicalValue| {
+        let mut row = parse_fixture(fixture, RowKeyKind::Explicit);
+        row.key = key.clone();
+        row
+    };
+    let build_inputs = || {
+        let mut source = FixtureRows::default();
+        source.add(MergeSide::Base, b"base-first", vec![fixture_row(BASE, &first_conflict_key)]);
+        source.add(MergeSide::Left, b"left-first", Vec::new());
+        source.add(MergeSide::Right, b"right-first", vec![fixture_row(RIGHT, &first_conflict_key)]);
+
+        source.add(MergeSide::Base, b"base-tombstone", vec![fixture_row(BASE, &tombstone_key)]);
+        source.add(MergeSide::Left, b"left-tombstone", Vec::new());
+        source.add(MergeSide::Right, b"right-tombstone", Vec::new());
+
+        source.add(MergeSide::Base, b"base-final", vec![fixture_row(BASE, &final_conflict_key)]);
+        source.add(MergeSide::Left, b"left-final", vec![fixture_row(LEFT, &final_conflict_key)]);
+        source.add(MergeSide::Right, b"right-final", Vec::new());
+
+        let mut base = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(
+                100,
+                [10, 11, 12],
+                [b"base-first".as_slice(), b"base-tombstone".as_slice(), b"base-final".as_slice()],
+            ),
+            None,
+        );
+        let mut left = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(
+                101,
+                [20, 21, 22],
+                [b"left-first".as_slice(), b"left-tombstone".as_slice(), b"left-final".as_slice()],
+            ),
+            None,
+        );
+        let mut right = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(
+                102,
+                [30, 31, 32],
+                [b"right-first".as_slice(), b"right-tombstone".as_slice(), b"right-final".as_slice()],
+            ),
+            None,
+        );
+
+        let checkpoint_id = b"consumer/m-final-conflict".to_vec();
+        base.checkpoints.insert(checkpoint_id.clone(), parse_checkpoint_fixture(CHECKPOINT_BASE));
+        left.checkpoints.insert(checkpoint_id.clone(), parse_checkpoint_fixture(CHECKPOINT_EDITED));
+        let closure_id = b"consumer/z-clean-closure".to_vec();
+        for snapshot in [&mut base, &mut left, &mut right] {
+            snapshot.checkpoints.insert(closure_id.clone(), parse_checkpoint_fixture(CHECKPOINT_BASE));
+        }
+        (base, left, right, source, checkpoint_id, closure_id)
+    };
+
+    let segment_visits = [
+        [
+            (MergeSide::Base, b"base-first".to_vec()),
+            (MergeSide::Left, b"left-first".to_vec()),
+            (MergeSide::Right, b"right-first".to_vec()),
+        ],
+        [
+            (MergeSide::Base, b"base-tombstone".to_vec()),
+            (MergeSide::Left, b"left-tombstone".to_vec()),
+            (MergeSide::Right, b"right-tombstone".to_vec()),
+        ],
+        [
+            (MergeSide::Base, b"base-final".to_vec()),
+            (MergeSide::Left, b"left-final".to_vec()),
+            (MergeSide::Right, b"right-final".to_vec()),
+        ],
+    ];
+    let all_segment_visits = segment_visits
+        .iter()
+        .flat_map(|visits| visits.iter().cloned())
+        .collect::<Vec<_>>();
+
+    // ORNA-MERGE-005 requires explicit row and conflict budgets but leaves
+    // boundary precedence open. Storage finishes ranges in manifest order,
+    // checks row conflicts within them, then resolves checkpoints. This fixture
+    // pins the final range after a clean tombstone under exact row capacity.
+    let (base, left, right, mut source, _, _) = build_inputs();
+    let error = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 3, max_conflicts: 1 },
+    )
+    .unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("the next range row crosses the exact row budget after the tombstone")
+    };
+    assert_eq!(report.rows_examined, 4);
+    assert_eq!(report.conflicts_lower_bound, 1);
+    assert_eq!(report.affected_ranges.len(), 3);
+    assert!(report.affected_checkpoints.is_empty());
+    let mut visits_through_tombstone = segment_visits
+        .iter()
+        .take(2)
+        .flat_map(|visits| visits.iter().cloned())
+        .collect::<Vec<_>>();
+    visits_through_tombstone.push((MergeSide::Base, b"base-final".to_vec()));
+    assert_eq!(source.visited, visits_through_tombstone);
+
+    // One existing conflict detail lets the final fixture row conflict cross
+    // the cap exactly as the fifth and last row is read.
+    let (base, left, right, mut source, _, _) = build_inputs();
+    let error = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 5, max_conflicts: 1 },
+    )
+    .unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("the final row conflict crosses the one-detail cap at the exact row limit")
+    };
+    assert_eq!(report.rows_examined, 5);
+    assert_eq!(report.conflicts_lower_bound, 2);
+    assert_eq!(report.affected_ranges.len(), 3);
+    assert!(report.affected_checkpoints.is_empty());
+    assert_eq!(source.visited, all_segment_visits);
+
+    // At two row-conflict details the checkpoint conflict becomes the crossing
+    // conflict. At three, the exact budget returns all fixture details and
+    // closes through the clean checkpoint suffix.
+    for max_conflicts in [2, 3] {
+        let (base, left, right, mut source, checkpoint_id, closure_id) = build_inputs();
+        let error = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 5, max_conflicts },
+        )
+        .unwrap_err();
+        assert_eq!(source.visited, all_segment_visits);
+        if max_conflicts == 2 {
+            let BranchMergeError::BudgetExceeded { report } = error else {
+                panic!("the checkpoint conflict crosses after both row conflicts fit")
+            };
+            assert_eq!(report.rows_examined, 5);
+            assert_eq!(report.conflicts_lower_bound, 3);
+            assert_eq!(report.affected_ranges.len(), 3);
+            assert_eq!(report.affected_checkpoints.len(), 1);
+            assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
+            assert!(!report.affected_checkpoints.contains(closure_id.as_slice()));
+        } else {
+            let BranchMergeError::Conflicts { conflicts, report } = error else {
+                panic!("the exact three-conflict budget closes the fixture tail")
+            };
+            assert_eq!(conflicts.len(), 3);
+            assert!(matches!(
+                &conflicts[0],
+                BranchMergeConflict::Row {
+                    conflict: orna_evolution_v1::RowMergeConflict::DeleteAndEdit { key, .. },
+                    ..
+                } if key == &first_conflict_key
+            ));
+            assert!(matches!(
+                &conflicts[1],
+                BranchMergeConflict::Row {
+                    conflict: orna_evolution_v1::RowMergeConflict::DeleteAndEdit { key, .. },
+                    ..
+                } if key == &final_conflict_key
+            ));
+            assert_eq!(
+                &conflicts[2],
+                &BranchMergeConflict::CheckpointConflict {
+                    id: checkpoint_id.clone(),
+                    conflict: orna_evolution_v1::CheckpointMergeConflict {
+                        base: Some(parse_checkpoint_fixture(CHECKPOINT_BASE)),
+                        left: Some(parse_checkpoint_fixture(CHECKPOINT_EDITED)),
+                        right: None,
+                    },
+                }
+            );
+            assert_eq!(report.rows_examined, 5);
+            assert_eq!(report.conflicts_lower_bound, 3);
+            assert_eq!(report.affected_ranges.len(), 3);
+            assert_eq!(report.affected_checkpoints.len(), 1);
+            assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
+            assert!(!report.affected_checkpoints.contains(closure_id.as_slice()));
+        }
+    }
+}
+
+#[test]
 fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
     let candidate_a = integer(10);
     let candidate_b = integer(20);
