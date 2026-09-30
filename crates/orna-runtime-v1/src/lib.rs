@@ -20233,6 +20233,33 @@ mod tests {
         );
         assert_eq!((lookups, scans), (0, 0), "zero-take left child retains visibility");
 
+        // An empty union child must not suppress an effectful sibling's
+        // projection failure, regardless of whether the failure is on the
+        // left (before the empty right child) or right (after the empty left).
+        let (left_projection_failure, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-right-zero-left-projection-failure.orna"
+            ),
+        );
+        assert_eq!(
+            left_projection_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!((lookups, scans), (2, 2), "left projection fails before the zero-take right child");
+
+        let (right_projection_failure, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-left-zero-right-projection-failure.orna"
+            ),
+        );
+        assert_eq!(
+            right_projection_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!((lookups, scans), (2, 2), "right projection runs after the zero-take left child");
+
         let (missing, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
             include_str!("../tests/fixtures/query-session-projection-missing.orna"),
