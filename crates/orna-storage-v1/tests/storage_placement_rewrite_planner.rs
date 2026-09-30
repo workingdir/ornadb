@@ -103,6 +103,12 @@ fn editable_path(key: &str) -> orna_storage_v1::LoosePath {
     orna_storage_v1::LoosePath::for_key("Placement", &[key.to_owned()]).unwrap()
 }
 
+fn editable_path_components(
+    keys: &[String],
+) -> Result<orna_storage_v1::LoosePath, orna_storage_v1::Error> {
+    orna_storage_v1::LoosePath::for_key("Placement", keys)
+}
+
 fn existing_numeric_paths(count: usize) -> Vec<orna_storage_v1::LoosePath> {
     (0..count)
         .map(|index| editable_path(&(20_000 + index).to_string()))
@@ -377,6 +383,140 @@ fn automatic_placement_falls_back_for_an_alias_with_an_untouched_editable_row() 
     assert_eq!(plan.new_row_placement(), PhysicalPlacement::Compact);
     assert_eq!(plan.reason(), PlacementReason::AutomaticUnrepresentablePath);
     assert_eq!(plan.decisions()[0].placement(), PhysicalPlacement::Compact);
+}
+
+#[test]
+fn portable_path_component_and_relative_path_limits_are_inclusive() {
+    assert!(editable_path_components(&["x".repeat(200)]).is_ok());
+    assert!(editable_path_components(&["x".repeat(201)]).is_err());
+
+    let profile = profile_for_key_type(Uuid::from_u128(8), "Str");
+    let body_bytes = CASE_COLLISION_LOWER_ROW.len();
+    let at_component_limit = plan_storage_placement(
+        &profile,
+        StoragePreference::Automatic,
+        0,
+        false,
+        Vec::new(),
+        [PlacementCandidate::insert(
+            text_key(&"x".repeat(200)),
+            body_bytes,
+            Some(editable_path_components(&["x".repeat(200)]).unwrap()),
+        )],
+    )
+    .unwrap();
+    assert_eq!(
+        at_component_limit.new_row_placement(),
+        PhysicalPlacement::Editable
+    );
+
+    // Five separators plus the final `.orna` suffix leave 1,014 bytes for
+    // six encoded components at the exact table-relative path limit.
+    let at_path_limit = [200, 200, 200, 200, 200, 14]
+        .into_iter()
+        .map(|size| "x".repeat(size))
+        .collect::<Vec<_>>();
+    assert!(editable_path_components(&at_path_limit).is_ok());
+
+    let over_path_limit = [200, 200, 200, 200, 200, 15]
+        .into_iter()
+        .map(|size| "x".repeat(size))
+        .collect::<Vec<_>>();
+    assert!(editable_path_components(&over_path_limit).is_err());
+}
+
+#[test]
+fn one_unrepresentable_automatic_insert_closes_the_new_row_batch() {
+    let profile = profile_for_key_type(Uuid::from_u128(7), "Str");
+    let existing_key = text_key("Alice");
+    let too_long_key = text_key(&"x".repeat(201));
+    let ordinary_key = text_key("safe");
+    let existing_path = editable_path("Alice");
+    let plan = plan_storage_placement(
+        &profile,
+        StoragePreference::Automatic,
+        1,
+        false,
+        vec![existing_path.clone()],
+        [
+            PlacementCandidate::update(
+                existing_key.clone(),
+                CASE_COLLISION_UPPER_ROW.len(),
+                PhysicalPlacement::Editable,
+                Some(existing_path.clone()),
+            ),
+            PlacementCandidate::insert(
+                too_long_key.clone(),
+                CASE_COLLISION_LOWER_ROW.len(),
+                None,
+            ),
+            PlacementCandidate::insert(
+                ordinary_key.clone(),
+                CASE_COLLISION_LOWER_ROW.len(),
+                Some(editable_path("safe")),
+            ),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(plan.new_row_placement(), PhysicalPlacement::Compact);
+    assert_eq!(plan.reason(), PlacementReason::AutomaticUnrepresentablePath);
+    let updated = plan
+        .decisions()
+        .iter()
+        .find(|decision| decision.key().encoded() == existing_key)
+        .unwrap();
+    assert_eq!(updated.placement(), PhysicalPlacement::Editable);
+    assert_eq!(updated.editable_path(), Some(&existing_path));
+    for inserted_key in [&too_long_key, &ordinary_key] {
+        let inserted = plan
+            .decisions()
+            .iter()
+            .find(|decision| decision.key().encoded() == *inserted_key)
+            .unwrap();
+        assert_eq!(inserted.action(), PlacementAction::Insert);
+        assert_eq!(inserted.placement(), PhysicalPlacement::Compact);
+        assert!(inserted.editable_path().is_none());
+    }
+
+    assert_eq!(
+        plan_storage_placement(
+            &profile,
+            StoragePreference::Editable,
+            0,
+            false,
+            Vec::new(),
+            [PlacementCandidate::insert(
+                too_long_key.clone(),
+                CASE_COLLISION_LOWER_ROW.len(),
+                None,
+            )],
+        ),
+        Err(StoragePlacementError::UnrepresentableEditableKey)
+    );
+    let explicit_compact = plan_storage_placement(
+        &profile,
+        StoragePreference::Compact,
+        0,
+        false,
+        Vec::new(),
+        [PlacementCandidate::insert(
+            too_long_key,
+            CASE_COLLISION_LOWER_ROW.len(),
+            None,
+        )],
+    )
+    .unwrap();
+    assert_eq!(
+        explicit_compact.new_row_placement(),
+        PhysicalPlacement::Compact
+    );
+
+    // The row fixture is the preexisting editable value: fallback only
+    // changes placement for the new rows, so its portable path stays valid.
+    let parsed = parse_row(CASE_COLLISION_UPPER_ROW);
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    assert!(LooseRow::new(CASE_COLLISION_UPPER_ROW.as_bytes().to_vec()).is_ok());
 }
 
 #[test]

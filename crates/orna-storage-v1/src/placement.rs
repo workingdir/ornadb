@@ -311,10 +311,15 @@ pub fn plan_storage_placement(
         {
             (PhysicalPlacement::Compact, PlacementReason::AutomaticPublicationBytes)
         }
-        StoragePreference::Automatic if !all_insert_paths => (
-            PhysicalPlacement::Compact,
-            PlacementReason::AutomaticUnrepresentablePath,
-        ),
+        StoragePreference::Automatic if !all_insert_paths => {
+            // One key beyond the portable path bounds closes placement over
+            // compact for every new row in this publication. Existing rows
+            // still follow their prior physical placement below.
+            (
+                PhysicalPlacement::Compact,
+                PlacementReason::AutomaticUnrepresentablePath,
+            )
+        }
         StoragePreference::Automatic => (
             PhysicalPlacement::Editable,
             PlacementReason::AutomaticEditable,
