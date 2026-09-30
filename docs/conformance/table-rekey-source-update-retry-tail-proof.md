@@ -245,3 +245,8 @@ row's reused key, the inserted row moves to a free key, and the competitor
 retries before the inserted row reuses the competitor's vacated source key.
 This final alternating reuse order is recorded as local behavior because the
 reference does not define this retry closure sequence.
+
+The final extension reverses the ownership again: the inserted row moves out
+of the competitor's target, the competitor retries into it, and the inserted
+row takes the competitor's vacated source key. This additional repeated reuse
+step is a pragmatic local ordering where the reference is silent.
