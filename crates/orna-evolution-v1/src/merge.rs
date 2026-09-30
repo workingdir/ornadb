@@ -394,6 +394,9 @@ pub fn merge_keyed_row(
     }
     match (base, left, right) {
         (None, None, _) | (None, _, None) => Ok(left.or(right).cloned()),
+        // Generated IDs are identities allocated independently by branch
+        // histories. Even equal payloads do not prove these are one insert;
+        // keep the collision visible instead of silently renumbering a row.
         (None, Some(left), Some(right)) if left.key_kind == RowKeyKind::Automatic || right.key_kind == RowKeyKind::Automatic => {
             Err(RowMergeConflict::AutomaticKeyCollision { table: left.table, key: left.key.clone() })
         }
@@ -452,6 +455,8 @@ pub struct CheckpointMergeConflict {
 }
 
 /// Merge checkpoint state only when one side is unchanged or both agree.
+/// Generations and positions are opaque state: there is no safe “take the
+/// newest” ordering for two independently advanced values.
 pub fn merge_checkpoint_generation(
     base: Option<&CheckpointGeneration>,
     left: Option<&CheckpointGeneration>,

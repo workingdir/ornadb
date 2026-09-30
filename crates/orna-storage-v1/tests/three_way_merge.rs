@@ -24,6 +24,10 @@ fn string(value: &str) -> CanonicalValue {
     CanonicalValue::new(OvbRaw::Text(value.to_owned())).unwrap()
 }
 
+fn integer(value: i64) -> CanonicalValue {
+    CanonicalValue::new(OvbRaw::Int(value.into())).unwrap()
+}
+
 fn schema(explicit_key: bool, name_type: FieldType) -> Schema {
     Schema {
         version: orna_evolution_v1::EvolutionVersion::V1_0,
@@ -294,6 +298,7 @@ fn generated_key_collision_is_a_row_conflict_and_never_renumbered() {
     let generated_key = CanonicalValue::new(OvbRaw::Int(92.into())).unwrap();
     left_row.key = generated_key.clone();
     right_row.key = generated_key;
+    right_row.fields.insert(id(2), string("different payload"));
     let mut source = FixtureRows::default();
     source.add(MergeSide::Base, b"base", Vec::new());
     source.add(MergeSide::Left, b"left", vec![left_row]);
@@ -304,4 +309,86 @@ fn generated_key_collision_is_a_row_conflict_and_never_renumbered() {
 
     let error = merge_three_way_snapshots(&base, &left, &right, &mut source, budget()).unwrap_err();
     assert!(matches!(error, BranchMergeError::Conflicts { conflicts, .. } if conflicts.iter().any(|item| matches!(item, BranchMergeConflict::Row { conflict: orna_evolution_v1::RowMergeConflict::AutomaticKeyCollision { key, .. }, .. } if key == &CanonicalValue::new(OvbRaw::Int(92.into())).unwrap()))));
+}
+
+#[test]
+fn versioned_delete_survives_merge_as_a_tombstone_without_pruning_history() {
+    let deleted_row = parse_fixture(BASE, RowKeyKind::Explicit);
+    let mut retained_row = deleted_row.clone();
+    retained_row.key = integer(2);
+    retained_row.fields.insert(id(2), string("old retained row"));
+    let mut edited_retained_row = retained_row.clone();
+    edited_retained_row.fields.insert(id(3), string("Paris"));
+
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"base", vec![deleted_row.clone(), retained_row.clone()]);
+    source.add(MergeSide::Left, b"left", vec![retained_row.clone()]);
+    source.add(MergeSide::Right, b"right", vec![deleted_row.clone(), edited_retained_row.clone()]);
+    let base = snapshot(schema(true, FieldType::Str), manifest(1, 1, b"base"), None);
+    let left = snapshot(schema(true, FieldType::Str), manifest(2, 2, b"left"), None);
+    let right = snapshot(schema(true, FieldType::Str), manifest(3, 3, b"right"), None);
+
+    let plan = merge_three_way_snapshots(&base, &left, &right, &mut source, budget()).unwrap();
+    let MergedSegment::Rows { rows, tombstones, .. } = &plan.tables[&id(1)].segments[0] else {
+        panic!("all three versions changed and require a merged range")
+    };
+    assert_eq!(rows, &[edited_retained_row]);
+    assert_eq!(tombstones, &[deleted_row.key.clone()]);
+    assert!(source.rows[&(MergeSide::Base, b"base".to_vec())].contains(&deleted_row));
+}
+
+#[test]
+fn versioned_delete_conflicts_with_a_concurrent_edit() {
+    let base_row = parse_fixture(BASE, RowKeyKind::Explicit);
+    let mut edited_row = base_row.clone();
+    edited_row.fields.insert(id(2), string("concurrent edit"));
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"base", vec![base_row]);
+    source.add(MergeSide::Left, b"left", Vec::new());
+    source.add(MergeSide::Right, b"right", vec![edited_row]);
+    let base = snapshot(schema(true, FieldType::Str), manifest(1, 1, b"base"), None);
+    let left = snapshot(schema(true, FieldType::Str), manifest(2, 2, b"left"), None);
+    let right = snapshot(schema(true, FieldType::Str), manifest(3, 3, b"right"), None);
+
+    let error = merge_three_way_snapshots(&base, &left, &right, &mut source, budget()).unwrap_err();
+    assert!(matches!(
+        error,
+        BranchMergeError::Conflicts { conflicts, .. }
+            if conflicts.iter().any(|conflict| matches!(
+                conflict,
+                BranchMergeConflict::Row {
+                    conflict: orna_evolution_v1::RowMergeConflict::DeleteAndEdit { .. },
+                    ..
+                }
+            ))
+    ));
+}
+
+#[test]
+fn unavailable_or_pruned_rows_fail_closed_instead_of_becoming_deletes() {
+    struct UnavailableRows;
+    impl BranchRowSource for UnavailableRows {
+        fn visit_rows(
+            &mut self,
+            _side: MergeSide,
+            _table: ObjectId,
+            _segment: Option<&RowSegmentManifest>,
+            _range: &KeyRange,
+            _visitor: &mut dyn FnMut(KeyedRow) -> bool,
+        ) -> Result<(), String> {
+            Err("segment is pruned or unavailable".into())
+        }
+    }
+
+    let base = snapshot(schema(true, FieldType::Str), manifest(1, 1, b"base"), None);
+    let left = snapshot(schema(true, FieldType::Str), manifest(2, 2, b"left"), None);
+    let right = snapshot(schema(true, FieldType::Str), manifest(3, 3, b"right"), None);
+    let error = merge_three_way_snapshots(&base, &left, &right, &mut UnavailableRows, budget())
+        .unwrap_err();
+    assert_eq!(
+        error,
+        BranchMergeError::RowRead {
+            message: "segment is pruned or unavailable".into(),
+        }
+    );
 }
