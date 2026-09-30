@@ -971,6 +971,34 @@ fn positive_factor_subnanosecond_tails_rescale_across_the_second_minute_edge() {
 }
 
 #[test]
+fn positive_factor_subnanosecond_rescaled_tails_close_at_two_minutes() {
+    // The reference is silent on closing a rescaled subnanosecond-derived
+    // minute tail. Pin the exact 6 ns correction from either side of 2m.
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
+    ] {
+        assert_eq!(session.submit(source), Ok(None), "{source}");
+    }
+
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-from-below-f55yc.orna"),
+        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-from-above-f55yc.orna"),
+    ] {
+        let result = session.submit(source);
+        assert_eq!(
+            result,
+            Ok(Some(texts(&["2m", "00:02:00", "2 minutes", "PT2M"]))),
+            "{source}; diagnostic={}",
+            result.as_ref().err().map_or("none", |error| error.code())
+        );
+    }
+}
+
+#[test]
 fn clock_output_bound_keeps_elapsed_hours_and_fractional_tail() {
     let limits = Limits {
         max_string_bytes: 129,
