@@ -20205,6 +20205,34 @@ mod tests {
             "the missing right source remains visible after an admitted empty left child"
         );
 
+        // When both union children take zero, each source still crosses its
+        // admission boundary while neither projection nor row scan executes.
+        let both_zero_fixture =
+            include_str!("../tests/fixtures/query-session-union-both-take-zero.orna");
+        let (both_zero, lookups, scans) =
+            invoke_query_fixture_with_counts(&session, both_zero_fixture);
+        assert_eq!(
+            both_zero.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 0), "both admitted zero-take children do no row work");
+
+        let (both_zero_missing_right, lookups, scans) =
+            invoke_query_fixture_with_counts(&storage_only, both_zero_fixture);
+        assert_eq!(
+            both_zero_missing_right.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 0), "zero-take right child retains visibility");
+
+        let (both_zero_missing_left, lookups, scans) =
+            invoke_query_fixture_with_counts(&maintenance_only, both_zero_fixture);
+        assert_eq!(
+            both_zero_missing_left.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 0), "zero-take left child retains visibility");
+
         let (missing, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
             include_str!("../tests/fixtures/query-session-projection-missing.orna"),
