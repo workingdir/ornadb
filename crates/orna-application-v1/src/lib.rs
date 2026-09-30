@@ -1431,6 +1431,9 @@ impl EffectHandler for SourceMutationEffectHandler {
                 let existing = self
                     .current_row(&table, &old_key_bytes)?
                     .ok_or_else(|| Self::effect_error("ORNA-EVAL-TABLE-MISSING-ROW"))?;
+                // Preflight the destination before recording or changing the
+                // overlay so a caught re-key failure leaves later tail work
+                // with both original row identities intact.
                 if self.current_row_if_known(&table, &new_key_bytes)?.is_some() {
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-DUPLICATE-KEY"));
                 }
@@ -2864,6 +2867,66 @@ mod tests {
         assert_eq!(
             CanonicalValue::decode(mutations[3].value().unwrap()).unwrap(),
             row(2, "original", 6)
+        );
+    }
+
+    #[test]
+    fn recovered_duplicate_rekey_leaves_both_original_rows_available() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "table-rekey-duplicate-recovery-tail.orna",
+                include_str!("../tests/fixtures/table-rekey-duplicate-recovery-tail.orna"),
+                "main",
+            )
+            .expect("checked-in duplicate re-key fixture should be admitted");
+
+        let int = |value: i64| {
+            CanonicalValue::new(OvbRaw::Int(value.into())).expect("integer is canonical")
+        };
+        let row = |id: i64, text: &str, quantity: i64| {
+            CanonicalValue::new(OvbRaw::Map(vec![
+                (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
+                (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
+                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+            ]))
+            .expect("row is canonical")
+        };
+        let key = |value: i64| int(value).encode().expect("key is canonical");
+        let rows = BTreeMap::from([(
+            "Note".to_owned(),
+            vec![
+                (key(1), row(1, "first", 3).encode().unwrap()),
+                (key(2), row(2, "second", 4).encode().unwrap()),
+            ],
+        )]);
+        let tables = admitted_table_schemas(&application.module_header);
+        let mut handler =
+            SourceMutationEffectHandler::with_table_rows(tables, rows).expect("valid snapshot");
+
+        invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            &Environment::new(),
+            application.limits,
+            &mut handler,
+        )
+        .expect("recovery and later updates should see the unchanged source rows");
+
+        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        assert_eq!(mutations.len(), 2);
+        assert_eq!(mutations[0].key(), key(1));
+        assert_eq!(mutations[0].rekey_to(), None);
+        assert_eq!(
+            CanonicalValue::decode(mutations[0].value().unwrap()).unwrap(),
+            row(1, "first", 8)
+        );
+        assert_eq!(mutations[1].key(), key(2));
+        assert_eq!(mutations[1].rekey_to(), None);
+        assert_eq!(
+            CanonicalValue::decode(mutations[1].value().unwrap()).unwrap(),
+            row(2, "second", 9)
         );
     }
 
