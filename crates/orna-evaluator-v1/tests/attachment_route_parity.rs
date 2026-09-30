@@ -1,7 +1,7 @@
 use std::{fs, path::Path, process::Command};
 
 use orna_evaluator_v1::{AdmittedReplSession, Limits};
-use orna_project_v1::{AttachedDatabaseSession, PinnedDatabase, ProjectLoader};
+use orna_project_v1::{AttachmentError, AttachedDatabaseSession, PinnedDatabase, ProjectLoader};
 use orna_repository_v1::Repository;
 use orna_value_v1::Value;
 use tempfile::TempDir;
@@ -141,6 +141,17 @@ fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
     // An admitted REPL keeps the exact alias pins it was built from when the
     // mutable attachment session later detaches or replaces one of them.
     let historical_session = session.clone();
+    assert!(matches!(
+        databases.detach_database("main_arch"),
+        Err(AttachmentError::AttachmentNotFound)
+    ));
+    let after_refused_detach = databases.module_inputs();
+    assert!(after_refused_detach.iter().any(|module| {
+        module.logical_path == "main/main.orna" && module.source.contains("= 42")
+    }));
+    assert!(after_refused_detach.iter().any(|module| {
+        module.logical_path == "main_archive.orna" && module.source.contains("= 43")
+    }));
     databases.detach_database("main").unwrap();
     let mut detached_session =
         AdmittedReplSession::from_attached_database_session(&databases, Limits::default()).unwrap();
