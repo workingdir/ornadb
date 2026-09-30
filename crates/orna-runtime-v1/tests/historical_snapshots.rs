@@ -751,14 +751,17 @@ async fn stable_prefix_neighbor_survives_extension_pin_tails() {
     let writer = state.acquire_lease([55; 16]).await.expect("acquire writer");
     let mut pins = Vec::new();
 
-    for generation in 1..=257_u64 {
+    for generation in 1..=258_u64 {
         let mut mutation_id = [0; 16];
         mutation_id[8..].copy_from_slice(&generation.to_be_bytes());
         // Exercise the reverse prefix orientation: the shorter key is stable while
-        // its longer neighbor is deleted at 256 and restored at 257.
+        // its longer neighbor is deleted at 256 and restored at 257. At 258 it
+        // returns to its original bytes, proving an identical row image is still
+        // addressed by a distinct historical generation pin.
         let extension_value = match generation {
             256 => None,
             257 => Some(b"restored-extension".to_vec()),
+            258 => Some(b"steady-extension".to_vec()),
             _ => Some(b"steady-extension".to_vec()),
         };
         let mut mutations = vec![
@@ -780,7 +783,7 @@ async fn stable_prefix_neighbor_survives_extension_pin_tails() {
         }
         commit(&state, writer, &mutations, 56).await;
 
-        if matches!(generation, 255 | 256 | 257) {
+        if matches!(generation, 255 | 256 | 257 | 258) {
             let selected = state
                 .select_historical_snapshot(generation)
                 .await
@@ -795,7 +798,7 @@ async fn stable_prefix_neighbor_survives_extension_pin_tails() {
 
     assert_eq!(
         pins.iter().map(|(generation, _, _)| *generation).collect::<Vec<_>>(),
-        [255, 256, 257]
+        [255, 256, 257, 258]
     );
     assert!(pins.windows(2).all(|pair| {
         pair[0].2.capture().generation_digest() == pair[1].2.capture().generation_digest()
@@ -810,18 +813,18 @@ async fn stable_prefix_neighbor_survives_extension_pin_tails() {
         );
     }
     let latest = state
-        .select_historical_snapshot(257)
+        .select_historical_snapshot(258)
         .await
-        .expect("select generation after extension restoration");
+        .expect("select generation after restoring the original extension bytes");
     assert_eq!(
         state
             .read_table_at(&latest, "records")
             .await
-            .expect("read generation 257")
+            .expect("read generation 258")
             .rows(),
         &[
             (vec![5], b"stable-prefix".to_vec()),
-            (vec![5, 0], b"restored-extension".to_vec()),
+            (vec![5, 0], b"steady-extension".to_vec()),
         ]
     );
 
@@ -840,6 +843,10 @@ async fn stable_prefix_neighbor_survives_extension_pin_tails() {
             257 => vec![
                 (vec![5], b"stable-prefix".to_vec()),
                 (vec![5, 0], b"restored-extension".to_vec()),
+            ],
+            258 => vec![
+                (vec![5], b"stable-prefix".to_vec()),
+                (vec![5, 0], b"steady-extension".to_vec()),
             ],
             _ => unreachable!("only prefix boundary pins are retained"),
         };
@@ -874,6 +881,10 @@ async fn stable_prefix_neighbor_survives_extension_pin_tails() {
             257 => vec![
                 (vec![5], b"stable-prefix".to_vec()),
                 (vec![5, 0], b"restored-extension".to_vec()),
+            ],
+            258 => vec![
+                (vec![5], b"stable-prefix".to_vec()),
+                (vec![5, 0], b"steady-extension".to_vec()),
             ],
             _ => unreachable!("only prefix boundary pins are retained"),
         };
