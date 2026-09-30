@@ -1270,6 +1270,99 @@ fn explain_unknown_join_chain_retains_known_scan_cost_boundary() {
 }
 
 #[test]
+fn explain_unknown_final_join_tails_retain_known_left_scan_boundary() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    // Join work is unknown when right-side statistics are unavailable, but
+    // independently known work from the left scan still counts at the total
+    // boundary, even though those joins are the final unknown plan tails.
+    let explain_with_mutation_tail = |affected_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:unknown-final-join-tail-boundary"),
+            source: obj("table:known-left"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 2),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:unknown-right-first"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:unknown-right-second"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:known-left"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(affected_rows),
+                estimated_write_bytes: Some(0),
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: Some(obj("materialization:unknown-final-joins")),
+        })
+        .expect("known left scan followed by unknown final join tails")
+    };
+
+    let exact = explain_with_mutation_tail(1);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().estimated_work(), Some(1));
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None,
+        "known left scan plus mutation and materialization sum to u64::MAX"
+    );
+    let left_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:known-left"))
+        })
+        .expect("known left scan under the joins");
+    assert_eq!(left_scan.estimated_work(), Some(u64::MAX - 2));
+    let join_nodes = exact
+        .nodes()
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Join)
+        .collect::<Vec<_>>();
+    assert_eq!(join_nodes.len(), 2);
+    assert!(join_nodes.iter().all(|node| node.estimated_work().is_none()));
+    for table in ["table:unknown-right-first", "table:unknown-right-second"] {
+        let scan = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("unknown right scan");
+        assert_eq!(scan.estimated_work(), None);
+    }
+
+    let overflow = explain_with_mutation_tail(2);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let surface = serde_json::to_value(&overflow).expect("unknown final join boundary surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
 fn explain_local_work_overflow_is_explicit_on_cost_and_write_tails() {
     let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
