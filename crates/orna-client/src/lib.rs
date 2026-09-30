@@ -2,7 +2,7 @@
 
 use orna_protocol::{
     ClientFrame, MAX_RESOURCE_ARGUMENTS, MAX_RESOURCE_BATCH_ITEMS, MAX_RESOURCE_TOTAL_ITEMS,
-    decode_active_value, decode_constructed_value, encode_active_client_frame, encode_active_value,
+    decode_constructed_value, encode_active_client_frame, encode_active_value,
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -248,16 +248,6 @@ impl ObserverLineage {
         self
     }
 
-    fn with_current(mut self, current: InvocationId) -> Self {
-        self.parent = self.current;
-        self.current = current;
-        if self.ancestor_len < self.ancestors.len() {
-            self.ancestors[self.ancestor_len] = current;
-            self.ancestor_len += 1;
-        }
-        self
-    }
-
     #[cfg(test)]
     fn with_parent_and_current(mut self, parent: InvocationId, current: InvocationId) -> Self {
         self.parent = parent;
@@ -319,14 +309,6 @@ impl ClientExecutionContext {
     /// Returns the root invocation identity used by resource requests.
     pub const fn parent_invocation_id(&self) -> InvocationId {
         self.parent_invocation_id
-    }
-
-    /// Returns the observer lineage carried by this execution context.
-    /// Contexts built by older callers have no embedded lineage and retain
-    /// the single-anchor compatibility behaviour.
-    fn observer_lineage(&self) -> ObserverLineage {
-        self.observer_lineage
-            .unwrap_or_else(|| ObserverLineage::top_level(self.parent_invocation_id))
     }
 
     /// Returns the trusted observer root invocation anchor used by Inspector.
@@ -3805,12 +3787,6 @@ impl ClientStateStore {
     pub fn resource_mut(&mut self, key: ClientResourceKey) -> Option<&mut ClientResource> {
         self.resources.get_mut(&key)
     }
-    /// Retains a resource whose executor ownership was handed back to the
-    /// caller after a nested action failure.
-    fn retain_resource(&mut self, resource: ClientResource) {
-        self.resources.insert(resource.key(), resource);
-    }
-
     /// Returns the existing resource, or creates one with its first declared type.
     ///
     /// A repeated lookup does not replace the cached resource or its expected
