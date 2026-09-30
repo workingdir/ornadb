@@ -34,10 +34,11 @@ use orna_protocol_v1::{
     TargetKind, canonical_request_fingerprint,
 };
 use orna_runtime_v1::{
-    Component, ConsumerIdentity, FaultInjector, RecoveryDisposition, RequestIdentity, RequestOwner,
-    RequestState as DurableRequestState, RequestStatus as DurableRequestStatus,
-    RunObservationRegistration, RuntimeActivationContext, RuntimeError, RuntimeState,
-    StagedTableActivation, TableMutation, TerminalOutcome, WriterLease,
+    admin_invocation_id, with_terminal_admin_effect, Component, ConsumerIdentity, FaultInjector,
+    RecoveryDisposition, RequestIdentity, RequestOwner, RequestState as DurableRequestState,
+    RequestStatus as DurableRequestStatus, RunObservationRegistration,
+    RuntimeActivationContext, RuntimeError, RuntimeState, StagedTableActivation, TableMutation,
+    TerminalOutcome, WriterLease,
 };
 use orna_security_v1::{
     AttachOutcome, AttachmentId, BoundaryError, CredentialIssuer, OpaqueCredential, Origin,
@@ -1185,11 +1186,30 @@ pub trait LiveAdminEffectDispatcher: Send + Sync {
         reason: Option<String>,
         context: &'a RuntimeActivationContext,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>>;
+
+    fn resume_stream<'a>(
+        &'a self,
+        _stream: CanonicalValue,
+        _context: &'a RuntimeActivationContext,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>> {
+        Box::pin(async { Err("sys.admin.unavailable".to_owned()) })
+    }
+
+    fn reject_staged_admin_effect<'a>(
+        &'a self,
+        _stream: CanonicalValue,
+        _reason: Option<String>,
+        _resume: bool,
+        _context: &'a RuntimeActivationContext,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>> {
+        Box::pin(async { Err("sys.admin.busy".to_owned()) })
+    }
 }
 
 struct RuntimeAdminEffectDispatcher {
     runtime: Arc<RuntimeState>,
     lease: WriterLease,
+    request: RequestIdentity,
 }
 
 impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
@@ -1223,20 +1243,92 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
     ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>>
     {
         Box::pin(async move {
-            let outcome = self
-                .runtime
-                .pause_stream_reference_at_capture(self.lease, stream, reason, context.capture())
+            let invocation_id = admin_invocation_id(self.request);
+            let outcome = with_terminal_admin_effect(&self.runtime, self.lease, || async {
+                self.runtime
+                    .pause_stream_reference_at_capture_with_invocation_id(
+                        self.lease,
+                        stream,
+                        reason,
+                        context.capture(),
+                        invocation_id,
+                    )
+                    .await
+            })
                 .await
                 .map_err(|error| match error {
                     RuntimeError::AdminBusy => "sys.admin.busy".to_owned(),
                     _ => "sys.admin.unavailable".to_owned(),
                 })?;
-            let accepted = matches!(
+            let changed = matches!(
                 outcome,
-                orna_runtime_v1::StreamAdministrationOutcome::Paused { .. }
-                    | orna_runtime_v1::StreamAdministrationOutcome::PausePending { .. }
+                orna_runtime_v1::StreamAdministrationOutcome::Paused { changed: true }
+                    | orna_runtime_v1::StreamAdministrationOutcome::PausePending { changed: true }
             );
-            CanonicalValue::new(OvbRaw::Bool(accepted)).map_err(|_| "sys.admin.result".to_owned())
+            CanonicalValue::new(OvbRaw::Bool(changed)).map_err(|_| "sys.admin.result".to_owned())
+        })
+    }
+
+    fn resume_stream<'a>(
+        &'a self,
+        stream: CanonicalValue,
+        context: &'a RuntimeActivationContext,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let invocation_id = admin_invocation_id(self.request);
+            let outcome = with_terminal_admin_effect(&self.runtime, self.lease, || async {
+                self.runtime
+                    .resume_stream_reference_at_capture_with_invocation_id(
+                        self.lease,
+                        stream,
+                        context.capture(),
+                        invocation_id,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|error| match error {
+                RuntimeError::AdminBusy => "sys.admin.busy".to_owned(),
+                _ => "sys.admin.unavailable".to_owned(),
+            })?;
+            let changed = matches!(
+                outcome,
+                orna_runtime_v1::StreamAdministrationOutcome::Running { changed: true }
+            );
+            CanonicalValue::new(OvbRaw::Bool(changed)).map_err(|_| "sys.admin.result".to_owned())
+        })
+    }
+
+    fn reject_staged_admin_effect<'a>(
+        &'a self,
+        stream: CanonicalValue,
+        reason: Option<String>,
+        resume: bool,
+        _context: &'a RuntimeActivationContext,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let function = if resume {
+                "sys.admin.resume_stream"
+            } else if reason.is_some() {
+                "sys.admin.pause_stream_with_reason"
+            } else {
+                "sys.admin.pause_stream"
+            };
+            let invocation_id = admin_invocation_id(self.request);
+            self.runtime
+                .reject_admin_stream_effect_as_busy(
+                    self.lease,
+                    function,
+                    stream,
+                    reason,
+                    invocation_id,
+                )
+                .await
+                .map_err(|error| match error {
+                    RuntimeError::AdminBusy => "sys.admin.busy".to_owned(),
+                    _ => "sys.admin.unavailable".to_owned(),
+                })?;
+            Err("sys.admin.busy".to_owned())
         })
     }
 }
@@ -2562,6 +2654,10 @@ impl LiveHost {
             (Some(runtime), Some(lease)) => Some(Arc::new(RuntimeAdminEffectDispatcher {
                 runtime: Arc::clone(runtime),
                 lease,
+                request: RequestIdentity {
+                    session_id: session,
+                    request_id: request,
+                },
             })
                 as Arc<dyn LiveAdminEffectDispatcher>),
             _ => None,
@@ -3352,6 +3448,10 @@ impl LiveHost {
             (Some(runtime), Some(lease)) => Some(RuntimeAdminEffectDispatcher {
                 runtime: Arc::clone(runtime),
                 lease,
+                request: RequestIdentity {
+                    session_id: session,
+                    request_id: request,
+                },
             }),
             _ => None,
         };
