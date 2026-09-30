@@ -62,6 +62,8 @@ const FIRST_REMAINDER_SOURCE_SCAN_EDGE_TAIL: &str =
     include_str!("fixtures/first_remainder_source_scan_edge_tail.orna");
 const SOURCE_REMAINDER_MULTISCAN_CLOSURE_TAIL: &str =
     include_str!("fixtures/source_remainder_multiscan_closure_tail.orna");
+const SOURCE_REMAINDER_SCAN_BOUNDARY_TAIL: &str =
+    include_str!("fixtures/source_remainder_scan_boundary_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -6786,5 +6788,119 @@ fn explain_closes_source_remainder_with_multiple_scan_tails_at_max() {
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
         node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_source_remainder_across_scan_rounding_boundary() {
+    let parsed = orna_syntax_v1::parse_module(SOURCE_REMAINDER_SCAN_BOUNDARY_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 6);
+
+    // ORNA-PLAN defines estimated_bytes as optional but leaves the byte-cost
+    // unit and rounding heuristic unspecified. Continue the established
+    // pragmatic 4-KiB-per-scan lower bound: the source remainder rounds to
+    // 2^52 units, the first tail scan (4095 bytes) adds one, and a second scan
+    // adds one through 4096 bytes but two at 4097. Thus the chosen row bound
+    // closes exactly at MAX through 4096 and overflows at the next byte.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const SOURCE_REMAINDER_BYTES: u64 = u64::MAX - 4_094;
+    const FIRST_TAIL_BYTES: u64 = 4_095;
+    let rows_to_close_source_and_two_scan_tails = u64::MAX - MAX_BYTE_BLOCKS - 2;
+    let explain = |second_tail_bytes, delete_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:source-remainder-scan-boundary-tail",
+            ),
+            source: obj("table:SourceRemainderScanBoundarySource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(SOURCE_REMAINDER_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderScanBoundaryFirst"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(FIRST_TAIL_BYTES),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderScanBoundarySecond"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(second_tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderScanBoundaryUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:SourceRemainderScanBoundaryTarget"),
+                kind: QueryMutationKind::Delete,
+                estimated_affected_rows: Some(delete_rows),
+                estimated_write_bytes: None,
+                estimated_table_rows_before: Some(delete_rows),
+            }],
+            materialize_into: Some(obj("materialization:source-remainder-scan-boundary")),
+        })
+        .expect("source remainder and scan rounding boundary closure")
+    };
+
+    let one_below = explain(0, rows_to_close_source_and_two_scan_tails);
+    assert_eq!(
+        one_below.root().details().get("estimated_cost_overflow"),
+        None,
+        "zero bytes in the second scan leave the subtotal one below MAX"
+    );
+
+    for tail_bytes in [4_095, 4_096] {
+        let closes_at_max = explain(tail_bytes, rows_to_close_source_and_two_scan_tails);
+        assert_eq!(closes_at_max.plan().estimated_cost(), None);
+        assert_eq!(
+            closes_at_max.root().details().get("estimated_cost_overflow"),
+            None,
+            "independently rounded scan tails through 4096 bytes close at MAX"
+        );
+    }
+
+    let overflow = explain(4_097, rows_to_close_source_and_two_scan_tails);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the second scan's first byte beyond one block crosses MAX"
+    );
+    let nodes = overflow.nodes();
+    let second_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderScanBoundarySecond"))
+        })
+        .expect("second independently rounded scan");
+    assert_eq!(second_scan.estimated_bytes(), Some(4_097));
+    assert!(nodes.iter().any(|node| {
+        node.kind() == PlanNodeKind::Scan
+            && node.object() == Some(&obj("table:SourceRemainderScanBoundaryUnknown"))
+            && node.estimated_work().is_none()
+    }));
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
     }));
 }
