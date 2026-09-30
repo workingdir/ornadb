@@ -636,6 +636,50 @@ fn positive_factor_tails_keep_the_minute_edge_after_duration_arithmetic() {
 }
 
 #[test]
+fn positive_factor_tail_chains_keep_the_minute_side_after_rescaling() {
+    // The reference is silent on rescaling a factor-derived near-minute tail.
+    // Pin exact nanoseconds: doubling a 1 ns edge tail leaves 2 ns around 2m.
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
+    ] {
+        assert_eq!(session.submit(source), Ok(None), "{source}");
+    }
+
+    for (source, expected) in [
+        (
+            include_str!("fixtures/stdlib-time-duration-factor-tail-chain-before-minute-rfzcx.orna"),
+            texts(&[
+                "1m 59.999999998s",
+                "00:01:59.999999998",
+                "1 minute, 59.999999998 seconds",
+                "PT1M59.999999998S",
+            ]),
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-factor-tail-chain-after-minute-rfzcx.orna"),
+            texts(&[
+                "2m 0.000000002s",
+                "00:02:00.000000002",
+                "2 minutes, 0.000000002 seconds",
+                "PT2M0.000000002S",
+            ]),
+        ),
+    ] {
+        let result = session.submit(source);
+        assert_eq!(
+            result,
+            Ok(Some(expected)),
+            "{source}; diagnostic={}",
+            result.as_ref().err().map_or("none", |error| error.code())
+        );
+    }
+}
+
+#[test]
 fn clock_output_bound_keeps_elapsed_hours_and_fractional_tail() {
     let limits = Limits {
         max_string_bytes: 129,
