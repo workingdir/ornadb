@@ -261,3 +261,8 @@ competitor move: the competitor moves into the released key, the inserted row
 retries into the competitor's target, and the competitor then reuses the
 inserted row's source. The fixture records this nested reuse order as local
 behavior because the reference is silent.
+
+The second handoff retry also reclaims an older intermediate destination. The
+inserted row moves aside there, the competitor retries into its released key,
+and the inserted row takes the competitor's vacated source. This local nested
+reuse order is pinned because the reference does not describe it.
