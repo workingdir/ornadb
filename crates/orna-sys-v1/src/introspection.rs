@@ -1328,17 +1328,21 @@ fn mutation_work(affected_rows: Option<u64>, write_bytes: Option<u64>) -> Option
         .and_then(|(rows, bytes)| rows.checked_add(ceil_div(bytes, 4096)))
 }
 
-fn partial_mutation_work_lower_bound(operator: &Operator) -> Option<u64> {
-    if operator.kind != PlanNodeKind::Invoke
-        || !operator.details.contains_key("mutation")
+fn partial_scan_or_mutation_work_lower_bound(operator: &Operator) -> Option<u64> {
+    let has_row_byte_work_model = operator.kind == PlanNodeKind::Scan
+        || (operator.kind == PlanNodeKind::Invoke
+            && operator.details.contains_key("mutation"));
+    if !has_row_byte_work_model
         || operator.details.contains_key("estimated_work_overflow")
     {
         return None;
     }
 
-    // A mutation's public work estimate requires both affected rows and write
-    // bytes. When exactly one is missing, its known nonnegative component is
-    // still a lower bound for aggregate overflow checks, but not a node cost.
+    // Scan and mutation estimates share a rows-plus-4-KiB-blocks work model.
+    // When exactly one input is absent, the known nonnegative component is a
+    // lower bound for aggregate overflow checks, but not an exact node cost.
+    // Other operators have different work models, so their partial cardinality
+    // must not be mistaken for independently priced work.
     match (operator.cardinality.rows, operator.cardinality.bytes) {
         (Some(rows), None) => Some(rows),
         (None, Some(bytes)) => Some(ceil_div(bytes, 4096)),
@@ -1597,7 +1601,7 @@ fn build_plan(
         };
         if let Some(work) = operator
             .work
-            .or_else(|| partial_mutation_work_lower_bound(operator))
+            .or_else(|| partial_scan_or_mutation_work_lower_bound(operator))
         {
             known_work_total = known_work_total.and_then(|known| known.checked_add(work));
             known_work_overflow |= known_work_total.is_none();
