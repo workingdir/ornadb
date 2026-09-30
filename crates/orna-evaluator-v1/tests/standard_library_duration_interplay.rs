@@ -155,7 +155,7 @@ fn integer_duration_units_enforce_limit_after_seconds_scaling() {
 }
 
 #[test]
-fn elapsed_duration_integer_scaling_keeps_nanosecond_precision_and_sign() {
+fn elapsed_duration_scaling_keeps_nanosecond_precision_and_sign() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
     assert_eq!(
         session.submit(include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna")),
@@ -190,6 +190,22 @@ fn elapsed_duration_integer_scaling_keeps_nanosecond_precision_and_sign() {
         (
             include_str!("fixtures/stdlib-time-duration-decimal-scale-divide-c57w6.orna"),
             "PT2S",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-decimal-scale-negative-divide-kmy4x.orna"),
+            "-PT0.000000001S",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-decimal-scale-nanosecond-divide-kmy4x.orna"),
+            "PT0.000000002S",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-decimal-scale-negative-product-kmy4x.orna"),
+            "PT1S",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-decimal-scale-zero-product-kmy4x.orna"),
+            "PT0S",
         ),
     ] {
         let result = session.submit(source);
