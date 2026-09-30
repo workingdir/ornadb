@@ -3075,6 +3075,39 @@ impl Context<'_, '_> {
                 self.duration_from_total_nanoseconds(quotient)
             }
             (
+                Value::Duration {
+                    seconds,
+                    nanosecond,
+                },
+                Value::Decimal(scalar),
+            ) if op == "*" => self.duration_decimal_scale(
+                elapsed_total_nanoseconds(&seconds, nanosecond),
+                scalar,
+                false,
+            ),
+            (
+                Value::Decimal(scalar),
+                Value::Duration {
+                    seconds,
+                    nanosecond,
+                },
+            ) if op == "*" => self.duration_decimal_scale(
+                elapsed_total_nanoseconds(&seconds, nanosecond),
+                scalar,
+                false,
+            ),
+            (
+                Value::Duration {
+                    seconds,
+                    nanosecond,
+                },
+                Value::Decimal(scalar),
+            ) if op == "/" => self.duration_decimal_scale(
+                elapsed_total_nanoseconds(&seconds, nanosecond),
+                scalar,
+                true,
+            ),
+            (
                 Value::Money { amount: a, currency: ac },
                 Value::Money { amount: b, currency: bc },
             ) => self.money_binary(op, a, ac, b, bc),
@@ -3137,6 +3170,55 @@ impl Context<'_, '_> {
             seconds: self.integer(seconds)?,
             nanosecond,
         })
+    }
+    fn duration_decimal_scale(
+        &self,
+        total_nanoseconds: BigInt,
+        scalar: DecimalValue,
+        divide: bool,
+    ) -> Result<Value, EvaluationError> {
+        self.integer(scalar.coefficient.clone())?;
+        self.integer(scalar.exponent10.clone())?;
+        if divide && scalar.coefficient.is_zero() {
+            return Err(error("ORNA-EVAL-DIVIDE-BY-ZERO"));
+        }
+
+        let mut numerator = if divide {
+            total_nanoseconds
+        } else {
+            total_nanoseconds * &scalar.coefficient
+        };
+        let mut denominator = if divide {
+            scalar.coefficient
+        } else {
+            BigInt::from(1u8)
+        };
+        let decimal_shift = if divide {
+            -scalar.exponent10
+        } else {
+            scalar.exponent10
+        };
+        if decimal_shift.is_negative() {
+            let power = (-decimal_shift)
+                .to_u32()
+                .filter(|power| *power <= DEFAULT_INTEGER_DIGITS as u32)
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            denominator *= BigInt::from(10u8).pow(power);
+        } else {
+            let power = decimal_shift
+                .to_u32()
+                .filter(|power| *power <= DEFAULT_INTEGER_DIGITS as u32)
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            numerator *= BigInt::from(10u8).pow(power);
+        }
+
+        let (quotient, remainder) = numerator.div_rem(&denominator);
+        // Decimal scaling may be rational, but Duration storage has a one
+        // nanosecond quantum; reject a remainder instead of rounding it away.
+        if !remainder.is_zero() {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        self.duration_from_total_nanoseconds(quotient)
     }
     fn instant_duration_binary(
         &self,
