@@ -1,0 +1,2 @@
+pub fn answer(): Int = 42;
+unit meter: time base;
