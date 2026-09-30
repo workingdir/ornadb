@@ -19,9 +19,11 @@ use orna_live_v1::{
 use orna_protocol_v1::{Envelope, Message, ResultStatus};
 use orna_runtime_v1::{
     NoFault, RuntimeActivationContext, RuntimeError, RuntimePublicationMetadataRows,
-    StagedTableActivation, TableMutation,
+    RuntimeTableActivationSnapshot, RuntimeTableRows, StagedTableActivation, TableMutation,
 };
-use orna_semantic_v1::{Catalogue, ModuleInput, SymbolKind, TableSchema, analyze_with_catalogue};
+use orna_semantic_v1::{
+    Catalogue, ModuleInput, Namespace, SymbolKind, TableSchema, analyze_with_catalogue,
+};
 use orna_syntax_v1::{
     CaseArm, Declaration, Expr, Statement, StringSegment, parse_module_with_file,
 };
@@ -170,6 +172,7 @@ impl ApplicationAuthority {
         if !functions.contains_key(&entry) {
             return Err(ApplicationError::MissingEntry(entry));
         }
+        let admitted_namespace = module_namespace(&logical_path);
 
         Ok(AdmittedApplication {
             logical_path,
@@ -181,8 +184,7 @@ impl ApplicationAuthority {
             limits: self.limits,
             module_header: analysis
                 .modules
-                .values()
-                .next()
+                .get(&admitted_namespace)
                 .cloned()
                 .expect("successful analysis records the admitted module header"),
         })
@@ -228,7 +230,44 @@ impl ApplicationAuthority {
             ApplicationError::EffectRejected(error.code().to_owned())
         })?;
         let mutations = handler.into_mutations()?;
-        Ok(StagedActivation { value, mutations })
+        Ok(StagedActivation {
+            value,
+            mutations,
+            snapshot_generation: None,
+        })
+    }
+
+    /// Evaluates table mutations against one activation-pinned table snapshot.
+    /// This is required for operations whose result depends on the previous
+    /// row value (`update`, patching `upsert`, and `rekey`). The returned work
+    /// can only be staged against the same captured generation.
+    pub fn evaluate_staged_with_table_snapshot(
+        &self,
+        application: &AdmittedApplication,
+        arguments: &Environment,
+        snapshot: &RuntimeTableActivationSnapshot,
+    ) -> Result<StagedActivation, ApplicationError> {
+        let tables = admitted_table_schemas(&application.module_header);
+        let mut handler = SourceMutationEffectHandler::with_table_rows(
+            tables,
+            snapshot.table_rows().clone(),
+        )?;
+        let value = invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            arguments,
+            application.limits,
+            &mut handler,
+        )
+        .map_err(|error: EvaluationError| {
+            ApplicationError::EffectRejected(error.code().to_owned())
+        })?;
+        let mutations = handler.into_mutations()?;
+        Ok(StagedActivation {
+            value,
+            mutations,
+            snapshot_generation: Some(snapshot.context().capture().generation_digest()),
+        })
     }
 
     /// Evaluates admitted source with a preloaded durable publication snapshot
@@ -257,7 +296,11 @@ impl ApplicationAuthority {
             ApplicationError::EffectRejected(error.code().to_owned())
         })?;
         let mutations = handler.into_mutations()?;
-        Ok(StagedActivation { value, mutations })
+        Ok(StagedActivation {
+            value,
+            mutations,
+            snapshot_generation: None,
+        })
     }
 
     /// Evaluates admitted source while dispatching its terminal runtime effect
@@ -318,7 +361,11 @@ impl ApplicationAuthority {
                 .await
                 .map_err(ApplicationError::SourceEffectFailed)?;
         }
-        Ok(StagedActivation { value, mutations })
+        Ok(StagedActivation {
+            value,
+            mutations,
+            snapshot_generation: None,
+        })
     }
 
     /// Computes the canonical digest for staged table work in one captured
@@ -387,6 +434,7 @@ impl ApplicationAuthority {
 pub struct StagedActivation {
     value: CanonicalValue,
     mutations: Vec<TableMutation>,
+    snapshot_generation: Option<[u8; 32]>,
 }
 
 /// A runtime operation requested by admitted application source.
@@ -504,6 +552,13 @@ impl StagedActivation {
         authority: &ApplicationAuthority,
         context: &RuntimeActivationContext,
     ) -> Result<StagedTableActivation, ApplicationError> {
+        if self.snapshot_generation.is_some_and(|generation| {
+            generation != context.capture().generation_digest()
+        }) {
+            return Err(ApplicationError::Runtime(
+                "table rows and commit context refer to different CWD generations".into(),
+            ));
+        }
         // Mutation IDs are unique in the runtime's durable ledger. The source
         // handler's IDs identify an ordered write within a source batch, so
         // bind them to this captured activation before crossing that boundary.
@@ -523,13 +578,47 @@ impl StagedActivation {
                 let id: [u8; 16] = digest.finalize()[..16]
                     .try_into()
                     .map_err(|_| ApplicationError::DigestEncoding)?;
-                TableMutation::new(
-                    id,
-                    mutation.table(),
-                    mutation.key().to_vec(),
-                    mutation.value().map(<[u8]>::to_vec),
-                )
-                .map_err(|error: RuntimeError| ApplicationError::Runtime(error.to_string()))
+                let staged = match (mutation.rekey_to(), mutation.is_insert()) {
+                    (Some(new_key), _) => mutation
+                        .value()
+                        .ok_or_else(|| {
+                            ApplicationError::Runtime("re-key had no replacement row".into())
+                        })
+                        .and_then(|value| {
+                            TableMutation::rekey(
+                                id,
+                                mutation.table(),
+                                mutation.key().to_vec(),
+                                new_key.to_vec(),
+                                value.to_vec(),
+                            )
+                            .map_err(|error| ApplicationError::Runtime(error.to_string()))
+                        }),
+                    (None, true) => mutation
+                        .value()
+                        .ok_or_else(|| {
+                            ApplicationError::Runtime("insert had no replacement row".into())
+                        })
+                        .and_then(|value| {
+                            TableMutation::insert(
+                                id,
+                                mutation.table(),
+                                mutation.key().to_vec(),
+                                value.to_vec(),
+                            )
+                            .map_err(|error| ApplicationError::Runtime(error.to_string()))
+                        }),
+                    (None, false) => TableMutation::new(
+                        id,
+                        mutation.table(),
+                        mutation.key().to_vec(),
+                        mutation.value().map(<[u8]>::to_vec),
+                    )
+                    .map_err(|error: RuntimeError| {
+                        ApplicationError::Runtime(error.to_string())
+                    }),
+                };
+                staged
             })
             .collect::<Result<Vec<_>, _>>()?;
         authority.stage_mutations(context.clone(), mutations)
@@ -548,6 +637,8 @@ pub struct SourceMutationEffectHandler {
     mutations: Vec<TableMutation>,
     next_ordinal: u64,
     publication_rows: Option<RuntimePublicationMetadataRows>,
+    captured_rows: Option<BTreeMap<String, BTreeMap<Vec<u8>, CanonicalValue>>>,
+    overlay: BTreeMap<String, BTreeMap<Vec<u8>, Option<CanonicalValue>>>,
 }
 
 impl SourceMutationEffectHandler {
@@ -558,7 +649,52 @@ impl SourceMutationEffectHandler {
             mutations: Vec::new(),
             next_ordinal: 0,
             publication_rows: None,
+            captured_rows: None,
+            overlay: BTreeMap::new(),
         }
+    }
+
+    fn with_table_rows(
+        tables: BTreeMap<String, TableSchema>,
+        rows: RuntimeTableRows,
+    ) -> Result<Self, ApplicationError> {
+        let mut handler = Self::new(tables);
+        let mut captured = BTreeMap::new();
+        for table in handler.tables.keys() {
+            let table_rows = rows
+                .get(table)
+                .ok_or_else(|| ApplicationError::UnadmittedTable(table.clone()))?;
+            let mut decoded = BTreeMap::new();
+            for (key, value) in table_rows {
+                let row = CanonicalValue::decode(value).map_err(|_| {
+                    ApplicationError::Runtime("captured table row was not canonical".into())
+                })?;
+                handler
+                    .row_matches_schema(&handler.tables[table], &row)
+                    .map_err(|_| {
+                        ApplicationError::Runtime("captured table row failed its schema".into())
+                    })?;
+                if handler
+                    .key_from_row(&handler.tables[table], &row)
+                    .map_err(|_| {
+                        ApplicationError::Runtime("captured table row had an invalid key".into())
+                    })?
+                    != *key
+                {
+                    return Err(ApplicationError::Runtime(
+                        "captured table row key did not match its row".into(),
+                    ));
+                }
+                if decoded.insert(key.clone(), row).is_some() {
+                    return Err(ApplicationError::Runtime(
+                        "captured table snapshot had duplicate keys".into(),
+                    ));
+                }
+            }
+            captured.insert(table.clone(), decoded);
+        }
+        handler.captured_rows = Some(captured);
+        Ok(handler)
     }
 
     fn with_publication_rows(
@@ -570,6 +706,8 @@ impl SourceMutationEffectHandler {
             mutations: Vec::new(),
             next_ordinal: 0,
             publication_rows: Some(publication_rows),
+            captured_rows: None,
+            overlay: BTreeMap::new(),
         }
     }
 
@@ -601,6 +739,36 @@ impl SourceMutationEffectHandler {
         key: Vec<u8>,
         value: Option<CanonicalValue>,
     ) -> Result<(), EvaluationError> {
+        self.record_with_kind(table, key, value, None, false)
+    }
+
+    fn record_insert(
+        &mut self,
+        table: &str,
+        key: Vec<u8>,
+        value: CanonicalValue,
+    ) -> Result<(), EvaluationError> {
+        self.record_with_kind(table, key, Some(value), None, true)
+    }
+
+    fn record_rekey(
+        &mut self,
+        table: &str,
+        old_key: Vec<u8>,
+        new_key: Vec<u8>,
+        value: CanonicalValue,
+    ) -> Result<(), EvaluationError> {
+        self.record_with_kind(table, old_key, Some(value), Some(new_key), false)
+    }
+
+    fn record_with_kind(
+        &mut self,
+        table: &str,
+        key: Vec<u8>,
+        value: Option<CanonicalValue>,
+        rekey_to: Option<Vec<u8>>,
+        insert_only: bool,
+    ) -> Result<(), EvaluationError> {
         let encoded = value
             .as_ref()
             .map(CanonicalValue::encode)
@@ -611,6 +779,10 @@ impl SourceMutationEffectHandler {
         digest.update(table.as_bytes());
         digest.update([0]);
         digest.update(&key);
+        digest.update([u8::from(insert_only), u8::from(rekey_to.is_some())]);
+        if let Some(new_key) = &rekey_to {
+            digest.update(new_key);
+        }
         digest.update(self.next_ordinal.to_be_bytes());
         if let Some(bytes) = &encoded {
             digest.update([1]);
@@ -621,14 +793,137 @@ impl SourceMutationEffectHandler {
         let id: [u8; 16] = digest.finalize()[..16]
             .try_into()
             .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-ROW"))?;
-        let mutation = TableMutation::new(id, table, key, encoded)
-            .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-ROW"))?;
+        let mutation = match (rekey_to, insert_only, encoded) {
+            (Some(new_key), false, Some(value)) => {
+                TableMutation::rekey(id, table, key, new_key, value)
+            }
+            (None, true, Some(value)) => TableMutation::insert(id, table, key, value),
+            (None, false, value) => TableMutation::new(id, table, key, value),
+            _ => return Err(Self::effect_error("ORNA-EVAL-TABLE-ROW")),
+        }
+        .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-ROW"))?;
         self.next_ordinal = self
             .next_ordinal
             .checked_add(1)
             .ok_or_else(|| Self::effect_error("ORNA-EVAL-LIMIT"))?;
         self.mutations.push(mutation);
         Ok(())
+    }
+
+    fn current_row(
+        &self,
+        table: &str,
+        key: &[u8],
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        if let Some(row) = self.overlay.get(table).and_then(|rows| rows.get(key)) {
+            return Ok(row.clone());
+        }
+        let captured = self
+            .captured_rows
+            .as_ref()
+            .ok_or_else(|| Self::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"))?;
+        Ok(captured.get(table).and_then(|rows| rows.get(key)).cloned())
+    }
+
+    fn current_row_if_known(
+        &self,
+        table: &str,
+        key: &[u8],
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        if let Some(row) = self.overlay.get(table).and_then(|rows| rows.get(key)) {
+            return Ok(row.clone());
+        }
+        Ok(self
+            .captured_rows
+            .as_ref()
+            .and_then(|captured| captured.get(table))
+            .and_then(|rows| rows.get(key))
+            .cloned())
+    }
+
+    fn admitted_table_name(&self, path: &str) -> Option<&str> {
+        if let Some((name, _)) = self.tables.get_key_value(path) {
+            return Some(name);
+        }
+        let short_name = path.rsplit('.').next()?;
+        let mut matches = self
+            .tables
+            .keys()
+            .filter(|name| name.as_str() == short_name || name.ends_with(&format!(".{short_name}")));
+        let found = matches.next()?;
+        if matches.next().is_some() {
+            None
+        } else {
+            Some(found)
+        }
+    }
+
+    fn patch_row(
+        &self,
+        schema: &TableSchema,
+        patch: &CanonicalValue,
+        row: &CanonicalValue,
+        permit_keys: bool,
+    ) -> Result<CanonicalValue, EvaluationError> {
+        let admission = self.admission(schema)?;
+        let (OvbRaw::Map(existing), OvbRaw::Map(changes)) = (row.raw(), patch.raw()) else {
+            return Err(Self::effect_error("ORNA-EVAL-TABLE-ROW"));
+        };
+        let mut fields = BTreeMap::<String, OvbRaw>::new();
+        for (field, value) in existing {
+            let OvbRaw::Text(field) = field else {
+                return Err(Self::effect_error("ORNA-EVAL-TABLE-ROW"));
+            };
+            fields.insert(field.clone(), value.clone());
+        }
+        for (field, value) in changes {
+            let OvbRaw::Text(field) = field else {
+                return Err(Self::effect_error("ORNA-EVAL-TABLE-ROW"));
+            };
+            if !schema.fields.contains_key(field)
+                || admission.computed.contains(field)
+                || (!permit_keys && admission.keys.iter().any(|(key, _)| key == field))
+            {
+                return Err(Self::effect_error("ORNA-EVAL-TABLE-ROW"));
+            }
+            fields.insert(field.clone(), value.clone());
+        }
+        let mut entries = fields
+            .into_iter()
+            .map(|(name, value)| (OvbRaw::Text(name), value))
+            .collect::<Vec<_>>();
+        entries.sort_by(|(left, _), (right, _)| {
+            canonical_map_key(left).cmp(&canonical_map_key(right))
+        });
+        let merged = CanonicalValue::new(OvbRaw::Map(entries))
+            .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-ROW"))?;
+        self.row_matches_schema(schema, &merged)?;
+        Ok(merged)
+    }
+
+    fn key_components(
+        &self,
+        schema: &TableSchema,
+        key: &CanonicalValue,
+    ) -> Result<Vec<CanonicalValue>, EvaluationError> {
+        let count = self.admission(schema)?.keys.len();
+        if count == 1 {
+            return Ok(vec![key.clone()]);
+        }
+        let OvbRaw::Array(parts) = key.raw() else {
+            return Err(Self::effect_error("ORNA-EVAL-TABLE-KEY"));
+        };
+        if parts.len() != count {
+            return Err(Self::effect_error("ORNA-EVAL-TABLE-KEY"));
+        }
+        parts
+            .iter()
+            .cloned()
+            .map(|part| {
+                CanonicalValue::new(part)
+                    .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-KEY"))
+            })
+            .collect()
     }
 
     fn table(&self, name: &str) -> Result<&TableSchema, EvaluationError> {
@@ -1034,19 +1329,70 @@ impl EffectHandler for SourceMutationEffectHandler {
         let Expr::Field { base, name, .. } = callee else {
             return Ok(None);
         };
-        let Expr::Name { text: table, .. } = base.as_ref() else {
+        if !matches!(name.as_str(), "insert" | "upsert" | "update" | "delete" | "rekey") {
+            return Ok(None);
+        }
+        let Some(path) = expression_name_path(base) else {
             return Ok(None);
         };
-        let schema = self.table(table)?;
+        let Some(table) = self.admitted_table_name(&path).map(str::to_owned) else {
+            return Ok(None);
+        };
+        let schema = self.table(&table)?;
         match name.as_str() {
-            "insert" | "upsert" => {
+            "insert" => {
                 let [row] = arguments else {
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 };
                 self.row_matches_schema(schema, row)?;
                 let key = self.key_from_row(schema, row)?;
-                self.record(table, key, Some(row.clone()))?;
+                if self.current_row_if_known(&table, &key)?.is_some() {
+                    return Err(Self::effect_error("ORNA-EVAL-TABLE-DUPLICATE-KEY"));
+                }
+                self.record_insert(&table, key.clone(), row.clone())?;
+                self.overlay
+                    .entry(table.to_owned())
+                    .or_default()
+                    .insert(key, Some(row.clone()));
                 Ok(Some(row.clone()))
+            }
+            "upsert" => {
+                let [patch] = arguments else {
+                    return Err(Self::effect_error("ORNA-EVAL-TABLE-ARGUMENT"));
+                };
+                let key = self.key_from_row(schema, patch)?;
+                let row = if let Some(existing) = self.current_row(&table, &key)? {
+                    self.patch_row(schema, patch, &existing, true)?
+                } else {
+                    self.row_matches_schema(schema, patch)?;
+                    patch.clone()
+                };
+                let key = self.key_from_row(schema, &row)?;
+                self.record(&table, key.clone(), Some(row.clone()))?;
+                self.overlay
+                    .entry(table.to_owned())
+                    .or_default()
+                    .insert(key, Some(row.clone()));
+                Ok(Some(row))
+            }
+            "update" => {
+                let [key, patch] = arguments else {
+                    return Err(Self::effect_error("ORNA-EVAL-TABLE-ARGUMENT"));
+                };
+                let key_bytes = encoded_key(key)?;
+                let existing = self
+                    .current_row(&table, &key_bytes)?
+                    .ok_or_else(|| Self::effect_error("ORNA-EVAL-TABLE-MISSING-ROW"))?;
+                let row = self.patch_row(schema, patch, &existing, false)?;
+                if self.key_from_row(schema, &row)? != key_bytes {
+                    return Err(Self::effect_error("ORNA-EVAL-TABLE-KEY"));
+                }
+                self.record(&table, key_bytes.clone(), Some(row.clone()))?;
+                self.overlay
+                    .entry(table.to_owned())
+                    .or_default()
+                    .insert(key_bytes, Some(row.clone()));
+                Ok(Some(row))
             }
             "delete" => {
                 let [key] = arguments else {
@@ -1057,8 +1403,64 @@ impl EffectHandler for SourceMutationEffectHandler {
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-UNADMITTED"));
                 }
                 let key = encoded_key(key)?;
-                self.record(table, key, None)?;
+                if self.current_row_if_known(&table, &key)?.is_none()
+                    && self.captured_rows.is_some()
+                {
+                    return Err(Self::effect_error("ORNA-EVAL-TABLE-MISSING-ROW"));
+                }
+                self.record(&table, key, None)?;
+                self.overlay
+                    .entry(table.to_owned())
+                    .or_default()
+                    .insert(encoded_key(&arguments[0])?, None);
                 Ok(Some(CanonicalValue::unit()))
+            }
+            "rekey" => {
+                let [old_key, new_key] = arguments else {
+                    return Err(Self::effect_error("ORNA-EVAL-TABLE-ARGUMENT"));
+                };
+                let admission = self.admission(schema)?;
+                if admission.automatic_key || admission.keys.is_empty() {
+                    return Err(Self::effect_error("ORNA-EVAL-TABLE-UNADMITTED"));
+                }
+                let old_key_bytes = encoded_key(old_key)?;
+                let new_key_bytes = encoded_key(new_key)?;
+                if old_key_bytes == new_key_bytes {
+                    return Err(Self::effect_error("ORNA-EVAL-TABLE-DUPLICATE-KEY"));
+                }
+                let existing = self
+                    .current_row(&table, &old_key_bytes)?
+                    .ok_or_else(|| Self::effect_error("ORNA-EVAL-TABLE-MISSING-ROW"))?;
+                if self.current_row_if_known(&table, &new_key_bytes)?.is_some() {
+                    return Err(Self::effect_error("ORNA-EVAL-TABLE-DUPLICATE-KEY"));
+                }
+                let parts = self.key_components(schema, new_key)?;
+                let mut key_entries = parts
+                    .iter()
+                    .zip(&admission.keys)
+                    .map(|(part, (name, _))| {
+                        (OvbRaw::Text(name.clone()), part.raw().clone())
+                    })
+                    .collect::<Vec<_>>();
+                key_entries.sort_by(|(left, _), (right, _)| {
+                    canonical_map_key(left).cmp(&canonical_map_key(right))
+                });
+                let key_patch = CanonicalValue::new(OvbRaw::Map(key_entries))
+                    .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-KEY"))?;
+                let row = self.patch_row(schema, &key_patch, &existing, true)?;
+                if self.key_from_row(schema, &row)? != new_key_bytes {
+                    return Err(Self::effect_error("ORNA-EVAL-TABLE-KEY"));
+                }
+                self.record_rekey(
+                    &table,
+                    old_key_bytes.clone(),
+                    new_key_bytes.clone(),
+                    row.clone(),
+                )?;
+                let rows = self.overlay.entry(table.to_owned()).or_default();
+                rows.insert(old_key_bytes, None);
+                rows.insert(new_key_bytes, Some(row.clone()));
+                Ok(Some(row))
             }
             // Read-shaped table calls stay on the ordinary evaluator path;
             // this boundary owns write lowering only.
@@ -1115,6 +1517,22 @@ fn encoded_key(key: &CanonicalValue) -> Result<Vec<u8>, EvaluationError> {
         .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-KEY"))
 }
 
+fn expression_name_path(expression: &Expr) -> Option<String> {
+    match expression {
+        Expr::Name { text, .. } => Some(text.clone()),
+        Expr::Field { base, name, .. } => {
+            Some(format!("{}.{}", expression_name_path(base)?, name))
+        }
+        _ => None,
+    }
+}
+
+fn canonical_map_key(key: &OvbRaw) -> Vec<u8> {
+    CanonicalValue::new(key.clone())
+        .and_then(|value| value.encode())
+        .expect("record field names are canonical OVB text values")
+}
+
 fn encoded_table_key(components: &[CanonicalValue]) -> Result<Vec<u8>, EvaluationError> {
     match components {
         [single] => encoded_key(single),
@@ -1141,6 +1559,19 @@ fn admitted_table_schemas(
                 .map(|schema| (name.clone(), schema))
         })
         .collect()
+}
+
+fn module_namespace(logical_path: &str) -> Namespace {
+    // Analysis also returns catalogue and standard-library headers; select
+    // the original admitted module instead of whichever namespace sorts first.
+    let mut parts = logical_path.split('/').map(str::to_owned).collect::<Vec<_>>();
+    if let Some(file) = parts.pop() {
+        let stem = file.strip_suffix(".orna").unwrap_or(&file);
+        if stem != "main" {
+            parts.push(stem.to_owned());
+        }
+    }
+    Namespace(parts)
 }
 
 impl From<ApplicationError> for LiveError {
@@ -1838,6 +2269,7 @@ mod tests {
         assert_eq!(staged.mutations().len(), 1);
         let mutation = &staged.mutations()[0];
         assert_eq!(mutation.table(), "Note");
+        assert!(mutation.is_insert());
         let key = orna_foundation_v1::Value::decode(mutation.key())
             .expect("mutation key must be canonical OVB");
         let expected_key = orna_foundation_v1::Value::new(orna_foundation_v1::OvbRaw::Int(
@@ -1878,6 +2310,86 @@ mod tests {
         ))
         .expect("canonical integer");
         assert_eq!(key, expected_key);
+    }
+
+    #[test]
+    fn snapshot_mutation_overlay_updates_then_rekeys_one_row() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "table-update-rekey.orna",
+                include_str!("../tests/fixtures/table-update-rekey.orna"),
+                "main",
+            )
+            .expect("checked-in table mutation fixture should be admitted");
+
+        let int = |value: i64| {
+            CanonicalValue::new(OvbRaw::Int(value.into())).expect("integer is canonical")
+        };
+        let key = int(1).encode().expect("key is canonical");
+        let row = CanonicalValue::new(OvbRaw::Map(vec![
+            (OvbRaw::Text("id".into()), OvbRaw::Int(1.into())),
+            (OvbRaw::Text("text".into()), OvbRaw::Text("widget".into())),
+            (OvbRaw::Text("quantity".into()), OvbRaw::Int(3.into())),
+        ]))
+        .expect("captured row is canonical")
+        .encode()
+        .expect("captured row encodes");
+        let rows = BTreeMap::from([("Note".to_owned(), vec![(key.clone(), row)])]);
+        let tables = admitted_table_schemas(&application.module_header);
+        let mut handler =
+            SourceMutationEffectHandler::with_table_rows(tables, rows).expect("valid snapshot");
+        invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            &Environment::new(),
+            application.limits,
+            &mut handler,
+        )
+        .expect("update and rekey should run against the pinned row");
+        let mutations = handler
+            .into_mutations()
+            .expect("staged mutations should be valid");
+
+        assert_eq!(mutations.len(), 2);
+        assert_eq!(mutations[0].key(), key);
+        assert_eq!(mutations[0].rekey_to(), None);
+        let updated = CanonicalValue::decode(mutations[0].value().expect("updated row"))
+            .expect("updated row is canonical");
+        assert_eq!(updated, CanonicalValue::new(OvbRaw::Map(vec![
+            (OvbRaw::Text("id".into()), OvbRaw::Int(1.into())),
+            (OvbRaw::Text("text".into()), OvbRaw::Text("widget".into())),
+            (OvbRaw::Text("quantity".into()), OvbRaw::Int(5.into())),
+        ])).expect("expected row is canonical"));
+
+        assert_eq!(mutations[1].key(), key);
+        let new_key = int(2).encode().unwrap();
+        assert_eq!(mutations[1].rekey_to(), Some(new_key.as_slice()));
+        let rekeyed = CanonicalValue::decode(mutations[1].value().expect("re-keyed row"))
+            .expect("re-keyed row is canonical");
+        assert_eq!(rekeyed, CanonicalValue::new(OvbRaw::Map(vec![
+            (OvbRaw::Text("id".into()), OvbRaw::Int(2.into())),
+            (OvbRaw::Text("text".into()), OvbRaw::Text("widget".into())),
+            (OvbRaw::Text("quantity".into()), OvbRaw::Int(5.into())),
+        ])).expect("expected row is canonical"));
+    }
+
+    #[test]
+    fn update_effect_fails_closed_without_activation_rows() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "table-update-rekey.orna",
+                include_str!("../tests/fixtures/table-update-rekey.orna"),
+                "main",
+            )
+            .expect("checked-in table mutation fixture should be admitted");
+        assert!(matches!(
+            authority.evaluate_staged(&application, &Environment::new()),
+            Err(ApplicationError::EffectRejected(_))
+        ));
     }
 
     struct SuccessfulSourceEffectDispatcher;
