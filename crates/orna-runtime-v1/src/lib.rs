@@ -20423,6 +20423,42 @@ mod tests {
             "a right child's take(1) caps its effects even when outer take asks for more"
         );
 
+        // The reference specifies bounded enumeration and left-to-right
+        // union order, but leaves effect visibility at a nested child cap
+        // implicit. With right take(2), outer demand three leaves its second
+        // (failing) projection latent; demand four requires it and reports it.
+        let (right_child_tail, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-project-right-child-bound-outer-stops.orna"
+            ),
+        );
+        assert_eq!(
+            right_child_tail.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(3u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "outer demand below the right child cap does not evaluate its failing tail"
+        );
+
+        let (right_child_failure, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-project-right-child-bound-outer-reaches.orna"
+            ),
+        );
+        assert_eq!(
+            right_child_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "outer demand reaching the right child tail reports its failure"
+        );
+
         // The reference fixes left-to-right union order and bounded
         // enumeration but leaves projection failures across a child-local
         // take boundary implicit. Keep the left child lazy: its excluded
