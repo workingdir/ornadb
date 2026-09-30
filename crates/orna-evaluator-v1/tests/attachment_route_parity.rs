@@ -385,3 +385,97 @@ fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
         Ok(Some(Value::int(43.into())))
     );
 }
+
+#[test]
+fn nested_admitted_clones_preserve_archive_pin_identity_after_alias_churn() {
+    let (_primary_dir, primary_repository, primary_commit) =
+        repository(include_str!("fixtures/attachment-route-primary.orna"));
+    let (package_dir, package_repository, main_commit) =
+        repository(include_str!("fixtures/attachment-route-package.orna"));
+    let archive_commit = commit_source(
+        package_dir.path(),
+        &include_str!("fixtures/attachment-route-package.orna").replace("42", "43"),
+    );
+    let replacement_commit = commit_source(
+        package_dir.path(),
+        &include_str!("fixtures/attachment-route-package.orna").replace("42", "99"),
+    );
+    let loader = ProjectLoader::default();
+    let primary =
+        PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader).unwrap();
+    let main = PinnedDatabase::resolve(
+        "main",
+        package_repository.clone(),
+        &main_commit,
+        loader,
+    )
+    .unwrap();
+    let archive = PinnedDatabase::resolve(
+        "main_archive",
+        package_repository.clone(),
+        &archive_commit,
+        loader,
+    )
+    .unwrap();
+    let mut databases = AttachedDatabaseSession::new(primary).unwrap();
+    databases.attach_database(main).unwrap();
+    databases.attach_database(archive).unwrap();
+    let admitted =
+        AdmittedReplSession::from_attached_database_session(&databases, Limits::default()).unwrap();
+
+    // Admission snapshots each alias pin. Later source-map churn affects only
+    // new admissions, including when an older admitted snapshot is cloned.
+    databases.detach_database("main").unwrap();
+    databases
+        .attach_database(
+            PinnedDatabase::resolve(
+                "main",
+                package_repository,
+                &replacement_commit,
+                loader,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    databases.detach_database("main_archive").unwrap();
+
+    let mut current_admission =
+        AdmittedReplSession::from_attached_database_session(&databases, Limits::default()).unwrap();
+    assert_eq!(current_admission.submit("use main;"), Ok(None));
+    assert_eq!(
+        current_admission.submit("main.package_value()"),
+        Ok(Some(Value::int(99.into())))
+    );
+    assert!(current_admission.submit("use main_archive;").is_err());
+
+    let mut first_clone = admitted.clone();
+    let mut second_clone = first_clone.clone();
+    for clone in [&first_clone, &second_clone] {
+        let attached = clone.attached_databases().unwrap();
+        assert_eq!(
+            attached.database("main").unwrap().pin().commit().as_str(),
+            main_commit
+        );
+        assert_eq!(
+            attached
+                .database("main_archive")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            archive_commit
+        );
+    }
+    for clone in [&mut first_clone, &mut second_clone] {
+        assert_eq!(clone.submit("use main;"), Ok(None));
+        assert_eq!(
+            clone.submit("main.package_value()"),
+            Ok(Some(Value::int(42.into())))
+        );
+        assert_eq!(clone.submit("use main_archive;"), Ok(None));
+        assert_eq!(
+            clone.submit("main_archive.package_value()"),
+            Ok(Some(Value::int(43.into())))
+        );
+    }
+}
