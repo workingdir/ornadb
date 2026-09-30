@@ -207,6 +207,18 @@ fn elapsed_duration_scaling_keeps_nanosecond_precision_and_sign() {
             include_str!("fixtures/stdlib-time-duration-decimal-scale-zero-product-kmy4x.orna"),
             "PT0S",
         ),
+        (
+            include_str!("fixtures/stdlib-time-duration-decimal-scale-nanosecond-product-28a35.orna"),
+            "PT0.000000001S",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-decimal-scale-reciprocal-28a35.orna"),
+            "PT1S",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-decimal-scale-negative-reciprocal-28a35.orna"),
+            "PT0.000000002S",
+        ),
     ] {
         let result = session.submit(source);
         assert_eq!(
