@@ -20812,6 +20812,27 @@ mod tests {
             "last() returns empty after the bounded prefix without scanning its next match"
         );
 
+        // The reference defines take, filter, and last independently but
+        // leaves this nested-union closure edge implicit. The fourth row's
+        // filter lookup would fail; last() consumes only the three admitted
+        // rows and returns their final match without evaluating that predicate.
+        let (last_skips_next_filtered_predicate, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-skips-next-predicate.orna"
+                ),
+            );
+        assert_eq!(
+            last_skips_next_filtered_predicate.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (5, 3),
+            "last() evaluates predicates within the outer prefix and skips the failing next predicate"
+        );
+
         // The reference leaves the first matching row immediately beyond a
         // filtered outer bound implicit. The three-row prefix has no match;
         // do not scan its fourth row, which would satisfy `first()`.
