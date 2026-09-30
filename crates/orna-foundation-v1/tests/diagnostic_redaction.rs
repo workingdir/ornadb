@@ -1047,6 +1047,114 @@ fn post_clone_admission_stays_local_through_nested_cause_composition() {
 }
 
 #[test]
+fn clone_from_readmission_keeps_root_sibling_when_clone_is_a_cause() {
+    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture_credential = fixture.split('"').nth(1).unwrap();
+    let source = Diagnostic::new(
+        SafeText::new("ORNA-E-LOCALITY-SOURCE").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .with_note(SafeText::new(fixture).unwrap())
+    .with_cause(
+        Diagnostic::new(
+            SafeText::new("ORNA-E-LOCALITY-SOURCE-CAUSE").unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .redacted_with_message(SafeText::new(fixture).unwrap())
+        .with_cause(
+            Diagnostic::new(
+                SafeText::new("ORNA-E-LOCALITY-SOURCE-LEAF").unwrap(),
+                DiagnosticSeverity::Warning,
+                SafeText::new(fixture).unwrap(),
+            )
+            .unwrap()
+            .redacted_with_message(SafeText::new(fixture).unwrap()),
+        ),
+    );
+    let mut destination = Diagnostic::new(
+        SafeText::new("ORNA-E-LOCALITY-OLD").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .redacted_with_message(SafeText::new("old destination admission").unwrap());
+    destination.clone_from(&source);
+    assert_eq!(destination, source);
+
+    let post_clone = destination
+        .redacted_with_message(SafeText::new("post-clone sibling disclosure").unwrap());
+    let standalone_sibling = post_clone.clone();
+    let cause_sibling = post_clone;
+    let composed = Diagnostic::new(
+        SafeText::new("ORNA-E-LOCALITY-OUTER").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .redacted_with_message(SafeText::new("outer local disclosure").unwrap())
+    .with_cause(cause_sibling);
+    let standalone_bytes = standalone_sibling.encode_ovb().unwrap();
+    let composed_wire = composed.encode_ovb().unwrap();
+
+    let envelope = serde_json::json!({
+        "standalone": standalone_sibling,
+        "composed": composed,
+    });
+    let json = serde_json::to_vec(&envelope).unwrap();
+    assert_eq!(
+        envelope["standalone"]["message"],
+        "post-clone sibling disclosure"
+    );
+    assert_eq!(
+        envelope["composed"]["message"],
+        "outer local disclosure"
+    );
+    assert_eq!(
+        envelope["composed"]["causes"][0]["message"],
+        "<redacted>"
+    );
+    assert_eq!(
+        json.windows(b"post-clone sibling disclosure".len())
+            .filter(|window| *window == b"post-clone sibling disclosure")
+            .count(),
+        1
+    );
+    assert!(
+        !json
+            .windows(fixture_credential.len())
+            .any(|window| window == fixture_credential.as_bytes())
+    );
+
+    assert!(
+        standalone_bytes
+            .windows(b"post-clone sibling disclosure".len())
+            .any(|window| window == b"post-clone sibling disclosure")
+    );
+    assert!(
+        !standalone_bytes
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+    assert!(
+        !composed_wire
+            .windows(b"post-clone sibling disclosure".len())
+            .any(|window| window == b"post-clone sibling disclosure")
+    );
+    assert!(
+        !composed_wire
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&composed_wire).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    assert_eq!(decoded["causes"][0]["message"], "<redacted>");
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
