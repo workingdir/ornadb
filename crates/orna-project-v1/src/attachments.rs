@@ -1779,6 +1779,93 @@ mod tests {
     }
 
     #[test]
+    fn nested_pin_closure_keeps_equal_pins_distinct_by_shared_repository_alias() {
+        let app_source = include_str!("../tests/fixtures/attached-equivalent-main.orna");
+        let archive_source = include_str!("../tests/fixtures/attached-incompatible-main.orna");
+        let (app_dir, app_repository, _) = repository(app_source);
+        let (archive_dir, archive_repository, archive_base_commit) = repository(archive_source);
+        let archive_terminal_commit = write_commit(
+            archive_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("backup {archive_base_commit}\nmirror {archive_base_commit}\n"),
+        );
+        let app_historical_commit = write_commit(
+            app_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive {archive_terminal_commit}\n"),
+        );
+        let archive_current_commit = write_commit(
+            archive_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("app {app_historical_commit}\n"),
+        );
+        let app_current_source = app_source.replace("42", "7");
+        write_commit(app_dir.path(), "main.orna", &app_current_source);
+        let app_current_commit = write_commit(
+            app_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive {archive_current_commit}\n"),
+        );
+
+        let loader = ProjectLoader::default();
+        let app = PinnedDatabase::resolve(
+            "app",
+            app_repository.clone(),
+            &app_current_commit,
+            loader,
+        )
+        .unwrap();
+        let resolver = PackageResolver::new(
+            [
+                ("app".to_owned(), app_repository),
+                ("archive".to_owned(), archive_repository.clone()),
+                ("backup".to_owned(), archive_repository.clone()),
+                ("mirror".to_owned(), archive_repository),
+            ],
+            loader,
+        )
+        .unwrap();
+
+        let root_session = resolver.resolve_for_parent(app).unwrap();
+        let archive = root_session.database("archive").unwrap().clone();
+        let archive_session = resolver.resolve_for_parent(archive).unwrap();
+        let historical_app = archive_session.database("app").unwrap().clone();
+        let historical_app_session = resolver.resolve_for_parent(historical_app).unwrap();
+        let archive_terminal = historical_app_session
+            .database("archive")
+            .unwrap()
+            .clone();
+        let terminal_session = resolver.resolve_for_parent(archive_terminal).unwrap();
+
+        // The reference does not define aliases sharing a repository or an
+        // object ID. V1 keeps alias identity even when both pins resolve to
+        // the same immutable package snapshot.
+        assert_eq!(terminal_session.attached().count(), 2);
+        let backup = terminal_session.database("backup").unwrap();
+        let mirror = terminal_session.database("mirror").unwrap();
+        assert_eq!(backup.pin().name(), "backup");
+        assert_eq!(mirror.pin().name(), "mirror");
+        assert_eq!(backup.pin().commit().as_str(), archive_base_commit);
+        assert_eq!(mirror.pin().commit().as_str(), archive_base_commit);
+        assert_ne!(backup.pin(), mirror.pin());
+        assert!(terminal_session.units_structurally_equivalent(
+            "backup",
+            "meter",
+            "mirror",
+            "meter"
+        ));
+        assert_eq!(
+            root_session
+                .database("archive")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            archive_current_commit
+        );
+    }
+
+    #[test]
     fn equivalent_units_interoperate_across_attachments_but_name_match_is_not_enough() {
         let primary_source = include_str!("fixtures/attached-primary-main.orna");
         let (_primary_dir, primary_repository, primary_commit) = repository(&primary_source);
