@@ -9,36 +9,45 @@ use orna_compiler::{
 use orna_core::{
     CatalogueRevisionId, FunctionId, FunctionRevisionId, SchemaId, SourceBundleId,
     SourceRevisionId, SourceUnitId, StandardLibraryRevisionId, TypeBindingId, TypeId,
-    canonical_hash::{
-        CanonicalHashError, artifact_payload_digest, calculate_standard_library_digest,
-        function_declaration_digest, function_semantic_digest_with_version, source_bundle_digest,
-        source_revision_record_digest, source_unit_content_digest, standard_library_digest,
-        verify_standard_library_snapshot as verify_canonical_standard_library_snapshot,
-        verify_standard_library_v2_snapshot as verify_canonical_standard_library_v2_snapshot,
-    },
+    canonical_hash::CanonicalHashError,
     catalogue::{
-        CatalogueSnapshot, CatalogueSnapshotError, FunctionDefinition, FunctionDomain,
-        FunctionReturn, FunctionSecurity, FunctionTransaction, FunctionVolatility,
-        ParameterDefinition, PreludeTypeName, PreludeTypeNameError, QualifiedSemanticName,
-        SchemaDefinition, SemanticNameError, TypeBinding, TypeBindingError, TypeLookupName,
-        ValueTypeDefinition, ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
+        CatalogueSnapshot, CatalogueSnapshotError, PreludeTypeName, PreludeTypeNameError,
+        QualifiedSemanticName, SchemaDefinition, SemanticNameError, TypeBinding, TypeBindingError,
+        TypeLookupName, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
     },
     revision::{
-        ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, DeployableRevision,
-        ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord,
-        FunctionSemanticHashVersion, RevisionInvariantError, Sha256Digest, SourceOrigin,
-        StandardExecutable, StandardLibraryDigestVersion, StandardLibrarySnapshot,
-        StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
+        ActiveDatabaseRevision, DeployableRevision, RevisionInvariantError, Sha256Digest,
+        StandardLibrarySnapshot, VerifiedStandardLibrarySnapshot,
     },
-    types::{ResolvedType, StandardScalar},
     value::{
         INSPECT_CARRIER_CODEC_REGISTRATIONS, InspectCarrierCodecRegistration,
         OpaqueCodecRegistration, OpaqueCodecRegistry, OpaqueCodecRegistryError,
     },
 };
+#[cfg(test)]
+use orna_core::{
+    canonical_hash::{
+        artifact_payload_digest, calculate_standard_library_digest, function_declaration_digest,
+        function_semantic_digest_with_version, source_bundle_digest, source_revision_record_digest,
+        source_unit_content_digest, standard_library_digest,
+        verify_standard_library_snapshot as verify_canonical_standard_library_snapshot,
+        verify_standard_library_v2_snapshot as verify_canonical_standard_library_v2_snapshot,
+    },
+    catalogue::{
+        FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity, FunctionTransaction,
+        FunctionVolatility, ParameterDefinition, ValueTypeKind,
+    },
+    revision::{
+        DefinitionIdentity, DefinitionOrigin, ExecutableArtifact, ExecutableArtifactKind,
+        FunctionRevisionRecord, FunctionSemanticHashVersion, SourceOrigin, StandardExecutable,
+        StandardLibraryDigestVersion, StoredSourceRevision, StoredSourceUnit,
+    },
+    types::{ResolvedType, StandardScalar},
+};
 use orna_semantic_v1::{
     Catalogue as StandardCatalogueV1, StandardCatalogueError, StandardDependencyProfile,
 };
+#[cfg(test)]
 use orna_syntax::{NamePart, PrimitiveValueTypePersistence, QualifiedName, TypeExportTarget};
 
 mod codecs;
@@ -300,10 +309,12 @@ const fn reserved_id(final_byte: u8) -> [u8; 16] {
     bytes
 }
 
+#[cfg(test)]
 const ACCEPTED_SOURCE_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0x5d, 0x53, 0x60, 0x01, 0xab, 0xc7, 0x54, 0xcf, 0x2c, 0xde, 0x9f, 0xf4, 0xed, 0x50, 0xb2, 0x2d,
     0xe8, 0xbb, 0x70, 0x04, 0x0a, 0x69, 0x1b, 0xc2, 0xec, 0x50, 0xbd, 0x6c, 0x65, 0xe5, 0x25, 0xf4,
 ]);
+#[cfg(test)]
 const ACCEPTED_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0xd8, 0x0e, 0x8f, 0x73, 0x88, 0x78, 0x2d, 0x73, 0x0e, 0x4d, 0x6c, 0x5a, 0x6f, 0xcd, 0x4a, 0x56,
     0x42, 0xa4, 0x81, 0xcb, 0x65, 0x6d, 0x6e, 0x5f, 0xca, 0x35, 0x9a, 0x69, 0xf3, 0x72, 0x63, 0xeb,
@@ -322,14 +333,17 @@ const ACCEPTED_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes(
 // encoder). The digest-golden tests recompute every value from the retained
 // units and compare against these constants, so any retained-source edit fails
 // loudly at build time.
+#[cfg(test)]
 const ACCEPTED_V2_TYPES_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0x5d, 0x53, 0x60, 0x01, 0xab, 0xc7, 0x54, 0xcf, 0x2c, 0xde, 0x9f, 0xf4, 0xed, 0x50, 0xb2, 0x2d,
     0xe8, 0xbb, 0x70, 0x04, 0x0a, 0x69, 0x1b, 0xc2, 0xec, 0x50, 0xbd, 0x6c, 0x65, 0xe5, 0x25, 0xf4,
 ]);
+#[cfg(test)]
 const ACCEPTED_V2_INVOKE_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0xb1, 0x9b, 0x95, 0x6b, 0xf6, 0xb2, 0x68, 0x54, 0x93, 0xe2, 0x83, 0x4a, 0xbd, 0x60, 0x35, 0x3a,
     0xbf, 0x70, 0xb7, 0x45, 0xe4, 0x89, 0x4b, 0x9c, 0x66, 0xd2, 0xa7, 0x7e, 0x74, 0x3e, 0xdd, 0xc5,
 ]);
+#[cfg(test)]
 const ACCEPTED_V2_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0xc5, 0xd5, 0xc6, 0x73, 0x22, 0xae, 0xb5, 0x8b, 0xfd, 0xe0, 0x7a, 0xb1, 0x02, 0x8d, 0x45, 0x7d,
     0x34, 0x1d, 0xd8, 0x5e, 0x25, 0x31, 0xe0, 0xf6, 0xa4, 0x2d, 0x89, 0xa8, 0xb9, 0x8e, 0x9d, 0x22,
@@ -342,10 +356,12 @@ const ACCEPTED_V2_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_byt
     0xb3, 0xb0, 0xf9, 0xb7, 0xed, 0x69, 0x1a, 0xaf, 0x03, 0x57, 0x9b, 0x20, 0x1c, 0xf3, 0xda, 0xc1,
     0xb7, 0x25, 0xba, 0xdf, 0x90, 0xb6, 0x91, 0x1a, 0x98, 0x23, 0xa3, 0x24, 0x91, 0x06, 0x73, 0xce,
 ]);
+#[cfg(test)]
 const ACCEPTED_V2_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0x65, 0x2a, 0x53, 0x25, 0xc9, 0xd1, 0x1d, 0x33, 0x20, 0x6c, 0x35, 0x1c, 0x0c, 0x5e, 0x8c, 0x3a,
     0x82, 0x2a, 0x5b, 0x9b, 0x72, 0x22, 0x02, 0xb9, 0x3c, 0x25, 0x87, 0x05, 0x1f, 0x0f, 0x46, 0xc2,
 ]);
+#[cfg(test)]
 const ACCEPTED_V2_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0x9e, 0xf8, 0x60, 0x0b, 0x7f, 0x63, 0xd2, 0xab, 0x4e, 0x43, 0xee, 0xaa, 0xfd, 0x23, 0xb9, 0x8a,
     0x82, 0x49, 0x07, 0xd4, 0x25, 0xb4, 0x62, 0x0c, 0x27, 0x35, 0x13, 0x75, 0x74, 0xff, 0x9b, 0x8d,
@@ -413,12 +429,16 @@ pub const BYTE_STREAM_MAGIC: &str = "ORNA-BYTE-STREAM/1 ";
 // loudly at build time. The V3 artifact and semantic digests are the V2
 // goldens because `orna.std/3` retains the exact V2 parameter-echo executable
 // unchanged.
+#[cfg(test)]
 const ACCEPTED_V3_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_TYPES_CONTENT_DIGEST;
+#[cfg(test)]
 const ACCEPTED_V3_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_INVOKE_CONTENT_DIGEST;
+#[cfg(test)]
 const ACCEPTED_V3_OUTPUT_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0x8f, 0x16, 0x21, 0x4d, 0x9c, 0x4d, 0xee, 0x06, 0x6f, 0x24, 0x7b, 0x24, 0x15, 0xe9, 0xaf, 0xa7,
     0x0f, 0xcf, 0x5f, 0xb2, 0x66, 0x47, 0x3b, 0xb0, 0xfd, 0x6d, 0x72, 0x87, 0x98, 0xa2, 0xaf, 0x35,
 ]);
+#[cfg(test)]
 const ACCEPTED_V3_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0x28, 0x69, 0x41, 0x4f, 0x3b, 0xbc, 0xb9, 0x14, 0x60, 0x5b, 0xf4, 0x79, 0x4d, 0x2d, 0x4d, 0xd3,
     0xe4, 0x3f, 0x43, 0xc9, 0x72, 0xc7, 0x50, 0x53, 0xc7, 0xeb, 0xc3, 0xdf, 0xb9, 0x19, 0xb1, 0x5f,
@@ -431,7 +451,9 @@ const ACCEPTED_V3_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_byt
     0x9e, 0xf4, 0xcb, 0x13, 0xb7, 0x5e, 0xaf, 0x81, 0x40, 0x51, 0xd0, 0x37, 0x47, 0x9c, 0x34, 0x5c,
     0x0e, 0x3b, 0x1d, 0x4e, 0xe0, 0x70, 0x32, 0x3e, 0x36, 0x31, 0x59, 0xe2, 0x79, 0x2c, 0x7d, 0xcd,
 ]);
+#[cfg(test)]
 const ACCEPTED_V3_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V2_ARTIFACT_DIGEST;
+#[cfg(test)]
 const ACCEPTED_V3_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V2_SEMANTIC_DIGEST;
 
 /// The standard-library version represented by the V4 manifest (work ADR 0062).
@@ -482,13 +504,18 @@ pub const UI_MAGIC: &str = "ORNA-UI/1 ";
 // content digests are the earlier goldens; the ui content, V4 bundle, V4
 // source revision, V4 artifact, and V4 standard-library digests are computed
 // by the canonical encoders.
+#[cfg(test)]
 const ACCEPTED_V4_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_TYPES_CONTENT_DIGEST;
+#[cfg(test)]
 const ACCEPTED_V4_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_INVOKE_CONTENT_DIGEST;
+#[cfg(test)]
 const ACCEPTED_V4_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V3_OUTPUT_CONTENT_DIGEST;
+#[cfg(test)]
 const ACCEPTED_V4_UI_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0xe0, 0x86, 0x9a, 0xe3, 0xd4, 0x7e, 0xcb, 0xb6, 0x22, 0x30, 0x05, 0xd5, 0x56, 0x8c, 0x39, 0x0f,
     0xad, 0xe2, 0x75, 0x6d, 0x45, 0xde, 0xb9, 0xa1, 0x83, 0x02, 0xd5, 0xe8, 0x4c, 0x2e, 0x5f, 0xd1,
 ]);
+#[cfg(test)]
 const ACCEPTED_V4_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0x3d, 0x26, 0x40, 0x9b, 0x61, 0xab, 0x0f, 0xd5, 0xb7, 0xb3, 0x14, 0xf4, 0x4d, 0x0b, 0xc6, 0x21,
     0xeb, 0xce, 0xa0, 0x76, 0x8d, 0xa6, 0x33, 0xc9, 0x4a, 0xd2, 0x96, 0x4c, 0x99, 0xde, 0xc6, 0xfe,
@@ -497,7 +524,9 @@ const ACCEPTED_V4_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_byte
     0xab, 0x6d, 0xba, 0x9d, 0xfc, 0x42, 0x35, 0x39, 0xc8, 0xea, 0x90, 0x55, 0xf5, 0xbf, 0x40, 0x6f,
     0x45, 0xb0, 0xd3, 0x36, 0x2c, 0x06, 0x35, 0x7e, 0x34, 0x13, 0x23, 0x88, 0xff, 0x51, 0x41, 0xdd,
 ]);
+#[cfg(test)]
 const ACCEPTED_V4_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V3_ARTIFACT_DIGEST;
+#[cfg(test)]
 const ACCEPTED_V4_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V3_SEMANTIC_DIGEST;
 const ACCEPTED_V4_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0xdc, 0xff, 0xa5, 0x23, 0x16, 0x43, 0xf4, 0x73, 0x29, 0xd3, 0x00, 0x34, 0x1f, 0xba, 0xa2, 0x4f,
@@ -518,14 +547,20 @@ pub const STD_JSON_SOURCE_UNIT_ID: SourceUnitId = SourceUnitId::from_bytes(reser
 pub const STD_JSON_CONTRACT: &str = "orna.std.value.json@1";
 pub const JSON_MAGIC: &str = "ORNA-JSON-VALUE/1 ";
 
+#[cfg(test)]
 const ACCEPTED_V5_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_TYPES_CONTENT_DIGEST;
+#[cfg(test)]
 const ACCEPTED_V5_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_INVOKE_CONTENT_DIGEST;
+#[cfg(test)]
 const ACCEPTED_V5_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_OUTPUT_CONTENT_DIGEST;
+#[cfg(test)]
 const ACCEPTED_V5_UI_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_UI_CONTENT_DIGEST;
+#[cfg(test)]
 const ACCEPTED_V5_JSON_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0x4b, 0x12, 0x56, 0xf5, 0x9d, 0x01, 0xe9, 0xec, 0x65, 0x22, 0x85, 0xb1, 0x4f, 0xb8, 0xfc, 0xd5,
     0xde, 0xcf, 0x9b, 0x6d, 0xbf, 0xfb, 0xf7, 0x0d, 0xa8, 0x7a, 0xad, 0xeb, 0xb9, 0xa0, 0x18, 0xbe,
 ]);
+#[cfg(test)]
 const ACCEPTED_V5_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0x87, 0xe2, 0xf5, 0x9d, 0x44, 0x47, 0x78, 0x9f, 0x0f, 0x9d, 0xc5, 0xa9, 0x64, 0xf9, 0xec, 0x20,
     0x1a, 0xfd, 0xdd, 0xe2, 0x8b, 0xe0, 0x7e, 0xd3, 0xd2, 0x37, 0x74, 0xc8, 0x33, 0xf5, 0x31, 0x15,
@@ -534,7 +569,9 @@ const ACCEPTED_V5_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_byte
     0x91, 0x2f, 0xb3, 0xb6, 0x6c, 0x28, 0x35, 0xb3, 0x68, 0x68, 0x68, 0x76, 0x75, 0x5d, 0x7c, 0x78,
     0x9c, 0xc3, 0xf2, 0x5c, 0x26, 0x87, 0x27, 0xb0, 0x83, 0xd9, 0x6e, 0x70, 0x7a, 0x99, 0xbc, 0x51,
 ]);
+#[cfg(test)]
 const ACCEPTED_V5_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V4_ARTIFACT_DIGEST;
+#[cfg(test)]
 const ACCEPTED_V5_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V4_SEMANTIC_DIGEST;
 const ACCEPTED_V5_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0x22, 0x60, 0x9b, 0xe8, 0xc6, 0x6a, 0xce, 0x4a, 0xbe, 0x37, 0x6b, 0x2d, 0xfa, 0x82, 0x07, 0xd1,
@@ -1564,6 +1601,7 @@ pub fn select_verified_standard_library(
     Err(StandardLibraryError::UnsupportedRevision { revision })
 }
 
+#[cfg(test)]
 fn matches_qualified_export(
     export: &orna_syntax::TypeExportDeclaration,
     expected_source: &QualifiedSemanticName,
@@ -1585,6 +1623,7 @@ fn matches_qualified_export(
     )
 }
 
+#[cfg(test)]
 fn matches_prelude_export(
     export: &orna_syntax::TypeExportDeclaration,
     qualified_binding: &TypeBinding,
@@ -1603,6 +1642,7 @@ fn matches_prelude_export(
         )
 }
 
+#[cfg(test)]
 fn matches_qualified_name(source: &QualifiedName, expected: &QualifiedSemanticName) -> bool {
     source.parts.len() == expected.parts().len()
         && source
@@ -1612,6 +1652,7 @@ fn matches_qualified_name(source: &QualifiedName, expected: &QualifiedSemanticNa
             .all(|(part, expected)| is_unquoted(part) && part.text.eq_ignore_ascii_case(expected))
 }
 
+#[cfg(test)]
 fn matches_prelude_words(source: &[NamePart], expected: &PreludeTypeName) -> bool {
     source.len() == expected.words().len()
         && source
@@ -1620,10 +1661,12 @@ fn matches_prelude_words(source: &[NamePart], expected: &PreludeTypeName) -> boo
             .all(|(word, expected)| is_unquoted(word) && word.text.eq_ignore_ascii_case(expected))
 }
 
+#[cfg(test)]
 fn is_unquoted(part: &NamePart) -> bool {
     !part.text.starts_with('"')
 }
 
+#[cfg(test)]
 fn decode_sql_string_literal(literal: &str) -> Option<String> {
     let content = literal.strip_prefix('\'')?.strip_suffix('\'')?;
     let mut decoded = String::with_capacity(content.len());
@@ -1641,6 +1684,7 @@ fn decode_sql_string_literal(literal: &str) -> Option<String> {
     Some(decoded)
 }
 
+#[cfg(test)]
 fn source_persistence(persistence: PrimitiveValueTypePersistence) -> ValueTypePersistence {
     match persistence {
         PrimitiveValueTypePersistence::Persistable => ValueTypePersistence::Persistable,

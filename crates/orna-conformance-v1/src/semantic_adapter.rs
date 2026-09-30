@@ -7530,45 +7530,6 @@ fn lower_relation_statement_with_resolution(
     }
 }
 
-fn relation_count(
-    expression: &Expr,
-    table_keys: &TableKeys,
-    functions: &Functions,
-    namespace: Option<&str>,
-    shadowed: &BTreeSet<String>,
-) -> Option<Expr> {
-    let Expr::Binary { lhs, op, rhs, .. } = expression else {
-        return None;
-    };
-    if op != "|" {
-        return None;
-    }
-    let Expr::Name {
-        text: table,
-        span: table_span,
-    } = lhs.as_ref()
-    else {
-        return None;
-    };
-    if !table_keys.contains_key(table)
-        || !relation_count_target(rhs, functions, namespace, shadowed)
-    {
-        return None;
-    }
-    Some(Expr::Call {
-        callee: Box::new(Expr::Field {
-            base: Box::new(Expr::Name {
-                text: table.clone(),
-                span: table_span.clone(),
-            }),
-            name: "count".into(),
-            span: expression.span(),
-        }),
-        arguments: Vec::new(),
-        span: expression.span(),
-    })
-}
-
 fn relation_count_target(
     expression: &Expr,
     functions: &Functions,
