@@ -5,7 +5,7 @@ use orna_storage_v1::{
     plan_storage_rewrite, CompactKeyRange, CompactOvbProfile,
     EditableBaseRow, HybridBaseState, PhysicalPlacement, PlacementAction, PlacementCandidate,
     StoragePlacementError, StoragePreference, StorageProfile, StorageRewriteError,
-    StorageRewriteTarget, AUTOMATIC_EDITABLE_MAX_PUBLICATION_BYTES,
+    StorageRewriteTarget, PlacementReason, AUTOMATIC_EDITABLE_MAX_PUBLICATION_BYTES,
 };
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 
@@ -232,27 +232,67 @@ fn automatic_placement_keeps_inclusive_row_and_byte_limits() {
 }
 
 #[test]
-fn placement_rejects_case_only_portable_path_aliases_from_row_fixtures() {
+fn automatic_placement_falls_back_for_case_only_aliases_and_keeps_existing_rows() {
     for fixture in [CASE_COLLISION_UPPER_ROW, CASE_COLLISION_LOWER_ROW] {
         let parsed = parse_row(fixture);
         assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
     }
 
     let profile = profile_for_key_type(Uuid::from_u128(3), "Str");
+    let upper_key = text_key("Alice");
+    let lower_key = text_key("alice");
+    let plan = plan_storage_placement(
+        &profile,
+        StoragePreference::Automatic,
+        1,
+        false,
+        [
+            PlacementCandidate::update(
+                upper_key.clone(),
+                CASE_COLLISION_UPPER_ROW.len(),
+                PhysicalPlacement::Editable,
+                Some(editable_path("Alice")),
+            ),
+            PlacementCandidate::insert(
+                lower_key.clone(),
+                CASE_COLLISION_LOWER_ROW.len(),
+                Some(editable_path("alice")),
+            ),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(plan.new_row_placement(), PhysicalPlacement::Compact);
+    assert_eq!(plan.reason(), PlacementReason::AutomaticUnrepresentablePath);
+    let existing = plan
+        .decisions()
+        .iter()
+        .find(|decision| decision.key().encoded() == upper_key)
+        .unwrap();
+    let inserted = plan
+        .decisions()
+        .iter()
+        .find(|decision| decision.key().encoded() == lower_key)
+        .unwrap();
+    assert_eq!(existing.placement(), PhysicalPlacement::Editable);
+    assert!(existing.editable_path().is_some());
+    assert_eq!(inserted.placement(), PhysicalPlacement::Compact);
+    assert!(inserted.editable_path().is_none());
+
     assert_eq!(
         plan_storage_placement(
             &profile,
-            StoragePreference::Automatic,
+            StoragePreference::Editable,
             0,
             false,
             [
                 PlacementCandidate::insert(
-                    text_key("Alice"),
+                    upper_key,
                     CASE_COLLISION_UPPER_ROW.len(),
                     Some(editable_path("Alice")),
                 ),
                 PlacementCandidate::insert(
-                    text_key("alice"),
+                    lower_key,
                     CASE_COLLISION_LOWER_ROW.len(),
                     Some(editable_path("alice")),
                 ),
