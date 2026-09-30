@@ -1,0 +1,4 @@
+pub table SourceRemainderUnknownEdgeSource(id: Int) { value: Int, }
+pub table SourceRemainderUnknownEdgeUnknown(id: Int) { value: Int, }
+pub table SourceRemainderUnknownEdgeRows(id: Int) { value: Int, }
+pub table SourceRemainderUnknownEdgeBytes(id: Int) { value: Int, }
