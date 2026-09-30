@@ -2226,15 +2226,28 @@ pub struct RuntimeQuerySession<'snapshot> {
 }
 
 impl RuntimeQuerySession<'_> {
+    /// Checks that the activation captured this relation without reading rows.
+    ///
+    /// `take(0)` does not need to enumerate or project anything, but it still
+    /// validates admission so an unavailable relation cannot masquerade as a
+    /// known empty one. The reference requires bounded enumeration but leaves
+    /// this zero-row admission boundary open; the runtime preserves its
+    /// admitted-empty versus unadmitted distinction.
+    pub fn ensure_table_admitted(&self, table: &str) -> Result<(), RuntimeQueryError> {
+        self.snapshot
+            .table_rows
+            .contains_key(table)
+            .then_some(())
+            .ok_or(RuntimeQueryError::TableNotAdmitted)
+    }
+
     /// Returns the session's current row for the exact canonical key.
     ///
     /// Every call checks the current overlay before the immutable base rows;
     /// query results are deliberately not memoized, preserving independent
     /// call semantics and making preceding writes visible immediately.
     pub fn query_exact(&self, table: &str, key: &[u8]) -> Result<Option<&[u8]>, RuntimeQueryError> {
-        if !self.snapshot.table_rows.contains_key(table) {
-            return Err(RuntimeQueryError::TableNotAdmitted);
-        }
+        self.ensure_table_admitted(table)?;
         if let Some(value) = self.overlay.get(table).and_then(|rows| rows.get(key)) {
             return Ok(value.as_deref());
         }
@@ -19658,6 +19671,19 @@ mod tests {
     }
 
     impl orna_evaluator_v1::EffectHandler for QuerySessionEffects<'_, '_> {
+        fn validate_relation_source(
+            &mut self,
+            source: &str,
+        ) -> Result<(), orna_evaluator_v1::EvaluationError> {
+            self.session.ensure_table_admitted(source).map_err(|error| {
+                orna_evaluator_v1::EvaluationError::redacted(SafeText::new(match error {
+                    RuntimeQueryError::TableNotAdmitted => "ORNA-EVAL-QUERY-TABLE",
+                    RuntimeQueryError::RowNotFound => "ORNA-EVAL-TABLE-MISSING",
+                    RuntimeQueryError::InvalidPageSize => "ORNA-EVAL-QUERY-PAGE",
+                }).expect("static diagnostic code"))
+            })
+        }
+
         fn handle(
             &mut self,
             callee: &orna_syntax_v1::Expr,
@@ -20016,8 +20042,36 @@ mod tests {
             )
             .await
             .unwrap();
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage", "sys.MaintenanceJob"])
+            .await
+            .unwrap();
         let mut session = snapshot.query_session();
+
+        let (empty, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-take-zero-empty.orna"),
+        );
+        assert_eq!(
+            empty.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 0), "admitted empty take(0) avoids row scans");
+        let unavailable_snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let unavailable_session = unavailable_snapshot.query_session();
+        let (unadmitted, lookups, scans) = invoke_query_fixture_with_counts(
+            &unavailable_session,
+            include_str!("../tests/fixtures/query-session-take-zero-unadmitted.orna"),
+        );
+        assert_eq!(
+            unadmitted.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (0, 0),
+            "unadmitted take(0) reports visibility without enumerating rows"
+        );
 
         let (missing, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
