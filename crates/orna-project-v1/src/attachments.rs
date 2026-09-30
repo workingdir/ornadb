@@ -25,6 +25,7 @@ use crate::{LoadedProject, LooseRowCandidate, ProjectLoadError, ProjectLoader};
 pub const PACKAGE_PIN_MANIFEST_PATH: &str = ".orna/packages";
 const MAX_PACKAGE_PIN_MANIFEST_BYTES: usize = 64 * 1024;
 const MAX_PACKAGE_PINS: usize = 256;
+const MAX_PACKAGE_PARENT_TREE_ENTRIES: usize = 4_096;
 
 /// One unverified exact commit row from `.orna/packages`.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -96,6 +97,28 @@ impl PackagePinManifest {
         repository: &Repository,
         parent: &GitCommitRef,
     ) -> Result<Self, AttachmentError> {
+        let entries = repository
+            .list_committed_tree(parent, MAX_PACKAGE_PARENT_TREE_ENTRIES)
+            .map_err(AttachmentError::Repository)?;
+        let path = Path::new(PACKAGE_PIN_MANIFEST_PATH);
+        let manifest = entries.iter().find(|entry| entry.path().as_path() == path);
+        if let Some(entry) = manifest {
+            if !matches!(entry.kind(), CommittedTreeEntryKind::File { .. }) {
+                return Err(AttachmentError::MalformedManifest);
+            }
+        } else if entries
+            .iter()
+            .any(|entry| entry.path().as_path().starts_with(path))
+        {
+            // `.orna/packages` is a file boundary. A directory below that
+            // name is malformed rather than an empty optional dependency set.
+            return Err(AttachmentError::MalformedManifest);
+        } else {
+            // The reference makes `std` and other packages optional, but does
+            // not prescribe a manifest format. In v1, omitting our exact-pin
+            // manifest means the parent has no package attachments.
+            return Ok(Self::default());
+        }
         let bytes = repository
             .read_committed_file(parent, PACKAGE_PIN_MANIFEST_PATH, MAX_PACKAGE_PIN_MANIFEST_BYTES)
             .map_err(AttachmentError::Repository)?;
@@ -273,7 +296,10 @@ impl AttachedDatabaseSession {
         database: PinnedDatabase,
     ) -> Result<(), AttachmentError> {
         let name = database.pin.name.clone();
-        if name == self.primary.pin.name || name == "sys" {
+        if name == "sys" {
+            return Err(AttachmentError::SystemDatabaseCannotAttach);
+        }
+        if name == self.primary.pin.name {
             return Err(AttachmentError::DuplicateAttachment);
         }
         if self.attached.contains_key(&name) {
@@ -281,6 +307,25 @@ impl AttachedDatabaseSession {
         }
         self.attached.insert(name, database);
         Ok(())
+    }
+
+    /// Detaches an optional database alias from subsequent session lookups.
+    /// The primary and implementation-provided `sys` facility are not
+    /// detachable. The reference does not define live detach timing; v1 drops
+    /// the alias immediately, so callers must revalidate module admission
+    /// before the next evaluation. In-flight clones retain their original pins.
+    pub fn detach_database(&mut self, name: &str) -> Result<(), AttachmentError> {
+        let name = checked_name(name.to_owned())?;
+        if name == self.primary.pin.name {
+            return Err(AttachmentError::PrimaryDatabaseCannotDetach);
+        }
+        if name == "sys" {
+            return Err(AttachmentError::SystemDatabaseCannotDetach);
+        }
+        self.attached
+            .remove(&name)
+            .map(drop)
+            .ok_or(AttachmentError::AttachmentNotFound)
     }
 
     pub fn primary(&self) -> &PinnedDatabase {
@@ -456,9 +501,13 @@ pub enum AttachmentError {
     ManifestTooLarge,
     TooManyPackages,
     DuplicateRepository,
+    SystemDatabaseCannotAttach,
     RepositoryUnavailable,
     PinUnavailable,
     DuplicateAttachment,
+    PrimaryDatabaseCannotDetach,
+    SystemDatabaseCannotDetach,
+    AttachmentNotFound,
     Repository(RepositoryError),
     Project(ProjectLoadError),
 }
@@ -471,9 +520,13 @@ impl fmt::Display for AttachmentError {
             Self::ManifestTooLarge => "package pin manifest exceeds its size limit",
             Self::TooManyPackages => "package pin manifest exceeds its entry limit",
             Self::DuplicateRepository => "repository aliases are invalid or duplicated",
+            Self::SystemDatabaseCannotAttach => "the system database is provided by the host",
             Self::RepositoryUnavailable => "pinned package repository is unavailable",
             Self::PinUnavailable => "pinned package commit is unavailable",
             Self::DuplicateAttachment => "database attachment name is already in use",
+            Self::PrimaryDatabaseCannotDetach => "the primary database cannot be detached",
+            Self::SystemDatabaseCannotDetach => "the system database cannot be detached",
+            Self::AttachmentNotFound => "database attachment does not exist",
             Self::Repository(_) => "repository snapshot could not be read",
             Self::Project(_) => "pinned database source could not be loaded",
         })
