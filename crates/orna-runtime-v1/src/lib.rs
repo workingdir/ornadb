@@ -20521,6 +20521,27 @@ mod tests {
             "the second nested-child row satisfies demand before its failing union tail"
         );
 
+        // The reference specifies filter retention, union ordering and
+        // bounded enumeration, but does not detail propagation through a
+        // filter inside a nested union child. Its second source row matches
+        // after the first is rejected; once take(1) is satisfied, neither
+        // the child's remaining source nor its nested sibling is needed.
+        let (nested_child_filter_match, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-nested-child-filter-second-match-stops.orna"
+            ),
+        );
+        assert_eq!(
+            nested_child_filter_match.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "a nested child's second-row match stops before its sibling's failing projection"
+        );
+
         // The reference fixes left-to-right union order and bounded
         // enumeration but leaves projection failures across a child-local
         // take boundary implicit. Keep the left child lazy: its excluded
@@ -24703,23 +24724,85 @@ mod tests {
         );
         assert_eq!(
             reopened
-                .reset_checkpoint_with_invocation_id(writer, request, shared_id)
+                .reset_checkpoint_with_invocation_id(writer, request.clone(), shared_id)
                 .await,
-            Ok(receipt)
+            Ok(receipt.clone())
         );
         let terminal_after_replay = reopened
-            .invocation_observation_tail(Some(cursor), 1)
+            .invocation_observation_tail(Some(cursor.clone()), 1)
             .await
             .unwrap();
         assert_eq!(
             terminal_after_replay, terminal,
             "receipt replay after reading the terminal event leaves that tail page unchanged"
         );
+        let terminal_cursor = terminal
+            .next_cursor
+            .clone()
+            .expect("terminal event pins the continuation phase");
         let after_replay = reopened
-            .invocation_observation_tail(terminal.next_cursor.clone(), 1)
+            .invocation_observation_tail(Some(terminal_cursor.clone()), 1)
             .await
             .unwrap();
         assert!(after_replay.entries.is_empty());
+        assert_eq!(after_replay.next_cursor, Some(terminal_cursor.clone()));
+
+        let later_invocation_id = id(244);
+        reopened
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: later_invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(245)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .reset_checkpoint_with_invocation_id(writer, request, shared_id)
+                .await,
+            Ok(receipt)
+        );
+        let later_admission = reopened
+            .invocation_observation_tail(Some(terminal_cursor), 1)
+            .await
+            .unwrap();
+        assert_eq!(later_admission.entries.len(), 1);
+        assert_eq!(later_admission.entries[0].sequence, 3);
+        assert_eq!(later_admission.entries[0].invocation_id, later_invocation_id);
+        assert_eq!(
+            later_admission.entries[0].status,
+            InvocationObservationStatus::Running
+        );
+        reopened
+            .finish_invocation_observation(
+                writer,
+                later_invocation_id,
+                InvocationCompletion::Succeeded,
+            )
+            .await
+            .unwrap();
+        let later_terminal = reopened
+            .invocation_observation_tail(later_admission.next_cursor, 1)
+            .await
+            .unwrap();
+        assert_eq!(later_terminal.entries.len(), 1);
+        assert_eq!(later_terminal.entries[0].sequence, 4);
+        assert_eq!(later_terminal.entries[0].invocation_id, later_invocation_id);
+        assert_eq!(
+            later_terminal.entries[0].status,
+            InvocationObservationStatus::Succeeded
+        );
+        let after_later_terminal = reopened
+            .invocation_observation_tail(later_terminal.next_cursor, 1)
+            .await
+            .unwrap();
+        assert!(after_later_terminal.entries.is_empty());
         let whole_tail = reopened.invocation_observation_tail(None, 4).await.unwrap();
         assert_eq!(
             whole_tail
@@ -24727,10 +24810,12 @@ mod tests {
                 .iter()
                 .map(|entry| entry.sequence)
                 .collect::<Vec<_>>(),
-            vec![1, 2]
+            vec![1, 2, 3, 4]
         );
         assert_eq!(whole_tail.entries[0].status, InvocationObservationStatus::Running);
         assert_eq!(whole_tail.entries[1].status, InvocationObservationStatus::Cancelled);
+        assert_eq!(whole_tail.entries[2].status, InvocationObservationStatus::Running);
+        assert_eq!(whole_tail.entries[3].status, InvocationObservationStatus::Succeeded);
     }
 
     #[tokio::test]
