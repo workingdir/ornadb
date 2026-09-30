@@ -20152,6 +20152,59 @@ mod tests {
             "a missing nested-union head remains visible without row work"
         );
 
+        // A zero-take child empties only its own union side. Preserve left to
+        // right execution, and surface a missing right relation after the
+        // left side has already produced its rows.
+        let (right_zero, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-union-right-take-zero.orna"),
+        );
+        assert_eq!(
+            right_zero.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(2u8))).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 2), "left rows run before the empty right branch");
+
+        let (right_zero_missing, lookups, scans) = invoke_query_fixture_with_counts(
+            &storage_only,
+            include_str!("../tests/fixtures/query-session-union-right-take-zero.orna"),
+        );
+        assert_eq!(
+            right_zero_missing.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (0, 2),
+            "the missing zero-take right source fails after the left rows are observed"
+        );
+
+        // The symmetric case proves that an empty left child does not suppress
+        // the right side, and that the left source is still admission-checked.
+        let (left_zero, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-union-left-take-zero.orna"),
+        );
+        assert_eq!(
+            left_zero.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 1), "right rows run after the empty left branch");
+
+        let (left_zero_missing, lookups, scans) = invoke_query_fixture_with_counts(
+            &maintenance_only,
+            include_str!("../tests/fixtures/query-session-union-left-take-zero.orna"),
+        );
+        assert_eq!(
+            left_zero_missing.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (0, 0),
+            "the missing right source remains visible after an admitted empty left child"
+        );
+
         let (missing, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
             include_str!("../tests/fixtures/query-session-projection-missing.orna"),
