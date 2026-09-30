@@ -297,4 +297,40 @@ fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
             .submit("main_archive.package_value()"),
         Ok(Some(Value::int(43.into())))
     );
+
+    // Detaching from the source session affects later admissions only; both
+    // already admitted evaluators retain their own archive pin and main pin.
+    databases.detach_database("main_archive").unwrap();
+    let after_source_detach = databases.module_inputs();
+    assert!(after_source_detach.iter().any(|module| {
+        module.logical_path == "main.orna" && module.source.contains("primary_value")
+    }));
+    assert!(after_source_detach.iter().any(|module| {
+        module.logical_path == "main/main.orna" && module.source.contains("= 99")
+    }));
+    assert!(!after_source_detach
+        .iter()
+        .any(|module| module.logical_path == "main_archive.orna"));
+    let mut after_detach_session =
+        AdmittedReplSession::from_attached_database_session(&databases, Limits::default()).unwrap();
+    assert_eq!(after_detach_session.submit("use main;"), Ok(None));
+    assert_eq!(
+        after_detach_session.submit("main.package_value()"),
+        Ok(Some(Value::int(99.into())))
+    );
+    assert!(after_detach_session
+        .submit("use main_archive;")
+        .is_err());
+    assert_eq!(
+        session.submit("main.package_value()"),
+        Ok(Some(Value::int(42.into())))
+    );
+    assert_eq!(
+        session.submit("main_archive.package_value()"),
+        Ok(Some(Value::int(43.into())))
+    );
+    assert_eq!(
+        replacement_session.submit("main_archive.package_value()"),
+        Ok(Some(Value::int(43.into())))
+    );
 }
