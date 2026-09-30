@@ -4076,6 +4076,8 @@ impl LiveHost {
         // RequestStatus has no separate wire state for a fingerprint
         // collision. Withhold terminal details and return RequestMismatch for
         // both retained and recovered requests instead of exposing stale data.
+        // Retain that diagnostic against this query's own request ID; a
+        // corrected query changes its payload and therefore needs a fresh ID.
         let retained = self.requests.get(&(session, target));
         if retained.is_some_and(|record| record.fingerprint != expected) {
             return Err(Error::RequestMismatch);
