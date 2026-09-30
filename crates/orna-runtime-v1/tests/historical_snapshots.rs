@@ -780,7 +780,7 @@ async fn stable_prefix_neighbor_survives_extension_pin_tails() {
         }
         commit(&state, writer, &mutations, 56).await;
 
-        if matches!(generation, 255 | 256) {
+        if matches!(generation, 255 | 256 | 257) {
             let selected = state
                 .select_historical_snapshot(generation)
                 .await
@@ -795,8 +795,20 @@ async fn stable_prefix_neighbor_survives_extension_pin_tails() {
 
     assert_eq!(
         pins.iter().map(|(generation, _, _)| *generation).collect::<Vec<_>>(),
-        [255, 256]
+        [255, 256, 257]
     );
+    assert!(pins.windows(2).all(|pair| {
+        pair[0].2.capture().generation_digest() == pair[1].2.capture().generation_digest()
+    }));
+    for pair in pins.windows(2) {
+        assert_ne!(
+            pair[0].2.snapshot_id(),
+            pair[1].2.snapshot_id(),
+            "prefix boundary pins remain distinct at generations {} and {}",
+            pair[0].0,
+            pair[1].0
+        );
+    }
     let latest = state
         .select_historical_snapshot(257)
         .await
@@ -819,13 +831,17 @@ async fn stable_prefix_neighbor_survives_extension_pin_tails() {
             .await
             .expect("resolve adjacent prefix pin after later commits");
         assert_eq!(&resolved, selected);
-        let expected_rows = if *generation == 255 {
-            vec![
+        let expected_rows = match *generation {
+            255 => vec![
                 (vec![5], b"stable-prefix".to_vec()),
                 (vec![5, 0], b"steady-extension".to_vec()),
-            ]
-        } else {
-            vec![(vec![5], b"stable-prefix".to_vec())]
+            ],
+            256 => vec![(vec![5], b"stable-prefix".to_vec())],
+            257 => vec![
+                (vec![5], b"stable-prefix".to_vec()),
+                (vec![5, 0], b"restored-extension".to_vec()),
+            ],
+            _ => unreachable!("only prefix boundary pins are retained"),
         };
         assert_eq!(
             state
@@ -849,13 +865,17 @@ async fn stable_prefix_neighbor_survives_extension_pin_tails() {
             .expect("resolve prefix pin after reopen");
         assert_eq!(resolved, *selected);
         assert_eq!(resolved.generation(), *generation);
-        let expected_rows = if *generation == 255 {
-            vec![
+        let expected_rows = match *generation {
+            255 => vec![
                 (vec![5], b"stable-prefix".to_vec()),
                 (vec![5, 0], b"steady-extension".to_vec()),
-            ]
-        } else {
-            vec![(vec![5], b"stable-prefix".to_vec())]
+            ],
+            256 => vec![(vec![5], b"stable-prefix".to_vec())],
+            257 => vec![
+                (vec![5], b"stable-prefix".to_vec()),
+                (vec![5, 0], b"restored-extension".to_vec()),
+            ],
+            _ => unreachable!("only prefix boundary pins are retained"),
         };
         assert_eq!(
             reopened
