@@ -4177,6 +4177,10 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         let twenty_eighth_conflict_id = b"consumer/zzzzzzzzzzzzzzzzzzzzzzzzzzz-twenty-eighth-checkpoint-conflict".to_vec();
         let twenty_ninth_conflict_id = b"consumer/zzzzzzzzzzzzzzzzzzzzzzzzzzzz-twenty-ninth-checkpoint-conflict".to_vec();
         let thirtieth_conflict_id = b"consumer/zzzzzzzzzzzzzzzzzzzzzzzzzzzzz-thirtieth-checkpoint-conflict".to_vec();
+        let trailing_agreed_delete_id =
+            b"consumer/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-trailing-agreed-delete".to_vec();
+        let trailing_unchanged_delete_id =
+            b"consumer/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-trailing-unchanged-delete".to_vec();
         base.checkpoints.insert(final_tail_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_BASE));
         left.checkpoints.insert(final_tail_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_LEFT));
         right.checkpoints.insert(final_tail_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_RIGHT));
@@ -4261,6 +4265,24 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         base.checkpoints.insert(thirtieth_conflict_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_BASE));
         left.checkpoints.insert(thirtieth_conflict_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_LEFT));
         right.checkpoints.insert(thirtieth_conflict_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_RIGHT));
+        // ORNA-MERGE-011 leaves clean tombstones after an exact conflict tail
+        // unspecified. Keep agreed deletion and delete-versus-unchanged cases
+        // beyond the final fixture conflict; sorted traversal treats both as
+        // clean closure entries that do not consume conflict capacity.
+        base.checkpoints.insert(
+            trailing_agreed_delete_id.clone(),
+            parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS),
+        );
+        let trailing_unchanged_checkpoint = parse_checkpoint_fixture(CHECKPOINT_TAIL_BASE);
+        base.checkpoints.insert(
+            trailing_unchanged_delete_id.clone(),
+            trailing_unchanged_checkpoint.clone(),
+        );
+        let trailing_retained_side = if checkpoint_delete_on_left { &mut right } else { &mut left };
+        trailing_retained_side.checkpoints.insert(
+            trailing_unchanged_delete_id.clone(),
+            trailing_unchanged_checkpoint,
+        );
         let error = merge_three_way_snapshots(
             &base,
             &left,
@@ -5669,6 +5691,8 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         assert!(report.affected_checkpoints.contains(thirtieth_conflict_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(agreed_delete_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(unchanged_delete_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(trailing_agreed_delete_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(trailing_unchanged_delete_id.as_slice()));
         assert_eq!(source.visited.len(), 6);
         assert!(source.visited[..3].iter().all(|(_, locator)| locator.ends_with(b"upper")));
         assert_eq!(
@@ -5867,6 +5891,8 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         assert!(report.affected_checkpoints.contains(thirtieth_conflict_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(agreed_delete_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(unchanged_delete_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(trailing_agreed_delete_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(trailing_unchanged_delete_id.as_slice()));
         assert_eq!(source.visited.len(), 6);
         assert!(source.visited[..3].iter().all(|(_, locator)| locator.ends_with(b"upper")));
         assert_eq!(
