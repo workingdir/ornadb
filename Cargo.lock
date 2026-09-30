@@ -1344,8 +1344,8 @@ name = "orna-core"
 version = "1.0.0"
 dependencies = [
  "base64",
- "orna-value-v1",
  "orna-syntax-v1",
+ "orna-value-v1",
  "proptest",
  "serde",
  "serde_json",
@@ -1376,8 +1376,8 @@ name = "orna-evolution-v1"
 version = "1.0.0"
 dependencies = [
  "orna-foundation-v1",
- "serde_json",
  "orna-syntax-v1",
+ "serde_json",
 ]
 
 [[package]]
@@ -1559,6 +1559,7 @@ dependencies = [
  "orna-foundation-v1",
  "orna-repository-v1",
  "orna-runtime-v1",
+ "orna-syntax-v1",
  "orna-value-v1",
  "parquet",
  "sha2 0.10.9",
