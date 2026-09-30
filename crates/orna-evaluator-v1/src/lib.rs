@@ -48,7 +48,7 @@ pub use repl::{ReplSession, parse_admitted_repl};
 /// crate verifies its pinned profile before either boundary admits an import.
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
-pub fn reference_standard_sources() -> [(String, String); 4] {
+pub fn reference_standard_sources() -> [(String, String); 5] {
     orna_standard::reference_standard_sources_v1()
 }
 
@@ -3209,8 +3209,9 @@ impl Context<'_, '_> {
             scope,
             !self.restrict_function_names,
             function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
-        )
-            || resolved.as_deref() == Some("std.collection.asof_join");
+        ) || resolved.as_deref().is_some_and(|name| {
+            matches!(name, "std.collection.asof_join" | "std.query.asof_join")
+        });
         let name = root_collection_name(callee).or_else(|| {
             native_export
                 .then(|| portable_collection_operation(callee, resolved.as_deref()))
@@ -4381,16 +4382,36 @@ impl Context<'_, '_> {
                 "upper",
             ],
         );
+        let native_bits = native_standard_module_operation(
+            callee,
+            resolved_function.as_deref(),
+            scope,
+            !self.restrict_function_names,
+            function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
+            "bits",
+            &[
+                "bit_or",
+                "bit_and",
+                "bit_xor",
+                "bit_not",
+                "shift_left",
+                "shift_right",
+            ],
+        );
         let qualified_math = (!scope.0.contains_key("std"))
             .then(|| math_name(callee))
             .flatten();
         let qualified_text = (!scope.0.contains_key("std"))
             .then(|| text_name(callee))
             .flatten();
+        let qualified_bits = (!scope.0.contains_key("std"))
+            .then(|| bits_name(callee))
+            .flatten();
         if self.restrict_function_names
             && resolved_function.is_none()
             && ((qualified_math.is_some() && native_math.is_none())
-                || (qualified_text.is_some() && native_text.is_none()))
+                || (qualified_text.is_some() && native_text.is_none())
+                || (qualified_bits.is_some() && native_bits.is_none()))
         {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
@@ -4401,7 +4422,9 @@ impl Context<'_, '_> {
             !self.restrict_function_names,
             function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
         );
-        let native_asof_join = resolved_function.as_deref() == Some("std.collection.asof_join")
+        let native_asof_join = resolved_function.as_deref().is_some_and(|name| {
+            matches!(name, "std.collection.asof_join" | "std.query.asof_join")
+        })
             || (portable_collection_name(callee) == Some("asof_join")
                 && !self.restrict_function_names
                 && !scope.0.contains_key("std")
@@ -4423,8 +4446,9 @@ impl Context<'_, '_> {
             && !native_collection
             && native_math.is_none()
             && native_text.is_none()
+            && native_bits.is_none()
             && (qualified_math.is_none()
-                && bits_name(callee).is_none()
+                && qualified_bits.is_none()
                 && qualified_text.is_none()
                 && portable_collection_operation(callee, resolved_function.as_deref()).is_none()
                 && stats_name(callee).is_none()
@@ -4580,7 +4604,11 @@ impl Context<'_, '_> {
                 .then_some(qualified_math)
                 .flatten()
         });
-        let bits = bits_name(callee);
+        let bits = native_bits.or_else(|| {
+            (!self.restrict_function_names)
+                .then_some(qualified_bits)
+                .flatten()
+        });
         let text = native_text.or_else(|| {
             (!self.restrict_function_names)
                 .then_some(qualified_text)
@@ -6513,6 +6541,9 @@ fn named_arguments(
         "contains" => &["value", "needle"],
         "replace" => &["value", "from", "to"],
         "normalise" => &["value", "form"],
+        "bit_or" | "bit_and" | "bit_xor" => &["left", "right"],
+        "bit_not" => &["value"],
+        "shift_left" | "shift_right" => &["value", "count"],
         "chunk" => &["values", "size"],
         "flatten" | "unique" | "pairs" => &["values"],
         "distinct" | "count" => &["rows"],
@@ -6654,13 +6685,17 @@ fn is_native_collection_binding(
     };
     if !matches!(
         operation,
-        "filter"
+        "chunk"
+            | "flatten"
+            | "filter"
             | "map"
             | "flat_map"
             | "sort_by"
+            | "rank"
             | "take"
             | "drop"
             | "distinct"
+            | "unique"
             | "union"
             | "count"
             | "first"
@@ -6670,6 +6705,15 @@ fn is_native_collection_binding(
             | "max"
             | "every"
             | "exists"
+            | "partition"
+            | "zip"
+            | "zip_exact"
+            | "group_by"
+            | "pairs"
+            | "window"
+            | "split_when"
+            | "bucket_by"
+            | "asof_join"
     ) {
         return false;
     }
@@ -6691,6 +6735,7 @@ fn native_standard_module_operation<'a>(
     let prefix = match module {
         "math" => "std.math.",
         "text" => "std.text.",
+        "bits" => "std.bits.",
         _ => return None,
     };
     if let Some(operation) = resolved_function.and_then(|name| name.strip_prefix(prefix)) {
