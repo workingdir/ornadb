@@ -42,6 +42,7 @@ pub(super) enum Command {
     Init(Option<PathBuf>),
     Status { format: StatusFormat },
     Fetch { remote: String, branch: String },
+    Serve { port: u16 },
     Diff(Vec<String>),
     Check,
     Explain(String),
@@ -253,6 +254,33 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             remote: words.next().unwrap_or("origin").to_owned(),
             branch: words.next().unwrap_or("main").to_owned(),
         },
+        Some("serve") => {
+            let mut port = 8080;
+            while let Some(option) = words.next() {
+                if option != "--port" {
+                    return Err(Diagnostic::usage(
+                        "E1002",
+                        "unsupported `serve` option",
+                        "use `serve` or `serve --port PORT`; the listener stays on loopback",
+                    ));
+                }
+                let value = words.next().ok_or_else(|| {
+                    Diagnostic::usage(
+                        "E1001",
+                        "`serve --port` needs a value",
+                        "supply a port from 0 through 65535 after `--port`",
+                    )
+                })?;
+                port = value.parse().map_err(|_| {
+                    Diagnostic::usage(
+                        "E1002",
+                        "`serve --port` is invalid",
+                        "supply a port from 0 through 65535 after `--port`",
+                    )
+                })?;
+            }
+            Command::Serve { port }
+        }
         Some("diff") => {
             let mut arguments = Vec::new();
             while let Some(argument) = words.next() {
