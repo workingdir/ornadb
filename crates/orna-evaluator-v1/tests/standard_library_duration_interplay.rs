@@ -1523,6 +1523,40 @@ fn positive_factor_rescaled_tails_close_after_seventeenth_doubling() {
 }
 
 #[test]
+fn positive_factor_rescaled_tails_close_after_eighteenth_doubling() {
+    // The reference is silent on extending positive-factor tail closure this
+    // far. Continue the symmetric edge correction through one more scaling:
+    // the 3 ns tail becomes 786,432 ns around 262,144 minutes, pinning 182d 1h 4m.
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
+    ] {
+        assert_eq!(session.submit(source), Ok(None), "{source}");
+    }
+
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighteenth-doubling-from-below-5pwio.orna"),
+        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighteenth-doubling-from-above-5pwio.orna"),
+    ] {
+        let result = session.submit(source);
+        assert_eq!(
+            result,
+            Ok(Some(texts(&[
+                "182d 1h 4m",
+                "4369:04:00",
+                "182 days, 1 hour, 4 minutes",
+                "P182DT1H4M",
+            ]))),
+            "{source}; diagnostic={}",
+            result.as_ref().err().map_or("none", |error| error.code())
+        );
+    }
+}
+
+#[test]
 fn clock_output_bound_keeps_elapsed_hours_and_fractional_tail() {
     let limits = Limits {
         max_string_bytes: 129,
