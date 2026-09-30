@@ -1334,6 +1334,8 @@ fn validate_portable_paths<'a>(
             prefix.push(if index == 0 {
                 component.to_owned()
             } else {
+                // Nested composite-key directories need the same portable
+                // sibling check as first-level keys after path escaping.
                 component.to_ascii_lowercase()
             });
             if let Some(previous) = siblings.insert(prefix.clone(), component)
