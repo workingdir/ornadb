@@ -2840,6 +2840,145 @@ mod tests {
     }
 
     #[test]
+    fn nested_pin_terminal_closure_preserves_swapped_equal_alias_edges() {
+        let compatible_source = include_str!("../tests/fixtures/attached-equivalent-main.orna");
+        let incompatible_source = include_str!("../tests/fixtures/attached-incompatible-main.orna");
+        let (app_dir, app_repository, _) = repository(incompatible_source);
+        let (package_dir, package_repository, _) = repository(compatible_source);
+        let (leaf_dir, leaf_repository, _) = repository(compatible_source);
+        let (end_dir, end_repository, end_current_commit) = repository(compatible_source);
+
+        let end_historical_commit = write_commit(end_dir.path(), "main.orna", incompatible_source);
+        let leaf_current_commit = write_commit(
+            leaf_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("end {end_current_commit}\n"),
+        );
+        write_commit(leaf_dir.path(), "main.orna", incompatible_source);
+        let leaf_historical_commit = write_commit(
+            leaf_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("end {end_historical_commit}\n"),
+        );
+        let package_current_commit = write_commit(
+            package_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("leaf {leaf_current_commit}\nterminal {leaf_historical_commit}\n"),
+        );
+        write_commit(package_dir.path(), "main.orna", incompatible_source);
+        let package_historical_commit = write_commit(
+            package_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("leaf {leaf_historical_commit}\nterminal {leaf_current_commit}\n"),
+        );
+        let app_commit = write_commit(
+            app_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive {package_current_commit}\nmirror {package_historical_commit}\n"),
+        );
+
+        let loader = ProjectLoader::default();
+        let app = PinnedDatabase::resolve(
+            "app",
+            app_repository.clone(),
+            &app_commit,
+            loader,
+        )
+        .unwrap();
+        let resolver = PackageResolver::new(
+            [
+                ("app".to_owned(), app_repository),
+                ("archive".to_owned(), package_repository.clone()),
+                ("mirror".to_owned(), package_repository),
+                ("leaf".to_owned(), leaf_repository.clone()),
+                ("terminal".to_owned(), leaf_repository),
+                ("end".to_owned(), end_repository),
+            ],
+            loader,
+        )
+        .unwrap();
+
+        let root_session = resolver.resolve_for_parent(app).unwrap();
+        let archive_closure = resolver
+            .resolve_for_parent(root_session.database("archive").unwrap().clone())
+            .unwrap();
+        let mirror_closure = resolver
+            .resolve_for_parent(root_session.database("mirror").unwrap().clone())
+            .unwrap();
+        let archive_leaf = archive_closure.database("leaf").unwrap();
+        let archive_terminal = archive_closure.database("terminal").unwrap();
+        let mirror_leaf = mirror_closure.database("leaf").unwrap();
+        let mirror_terminal = mirror_closure.database("terminal").unwrap();
+
+        // The reference fixes each exact pin but leaves recursive closure
+        // behavior for shared-repository aliases unspecified. V1 retains every
+        // alias edge and reads its next pins from that edge's selected revision.
+        assert_eq!(
+            archive_closure.primary().pin().commit().as_str(),
+            package_current_commit
+        );
+        assert_eq!(
+            mirror_closure.primary().pin().commit().as_str(),
+            package_historical_commit
+        );
+        assert_eq!(archive_leaf.pin().commit().as_str(), leaf_current_commit);
+        assert_eq!(archive_terminal.pin().commit().as_str(), leaf_historical_commit);
+        assert_eq!(mirror_leaf.pin().commit().as_str(), leaf_historical_commit);
+        assert_eq!(mirror_terminal.pin().commit().as_str(), leaf_current_commit);
+        assert_eq!(archive_leaf.pin().commit(), mirror_terminal.pin().commit());
+        assert_ne!(archive_leaf.pin(), mirror_terminal.pin());
+        assert_eq!(archive_terminal.pin().commit(), mirror_leaf.pin().commit());
+        assert_ne!(archive_terminal.pin(), mirror_leaf.pin());
+
+        for (closure, alias, expected_leaf, expected_end) in [
+            (
+                &archive_closure,
+                "leaf",
+                leaf_current_commit.as_str(),
+                end_current_commit.as_str(),
+            ),
+            (
+                &archive_closure,
+                "terminal",
+                leaf_historical_commit.as_str(),
+                end_historical_commit.as_str(),
+            ),
+            (
+                &mirror_closure,
+                "leaf",
+                leaf_historical_commit.as_str(),
+                end_historical_commit.as_str(),
+            ),
+            (
+                &mirror_closure,
+                "terminal",
+                leaf_current_commit.as_str(),
+                end_current_commit.as_str(),
+            ),
+        ] {
+            let tail = resolver
+                .resolve_for_parent(closure.database(alias).unwrap().clone())
+                .unwrap();
+            assert_eq!(tail.primary().pin().name(), alias);
+            assert_eq!(tail.primary().pin().commit().as_str(), expected_leaf);
+            assert_eq!(tail.database("end").unwrap().pin().commit().as_str(), expected_end);
+            assert!(tail.units_structurally_equivalent(alias, "meter", "end", "meter"));
+        }
+
+        assert_eq!(git(package_dir.path(), &["rev-parse", "HEAD"]), package_historical_commit);
+        assert_eq!(git(leaf_dir.path(), &["rev-parse", "HEAD"]), leaf_historical_commit);
+        assert_eq!(git(end_dir.path(), &["rev-parse", "HEAD"]), end_historical_commit);
+        assert_eq!(
+            root_session.database("archive").unwrap().pin().commit().as_str(),
+            package_current_commit
+        );
+        assert_eq!(
+            root_session.database("mirror").unwrap().pin().commit().as_str(),
+            package_historical_commit
+        );
+    }
+
+    #[test]
     fn equivalent_units_interoperate_across_attachments_but_name_match_is_not_enough() {
         let primary_source = include_str!("fixtures/attached-primary-main.orna");
         let (_primary_dir, primary_repository, primary_commit) = repository(&primary_source);
