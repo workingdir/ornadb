@@ -3731,6 +3731,206 @@ fn stale_event_fingerprint_does_not_reserve_durable_request_id() {
 }
 
 #[test]
+fn durable_status_retry_replays_unknown_after_target_completes_and_host_recovers() {
+    let (root, repository) = durable_repository();
+    let runtime = open_durable_state(&repository);
+    let old_owner = RequestOwner::from(block_on(runtime.acquire_lease([75; 16])).unwrap());
+    let mut host = durable_host_with_owner(runtime, [75; 16]);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
+    let mut socket = WebSocketState::new([5; 16]);
+    let mut application = WatchEventApplication {
+        mode: WatchEventMode::Denied,
+        subscriptions: 0,
+        events: 0,
+    };
+
+    let fixture_eval = eval_with_context([1; 16], [36; 16], [2; 16], None);
+    let fixture_output = block_on(transport.receive_with_application(
+        &mut socket,
+        2,
+        &masked_binary_payload(&fixture_eval),
+        &mut application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &fixture_output[0] else {
+        panic!("the in-crate ORNA fixture receives a host response");
+    };
+    assert!(matches!(
+        Envelope::decode(payload, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Diagnostic { .. }
+    ));
+
+    let subscribed = block_on(transport.receive_with_application(
+        &mut socket,
+        3,
+        &masked_binary_payload(&subscribe_request([35; 16])),
+        &mut application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &subscribed[0] else {
+        panic!("the fixture-backed session establishes its watch");
+    };
+    let watch = Envelope::decode(payload, Limits::default().protocol)
+        .unwrap()
+        .watch
+        .expect("subscription returns its watch identity");
+
+    let event_request = event([1; 16], [37; 16], watch);
+    let event_fingerprint = request_fingerprint(&event_request, [1; 16]);
+    let unknown_status_request = Envelope {
+        request: Some([38; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [37; 16],
+            fingerprint: event_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let unknown_status_output = block_on(transport.receive_with_application(
+        &mut socket,
+        4,
+        &masked_binary_payload(&unknown_status_request),
+        &mut application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &unknown_status_output[0] else {
+        panic!("an unknown request returns a status snapshot");
+    };
+    let unknown_status = Envelope::decode(payload, Limits::default().protocol).unwrap();
+    assert_eq!(unknown_status.request, Some([38; 16]));
+    assert!(matches!(
+        &unknown_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Unknown,
+            fingerprint: None,
+            result: None,
+        } if *target == [37; 16]
+    ));
+
+    let event_output = block_on(transport.receive_with_application(
+        &mut socket,
+        5,
+        &masked_binary_payload(&event_request),
+        &mut application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &event_output[0] else {
+        panic!("the event returns its terminal rejection");
+    };
+    let event_diagnostic = Envelope::decode(payload, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        &event_diagnostic.message,
+        Message::Diagnostic { .. }
+    ));
+    assert_eq!(application.events, 1);
+    drop(transport);
+
+    let recovery_runtime = open_durable_state(&repository);
+    block_on(recovery_runtime.recover_abandoned(old_owner.owner_id, [76; 16])).unwrap();
+    drop(recovery_runtime);
+    let mut recovered = durable_host_after_takeover(
+        open_durable_state(&repository),
+        [76; 16],
+        old_owner,
+    );
+    let mut recovered_issuer = Issuer(2, None);
+    let recovered_credential = create(&mut recovered, &mut recovered_issuer);
+    block_on(recovered.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &recovered_credential,
+        attachment: [6; 16],
+        now: 6,
+    }))
+    .unwrap();
+    let mut recovered_transport =
+        LiveTransport::new(recovered, TransportLimits::default()).unwrap();
+    let mut recovered_socket = WebSocketState::new([6; 16]);
+    let mut recovered_application = UnitApplication::default();
+
+    let terminal_status_request = Envelope {
+        request: Some([39; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [37; 16],
+            fingerprint: event_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let terminal_status_output = block_on(recovered_transport.receive_with_application(
+        &mut recovered_socket,
+        7,
+        &masked_binary_payload(&terminal_status_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &terminal_status_output[0] else {
+        panic!("a fresh status query observes the completed Event");
+    };
+    let terminal_status = Envelope::decode(payload, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        terminal_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: None,
+        } if target == [37; 16] && fingerprint == event_fingerprint
+    ));
+
+    let unknown_retry = block_on(recovered_transport.receive_with_application(
+        &mut recovered_socket,
+        8,
+        &masked_binary_payload(&unknown_status_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &unknown_retry[0] else {
+        panic!("the exact status retry replays its original snapshot");
+    };
+    assert_eq!(
+        Envelope::decode(payload, Limits::default().protocol).unwrap(),
+        unknown_status
+    );
+
+    let event_retry = block_on(recovered_transport.receive_with_application(
+        &mut recovered_socket,
+        9,
+        &masked_binary_payload(&event_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &event_retry[0] else {
+        panic!("the exact Event retry replays after process recovery");
+    };
+    assert_eq!(
+        Envelope::decode(payload, Limits::default().protocol).unwrap(),
+        event_diagnostic
+    );
+    assert_eq!(recovered_application.calls, 0);
+
+    drop(recovered_transport);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn websocket_commit_without_completed_delivery_aborts_candidate_and_preserves_incumbent() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
     let mut issuer = Issuer(1, None);
