@@ -1223,6 +1223,108 @@ fn positionless_deletes_resolve_at_exact_row_change_budget_boundary() {
 }
 
 #[test]
+fn positionless_deletes_wait_for_segment_boundary_row_budget() {
+    let candidate_a = integer(10);
+    let candidate_b = integer(20);
+    let (low_key, high_key) = if candidate_a.encode().unwrap() < candidate_b.encode().unwrap() {
+        (candidate_a, candidate_b)
+    } else {
+        (candidate_b, candidate_a)
+    };
+    let boundary = high_key.encode().unwrap();
+    let low_range = KeyRange::new(None, Some(boundary.clone())).unwrap();
+    let high_range = KeyRange::new(Some(boundary), None).unwrap();
+    let split_manifest = |digest, low_digest, high_digest, low_locator: &[u8], high_locator: &[u8]| {
+        TableManifest {
+            digest: [digest; 32],
+            segments: vec![
+                RowSegmentManifest {
+                    locator: low_locator.to_vec(),
+                    range: low_range.clone(),
+                    digest: [low_digest; 32],
+                },
+                RowSegmentManifest {
+                    locator: high_locator.to_vec(),
+                    range: high_range.clone(),
+                    digest: [high_digest; 32],
+                },
+            ],
+        }
+    };
+    let fixture_row = |fixture: &str, key: CanonicalValue| {
+        let mut row = parse_fixture(fixture, RowKeyKind::Explicit);
+        row.key = key;
+        row
+    };
+    let build_inputs = || {
+        let mut source = FixtureRows::default();
+        source.add(MergeSide::Base, b"base-low", vec![fixture_row(BASE, low_key.clone())]);
+        source.add(MergeSide::Left, b"left-low", vec![fixture_row(LEFT, low_key.clone())]);
+        source.add(MergeSide::Right, b"right-low", vec![fixture_row(RIGHT, low_key.clone())]);
+        source.add(MergeSide::Base, b"base-high", vec![fixture_row(BASE, high_key.clone())]);
+        source.add(MergeSide::Left, b"left-high", vec![fixture_row(LEFT, high_key.clone())]);
+        source.add(MergeSide::Right, b"right-high", vec![fixture_row(RIGHT, high_key.clone())]);
+
+        let mut base = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(50, 1, 4, b"base-low", b"base-high"),
+            None,
+        );
+        let left = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(51, 2, 5, b"left-low", b"left-high"),
+            None,
+        );
+        let mut right = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(52, 3, 6, b"right-low", b"right-high"),
+            None,
+        );
+
+        base.checkpoints.insert(
+            b"consumer/segment-joint-positionless-delete".to_vec(),
+            CheckpointGeneration { generation: 100, position: None },
+        );
+        let one_side_id = b"consumer/segment-one-side-positionless-delete".to_vec();
+        let one_side_checkpoint = CheckpointGeneration { generation: 110, position: None };
+        base.checkpoints.insert(one_side_id.clone(), one_side_checkpoint.clone());
+        right.checkpoints.insert(one_side_id, one_side_checkpoint);
+
+        (base, left, right, source)
+    };
+
+    // The high segment owns the inclusive split key. A row-budget stop at that
+    // boundary returns its range impact before checkpoint deletes are visited.
+    let (base, left, right, mut source) = build_inputs();
+    let below_exact = BranchMergeBudget { max_rows_examined: 5, max_conflicts: 0 };
+    let error = merge_three_way_snapshots(&base, &left, &right, &mut source, below_exact).unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("the row budget must stop inside the upper segment")
+    };
+    assert_eq!(report.rows_examined, 6);
+    assert_eq!(report.conflicts_lower_bound, 0);
+    assert!(report.affected_ranges.contains(&(id(1), high_range.clone())));
+    assert!(report.affected_checkpoints.is_empty());
+
+    let (base, left, right, mut source) = build_inputs();
+    let exact_budget = BranchMergeBudget { max_rows_examined: 6, max_conflicts: 0 };
+    let plan = merge_three_way_snapshots(&base, &left, &right, &mut source, exact_budget).unwrap();
+    assert_eq!(plan.report.rows_examined, 6);
+    assert_eq!(source.visited.len(), 6);
+    let segments = &plan.tables[&id(1)].segments;
+    assert_eq!(segments.len(), 2);
+    for segment in segments {
+        let MergedSegment::Rows { rows, .. } = segment else {
+            panic!("both changed key ranges materialize from their fixtures")
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].fields[&id(2)], string("Grace"));
+        assert_eq!(rows[0].fields[&id(3)], string("Paris"));
+    }
+    assert!(plan.checkpoints.is_empty());
+}
+
+#[test]
 fn schema_conflict_is_a_boundary_before_row_reads_and_checkpoint_resolution() {
     let base_checkpoint = CheckpointGeneration {
         generation: 4,
