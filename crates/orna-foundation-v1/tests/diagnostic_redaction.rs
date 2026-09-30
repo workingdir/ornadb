@@ -9763,6 +9763,223 @@ fn decoded_empty_parent_replacement_restores_chain_closure_snapshots() {
 }
 
 #[test]
+fn decoded_deep_nested_parent_tail_recovery_keeps_closure_generations() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    fn cause_shape(diagnostic: &serde_json::Value) -> Vec<usize> {
+        let causes = diagnostic["causes"].as_array().unwrap();
+        let mut shape = vec![causes.len()];
+        for cause in causes {
+            shape.extend(cause_shape(cause));
+        }
+        shape
+    }
+    fn deep_tail_codes(diagnostic: &serde_json::Value) -> Vec<String> {
+        diagnostic["causes"][0]["causes"][0]["causes"][0]["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tail| tail["code"].as_str().unwrap().to_owned())
+            .collect()
+    }
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let make_parent = |root_message: &str,
+                       branch_message: &str,
+                       nested_message: &str,
+                       terminal_message: &str,
+                       tails: Vec<Diagnostic>| {
+        let terminal = tails.into_iter().fold(
+            admitted("ORNA-E-DEEP-TERMINAL", terminal_message),
+            |terminal, tail| terminal.with_cause(tail),
+        );
+        let nested = admitted("ORNA-E-DEEP-NESTED", nested_message).with_cause(terminal);
+        let branch = admitted("ORNA-E-DEEP-BRANCH", branch_message).with_cause(nested);
+        admitted("ORNA-E-DEEP-ROOT", root_message).with_cause(branch)
+    };
+    let recover = |diagnostic: &Diagnostic| {
+        Diagnostic::decode_ovb(&diagnostic.encode_ovb().unwrap()).unwrap()
+    };
+    let capture = |snapshot: Diagnostic| move || snapshot.clone();
+
+    let full_recovery = recover(&make_parent(
+        "deep full root payload",
+        "deep full branch payload",
+        "deep full nested payload",
+        "deep full terminal payload",
+        vec![
+            admitted("ORNA-E-DEEP-OLD-A", "deep old first tail payload"),
+            admitted("ORNA-E-DEEP-OLD-B", "deep old final tail payload"),
+        ],
+    ));
+    let empty_recovery = recover(&make_parent(
+        "deep empty root payload",
+        "deep empty branch payload",
+        "deep empty nested payload",
+        "deep empty terminal payload",
+        vec![],
+    ));
+    let replacement_recovery = recover(&make_parent(
+        "deep replacement root payload",
+        "deep replacement branch payload",
+        "deep replacement nested payload",
+        "deep replacement terminal payload",
+        vec![admitted(
+            "ORNA-E-DEEP-NEW",
+            "deep replacement tail payload",
+        )],
+    ));
+
+    // ORNA-SECRET-002 requires recursive redaction, but is silent on closure
+    // snapshots when a decoded tail vector four parent edges deep is emptied,
+    // replaced, and recovered. Treat each decoded tree as an owned generation;
+    // locally readmitting its root does not admit any nested parent.
+    let capture_full = capture(full_recovery.clone());
+    let capture_empty = capture(empty_recovery.clone());
+    let capture_replacement = capture(replacement_recovery.clone());
+    let empty_readmission = empty_recovery
+        .clone()
+        .redacted_with_message(SafeText::new("deep empty root readmission").unwrap());
+    let capture_empty_readmission = capture(empty_readmission.clone());
+
+    let mut receiver = full_recovery.clone();
+    let capture_initial_full = capture(receiver.clone());
+    receiver.clone_from(&capture_empty());
+    let capture_empty_tail = capture(receiver.clone());
+    receiver.clone_from(&capture_replacement());
+    let capture_new_tail = capture(receiver.clone());
+    receiver.clone_from(&capture_full());
+    let capture_restored_full = capture(receiver.clone());
+    receiver.clone_from(&capture_empty_readmission());
+    let capture_readmitted_empty = capture(receiver.clone());
+    receiver.clone_from(&capture_replacement());
+    let capture_final_new = capture(receiver.clone());
+
+    assert_eq!(capture_initial_full(), full_recovery);
+    assert_eq!(capture_empty_tail(), empty_recovery);
+    assert_eq!(capture_new_tail(), replacement_recovery);
+    assert_eq!(capture_restored_full(), full_recovery);
+    assert_eq!(capture_readmitted_empty(), empty_readmission);
+    assert_eq!(capture_final_new(), replacement_recovery);
+    let readmitted_projection = serde_json::to_value(capture_readmitted_empty()).unwrap();
+    assert_eq!(readmitted_projection["message"], "deep empty root readmission");
+    assert_eq!(cause_shape(&readmitted_projection), [1, 1, 1, 0]);
+    for cause in readmitted_projection["causes"].as_array().unwrap() {
+        assert_redacted_tree(cause);
+    }
+
+    let compose_generations = {
+        let capture_initial_full = capture_initial_full;
+        let capture_empty_tail = capture_empty_tail;
+        let capture_new_tail = capture_new_tail;
+        let capture_restored_full = capture_restored_full;
+        let capture_readmitted_empty = capture_readmitted_empty;
+        let capture_final_new = capture_final_new;
+        move || {
+            admitted("ORNA-E-DEEP-OUTER", "deep recovery outer admission")
+                .with_cause(capture_initial_full())
+                .with_cause(capture_empty_tail())
+                .with_cause(capture_new_tail())
+                .with_cause(capture_restored_full())
+                .with_cause(capture_readmitted_empty())
+                .with_cause(capture_final_new())
+        }
+    };
+    receiver.clone_from(&capture_empty());
+    let outer = compose_generations();
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["message"], "deep recovery outer admission");
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 6);
+    for cause in causes {
+        assert_redacted_tree(cause);
+    }
+    assert_eq!(
+        causes.iter().map(cause_shape).collect::<Vec<_>>(),
+        vec![
+            vec![1, 1, 1, 2, 0, 0],
+            vec![1, 1, 1, 0],
+            vec![1, 1, 1, 1, 0],
+            vec![1, 1, 1, 2, 0, 0],
+            vec![1, 1, 1, 0],
+            vec![1, 1, 1, 1, 0],
+        ],
+    );
+    assert_eq!(
+        causes.iter().map(deep_tail_codes).collect::<Vec<_>>(),
+        vec![
+            vec![
+                "ORNA-E-DEEP-OLD-A".to_owned(),
+                "ORNA-E-DEEP-OLD-B".to_owned(),
+            ],
+            vec![],
+            vec!["ORNA-E-DEEP-NEW".to_owned()],
+            vec![
+                "ORNA-E-DEEP-OLD-A".to_owned(),
+                "ORNA-E-DEEP-OLD-B".to_owned(),
+            ],
+            vec![],
+            vec!["ORNA-E-DEEP-NEW".to_owned()],
+        ],
+    );
+
+    let json = serde_json::to_vec(&outer).unwrap();
+    let wire = outer.encode_ovb().unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"deep full root payload".as_slice(),
+            b"deep full branch payload".as_slice(),
+            b"deep full nested payload".as_slice(),
+            b"deep full terminal payload".as_slice(),
+            b"deep old final tail payload".as_slice(),
+            b"deep empty root payload".as_slice(),
+            b"deep empty terminal payload".as_slice(),
+            b"deep replacement root payload".as_slice(),
+            b"deep replacement terminal payload".as_slice(),
+            b"deep replacement tail payload".as_slice(),
+            b"deep empty root readmission".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
+    assert_redacted_tree(&decoded);
+    assert_eq!(
+        decoded["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(cause_shape)
+            .collect::<Vec<_>>(),
+        causes.iter().map(cause_shape).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
 fn decoded_parent_chains_cross_empty_sibling_replacements_without_tail_leaks() {
     let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
