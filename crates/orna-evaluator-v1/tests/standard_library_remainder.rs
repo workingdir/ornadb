@@ -1,6 +1,6 @@
 use orna_evaluator_v1::{AdmittedReplSession, Limits};
 use orna_foundation_v1::CanonicalValue;
-use orna_value_v1::Raw;
+use orna_value_v1::{Raw, Value};
 
 fn canonical(raw: Raw) -> CanonicalValue {
     CanonicalValue::new(raw).unwrap()
@@ -8,6 +8,21 @@ fn canonical(raw: Raw) -> CanonicalValue {
 
 fn ints(values: &[i64]) -> Raw {
     Raw::Array(values.iter().map(|value| Raw::Int((*value).into())).collect())
+}
+
+fn option_int(value: i64) -> CanonicalValue {
+    CanonicalValue::new(
+        Value::option(Some(Value::int(value.into())))
+            .unwrap()
+            .raw()
+            .clone(),
+    )
+    .unwrap()
+}
+
+fn option_decimal(coefficient: i64, exponent10: i64) -> CanonicalValue {
+    let value = Value::decimal(coefficient.into(), exponent10.into()).unwrap();
+    CanonicalValue::new(Value::option(Some(value)).unwrap().raw().clone()).unwrap()
 }
 
 #[test]
@@ -123,5 +138,98 @@ fn pinned_bits_exports_bind_and_remain_optional_without_std() {
             .unwrap_err()
             .code(),
         "ORNA-S012-UNRESOLVED"
+    );
+}
+
+#[test]
+fn pinned_stats_aggregates_require_the_captured_std_module() {
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-use-stats-ymou.orna")),
+        Ok(None)
+    );
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-stats-empty-list-ymou.orna")),
+        Ok(None)
+    );
+    for (source, expected) in [
+        (
+            include_str!("fixtures/stdlib-stats-mean-exact-ymou.orna"),
+            option_int(2),
+        ),
+        (
+            include_str!("fixtures/stdlib-stats-mean-rounded-ymou.orna"),
+            option_int(2),
+        ),
+        (
+            include_str!("fixtures/stdlib-stats-median-ymou.orna"),
+            option_int(5),
+        ),
+        (
+            include_str!("fixtures/stdlib-stats-median-rounded-ymou.orna"),
+            option_decimal(2, 0),
+        ),
+        (
+            include_str!("fixtures/stdlib-stats-percentile-linear-ymou.orna"),
+            option_decimal(25, -1),
+        ),
+        (
+            include_str!("fixtures/stdlib-stats-percentile-lower-ymou.orna"),
+            option_decimal(0, 0),
+        ),
+        (
+            include_str!("fixtures/stdlib-stats-empty-ymou.orna"),
+            CanonicalValue::new(Raw::Null).unwrap(),
+        ),
+    ] {
+        assert_eq!(session.submit(source), Ok(Some(expected)), "{source}");
+    }
+    assert_eq!(
+        session
+            .submit(include_str!("fixtures/stdlib-stats-inexact-ymou.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-VALUE",
+        "an inexact exact-number mean needs an explicit scale and rounding mode"
+    );
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-use-query-ymou.orna")),
+        Ok(None)
+    );
+    for (source, expected) in [
+        (
+            include_str!("fixtures/stdlib-query-aggregations-ymou.orna"),
+            CanonicalValue::new(Raw::Int(6.into())).unwrap(),
+        ),
+        (include_str!("fixtures/stdlib-query-min-ymou.orna"), option_int(1)),
+        (include_str!("fixtures/stdlib-query-max-ymou.orna"), option_int(3)),
+        (
+            include_str!("fixtures/stdlib-query-count-ymou.orna"),
+            CanonicalValue::new(Raw::Int(2.into())).unwrap(),
+        ),
+    ] {
+        assert_eq!(session.submit(source), Ok(Some(expected)), "{source}");
+    }
+
+    let mut without_std = AdmittedReplSession::new(Limits::default());
+    assert_eq!(
+        without_std
+            .submit(include_str!("fixtures/stdlib-stats-without-snapshot-ymou.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-S012-UNRESOLVED"
+    );
+}
+
+#[test]
+fn pinned_bits_use_unbounded_signed_twos_complement_operations() {
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-use-bits-2213.orna")),
+        Ok(None)
+    );
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-bits-signed-ymou.orna")),
+        Ok(Some(CanonicalValue::new(Raw::Bool(true)).unwrap()))
     );
 }
