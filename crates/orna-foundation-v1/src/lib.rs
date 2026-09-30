@@ -1449,9 +1449,9 @@ impl Diagnostic {
     }
     pub fn decode_ovb(bytes: &[u8]) -> Result<Self, FoundationError> {
         let diagnostic = Self::from_raw(Value::decode(bytes).map_err(FoundationError::Value)?.raw())?;
-        // Decoding is a disclosure boundary too. The producer's redacted bit
-        // admits only its root message; composed notes and causes are rechecked.
-        Ok(diagnostic.boundary_projection())
+        // The wire redacted bit is an untrusted producer claim, not a
+        // disclosure grant. Generic decoding therefore redacts every payload.
+        Ok(diagnostic.redacted())
     }
     fn validate_redaction_consistency(&self) -> Result<(), FoundationError> {
         // The explicit span marker is itself a redaction claim. Do not let a
