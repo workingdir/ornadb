@@ -1066,6 +1066,42 @@ fn positionless_checkpoint_delete_vs_change_conflicts_in_both_orientations() {
 }
 
 #[test]
+fn agreed_positionless_deletes_do_not_spend_budget_after_a_row_conflict() {
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"base", vec![parse_fixture(BASE, RowKeyKind::Explicit)]);
+    source.add(MergeSide::Left, b"left", vec![parse_fixture(LEFT, RowKeyKind::Explicit)]);
+    source.add(MergeSide::Right, b"right", vec![parse_fixture(CONFLICT, RowKeyKind::Explicit)]);
+
+    let mut base = snapshot(schema(true, FieldType::Str), manifest(30, 30, b"base"), None);
+    let left = snapshot(schema(true, FieldType::Str), manifest(31, 31, b"left"), None);
+    let mut right = snapshot(schema(true, FieldType::Str), manifest(32, 32, b"right"), None);
+
+    let jointly_deleted_id = b"consumer/positionless-joint-delete".to_vec();
+    let jointly_deleted = CheckpointGeneration { generation: 60, position: None };
+    base.checkpoints.insert(jointly_deleted_id.clone(), jointly_deleted);
+
+    let one_side_deleted_id = b"consumer/positionless-one-side-delete".to_vec();
+    let one_side_deleted = CheckpointGeneration { generation: 70, position: None };
+    base.checkpoints.insert(one_side_deleted_id.clone(), one_side_deleted.clone());
+    right.checkpoints.insert(one_side_deleted_id, one_side_deleted);
+
+    // An absent map entry is a deletion, while a present generation with no
+    // provider cursor is still state. Agreed deletes are clean even when the
+    // unrelated row phase consumes the entire conflict-detail budget.
+    let one_conflict_budget = BranchMergeBudget { max_rows_examined: 100, max_conflicts: 1 };
+    let error = merge_three_way_snapshots(&base, &left, &right, &mut source, one_conflict_budget)
+        .unwrap_err();
+    let BranchMergeError::Conflicts { conflicts, report } = error else {
+        panic!("agreed positionless deletes must not exhaust the row conflict budget")
+    };
+    assert!(matches!(conflicts.as_slice(), [BranchMergeConflict::Row { .. }]));
+    assert_eq!(report.conflicts_lower_bound, 1);
+    assert!(report.affected_checkpoints.is_empty());
+    assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+    assert_eq!(source.visited.len(), 3);
+}
+
+#[test]
 fn schema_conflict_is_a_boundary_before_row_reads_and_checkpoint_resolution() {
     let base_checkpoint = CheckpointGeneration {
         generation: 4,
