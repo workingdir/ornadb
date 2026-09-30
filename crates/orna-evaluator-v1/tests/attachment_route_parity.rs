@@ -73,7 +73,7 @@ fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
     .unwrap();
     let longer_alias = PinnedDatabase::resolve(
         "main_archive",
-        package_repository,
+        package_repository.clone(),
         &longer_alias_commit,
         loader,
     )
@@ -133,5 +133,58 @@ fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
             .commit()
             .as_str(),
         longer_alias_commit
+    );
+
+    // An admitted REPL keeps the exact alias pins it was built from when the
+    // mutable attachment session later detaches or replaces one of them.
+    let historical_session = session.clone();
+    databases.detach_database("main").unwrap();
+    let mut detached_session =
+        AdmittedReplSession::from_attached_database_session(&databases, Limits::default()).unwrap();
+    assert!(detached_session.submit("use main;").is_err());
+    assert_eq!(detached_session.submit("use main_archive;"), Ok(None));
+    assert_eq!(
+        detached_session.submit("main_archive.package_value()"),
+        Ok(Some(Value::int(43.into())))
+    );
+
+    let replacement_commit = commit_source(
+        package_dir.path(),
+        &include_str!("fixtures/attachment-route-package.orna").replace("42", "99"),
+    );
+    let replacement = PinnedDatabase::resolve(
+        "main",
+        package_repository,
+        &replacement_commit,
+        loader,
+    )
+    .unwrap();
+    databases.attach_database(replacement).unwrap();
+    let mut replacement_session =
+        AdmittedReplSession::from_attached_database_session(&databases, Limits::default()).unwrap();
+    assert_eq!(replacement_session.submit("use main;"), Ok(None));
+    assert_eq!(
+        replacement_session.submit("main.package_value()"),
+        Ok(Some(Value::int(99.into())))
+    );
+    assert_eq!(
+        replacement_session.submit("use main_archive;"),
+        Ok(None)
+    );
+    assert_eq!(
+        replacement_session.submit("main_archive.package_value()"),
+        Ok(Some(Value::int(43.into())))
+    );
+    assert_eq!(
+        historical_session
+            .clone()
+            .submit("main.package_value()"),
+        Ok(Some(Value::int(42.into())))
+    );
+    assert_eq!(
+        historical_session
+            .clone()
+            .submit("main_archive.package_value()"),
+        Ok(Some(Value::int(43.into())))
     );
 }
