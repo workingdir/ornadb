@@ -6094,6 +6094,7 @@ impl LiveTransport {
         };
         match event {
             SocketEvent::Binary(message) => {
+                let decoded = Envelope::decode(&message, self.host.limits.protocol).ok();
                 match self
                     .host
                     .prepare_application_frame(socket.attachment, now, Frame::Binary(message))
@@ -6109,7 +6110,26 @@ impl LiveTransport {
                     Err(Error::InvalidMessage) => {
                         self.close_prepared_socket(socket, now, 1002).await
                     }
-                    Err(error) => Err(error),
+                    Err(error) => {
+                        // Keep the actor-preparation path's rejection contract
+                        // aligned with synchronous socket dispatch: a decoded
+                        // operational failure is a correlated wire diagnostic,
+                        // while framing and attachment failures stay transport
+                        // errors owned by the caller.
+                        if let Some(envelope) = decoded.as_ref()
+                            && let Some(outcome) = self.operational_error_outcome(
+                                socket.attachment,
+                                envelope,
+                                error,
+                            )?
+                        {
+                            Ok(WebSocketApplicationPreparation::Output(
+                                self.websocket_output(outcome)?,
+                            ))
+                        } else {
+                            Err(error)
+                        }
+                    }
                 }
             }
             SocketEvent::Ping(payload) => Ok(WebSocketApplicationPreparation::Output(
