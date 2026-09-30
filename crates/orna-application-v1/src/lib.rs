@@ -2269,6 +2269,7 @@ mod tests {
         assert_eq!(staged.mutations().len(), 1);
         let mutation = &staged.mutations()[0];
         assert_eq!(mutation.table(), "Note");
+        assert!(mutation.is_insert());
         let key = orna_foundation_v1::Value::decode(mutation.key())
             .expect("mutation key must be canonical OVB");
         let expected_key = orna_foundation_v1::Value::new(orna_foundation_v1::OvbRaw::Int(

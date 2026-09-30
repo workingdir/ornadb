@@ -18167,6 +18167,32 @@ mod tests {
             .unwrap();
 
         let context = state.begin_activation().await.unwrap();
+        let duplicate_insert =
+            TableMutation::insert(id(12), "books", vec![1], vec![11]).unwrap();
+        let before = context.capture().clone();
+        assert_eq!(
+            state
+                .commit_table_activation(
+                    lease,
+                    &context,
+                    &[duplicate_insert],
+                    digest(12),
+                    &NoFault,
+                )
+                .await,
+            Err(RuntimeError::InvalidTableMutation)
+        );
+        assert_eq!(state.capture().await.unwrap(), before);
+        assert_eq!(state.committed_table_row("books", &[1]).await.unwrap(), Some(vec![9]));
+
+        let insert = TableMutation::insert(id(13), "books", vec![3], vec![7]).unwrap();
+        state
+            .commit_table_activation(lease, &context, &[insert], digest(13), &NoFault)
+            .await
+            .unwrap();
+        assert_eq!(state.committed_table_row("books", &[3]).await.unwrap(), Some(vec![7]));
+
+        let context = state.begin_activation().await.unwrap();
         let occupied = TableMutation::rekey(id(8), "books", vec![1], vec![2], vec![10])
             .unwrap();
         let before = context.capture().clone();
@@ -18180,18 +18206,18 @@ mod tests {
         assert_eq!(state.committed_table_row("books", &[1]).await.unwrap(), Some(vec![9]));
         assert_eq!(state.committed_table_row("books", &[2]).await.unwrap(), Some(vec![8]));
 
-        let rekey = TableMutation::rekey(id(10), "books", vec![1], vec![3], vec![10]).unwrap();
+        let rekey = TableMutation::rekey(id(10), "books", vec![1], vec![4], vec![10]).unwrap();
         state
             .commit_table_activation(lease, &context, &[rekey], digest(11), &NoFault)
             .await
             .unwrap();
         assert_eq!(state.committed_table_row("books", &[1]).await.unwrap(), None);
-        assert_eq!(state.committed_table_row("books", &[3]).await.unwrap(), Some(vec![10]));
+        assert_eq!(state.committed_table_row("books", &[4]).await.unwrap(), Some(vec![10]));
 
         let pending = state.pending().await.unwrap();
         let retained = TableMutation::decode(pending.last().unwrap()).unwrap();
         assert_eq!(retained.key(), &[1]);
-        assert_eq!(retained.rekey_to(), Some(&[3][..]));
+        assert_eq!(retained.rekey_to(), Some(&[4][..]));
         assert!(pending.last().unwrap().payload.starts_with(b"ORNA-TABLE-MUTATION-2\0"));
     }
 
