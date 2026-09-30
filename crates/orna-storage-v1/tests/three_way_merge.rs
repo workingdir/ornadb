@@ -361,6 +361,71 @@ fn schema_conflict_budget_boundary_is_exact_and_stops_later_phases() {
 }
 
 #[test]
+fn truncated_schema_conflicts_report_tables_beyond_the_materialized_prefix() {
+    let mut base_schema = schema(true, FieldType::Str);
+    let mut second_table = base_schema.tables[0].clone();
+    second_table.id = id(5);
+    second_table.name = "Company".into();
+    base_schema.tables.push(second_table);
+    let mut left_schema = base_schema.clone();
+    left_schema.tables[0].fields[1].ty = FieldType::Int;
+    left_schema.tables[1].fields[1].ty = FieldType::Int;
+    let mut right_schema = base_schema.clone();
+    right_schema.tables[0].fields[1].ty = FieldType::Bool;
+    right_schema.tables[1].fields[1].ty = FieldType::Bool;
+
+    let mut base_row_company = parse_fixture(BASE, RowKeyKind::Explicit);
+    base_row_company.table = id(5);
+    let mut left_row_company = parse_fixture(LEFT, RowKeyKind::Explicit);
+    left_row_company.table = id(5);
+    let mut right_row_company = parse_fixture(CONFLICT, RowKeyKind::Explicit);
+    right_row_company.table = id(5);
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"base", vec![parse_fixture(BASE, RowKeyKind::Explicit)]);
+    source.add(MergeSide::Left, b"left", vec![parse_fixture(LEFT, RowKeyKind::Explicit)]);
+    source.add(MergeSide::Right, b"right", vec![parse_fixture(CONFLICT, RowKeyKind::Explicit)]);
+    source.add(MergeSide::Base, b"base-company", vec![base_row_company]);
+    source.add(MergeSide::Left, b"left-company", vec![left_row_company]);
+    source.add(MergeSide::Right, b"right-company", vec![right_row_company]);
+
+    let checkpoint = |generation, token: &[u8]| CheckpointGeneration {
+        generation,
+        position: Some(token.to_vec()),
+    };
+    let mut base = snapshot(
+        base_schema,
+        manifest(1, 1, b"base"),
+        Some(checkpoint(4, b"base-token")),
+    );
+    let mut left = snapshot(
+        left_schema,
+        manifest(2, 2, b"left"),
+        Some(checkpoint(5, b"left-token")),
+    );
+    let mut right = snapshot(
+        right_schema,
+        manifest(3, 3, b"right"),
+        Some(checkpoint(6, b"right-token")),
+    );
+    base.tables.insert(id(5), manifest(10, 10, b"base-company"));
+    left.tables.insert(id(5), manifest(20, 20, b"left-company"));
+    right.tables.insert(id(5), manifest(30, 30, b"right-company"));
+
+    let one_detail_budget = BranchMergeBudget { max_rows_examined: 100, max_conflicts: 1 };
+    let error = merge_three_way_snapshots(&base, &left, &right, &mut source, one_detail_budget)
+        .unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("the second table conflict exceeds the one-detail schema budget")
+    };
+    assert_eq!(report.conflicts_lower_bound, 2);
+    assert!(report.affected_tables.contains(&id(1)));
+    assert!(report.affected_tables.contains(&id(5)));
+    assert!(report.affected_ranges.is_empty());
+    assert!(report.affected_checkpoints.is_empty());
+    assert!(source.visited.is_empty(), "schema conflicts stop before row and checkpoint phases");
+}
+
+#[test]
 fn row_and_checkpoint_conflicts_accumulate_in_phase_order_without_a_partial_plan() {
     let base_checkpoint = CheckpointGeneration {
         generation: 4,
