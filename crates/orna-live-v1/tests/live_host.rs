@@ -11797,10 +11797,12 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
     }
     .encode(Limits::default().protocol)
     .unwrap();
+    let failure_status_query_fingerprint =
+        request_fingerprint(&failure_status_query, [1; 16]);
     let failure_status = block_on(host.dispatch_frame(
         [6; 16],
         8,
-        Frame::Binary(failure_status_query),
+        Frame::Binary(failure_status_query.clone()),
         &mut application,
     ))
     .unwrap()
@@ -11818,6 +11820,66 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
         } if *target == [91; 16]
             && *returned == fingerprint
             && result == &expected_failure
+    ));
+    assert_eq!(application.calls, 1);
+
+    let retargeted_failure_query = Envelope {
+        request: Some([93; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [92; 16],
+            fingerprint: request_fingerprint(&other_eval, [1; 16]),
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    // The reference requires a different input under this query ID to fail;
+    // it leaves exact replay after that rejected retarget unstated. Keep the
+    // first terminal-failure snapshot bound to its original query identity.
+    let first_retarget_mismatch = block_on(host.dispatch_frame(
+        [6; 16],
+        9,
+        Frame::Binary(retargeted_failure_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("retargeting the completed status query returns a mismatch");
+    assert!(matches!(
+        &first_retarget_mismatch.message,
+        Message::Diagnostic { .. }
+    ));
+    let retarget_mismatch_retry = block_on(host.dispatch_frame(
+        [6; 16],
+        10,
+        Frame::Binary(retargeted_failure_query),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the exact rejected retarget replays its mismatch");
+    assert_eq!(retarget_mismatch_retry, first_retarget_mismatch);
+
+    let exact_failure_query_retry = block_on(host.dispatch_frame(
+        [6; 16],
+        11,
+        Frame::Binary(failure_status_query),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the original query still replays its terminal failure snapshot");
+    assert_eq!(exact_failure_query_retry, failure_status);
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [1; 16],
+            request_id: [93; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == failure_status_query_fingerprint
     ));
     assert_eq!(application.calls, 1);
 
