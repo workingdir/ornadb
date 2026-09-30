@@ -7649,6 +7649,210 @@ fn revoked_nested_snapshots_survive_cause_vector_shrink_and_regrowth() {
 }
 
 #[test]
+fn closure_snapshots_survive_nested_parent_and_cause_vector_resize() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    fn nested_cause_lengths(diagnostic: &serde_json::Value) -> Vec<usize> {
+        diagnostic["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cause| cause["causes"].as_array().unwrap().len())
+            .collect()
+    }
+
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let untrusted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(message).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+
+    let old_branch_a = admitted("ORNA-E-RESIZE-BRANCH-A", "old branch A admission")
+        .with_cause(admitted("ORNA-E-RESIZE-TAIL-A1", "old branch A tail one"))
+        .with_cause(admitted("ORNA-E-RESIZE-TAIL-A2", "old branch A tail two"));
+    let old_branch_b = admitted("ORNA-E-RESIZE-BRANCH-B", "old branch B admission")
+        .with_cause(admitted("ORNA-E-RESIZE-TAIL-B1", "old branch B tail one"));
+    let old_parent = admitted("ORNA-E-RESIZE-PARENT", "old resized parent admission")
+        .with_cause(old_branch_a)
+        .with_cause(old_branch_b);
+    let capture_old = {
+        let snapshot = old_parent.clone();
+        move || snapshot.clone()
+    };
+    let revoked_parent = capture_old().redacted();
+    let capture_revoked = {
+        let snapshot = revoked_parent.clone();
+        move || snapshot.clone()
+    };
+    let short_replacement = untrusted("ORNA-E-RESIZE-SHORT", "short resized parent secret")
+        .with_cause(untrusted(
+            "ORNA-E-RESIZE-SHORT-BRANCH",
+            "short resized branch secret",
+        ));
+
+    // ORNA-SECRET-002 requires diagnostic secret redaction, but is silent on
+    // host Clone::clone_from when parent and nested vectors both resize. Treat
+    // closure results as immutable generations while live receivers shrink.
+    let mut left = capture_old();
+    let mut right = capture_revoked();
+    left.clone_from(&short_replacement);
+    right.clone_from(&capture_old());
+    assert_eq!(left, short_replacement);
+    assert_eq!(right, old_parent);
+    left.clone_from(&capture_revoked());
+    right.clone_from(&short_replacement);
+    assert_eq!(left, revoked_parent);
+    assert_eq!(right, short_replacement);
+
+    let old_projection = serde_json::to_value(capture_old()).unwrap();
+    assert_eq!(old_projection["message"], "old resized parent admission");
+    assert_eq!(old_projection["causes"].as_array().unwrap().len(), 2);
+    assert_eq!(nested_cause_lengths(&old_projection), [2, 1]);
+    let revoked_projection = serde_json::to_value(capture_revoked()).unwrap();
+    assert_redacted_tree(&revoked_projection);
+    assert_eq!(revoked_projection["causes"].as_array().unwrap().len(), 2);
+    assert_eq!(nested_cause_lengths(&revoked_projection), [2, 1]);
+
+    let compose_captured_generations = {
+        let left = left.clone();
+        let right = right.clone();
+        let capture_old = capture_old;
+        let capture_revoked = capture_revoked;
+        move || {
+            admitted("ORNA-E-RESIZE-OUTER", "resize closure outer admission")
+                .with_cause(left.clone())
+                .with_cause(right.clone())
+                .with_cause(capture_old())
+                .with_cause(capture_revoked())
+        }
+    };
+    let live_replacement = untrusted("ORNA-E-RESIZE-LIVE", "resized live replacement secret");
+    left.clone_from(&live_replacement);
+    right.clone_from(&live_replacement);
+    assert_eq!(left, live_replacement);
+    assert_eq!(right, live_replacement);
+
+    let outer = compose_captured_generations();
+    assert_eq!(outer, compose_captured_generations());
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["message"], "resize closure outer admission");
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 4);
+    for cause in causes {
+        assert_redacted_tree(cause);
+    }
+    assert_eq!(
+        causes
+            .iter()
+            .map(|cause| {
+                (
+                    cause["causes"].as_array().unwrap().len(),
+                    nested_cause_lengths(cause),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            (2, vec![2, 1]),
+            (1, vec![0]),
+            (2, vec![2, 1]),
+            (2, vec![2, 1]),
+        ]
+    );
+
+    let json = serde_json::to_vec(&outer).unwrap();
+    assert!(
+        json.windows(b"resize closure outer admission".len())
+            .any(|window| window == b"resize closure outer admission")
+    );
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"old resized parent admission".as_slice(),
+            b"old branch A admission".as_slice(),
+            b"old branch A tail one".as_slice(),
+            b"old branch A tail two".as_slice(),
+            b"old branch B admission".as_slice(),
+            b"old branch B tail one".as_slice(),
+            b"short resized parent secret".as_slice(),
+            b"short resized branch secret".as_slice(),
+            b"resized live replacement secret".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+
+    let wire = outer.encode_ovb().unwrap();
+    assert!(
+        wire.windows(b"resize closure outer admission".len())
+            .any(|window| window == b"resize closure outer admission")
+    );
+    for disclosure in [
+        fixture.as_bytes(),
+        b"old resized parent admission".as_slice(),
+        b"old branch A tail one".as_slice(),
+        b"old branch A tail two".as_slice(),
+        b"old branch B tail one".as_slice(),
+    ]
+    .into_iter()
+    .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
+    {
+        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    let decoded_causes = decoded["causes"].as_array().unwrap();
+    assert_eq!(decoded_causes.len(), 4);
+    for cause in decoded_causes {
+        assert_redacted_tree(cause);
+    }
+    assert_eq!(
+        decoded_causes
+            .iter()
+            .map(|cause| {
+                (
+                    cause["causes"].as_array().unwrap().len(),
+                    nested_cause_lengths(cause),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            (2, vec![2, 1]),
+            (1, vec![0]),
+            (2, vec![2, 1]),
+            (2, vec![2, 1]),
+        ]
+    );
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
