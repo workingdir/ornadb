@@ -3130,6 +3130,152 @@ fn synchronous_event_diagnostic_replays_after_watch_closure() {
 }
 
 #[test]
+fn durable_event_diagnostic_status_and_replay_keep_closed_watch_correlation() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = WatchEventApplication {
+        mode: WatchEventMode::Denied,
+        subscriptions: 0,
+    };
+
+    let fixture_eval = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(eval_with_context([1; 16], [36; 16], [2; 16], None)),
+        &mut application,
+    ))
+    .unwrap();
+    assert!(matches!(
+        fixture_eval.response.unwrap().message,
+        Message::Diagnostic { .. }
+    ));
+
+    let subscribed = block_on(host.dispatch_frame(
+        [5; 16],
+        3,
+        Frame::Binary(subscribe_request([35; 16])),
+        &mut application,
+    ))
+    .unwrap();
+    let watch = subscribed
+        .response
+        .and_then(|response| response.watch)
+        .expect("subscription returns its host watch identity");
+    let request = event([1; 16], [37; 16], watch);
+    let request_fingerprint = request_fingerprint(&request, [1; 16]);
+    let first = block_on(host.dispatch_frame(
+        [5; 16],
+        4,
+        Frame::Binary(request.clone()),
+        &mut application,
+    ))
+    .unwrap();
+    let diagnostic = first.response.expect("portable rejection has a response");
+    assert_eq!(diagnostic.request, Some([37; 16]));
+    assert_eq!(diagnostic.watch, Some(watch));
+    assert!(matches!(diagnostic.message, Message::Diagnostic { .. }));
+    let stored = block_on(open_durable_state(&repository).request_status_for_identity(
+        RequestIdentity {
+            session_id: [1; 16],
+            request_id: [37; 16],
+        },
+    ))
+    .unwrap()
+    .unwrap();
+    assert_eq!(stored.state, RequestState::Completed);
+    assert_eq!(
+        Envelope::decode(
+            stored.terminal_outcome.as_ref().unwrap().as_bytes(),
+            Limits::default().protocol,
+        )
+        .unwrap(),
+        diagnostic
+    );
+
+    block_on(host.dispatch_frame(
+        [5; 16],
+        5,
+        Frame::Binary(unsubscribe()),
+        &mut application,
+    ))
+    .unwrap();
+    // The protocol defines terminal status without a Result body for a host
+    // diagnostic, but is quiet about combining that with a closed watch. Keep
+    // status terminal while replaying the original request/watch pair.
+    let status = Envelope {
+        request: Some([38; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [37; 16],
+            fingerprint: request_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let status = block_on(host.dispatch_frame(
+        [5; 16],
+        6,
+        Frame::Binary(status),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("durable rejected request remains queryable");
+    assert!(matches!(
+        status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: None,
+        } if target == [37; 16] && fingerprint == request_fingerprint
+    ));
+
+    let mut issuer = Issuer(2, None);
+    let (replacement, retired) = block_on(host.rotate_and_retire(
+        [1; 16],
+        &origin(),
+        &credential,
+        7,
+        &mut issuer,
+    ))
+    .unwrap();
+    assert_eq!(retired, Some([5; 16]));
+    assert_eq!(
+        block_on(host.resume(ResumeRequest {
+            id: [1; 16],
+            origin: &origin(),
+            credential: &replacement,
+            attachment: [6; 16],
+            now: 8,
+        })),
+        Ok(orna_security_v1::AttachOutcome::Reconnected)
+    );
+
+    let replay = block_on(host.dispatch_frame(
+        [6; 16],
+        9,
+        Frame::Binary(request),
+        &mut application,
+    ))
+    .unwrap();
+    assert_eq!(replay.response, Some(diagnostic));
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn websocket_commit_without_completed_delivery_aborts_candidate_and_preserves_incumbent() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
     let mut issuer = Issuer(1, None);
