@@ -1,0 +1,2 @@
+use contacts;
+pub fn package_value(): Int = 42;
