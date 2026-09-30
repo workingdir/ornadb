@@ -210,6 +210,121 @@ fn semantic_diff_coalesces_only_an_explicit_rekey_intent() {
 }
 
 #[test]
+fn semantic_diff_keeps_row_identity_through_a_rekey_tail_with_an_update() {
+    let base = SemanticSnapshot::new(
+        catalogue(1, false),
+        [KeyedRow::new(TABLE, &integer(7), &text("before")).unwrap()],
+        [],
+        [],
+        None,
+    )
+    .unwrap();
+    let candidate = SemanticSnapshot::new(
+        catalogue(1, false),
+        [KeyedRow::new(TABLE, &integer(9), &text("after")).unwrap()],
+        [],
+        [],
+        None,
+    )
+    .unwrap()
+    .with_rekeys([
+        RowRekey::new(TABLE, &integer(7), &integer(8)).unwrap(),
+        RowRekey::new(TABLE, &integer(8), &integer(9)).unwrap(),
+    ])
+    .unwrap();
+
+    let report = semantic_snapshot_diff(&base, &candidate);
+
+    assert_eq!(report.rows().len(), 1);
+    assert_eq!(report.rows()[0].kind(), RowChangeKind::Rekeyed);
+    assert_eq!(report.rows()[0].previous_key_bytes(), Some(integer(7).encode().unwrap().as_slice()));
+    assert_eq!(report.rows()[0].key_bytes(), integer(9).encode().unwrap());
+}
+
+#[test]
+fn semantic_diff_uses_activation_order_when_a_rekeyed_key_is_reused() {
+    let base = SemanticSnapshot::new(
+        catalogue(1, false),
+        [
+            KeyedRow::new(TABLE, &integer(1), &text("first identity")).unwrap(),
+            KeyedRow::new(TABLE, &integer(2), &text("second identity")).unwrap(),
+        ],
+        [],
+        [],
+        None,
+    )
+    .unwrap();
+    let candidate = SemanticSnapshot::new(
+        catalogue(1, false),
+        [
+            KeyedRow::new(TABLE, &integer(2), &text("first identity")).unwrap(),
+            KeyedRow::new(TABLE, &integer(3), &text("second identity")).unwrap(),
+        ],
+        [],
+        [],
+        None,
+    )
+    .unwrap()
+    // The first move frees key 2; only then can the first row claim it.
+    .with_rekeys([
+        RowRekey::new(TABLE, &integer(2), &integer(3)).unwrap(),
+        RowRekey::new(TABLE, &integer(1), &integer(2)).unwrap(),
+    ])
+    .unwrap();
+
+    let report = semantic_snapshot_diff(&base, &candidate);
+
+    assert_eq!(report.rows().len(), 2);
+    assert!(report.rows().iter().all(|row| row.kind() == RowChangeKind::Rekeyed));
+    assert_eq!(report.rows()[0].previous_key_bytes(), Some(integer(1).encode().unwrap().as_slice()));
+    assert_eq!(report.rows()[0].key_bytes(), integer(2).encode().unwrap());
+    assert_eq!(report.rows()[1].previous_key_bytes(), Some(integer(2).encode().unwrap().as_slice()));
+    assert_eq!(report.rows()[1].key_bytes(), integer(3).encode().unwrap());
+}
+
+#[test]
+fn semantic_diff_tracks_rekey_identity_when_a_freed_destination_is_reused_again() {
+    let base = SemanticSnapshot::new(
+        catalogue(1, false),
+        [
+            KeyedRow::new(TABLE, &integer(1), &text("first identity")).unwrap(),
+            KeyedRow::new(TABLE, &integer(4), &text("second identity")).unwrap(),
+        ],
+        [],
+        [],
+        None,
+    )
+    .unwrap();
+    let candidate = SemanticSnapshot::new(
+        catalogue(1, false),
+        [
+            KeyedRow::new(TABLE, &integer(2), &text("second identity")).unwrap(),
+            KeyedRow::new(TABLE, &integer(3), &text("first identity")).unwrap(),
+        ],
+        [],
+        [],
+        None,
+    )
+    .unwrap()
+    .with_rekeys([
+        RowRekey::new(TABLE, &integer(1), &integer(2)).unwrap(),
+        RowRekey::new(TABLE, &integer(2), &integer(3)).unwrap(),
+        RowRekey::new(TABLE, &integer(4), &integer(2)).unwrap(),
+    ])
+    .unwrap();
+
+    let report = semantic_snapshot_diff(&base, &candidate);
+
+    assert_eq!(report.rows().len(), 2);
+    assert_eq!(report.rows()[0].kind(), RowChangeKind::Rekeyed);
+    assert_eq!(report.rows()[0].previous_key_bytes(), Some(integer(4).encode().unwrap().as_slice()));
+    assert_eq!(report.rows()[0].key_bytes(), integer(2).encode().unwrap());
+    assert_eq!(report.rows()[1].kind(), RowChangeKind::Rekeyed);
+    assert_eq!(report.rows()[1].previous_key_bytes(), Some(integer(1).encode().unwrap().as_slice()));
+    assert_eq!(report.rows()[1].key_bytes(), integer(3).encode().unwrap());
+}
+
+#[test]
 fn compact_generation_advance_without_logical_changes_is_physical_only() {
     let base = SemanticSnapshot::new(
         catalogue(1, false),

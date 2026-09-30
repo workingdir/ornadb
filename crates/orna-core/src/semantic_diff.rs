@@ -216,7 +216,10 @@ pub struct SemanticSnapshot {
     results: BTreeMap<(FunctionId, [u8; 32]), [u8; 32]>,
     dependencies: BTreeSet<DependencyEdge>,
     compact_storage: Option<CompactStorageObservation>,
-    rekeys: BTreeSet<RowRekey>,
+    // Re-key intents are an ordered activation log. Keeping source order is
+    // necessary when a freed key is reused by a different row in that same
+    // activation.
+    rekeys: Vec<RowRekey>,
 }
 
 impl SemanticSnapshot {
@@ -254,7 +257,7 @@ impl SemanticSnapshot {
             results: result_map,
             dependencies,
             compact_storage,
-            rekeys: BTreeSet::new(),
+            rekeys: Vec::new(),
         })
     }
 
@@ -264,13 +267,7 @@ impl SemanticSnapshot {
         rekeys: impl IntoIterator<Item = RowRekey>,
     ) -> Result<Self, SemanticSnapshotError> {
         for rekey in rekeys {
-            if self.rekeys.iter().any(|existing| {
-                existing.table == rekey.table
-                    && (existing.old_key == rekey.old_key || existing.new_key == rekey.new_key)
-            }) || !self.rekeys.insert(rekey)
-            {
-                return Err(SemanticSnapshotError::DuplicateRekey);
-            }
+            self.rekeys.push(rekey);
         }
         Ok(self)
     }
@@ -517,27 +514,42 @@ pub fn semantic_snapshot_diff(
 fn diff_rows(
     base: &BTreeMap<(TypeId, Vec<u8>), [u8; 32]>,
     candidate: &BTreeMap<(TypeId, Vec<u8>), [u8; 32]>,
-    rekeys: &BTreeSet<RowRekey>,
+    rekeys: &[RowRekey],
 ) -> Vec<RowChange> {
-    let mut consumed = BTreeSet::new();
-    let mut changes = Vec::new();
+    // Carry each base row's stable identity through the ordered activation
+    // log. A key can be reused only after its previous row has moved, so an
+    // unordered edge graph would incorrectly collapse e.g. 2→3, then 1→2.
+    let mut current_identity = base
+        .keys()
+        .cloned()
+        .map(|identity| (identity.clone(), identity))
+        .collect::<BTreeMap<_, _>>();
     for rekey in rekeys {
         let old = (rekey.table, rekey.old_key.clone());
         let new = (rekey.table, rekey.new_key.clone());
-        // Only honor explicit intent when it exactly explains an old-row
-        // removal and a new-row addition. Invalid or stale intent stays a
-        // conservative ordinary add/remove diff.
-        if base.contains_key(&old)
-            && !candidate.contains_key(&old)
-            && !base.contains_key(&new)
-            && candidate.contains_key(&new)
-        {
-            consumed.insert(old);
-            consumed.insert(new.clone());
+        if current_identity.contains_key(&new) {
+            // A stale or invalid intent cannot displace another live row.
+            // The ordinary keyed diff below remains the conservative result.
+            continue;
+        }
+        if let Some(origin) = current_identity.remove(&old) {
+            current_identity.insert(new, origin);
+        }
+    }
+
+    let mut consumed = BTreeSet::new();
+    let mut changes = Vec::new();
+    for (current, origin) in current_identity {
+        if origin != current && candidate.contains_key(&current) {
+            // The activation ledger is explicit evidence of continuity, even
+            // when an earlier move frees a key that another row then occupies.
+            // A terminal delete has no candidate row and stays a removal.
+            consumed.insert(origin.clone());
+            consumed.insert(current.clone());
             changes.push(RowChange {
-                table: rekey.table,
-                key: rekey.new_key.clone(),
-                previous_key: Some(rekey.old_key.clone()),
+                table: current.0,
+                key: current.1,
+                previous_key: Some(origin.1),
                 kind: RowChangeKind::Rekeyed,
             });
         }
