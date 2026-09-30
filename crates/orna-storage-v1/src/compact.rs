@@ -440,6 +440,11 @@ impl CompactBaseState {
         self.schema_fingerprint
     }
 
+    /// Returns the exact generation a subsequent compact publication must use.
+    pub const fn next_generation(&self) -> u64 {
+        self.next_generation
+    }
+
     pub fn rows(&self) -> impl Iterator<Item = &CompactBaseRow> {
         self.rows.values()
     }
@@ -3598,6 +3603,64 @@ mod tests {
                 }],
             ),
             Err(CompactBaseProjectionError::DuplicateHybridKey)
+        );
+    }
+
+    #[test]
+    fn storage_rewrite_to_editable_encodes_portable_rows_before_publication() {
+        const EDITABLE_ROW: &str = include_str!("../tests/fixtures/storage-placement-row.orna");
+        let profile = profile_for_table(TABLE);
+        let key_value = CanonicalValue::decode(&scalar_key(17)).unwrap();
+        let key = profile.decode_key(&scalar_key(17)).unwrap();
+        let compact = CompactBaseState {
+            table_id: profile.table_id(),
+            schema_fingerprint: profile.schema_fingerprint(),
+            next_generation: 8,
+            rows: BTreeMap::from([(
+                key,
+                CompactBaseRow {
+                    key: key_value.clone(),
+                    value: Some(row_value(17)),
+                    generation: 7,
+                    role: CompactSegmentRole::Data,
+                },
+            )]),
+        };
+        let hybrid = HybridBaseState::new(&profile, compact, []).unwrap();
+        let plan = crate::plan_storage_rewrite(
+            &profile,
+            &hybrid,
+            crate::StorageRewriteTarget::Editable,
+            |_| {
+                crate::LoosePath::for_key("Records", &["17".to_owned()])
+                    .map_err(|_| crate::StorageRewriteError::UnrepresentablePath)
+            },
+            |_, _| Ok(EDITABLE_ROW.as_bytes().to_vec()),
+            |bytes| {
+                assert_eq!(bytes, EDITABLE_ROW.as_bytes());
+                Ok((scalar_key(17), row_value(17).encode().unwrap()))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(plan.from(), crate::StorageProfile::Compact);
+        assert_eq!(plan.to(), crate::StorageRewriteTarget::Editable);
+        assert_eq!(plan.previous_generation(), 7);
+        assert_eq!(plan.generation(), 8);
+        assert_eq!(plan.rows().len(), 1);
+        assert_eq!(plan.rows()[0].source(), crate::PhysicalPlacement::Compact);
+        assert_eq!(plan.rows()[0].destination(), crate::PhysicalPlacement::Editable);
+        assert!(plan.rows()[0].editable_path().is_some());
+        assert_eq!(plan.rows()[0].editable_bytes(), Some(EDITABLE_ROW.as_bytes()));
+        let output = plan
+            .rows()
+            .iter()
+            .map(|row| (row.key().to_vec(), row.canonical_value().to_vec()));
+        assert_eq!(
+            plan.verify_candidate(&profile, output)
+                .unwrap()
+                .semantic_diff_entries(),
+            0
         );
     }
 }

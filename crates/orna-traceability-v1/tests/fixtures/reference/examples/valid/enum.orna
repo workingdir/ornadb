@@ -1,0 +1,10 @@
+pub enum SyncResult {
+    ok { count: Int },
+    failed { reason: Str, retryable: Bool },
+}
+
+pub fn count(result: SyncResult): Int =
+    case result {
+        SyncResult.ok { count }: count,
+        SyncResult.failed { reason: _, retryable: _ }: 0,
+    };

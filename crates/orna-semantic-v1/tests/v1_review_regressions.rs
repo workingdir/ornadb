@@ -1452,6 +1452,7 @@ fn historical_snapshot_projects_nested_authority_module_roots() {
             public: true,
             effects: EffectSummary::default(),
             generic_parameters: Vec::new(),
+            enum_variants: BTreeSet::new(),
             table_schema: None,
         },
     )]);

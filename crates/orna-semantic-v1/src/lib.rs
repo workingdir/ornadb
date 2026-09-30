@@ -10,6 +10,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
+use orna_value_v1::{Decimal, path_decode_key_components};
 use orna_syntax_v1::{
     AssignmentOperator, AssignmentTarget, ControlKind, Declaration, Expr, FieldInitializer, Item,
     LambdaParameter, LiteralKind, Pattern, ProtocolMember, SyntaxSpan, Statement,
@@ -387,6 +388,8 @@ pub struct Symbol {
     pub public: bool,
     pub effects: EffectSummary,
     pub generic_parameters: Vec<GenericParameterMetadata>,
+    /// Closed enum variants retained for schema-directed key reconstruction.
+    pub enum_variants: BTreeSet<String>,
     /// Declaration-backed write admission, retained through module exports.
     /// None means the caller supplied no field-admission metadata.
     pub table_schema: Option<TableSchema>,
@@ -1262,6 +1265,7 @@ where
                     public: true,
                     effects,
                     generic_parameters: Vec::new(),
+                    enum_variants: BTreeSet::new(),
                     ty,
                 },
             )
@@ -1332,6 +1336,7 @@ fn fixture_symbol(kind: SymbolKind, ty: Type) -> Symbol {
         public: true,
         effects: EffectSummary::default(),
         generic_parameters: Vec::new(),
+        enum_variants: BTreeSet::new(),
     }
 }
 
@@ -1569,12 +1574,18 @@ pub fn admit_row_unit(
         ));
         return result;
     };
-    if decoded_key.len() != admission.keys.len()
-        || admission
-            .keys
+    let Some(key_types) = row_key_component_types(admission, analysis) else {
+        result.diagnostics.push(diag(
+            DIAG_TYPE,
+            "project row key path does not match the declared key schema",
+        ));
+        return result;
+    };
+    if decoded_key.len() != key_types.len()
+        || key_types
             .iter()
             .zip(&decoded_key)
-            .any(|((_, ty), value)| !row_key_matches_type(value, ty))
+            .any(|(ty, value)| !row_key_matches_type(value, ty, analysis))
     {
         result.diagnostics.push(diag(
             DIAG_TYPE,
@@ -1980,6 +1991,7 @@ fn collect_header(
                     public,
                     effects: EffectSummary::default(),
                     generic_parameters: declared_generic_parameters(item),
+                    enum_variants: declared_enum_variants(item),
                 },
             )
             .is_some()
@@ -2120,6 +2132,16 @@ fn declared_symbol(item: &Item) -> Option<(String, SymbolKind, Type)> {
         _ => None,
     }
 }
+
+fn declared_enum_variants(item: &Item) -> BTreeSet<String> {
+    let Declaration::Enum { variants, .. } = &item.declaration else {
+        return BTreeSet::new();
+    };
+    variants
+        .iter()
+        .map(|variant| variant.name.clone())
+        .collect()
+}
 fn type_of(ty: &TypeExpr) -> Type {
     match ty {
         TypeExpr::Name {
@@ -2130,6 +2152,13 @@ fn type_of(ty: &TypeExpr) -> Type {
         TypeExpr::Name {
             path, arguments, ..
         } if path.as_slice() == ["Relation"] && arguments.len() == 1 => {
+            Type::Relation(Box::new(type_of(&arguments[0])))
+        }
+        TypeExpr::Name {
+            path, arguments, ..
+        } if path.as_slice() == ["Query"] && arguments.len() == 1 => {
+            // Query<T> is the read-only planner handle for the same typed row
+            // stream represented by Relation<T> in the current evaluator.
             Type::Relation(Box::new(type_of(&arguments[0])))
         }
         TypeExpr::Name {
@@ -2903,6 +2932,7 @@ fn resolve_imports_with_dependencies(
                 public: true,
                 effects: EffectSummary::default(),
                 generic_parameters: Vec::new(),
+                enum_variants: BTreeSet::new(),
             };
             match tail {
                 UseTail::None => {
@@ -2957,6 +2987,7 @@ fn resolve_imports_with_dependencies(
                         public: true,
                         effects: EffectSummary::default(),
                         generic_parameters: Vec::new(),
+                        enum_variants: BTreeSet::new(),
                     },
                     diagnostics,
                 );
@@ -2999,6 +3030,7 @@ fn resolve_imports_with_dependencies(
                         public: true,
                         effects: EffectSummary::default(),
                         generic_parameters: Vec::new(),
+                        enum_variants: BTreeSet::new(),
                     },
                     diagnostics,
                 );
@@ -3487,41 +3519,68 @@ fn check_item(
             }
             let mut key_names = BTreeSet::new();
             for key in keys {
-                if let Pattern::Name(key_name, _) = &key.pattern
-                    && !key_names.insert(key_name)
-                {
-                    diagnostics.push(diag(DIAG_DUPLICATE, "duplicate primary-key field"));
+                match &key.pattern {
+                    Pattern::Name(key_name, _) => {
+                        if !key_names.insert(key_name.clone()) {
+                            diagnostics.push(diag(DIAG_DUPLICATE, "duplicate primary-key field"));
+                        }
+                    }
+                    // Key paths are reconstructed as an ordered list of named
+                    // columns, so destructuring patterns have no stable schema
+                    // surface here.
+                    _ => diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "primary-key fields must have simple names",
+                    )),
                 }
                 if let Some(annotation) = &key.annotation {
                     validate_type_annotation(annotation, scope, &BTreeSet::new(), diagnostics);
+                } else {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "primary-key fields must declare a type",
+                    ));
                 }
                 let ty = key
                     .annotation
                     .as_ref()
                     .map(|annotation| resolved_type_of(annotation, scope))
                     .unwrap_or(Type::Error);
-                let is_range = matches!(&ty, Type::Range(_))
-                    || matches!(&ty, Type::Applied { base, .. } if base == "Range");
-                let is_float = matches!(&ty, Type::Float)
-                    || matches!(&ty, Type::Applied { base, .. } if base == "Float");
-                let is_payload_enum = match &ty {
-                    Type::Named(name) => scope.payload_enum_types.contains(name),
-                    _ => false,
-                };
-                if is_range || is_float || is_payload_enum {
-                    let message = if is_range {
-                        "Range<T> is not a primary-key type in version 1.0"
-                    } else if is_payload_enum {
-                        "payload-bearing enums cannot be primary-key types"
-                    } else {
-                        "Float is not a valid primary-key type"
-                    };
+                if let Some(message) = primary_key_type_error(&ty, scope, &mut BTreeSet::new()) {
                     diagnostics.push(diag(DIAG_TYPE, message));
+                }
+            }
+            // Keep the catalogue's key encoding types transparent through
+            // local aliases; path admission has no source Scope to consult.
+            if let Some(schema) = symbols
+                .get_mut(name)
+                .and_then(|symbol| symbol.table_schema.as_mut())
+            {
+                for key in keys {
+                    let (Pattern::Name(key_name, _), Some(annotation)) =
+                        (&key.pattern, &key.annotation)
+                    else {
+                        continue;
+                    };
+                    let resolved = resolved_type_of(annotation, scope);
+                    schema.fields.insert(key_name.clone(), resolved.clone());
+                    if let Some((_, key_type)) = schema
+                        .admission
+                        .as_mut()
+                        .and_then(|admission| {
+                            admission
+                                .keys
+                                .iter_mut()
+                                .find(|(field, _)| field == key_name)
+                        })
+                    {
+                        *key_type = resolved;
+                    }
                 }
             }
             let row = table_row_type(item);
             let target = Type::Named(name.clone());
-            let row_locals = match &row {
+            let mut row_locals = match &row {
                 Type::Record(fields) => fields
                     .iter()
                     .map(|(field, ty)| {
@@ -3534,12 +3593,67 @@ fn check_item(
                                 public: false,
                                 effects: EffectSummary::default(),
                                 generic_parameters: Vec::new(),
+                                enum_variants: BTreeSet::new(),
                             },
                         )
                     })
                     .collect(),
                 _ => BTreeMap::new(),
             };
+            if matches!(&row, Type::Record(_)) {
+                if keys.is_empty()
+                    && members.iter().any(|member| {
+                        matches!(member, orna_syntax_v1::TableMember::Field { name, .. } if name == "id")
+                    })
+                {
+                    // `id` is already the implicit logical key, so choosing a
+                    // body field of the same name would make row identity
+                    // depend on declaration order.
+                    diagnostics.push(diag(
+                        DIAG_DUPLICATE,
+                        "automatic primary-key field `id` conflicts with a declared field",
+                    ));
+                }
+                let mut declared_fields = key_names.clone();
+                if keys.is_empty() {
+                    declared_fields.insert("id".to_owned());
+                }
+                for member in members {
+                    if let orna_syntax_v1::TableMember::Field { name, .. } = member
+                        && !declared_fields.insert(name.clone())
+                    {
+                        diagnostics.push(diag(
+                            DIAG_DUPLICATE,
+                            "table field conflicts with another field or primary key",
+                        ));
+                    }
+                }
+            }
+            // `self` is the complete prospective row inside key defaults and
+            // row-local field expressions. The table row shape already
+            // includes key columns and the implicit `id` where applicable.
+            if let Type::Record(fields) = &row {
+                row_locals.insert(
+                    "self".into(),
+                    Symbol {
+                        table_schema: None,
+                        kind: SymbolKind::Let,
+                        ty: Type::Record(fields.clone()),
+                        public: false,
+                        effects: EffectSummary::default(),
+                        generic_parameters: Vec::new(),
+                        enum_variants: BTreeSet::new(),
+                    },
+                );
+            }
+            for key in keys {
+                let (Some(annotation), Some(default)) = (&key.annotation, &key.default) else {
+                    continue;
+                };
+                let expected = resolved_type_of(annotation, scope);
+                let inferred = infer_contextual(default, &expected, scope, &row_locals, diagnostics);
+                require_same(&expected, &inferred.ty, diagnostics);
+            }
             validate_non_overlapping_implementations(
                 members.iter().filter_map(|member| match member {
                     orna_syntax_v1::TableMember::Implementation { implementation, .. } => {
@@ -3692,6 +3806,7 @@ fn check_item(
                         public: false,
                         effects: EffectSummary::default(),
                         generic_parameters: Vec::new(),
+                        enum_variants: BTreeSet::new(),
                     },
                 );
             }
@@ -4148,7 +4263,7 @@ fn static_type_is_known(ty: &Type, scope: &Scope) -> bool {
         Type::Applied { base, arguments } => {
             (matches!(
                 base.as_str(),
-                "List" | "Range" | "Relation" | "Stream" | "Money" | "Float" | "Decimal"
+                "List" | "Range" | "Relation" | "Query" | "Stream" | "Money" | "Float" | "Decimal"
             ) || system_api::embedded_system_api().describes_type(base))
                 && arguments
                     .iter()
@@ -5024,6 +5139,7 @@ fn implementation_has_write(
                             public: false,
                             effects: EffectSummary::default(),
                             generic_parameters: Vec::new(),
+                            enum_variants: BTreeSet::new(),
                         },
                     )),
                     _ => None,
@@ -5375,7 +5491,7 @@ fn annotation_type_name_is_declared(
             || system_api::embedded_system_api().describes_type(last)
             || matches!(
                 last.as_str(),
-                "List" | "Range" | "Relation" | "Stream" | "Money" | "Locale"
+                "List" | "Range" | "Relation" | "Query" | "Stream" | "Money" | "Locale"
             )
             || scope.names.get(last).is_some_and(|symbol| {
                 matches!(
@@ -6590,6 +6706,7 @@ fn insert_local_binding(
             public: false,
             effects: EffectSummary::default(),
             generic_parameters: Vec::new(),
+            enum_variants: BTreeSet::new(),
         },
     );
 }
@@ -11124,6 +11241,31 @@ fn infer_success_pipeline(
     if let Expr::Call {
         callee, arguments, ..
     } = rhs
+        && qualified_path(callee).as_deref() == Some(["sys", "explain"].as_slice())
+    {
+        let functions = system_api::embedded_system_api()
+            .function("sys.explain")
+            .expect("descriptor-driven sys.explain path has a descriptor");
+        let stage = infer_query_explain_system_call(
+            functions,
+            arguments,
+            None,
+            Some(&input.ty),
+            scope,
+            local,
+            diagnostics,
+        )
+        .expect("sys.explain has a query-plan overload");
+        let mut effects = input.effects;
+        effects.join(&stage.effects);
+        return Inferred {
+            ty: stage.ty,
+            effects,
+        };
+    }
+    if let Expr::Call {
+        callee, arguments, ..
+    } = rhs
         && qualified_path(callee).as_deref() == Some(["sys", "cancel"].as_slice())
     {
         let functions = system_api::embedded_system_api()
@@ -12214,7 +12356,8 @@ fn infer_generic_pipeline_stage(
             effects,
         };
     };
-    if path == ["sys", "meta"]
+    if path == ["sys", "explain"]
+        || path == ["sys", "meta"]
         || path == ["sys", "await"]
         || path == ["sys", "cancel"]
         || path == ["sys", "invoke"]
@@ -13025,6 +13168,9 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
     }
     match (expected, actual) {
         (Type::Optional(_), Type::Null) => true,
+        // Optional parameters accept their non-null payload directly; callers
+        // do not need to wrap ordinary values in a nullable constructor.
+        (Type::Optional(expected), actual) => types_match(expected, actual),
         (
             Type::Applied {
                 base: expected_base,
@@ -13432,6 +13578,19 @@ fn infer_descriptor_system_call(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Inferred> {
     let functions = system_api::embedded_system_api().function(&path.join("."))?;
+    if path == ["sys", "explain"] {
+        if let Some(explained) = infer_query_explain_system_call(
+            functions,
+            arguments,
+            type_arguments,
+            None,
+            scope,
+            local,
+            diagnostics,
+        ) {
+            return Some(explained);
+        }
+    }
     if path == ["sys", "meta"] {
         return Some(infer_meta_system_call(
             functions,
@@ -14131,6 +14290,13 @@ fn substitute_generic_descriptor_type(
             .get(name)
             .cloned()
             .or_else(|| Some(descriptor_type(ty))),
+        system_api::SystemType::Applied { base, arguments } if base == "Query" => {
+            let element = arguments.first()?;
+            Some(Type::Relation(Box::new(substitute_generic_descriptor_type(
+                element,
+                substitutions,
+            )?)))
+        }
         system_api::SystemType::Applied { base, arguments } => Some(Type::Applied {
             base: base.clone(),
             arguments: arguments
@@ -14145,6 +14311,203 @@ fn substitute_generic_descriptor_type(
             substitute_generic_descriptor_type(element, substitutions)?,
         ))),
     }
+}
+
+/// `sys.explain(Query<T>)` is the generic planner overload. The v1 evaluator
+/// currently represents a typed query handle as `Relation<T>`, so the
+/// semantic layer specializes this descriptor without exposing a second
+/// runtime type. The actual planner adapter still resolves the query against
+/// the pinned catalogue snapshot.
+fn infer_query_explain_system_call(
+    functions: &[system_api::FunctionDescriptor],
+    arguments: &[orna_syntax_v1::Argument],
+    type_arguments: Option<&[TypeExpr]>,
+    input: Option<&Type>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let query_descriptor = functions.iter().find(|function| {
+        let [parameter] = function.parameters.as_slice() else {
+            return false;
+        };
+        if function.type_parameters.len() != 1 {
+            return false;
+        }
+        let generic = function
+            .type_parameters
+            .iter()
+            .next()
+            .expect("one type parameter was checked above");
+        function.name == "sys.explain"
+            && function.label == "sys.explain(Query)"
+            && function.effect == system_api::SystemEffect::Read
+            && parameter.name == "query"
+            && !parameter.has_default
+            && parameter.ty
+                == system_api::SystemType::Applied {
+                    base: "Query".into(),
+                    arguments: vec![system_api::SystemType::Named(generic.clone())],
+                }
+            && function.result == system_api::SystemType::Named("sys.Plan".into())
+    })?;
+
+    let has_input = input.is_some();
+    let mut effects = EffectSummary::default();
+    let mut values = Vec::with_capacity(arguments.len() + usize::from(has_input));
+    if let Some(input) = input {
+        values.push(input.clone());
+    }
+    for argument in arguments {
+        let value = infer(&argument.value, scope, local, diagnostics);
+        effects.join(&value.effects);
+        values.push(value.ty);
+    }
+
+    let query_shape = if has_input {
+        arguments.is_empty()
+    } else {
+        arguments.len() == 1
+            && arguments[0]
+                .name
+                .as_deref()
+                .is_none_or(|name| name == "query")
+    };
+    let generic_requested = type_arguments.is_some_and(|arguments| !arguments.is_empty());
+    let query_named = arguments
+        .iter()
+        .any(|argument| argument.name.as_deref() == Some("query"));
+    let query_value = values.first();
+    let is_query = query_value.is_some_and(|ty| match ty {
+        Type::Relation(_) => true,
+        Type::Applied { base, .. } => base == "Query",
+        _ => false,
+    });
+    let wants_query = query_shape && (query_named || is_query || generic_requested);
+
+    if wants_query {
+        effects.join(&descriptor_effects(query_descriptor.effect));
+        if query_value.is_some_and(|ty| matches!(ty, Type::Error)) {
+            return Some(Inferred {
+                ty: Type::Error,
+                effects,
+            });
+        }
+        let query_element = match query_value.expect("query shape contains a value") {
+            Type::Relation(element) => element.as_ref(),
+            Type::Applied { base, arguments } if base == "Query" => {
+                let Some(element) = arguments.first() else {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "sys.explain(Query) requires a typed query value",
+                    ));
+                    return Some(Inferred {
+                        ty: Type::Error,
+                        effects,
+                    });
+                };
+                element
+            }
+            _ => {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "sys.explain(Query) requires a typed query value",
+                ));
+                return Some(Inferred {
+                    ty: Type::Error,
+                    effects,
+                });
+            }
+        };
+
+        if let Some(type_arguments) = type_arguments.filter(|arguments| !arguments.is_empty()) {
+            let explicit = type_arguments
+                .iter()
+                .map(|argument| valid_static_type(argument, scope))
+                .collect::<Option<Vec<_>>>();
+            let Some([explicit]) = explicit.as_deref() else {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "sys.explain requires exactly one valid explicit query element type",
+                ));
+                return Some(Inferred {
+                    ty: Type::Error,
+                    effects,
+                });
+            };
+            if !types_match(explicit, query_element) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "sys.explain explicit query element type must match the query value",
+                ));
+                return Some(Inferred {
+                    ty: Type::Error,
+                    effects,
+                });
+            }
+        }
+
+        let generic = query_descriptor
+            .type_parameters
+            .iter()
+            .next()
+            .expect("validated query descriptor has one type parameter");
+        let substitutions = BTreeMap::from([(generic.clone(), query_element.clone())]);
+        return Some(Inferred {
+            ty: substitute_generic_descriptor_type(&query_descriptor.result, &substitutions)
+                .unwrap_or(Type::Error),
+            effects,
+        });
+    }
+
+    if values.iter().any(|ty| matches!(ty, Type::Error)) {
+        return Some(Inferred {
+            ty: Type::Error,
+            effects,
+        });
+    }
+
+    if has_input {
+        if arguments.is_empty()
+            && let Some(function) = functions.iter().find(|function| {
+                function.name == "sys.explain"
+                    && function.label != "sys.explain(Query)"
+                    && function.type_parameters.is_empty()
+                    && function.parameters.len() == 1
+                    && types_match(&descriptor_type(&function.parameters[0].ty), &values[0])
+            })
+        {
+            effects.join(&descriptor_effects(function.effect));
+            return Some(Inferred {
+                ty: descriptor_type(&function.result),
+                effects,
+            });
+        }
+    } else if type_arguments.is_none() {
+        if let Some(function) = functions
+            .iter()
+            .filter(|function| {
+                function.name == "sys.explain"
+                    && descriptor_function_is_staticly_supported(function)
+            })
+            .find(|function| descriptor_arguments_match(function, arguments, &values))
+        {
+            effects.join(&descriptor_effects(function.effect));
+            return Some(Inferred {
+                ty: descriptor_type(&function.result),
+                effects,
+            });
+        }
+    }
+
+    diagnostics.push(diag(
+        DIAG_TYPE,
+        "arguments do not match a portable sys.explain overload",
+    ));
+    Some(Inferred {
+        ty: Type::Error,
+        effects,
+    })
 }
 
 /// `sys.meta<T>` is the one generic system operation whose type parameter is
@@ -14259,6 +14622,15 @@ fn infer_descriptor_system_call_with_input(
 ) -> Option<Inferred> {
     let functions = system_api::embedded_system_api().function(&path.join("."))?;
     match path {
+        ["sys", "explain"] => infer_query_explain_system_call(
+            functions,
+            arguments,
+            (!type_arguments.is_empty()).then_some(type_arguments),
+            Some(input),
+            scope,
+            local,
+            diagnostics,
+        ),
         ["sys", "meta"] => Some(infer_meta_system_call(
             functions,
             arguments,
@@ -14762,7 +15134,9 @@ fn descriptor_type(ty: &system_api::SystemType) -> Type {
             "Duration" => Type::Named("std.DURATION".into()),
             other => Type::Named(other.into()),
         },
-        system_api::SystemType::Applied { base, arguments } if base == "Relation" => {
+        system_api::SystemType::Applied { base, arguments }
+            if matches!(base.as_str(), "Relation" | "Query") =>
+        {
             Type::Relation(Box::new(
                 arguments
                     .first()
@@ -15793,6 +16167,12 @@ fn table_row_type(item: &Item) -> Type {
         unreachable!("table row type requested for a non-table declaration");
     };
     let mut fields = BTreeMap::new();
+    if keys.is_empty() {
+        // Automatic IDs are real logical row fields even though insertion
+        // allocates them. This keeps selection and catalogue schema shape in
+        // sync with the implicit primary key.
+        fields.insert("id".into(), Type::Int);
+    }
     for key in keys {
         if let Pattern::Name(name, _) = &key.pattern {
             fields.insert(
@@ -15807,6 +16187,92 @@ fn table_row_type(item: &Item) -> Type {
         }
     }
     Type::Record(fields)
+}
+
+fn primary_key_type_error(
+    ty: &Type,
+    scope: &Scope,
+    visiting_tables: &mut BTreeSet<String>,
+) -> Option<&'static str> {
+    let resolved = resolve_type_aliases(ty, &scope.type_aliases, &mut BTreeSet::new());
+    if &resolved != ty {
+        return primary_key_type_error(&resolved, scope, visiting_tables);
+    }
+    match ty {
+        Type::Int | Type::Decimal | Type::Date | Type::Instant | Type::Text | Type::Bool => None,
+        Type::Tuple(elements) if elements.is_empty() => {
+            Some("Unit is not a primary-key type in version 1.0")
+        }
+        Type::Tuple(elements) => elements
+            .iter()
+            .find_map(|element| primary_key_type_error(element, scope, visiting_tables)),
+        Type::Named(name) if matches!(name.as_str(), "Uuid" | "UUID" | "std.UUID") => None,
+        Type::Named(name) if scope.payload_enum_types.contains(name) => {
+            Some("payload-bearing enums cannot be primary-key types")
+        }
+        Type::Named(name) => {
+            let symbol = scope_named_symbol(name, scope);
+            match symbol {
+                Some(symbol) if symbol.kind == SymbolKind::Enum => None,
+                Some(symbol) if symbol.kind == SymbolKind::Table => {
+                    if !visiting_tables.insert(name.clone()) {
+                        return Some("table reference key type is recursively defined");
+                    }
+                    let result = match symbol
+                        .table_schema
+                        .as_ref()
+                        .and_then(|schema| schema.admission.as_ref())
+                    {
+                        Some(admission) => {
+                            if admission.keys.is_empty() {
+                                Some("table reference has no canonical primary key")
+                            } else {
+                                admission.keys.iter().find_map(|(_, key_type)| {
+                                    primary_key_type_error(key_type, scope, visiting_tables)
+                                })
+                            }
+                        }
+                        None => Some("table reference has no canonical primary key"),
+                    };
+                    visiting_tables.remove(name);
+                    result
+                }
+                _ => Some("type has no canonical primary-key encoding"),
+            }
+        }
+        Type::Float => {
+            Some("Float is not a valid primary-key type")
+        }
+        Type::Applied { base, .. } if base == "Float" => {
+            Some("Float is not a valid primary-key type")
+        }
+        Type::Range(_) => Some("Range<T> is not a primary-key type in version 1.0"),
+        Type::Applied { base, .. } if base == "Range" => {
+            Some("Range<T> is not a primary-key type in version 1.0")
+        }
+        Type::Error => None,
+        _ => Some("type has no canonical primary-key encoding"),
+    }
+}
+
+fn scope_named_symbol<'a>(name: &str, scope: &'a Scope) -> Option<&'a Symbol> {
+    if let Some(symbol) = scope.names.get(name) {
+        return Some(symbol);
+    }
+    if let Some((module_alias, member)) = name.split_once('.')
+        && let Some(namespace) = scope.modules.get(module_alias)
+    {
+        return scope
+            .available_modules
+            .get(namespace)
+            .and_then(|module| module.symbols.get(member));
+    }
+    let mut matches = scope
+        .names
+        .values()
+        .filter(|symbol| symbol.ty == Type::Named(name.to_owned()));
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
 }
 
 fn nominal_row_type(item: &Item) -> Option<(String, Type)> {
@@ -16269,123 +16735,109 @@ fn valid_row_component(component: &str) -> bool {
 }
 
 fn decode_row_key_path(components: &[String]) -> Option<Vec<String>> {
-    let last = components.last()?;
-    let stem = last.strip_suffix(".orna")?;
-    if stem.is_empty() {
-        return None;
+    path_decode_key_components(components).ok()
+}
+
+fn row_key_component_types(admission: &TableAdmission, analysis: &Analysis) -> Option<Vec<Type>> {
+    fn append(
+        ty: &Type,
+        analysis: &Analysis,
+        visiting: &mut BTreeSet<String>,
+        output: &mut Vec<Type>,
+    ) -> bool {
+        match ty {
+            Type::Tuple(elements) if !elements.is_empty() => elements
+                .iter()
+                .all(|element| append(element, analysis, visiting, output)),
+            Type::Tuple(_) => false,
+            Type::Named(name) if matches!(name.as_str(), "Uuid" | "UUID" | "std.UUID") => {
+                output.push(ty.clone());
+                true
+            }
+            Type::Named(name) => {
+                let Some(symbol) = analysis_named_symbol(name, analysis) else {
+                    output.push(ty.clone());
+                    return true;
+                };
+                if symbol.kind != SymbolKind::Table {
+                    output.push(ty.clone());
+                    return true;
+                }
+                if !visiting.insert(name.clone()) {
+                    return false;
+                }
+                let Some(referenced_keys) = symbol
+                    .table_schema
+                    .as_ref()
+                    .and_then(|schema| schema.admission.as_ref())
+                    .map(|schema| schema.keys.clone())
+                    .filter(|keys| !keys.is_empty())
+                else {
+                    visiting.remove(name);
+                    return false;
+                };
+                let valid = referenced_keys
+                    .iter()
+                    .all(|(_, key_type)| append(key_type, analysis, visiting, output));
+                visiting.remove(name);
+                valid
+            }
+            _ => {
+                output.push(ty.clone());
+                true
+            }
+        }
     }
-    let mut decoded = Vec::with_capacity(components.len());
-    for (index, component) in components.iter().enumerate() {
-        let encoded = if index + 1 == components.len() {
-            stem
-        } else {
-            component.as_str()
-        };
-        let value = decode_row_component(encoded)?;
-        if index + 1 == components.len() && value.is_empty() {
+
+    let mut output = Vec::new();
+    let mut visiting = BTreeSet::new();
+    for (_, ty) in &admission.keys {
+        if !append(ty, analysis, &mut visiting, &mut output) {
             return None;
         }
-        decoded.push(value);
     }
-    Some(decoded)
+    Some(output)
 }
 
-fn decode_row_component(encoded: &str) -> Option<String> {
-    if encoded == "~ff" {
-        return Some(String::new());
-    }
-    if !encoded.is_ascii()
-        || encoded.is_empty()
-        || encoded.len() > 200
-        || encoded.contains("~ff")
-    {
-        return None;
-    }
-    let bytes = encoded.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'~' {
-            if index + 2 >= bytes.len() {
-                return None;
+fn analysis_named_symbol<'a>(name: &str, analysis: &'a Analysis) -> Option<&'a Symbol> {
+    let mut exact = Vec::new();
+    let mut qualified = Vec::new();
+    for (namespace, module) in &analysis.modules {
+        for (symbol_name, symbol) in &module.symbols {
+            if symbol.ty == Type::Named(name.to_owned()) {
+                exact.push(symbol);
             }
-            let value = std::str::from_utf8(&bytes[index + 1..index + 3])
-                .ok()
-                .and_then(|hex| u8::from_str_radix(hex, 16).ok())?;
-            decoded.push(value);
-            index += 3;
-        } else {
-            if !matches!(
-                bytes[index],
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'
-            ) {
-                return None;
+            let full_name = if namespace.0.is_empty() {
+                symbol_name.clone()
+            } else {
+                format!("{}.{symbol_name}", namespace.0.join("."))
+            };
+            if full_name == name {
+                qualified.push(symbol);
             }
-            decoded.push(bytes[index]);
-            index += 1;
         }
     }
-    let value = String::from_utf8(decoded).ok()?;
-    (encode_row_component(&value) == encoded).then_some(value)
+    let matches = if qualified.is_empty() { exact } else { qualified };
+    (matches.len() == 1).then(|| matches[0])
 }
 
-fn encode_row_component(value: &str) -> String {
-    if value.is_empty() {
-        return "~ff".into();
-    }
-    let bytes = value.as_bytes();
-    let reserved = reserved_row_name(value);
-    let trailing = bytes.iter().rposition(|byte| *byte != b'.').map_or(0, |index| index + 1);
-    let mut encoded = String::new();
-    for (index, byte) in bytes.iter().enumerate() {
-        let force = (reserved && index == 0) || (*byte == b'.' && index >= trailing);
-        if !force
-            && matches!(
-                *byte,
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'
-            )
-        {
-            encoded.push(*byte as char);
-        } else {
-            encoded.push_str(&format!("~{byte:02x}"));
-        }
-    }
-    encoded
-}
-
-fn reserved_row_name(value: &str) -> bool {
-    let trimmed = value.trim_end_matches([' ', '.']);
-    let lower = trimmed.to_ascii_lowercase();
-    if lower == ".git" {
-        return true;
-    }
-    let first = lower.split('.').next().unwrap_or_default();
-    matches!(
-        first,
-        "con" | "prn" | "aux" | "nul" | "clock$" | "conin$" | "conout$"
-    ) || (first.len() == 4
-        && (first.starts_with("com") || first.starts_with("lpt"))
-        && matches!(first.as_bytes()[3], b'1'..=b'9'))
-}
-
-fn row_key_matches_type(value: &str, ty: &Type) -> bool {
+fn row_key_matches_type(value: &str, ty: &Type, analysis: &Analysis) -> bool {
     match ty {
         Type::Text => true,
         Type::Int => canonical_integer(value),
-        Type::Decimal => canonical_decimal(value),
+        Type::Decimal => Decimal::from_canonical_text(value).is_ok(),
         Type::Bool => matches!(value, "true" | "false"),
-        Type::Date => {
-            value.len() == 10
-                && value.as_bytes()[4] == b'-'
-                && value.as_bytes()[7] == b'-'
-                && value
-                    .bytes()
-                    .enumerate()
-                    .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
-        }
-        Type::Instant => value.contains('T') && (value.ends_with('Z') || value.contains('+')),
+        Type::Date => canonical_date(value),
+        Type::Instant => canonical_instant(value),
         Type::Named(name) => {
-            matches!(name.as_str(), "Uuid" | "UUID" | "std.UUID") && canonical_uuid(value)
+            if matches!(name.as_str(), "Uuid" | "UUID" | "std.UUID") {
+                canonical_uuid(value)
+            } else {
+                analysis_named_symbol(name, analysis)
+                    .is_some_and(|symbol| {
+                        symbol.kind == SymbolKind::Enum && symbol.enum_variants.contains(value)
+                    })
+            }
         }
         _ => false,
     }
@@ -16393,30 +16845,82 @@ fn row_key_matches_type(value: &str, ty: &Type) -> bool {
 
 fn canonical_integer(value: &str) -> bool {
     let digits = value.strip_prefix('-').unwrap_or(value);
-    !digits.is_empty()
+    !(value.starts_with('-') && digits == "0")
+        && !digits.is_empty()
         && digits.bytes().all(|byte| byte.is_ascii_digit())
         && (digits == "0" || !digits.starts_with('0'))
 }
 
-fn canonical_decimal(value: &str) -> bool {
-    let value = value.strip_prefix('-').unwrap_or(value);
-    let (mantissa, exponent) = value.split_once(['e', 'E']).map_or((value, None), |(m, e)| {
-        (m, Some(e))
-    });
-    if let Some(exponent) = exponent {
-        if exponent.is_empty() {
-            return false;
-        }
-        let exponent = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
-        if exponent.is_empty() || !exponent.bytes().all(|byte| byte.is_ascii_digit()) {
-            return false;
+fn canonical_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
+    {
+        return false;
+    }
+    let year = value[..4].parse::<u32>().ok();
+    let month = value[5..7].parse::<u32>().ok();
+    let day = value[8..].parse::<u32>().ok();
+    let (Some(year), Some(month), Some(day)) = (year, month, day) else {
+        return false;
+    };
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=9999).contains(&year) && (1..=max_day).contains(&day)
+}
+
+fn canonical_instant(value: &str) -> bool {
+    // Row paths carry one stable UTC spelling. Offsets are accepted in source
+    // literals but normalize before storage, so they are not alternate keys.
+    let Some(body) = value.strip_suffix('Z') else {
+        return false;
+    };
+    let Some((date, time)) = body.split_once('T') else {
+        return false;
+    };
+    if !canonical_date(date) {
+        return false;
+    }
+    let (clock, fraction) = time
+        .split_once('.')
+        .map_or((time, None), |(clock, fraction)| (clock, Some(fraction)));
+    let clock_bytes = clock.as_bytes();
+    if clock_bytes.len() != 8
+        || clock_bytes[2] != b':'
+        || clock_bytes[5] != b':'
+        || !clock_bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 2 | 5) || byte.is_ascii_digit())
+    {
+        return false;
+    }
+    let hour = clock[..2].parse::<u32>().ok();
+    let minute = clock[3..5].parse::<u32>().ok();
+    let second = clock[6..8].parse::<u32>().ok();
+    if !matches!((hour, minute, second), (Some(h), Some(m), Some(s)) if h < 24 && m < 60 && s < 60)
+    {
+        return false;
+    }
+    match fraction {
+        None => true,
+        Some(fraction) => {
+            !fraction.is_empty()
+                && fraction.len() <= 9
+                && fraction.bytes().all(|byte| byte.is_ascii_digit())
+                && !fraction.ends_with('0')
         }
     }
-    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    !whole.is_empty()
-        && whole.bytes().all(|byte| byte.is_ascii_digit())
-        && (whole == "0" || !whole.starts_with('0'))
-        && (fraction.is_empty() || fraction.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 fn canonical_uuid(value: &str) -> bool {
@@ -16424,7 +16928,7 @@ fn canonical_uuid(value: &str) -> bool {
         && value.bytes().enumerate().all(|(index, byte)| {
             matches!(index, 8 | 13 | 18 | 23)
                 .then_some(byte == b'-')
-                .unwrap_or(byte.is_ascii_hexdigit())
+                .unwrap_or(byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         })
 }
 

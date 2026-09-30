@@ -1148,13 +1148,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
     fn corpus() -> std::path::PathBuf {
-        let crate_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let checkout_bundle = crate_dir.join("../../../reference/Orna-1.0.0");
-        if checkout_bundle.is_dir() {
-            checkout_bundle
-        } else {
-            crate_dir.join("../../../../reference/Orna-1.0.0")
-        }
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference")
     }
     fn copy_corpus() -> std::path::PathBuf {
         let target = std::env::temp_dir().join(format!(
