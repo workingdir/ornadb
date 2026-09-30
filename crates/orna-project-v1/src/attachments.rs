@@ -3993,6 +3993,125 @@ mod tests {
     }
 
     #[test]
+    fn nested_pin_reverse_prefix_branches_isolate_shared_terminal_pin() {
+        let app_source = include_str!("../tests/fixtures/attached-incompatible-main.orna");
+        let shared_source = include_str!("../tests/fixtures/attached-equivalent-main.orna");
+        let (app_dir, app_repository, _) = repository(app_source);
+        let (shared_dir, shared_repository, shared_base_commit) = repository(shared_source);
+
+        let archive_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive_copy_archive {shared_base_commit}\n"),
+        );
+        let archive_copy_commit = write_commit(
+            shared_dir.path(),
+            "main.orna",
+            &shared_source.replace("42", "7"),
+        );
+        let longest_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!(
+                "archive {archive_commit}\narchive_copy {archive_copy_commit}\n"
+            ),
+        );
+        let app_commit = write_commit(
+            app_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!(
+                "archive {archive_commit}\narchive_copy {archive_copy_commit}\narchive_copy_archive {longest_commit}\n"
+            ),
+        );
+
+        let loader = ProjectLoader::default();
+        let app = PinnedDatabase::resolve(
+            "app",
+            app_repository.clone(),
+            &app_commit,
+            loader,
+        )
+        .unwrap();
+        let resolver = PackageResolver::new(
+            [
+                ("app".to_owned(), app_repository),
+                ("archive".to_owned(), shared_repository.clone()),
+                ("archive_copy".to_owned(), shared_repository.clone()),
+                ("archive_copy_archive".to_owned(), shared_repository),
+            ],
+            loader,
+        )
+        .unwrap();
+
+        let root_session = resolver.resolve_for_parent(app).unwrap();
+        let longest_parent = root_session
+            .database("archive_copy_archive")
+            .unwrap()
+            .clone();
+        let longest_closure = resolver.resolve_for_parent(longest_parent).unwrap();
+        let archive_parent = longest_closure.database("archive").unwrap().clone();
+        let archive_copy_parent = longest_closure
+            .database("archive_copy")
+            .unwrap()
+            .clone();
+        let mut archive_terminal = resolver.resolve_for_parent(archive_parent).unwrap();
+        let archive_copy_terminal = resolver
+            .resolve_for_parent(archive_copy_parent)
+            .unwrap();
+
+        assert_eq!(archive_terminal.primary().pin().name(), "archive");
+        assert_eq!(archive_copy_terminal.primary().pin().name(), "archive_copy");
+        let archive_terminal_pin = archive_terminal
+            .database("archive_copy_archive")
+            .unwrap()
+            .clone();
+        let archive_copy_terminal_pin = archive_copy_terminal
+            .database("archive_copy_archive")
+            .unwrap()
+            .clone();
+        assert_eq!(archive_terminal_pin.pin(), archive_copy_terminal_pin.pin());
+        assert_eq!(
+            archive_terminal_pin.pin().commit().as_str(),
+            shared_base_commit
+        );
+
+        // The reference fixes the terminal OID but is silent on two reverse
+        // prefix routes sharing that pin. V1 keeps closure maps per session, so
+        // removing the shared terminal from one route preserves the other.
+        archive_terminal
+            .detach_database("archive_copy_archive")
+            .unwrap();
+        assert!(archive_terminal
+            .database("archive_copy_archive")
+            .is_none());
+        assert_eq!(
+            archive_copy_terminal
+                .database("archive_copy_archive")
+                .unwrap()
+                .pin(),
+            archive_terminal_pin.pin()
+        );
+        let terminal_session = resolver
+            .resolve_for_parent(archive_terminal_pin)
+            .unwrap();
+        assert_eq!(
+            terminal_session.primary().pin().name(),
+            "archive_copy_archive"
+        );
+        assert_eq!(terminal_session.attached().count(), 0);
+        for (name, expected_commit) in [
+            ("archive", archive_commit.as_str()),
+            ("archive_copy", archive_copy_commit.as_str()),
+            ("archive_copy_archive", longest_commit.as_str()),
+        ] {
+            assert_eq!(
+                root_session.database(name).unwrap().pin().commit().as_str(),
+                expected_commit
+            );
+        }
+    }
+
+    #[test]
     fn equivalent_units_interoperate_across_attachments_but_name_match_is_not_enough() {
         let primary_source = include_str!("fixtures/attached-primary-main.orna");
         let (_primary_dir, primary_repository, primary_commit) = repository(&primary_source);
