@@ -299,6 +299,39 @@ fn case_recovery_isolates_nested_interpolation_delimiters_and_keeps_tail() {
 }
 
 #[test]
+fn case_recovery_restores_each_nested_interpolation_delimiter_tail() {
+    let source = include_str!("fixtures/malformed-case-arm-deep-interpolation-delimiter-scope.orna");
+    let parsed = parse_module(source);
+
+    assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+    let diagnostic = &parsed.diagnostics[0];
+    assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+    assert_eq!(diagnostic.message, "expected pattern");
+    let invalid_pattern = source.find("\"value").expect("fixture has a string pattern");
+    assert_eq!(diagnostic.span.start, invalid_pattern);
+    assert_eq!(diagnostic.span.end, invalid_pattern + 1);
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block { statements, tail, .. } = body else {
+        panic!("expected a function block");
+    };
+    assert!(statements.is_empty(), "{statements:?}");
+    let Some(Expr::Control { arms, .. }) = tail.as_deref() else {
+        panic!("expected a case expression tail, got {tail:?}");
+    };
+    assert!(matches!(
+        arms.as_slice(),
+        [orna_syntax_v1::CaseArm {
+            pattern: Pattern::Literal { text, .. },
+            body: Expr::Literal { text: body, .. },
+            ..
+        }] if text == "true" && body == "8"
+    ));
+}
+
+#[test]
 fn semicolon_keeps_control_expression_as_a_statement() {
     let parsed = parse_module(include_str!("fixtures/semicolon-control-block-item.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
