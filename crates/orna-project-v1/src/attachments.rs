@@ -3172,6 +3172,61 @@ mod tests {
     }
 
     #[test]
+    fn nested_pin_closure_rejects_alias_edge_that_reuses_primary_name() {
+        let app_source = include_str!("../tests/fixtures/attached-incompatible-main.orna");
+        let archive_source = include_str!("../tests/fixtures/attached-equivalent-main.orna");
+        let (app_dir, app_repository, _) = repository(app_source);
+        let (archive_dir, archive_repository, archive_base_commit) = repository(archive_source);
+
+        let archive_terminal_commit = write_commit(
+            archive_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive {archive_base_commit}\n"),
+        );
+        let app_commit = write_commit(
+            app_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive {archive_terminal_commit}\n"),
+        );
+        assert!(archive_repository
+            .resolve_snapshot(&archive_base_commit)
+            .is_ok());
+
+        let loader = ProjectLoader::default();
+        let app = PinnedDatabase::resolve(
+            "app",
+            app_repository.clone(),
+            &app_commit,
+            loader,
+        )
+        .unwrap();
+        let resolver = PackageResolver::new(
+            [
+                ("app".to_owned(), app_repository),
+                ("archive".to_owned(), archive_repository),
+            ],
+            loader,
+        )
+        .unwrap();
+
+        let root_session = resolver.resolve_for_parent(app).unwrap();
+        let archive = root_session.database("archive").unwrap().clone();
+        assert_eq!(archive.pin().commit().as_str(), archive_terminal_commit);
+
+        // The reference fixes the nested OID but does not define a child edge
+        // that reuses its primary alias. V1 rejects it to preserve one binding
+        // for that alias in each session and leaves the parent's pin unchanged.
+        assert!(matches!(
+            resolver.resolve_for_parent(archive),
+            Err(AttachmentError::DuplicateAttachment)
+        ));
+        assert_eq!(
+            root_session.database("archive").unwrap().pin().commit().as_str(),
+            archive_terminal_commit
+        );
+    }
+
+    #[test]
     fn equivalent_units_interoperate_across_attachments_but_name_match_is_not_enough() {
         let primary_source = include_str!("fixtures/attached-primary-main.orna");
         let (_primary_dir, primary_repository, primary_commit) = repository(&primary_source);
