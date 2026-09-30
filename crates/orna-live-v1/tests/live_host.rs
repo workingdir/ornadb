@@ -11066,7 +11066,7 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     let tenth_retargeted_retry = block_on(host.dispatch_frame(
         [15; 16],
         5,
-        Frame::Binary(tenth_retargeted_query),
+        Frame::Binary(tenth_retargeted_query.clone()),
         &mut application,
     ))
     .unwrap()
@@ -11185,6 +11185,189 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
             [15; 16],
             8,
             Frame::Binary(tenth_query_request),
+            &mut application,
+        )),
+        Err(Error::Closed)
+    ));
+
+    // The exact query bytes rejected as a collision above become a fresh
+    // query identity after that scope closes; its target fingerprint remains
+    // session-bound, so a new target needs a fresh status query to be observed.
+    let eleventh_subscribe = subscribe();
+    let mut eleventh_issuer = Issuer(11, None);
+    let eleventh_credential = block_on(host.create(
+        CreateRequest {
+            id: [11; 16],
+            origin: origin(),
+            expires_at: 100,
+            now: 24,
+            subscribe: &eleventh_subscribe,
+        },
+        &mut eleventh_issuer,
+    ))
+    .unwrap();
+    block_on(host.resume(ResumeRequest {
+        id: [11; 16],
+        origin: &origin(),
+        credential: &eleventh_credential,
+        attachment: [16; 16],
+        now: 25,
+    }))
+    .unwrap();
+
+    let eleventh_target_request = eval_with_context([11; 16], [96; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&eleventh_target_request, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    let eleventh_target_fingerprint = request_fingerprint(&eleventh_target_request, [11; 16]);
+    let eleventh_identity = RequestIdentity {
+        session_id: [11; 16],
+        request_id: [96; 16],
+    };
+    let eleventh_query_fingerprint = request_fingerprint(&tenth_retargeted_query, [11; 16]);
+    let eleventh_unknown = block_on(host.dispatch_frame(
+        [16; 16],
+        2,
+        Frame::Binary(tenth_retargeted_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the prior scope's mismatching query ID is fresh in this scope");
+    assert!(matches!(
+        &eleventh_unknown.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Unknown,
+            fingerprint: None,
+            result: None,
+        } if *target == [96; 16]
+    ));
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [10; 16],
+            request_id: [91; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == tenth_query_fingerprint
+    ));
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [11; 16],
+            request_id: [91; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == eleventh_query_fingerprint
+    ));
+
+    let runtime = open_durable_state(&repository);
+    let (_, capability) = block_on(runtime.reserve_request_with_admission(
+        eleventh_identity,
+        eleventh_target_fingerprint,
+    ))
+    .unwrap();
+    let capability = capability.expect("fresh owner-bound capability in the eleventh scope");
+    block_on(runtime.start_request_with_owner_and_admission(
+        eleventh_identity,
+        eleventh_target_fingerprint,
+        lease,
+        capability,
+    ))
+    .unwrap();
+    drop(runtime);
+
+    let eleventh_unknown_retry = block_on(host.dispatch_frame(
+        [16; 16],
+        3,
+        Frame::Binary(tenth_retargeted_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the exact reused query keeps its Unknown snapshot");
+    assert_eq!(eleventh_unknown_retry, eleventh_unknown);
+    let eleventh_fresh_request = Envelope {
+        request: Some([97; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [96; 16],
+            fingerprint: eleventh_target_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let eleventh_fresh = block_on(host.dispatch_frame(
+        [16; 16],
+        4,
+        Frame::Binary(eleventh_fresh_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a fresh query sees the new scope's target running");
+    assert!(matches!(
+        &eleventh_fresh.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Running,
+            fingerprint: Some(returned),
+            result: None,
+        } if *target == [96; 16] && *returned == eleventh_target_fingerprint
+    ));
+
+    let mut eleventh_deletion = RecordingDelete::default();
+    let mut eleventh_children = RecordingChildren::default();
+    assert_eq!(
+        block_on(host.http_delete_with_children(
+            DeleteRequest {
+                id: [11; 16],
+                origin: &origin(),
+                credential: &eleventh_credential,
+                now: 26,
+            },
+            &mut eleventh_deletion,
+            &mut eleventh_children,
+        ))
+        .status,
+        204
+    );
+    assert_eq!(eleventh_children.requests, vec![eleventh_identity]);
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status(
+            eleventh_identity,
+            eleventh_target_fingerprint,
+        ))
+        .unwrap(),
+        Some(status) if status.state == orna_runtime_v1::RequestState::Cancelled
+    ));
+    for (request_id, expected_fingerprint) in [
+        ([91; 16], eleventh_query_fingerprint),
+        ([97; 16], request_fingerprint(&eleventh_fresh_request, [11; 16])),
+    ] {
+        assert!(matches!(
+            block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+                session_id: [11; 16],
+                request_id,
+            }))
+            .unwrap(),
+            Some(status)
+                if status.state == orna_runtime_v1::RequestState::Completed
+                    && status.fingerprint == expected_fingerprint
+        ));
+    }
+    assert!(matches!(
+        block_on(host.dispatch_frame(
+            [16; 16],
+            5,
+            Frame::Binary(tenth_retargeted_query),
             &mut application,
         )),
         Err(Error::Closed)
