@@ -20,6 +20,8 @@ const WRITE_MATERIALIZATION_ROUNDING_TAIL: &str =
     include_str!("fixtures/write_materialization_rounding_tail.orna");
 const MAX_SOURCE_MATERIALIZED_WRITE_TAIL: &str =
     include_str!("fixtures/max_source_materialized_write_tail.orna");
+const MAX_SOURCE_MATERIALIZATION_CLOSURE_TAIL: &str =
+    include_str!("fixtures/max_source_materialization_closure_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -4388,6 +4390,75 @@ fn explain_closes_max_source_byte_remainder_with_materialized_max_byte_write_tai
     assert_eq!(overflow_write.details().get("estimated_work_overflow"), None);
     let surface = serde_json::to_value(&overflow).expect("MAX source/write overflow surface");
     assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_keeps_max_source_materialization_at_local_work_boundary() {
+    let parsed = orna_syntax_v1::parse_module(MAX_SOURCE_MATERIALIZATION_CLOSURE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the existing 4-KiB
+    // heuristic, MAX bytes charge 2^52 blocks. Choosing the remaining rows so
+    // both the source scan and materialization each end exactly at MAX proves
+    // that their aggregate overflow is reported on the plan, not on either
+    // locally representable node.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    let closing_rows = u64::MAX - MAX_BYTE_BLOCKS;
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:max-source-materialization-local-boundary"),
+        source: obj("table:MaxSourceMaterialization"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(closing_rows),
+            estimated_bytes: Some(u64::MAX),
+            mutable_branch: None,
+        }),
+        joins: Vec::new(),
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: Vec::new(),
+        materialize_into: Some(obj("materialization:max-source-local-boundary")),
+    })
+    .expect("MAX source bytes close through a materialization tail");
+
+    assert_eq!(explained.plan().estimated_cost(), None);
+    let scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:MaxSourceMaterialization"))
+        })
+        .expect("fixture MAX-byte source scan");
+    assert_eq!(scan.estimated_rows(), Some(closing_rows));
+    assert_eq!(scan.estimated_bytes(), Some(u64::MAX));
+    assert_eq!(scan.estimated_work(), Some(u64::MAX));
+    assert_eq!(scan.details().get("estimated_work_overflow"), None);
+
+    assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(explained.root().estimated_rows(), Some(closing_rows));
+    assert_eq!(explained.root().estimated_bytes(), Some(u64::MAX));
+    assert_eq!(explained.root().estimated_work(), Some(u64::MAX));
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "two exact MAX local contributions overflow only at the aggregate"
+    );
+    assert_eq!(explained.root().details().get("estimated_work_overflow"), None);
+
+    let surface = serde_json::to_value(&explained).expect("max-source materialization surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(
+        surface["nodes"][0]["details"]["estimated_work"],
+        serde_json::json!(u64::MAX)
+    );
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
         node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
