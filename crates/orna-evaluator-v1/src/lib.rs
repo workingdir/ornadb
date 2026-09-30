@@ -48,7 +48,7 @@ pub use repl::{ReplSession, parse_admitted_repl};
 /// crate verifies its pinned profile before either boundary admits an import.
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
-pub fn reference_standard_sources() -> [(String, String); 7] {
+pub fn reference_standard_sources() -> [(String, String); 11] {
     orna_standard::reference_standard_sources_v1()
 }
 
@@ -4419,7 +4419,14 @@ impl Context<'_, '_> {
                     false,
                     function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
                     "time",
-                    &["offset_at", "resolve_local"],
+                    &[
+                        "offset_at",
+                        "resolve_local",
+                        "duration.compact.format",
+                        "duration.clock.format",
+                        "duration.words.format",
+                        "duration.iso.format",
+                    ],
                 )
             })
             .flatten();
@@ -4976,6 +4983,39 @@ impl Context<'_, '_> {
                     unix_seconds: instant.unix_seconds,
                     nanosecond: instant.nanosecond,
                 })
+            }
+            (
+                "duration.compact.format"
+                | "duration.clock.format"
+                | "duration.words.format"
+                | "duration.iso.format",
+                [Value::Duration {
+                    seconds,
+                    nanosecond,
+                }],
+            ) => {
+                self.step()?;
+                format_duration_context(None)?;
+                self.string(format_duration(name, seconds, *nanosecond))
+                    .map(Value::String)
+            }
+            (
+                "duration.compact.format"
+                | "duration.clock.format"
+                | "duration.words.format"
+                | "duration.iso.format",
+                [
+                    Value::Duration {
+                        seconds,
+                        nanosecond,
+                    },
+                    context,
+                ],
+            ) => {
+                self.step()?;
+                format_duration_context(Some(context))?;
+                self.string(format_duration(name, seconds, *nanosecond))
+                    .map(Value::String)
             }
             ("offset_at" | "resolve_local", _) => Err(error("ORNA-EVAL-TYPE")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
@@ -6651,6 +6691,14 @@ fn named_arguments(
         "normalise" => &["value", "form"],
         "offset_at" => &["instant", "zone"],
         "resolve_local" => &["local", "zone", "ambiguous"],
+        "duration.compact.format"
+        | "duration.clock.format"
+        | "duration.words.format"
+        | "duration.iso.format" => match values.len() {
+            1 => &["duration"],
+            2 => &["duration", "context"],
+            _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+        },
         "bit_or" | "bit_and" | "bit_xor" => &["left", "right"],
         "bit_not" => &["value"],
         "shift_left" | "shift_right" => &["value", "count"],
@@ -6881,6 +6929,143 @@ fn captured_timezone_snapshot_matches(functions: &Functions) -> bool {
             ..
         } if unescape_string(text).is_ok_and(|edition| edition == TIMEZONE_DATASET_VERSION)
     )
+}
+
+fn format_duration_context(context: Option<&Value>) -> Result<(), EvaluationError> {
+    let (locale, zone) = match context {
+        None => ("en", "UTC"),
+        Some(Value::Record(fields)) => {
+            let Some(Value::String(locale)) = fields.get("locale") else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            let Some(Value::String(zone)) = fields.get("time_zone") else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            (locale.as_str(), zone.as_str())
+        }
+        Some(_) => return Err(error("ORNA-EVAL-TYPE")),
+    };
+    // This first pinned profile implements English labels and validates the
+    // context zone against the same immutable edition as local-time lookup.
+    if !matches!(locale, "en" | "en-US" | "en-GB") {
+        return Err(error("ORNA-EVAL-VALUE"));
+    }
+    resolve_time_zone(zone).map_err(|_| error("ORNA-EVAL-VALUE"))?;
+    Ok(())
+}
+
+fn format_duration(name: &str, seconds: &BigInt, nanosecond: u32) -> String {
+    const NANOS_PER_SECOND: u64 = 1_000_000_000;
+    const NANOS_PER_MINUTE: u64 = 60 * NANOS_PER_SECOND;
+    const NANOS_PER_HOUR: u64 = 60 * NANOS_PER_MINUTE;
+    const NANOS_PER_DAY: u64 = 24 * NANOS_PER_HOUR;
+
+    let mut total = seconds * BigInt::from(NANOS_PER_SECOND) + BigInt::from(nanosecond);
+    let negative = total.sign() == Sign::Minus;
+    if negative {
+        total = -total;
+    }
+    let (days, remainder) = total.div_rem(&BigInt::from(NANOS_PER_DAY));
+    let (hours, remainder) = remainder.div_rem(&BigInt::from(NANOS_PER_HOUR));
+    let (minutes, remainder) = remainder.div_rem(&BigInt::from(NANOS_PER_MINUTE));
+    let (whole_seconds, fraction) = remainder.div_rem(&BigInt::from(NANOS_PER_SECOND));
+    let hours = hours.to_u32().expect("hour remainder is below one day");
+    let minutes = minutes.to_u32().expect("minute remainder is below one hour");
+    let whole_seconds = whole_seconds
+        .to_u32()
+        .expect("second remainder is below one minute");
+    let fraction = fraction.to_u32().expect("fraction is below one second");
+    let fractional_seconds = if fraction == 0 {
+        whole_seconds.to_string()
+    } else {
+        format!("{whole_seconds}.{fraction:09}")
+            .trim_end_matches('0')
+            .to_owned()
+    };
+    let sign = if negative { "-" } else { "" };
+
+    match name {
+        "duration.compact.format" => {
+            let mut parts = Vec::new();
+            if !days.is_zero() {
+                parts.push(format!("{days}d"));
+            }
+            if hours > 0 {
+                parts.push(format!("{hours}h"));
+            }
+            if minutes > 0 {
+                parts.push(format!("{minutes}m"));
+            }
+            if whole_seconds > 0 || fraction > 0 || parts.is_empty() {
+                parts.push(format!("{fractional_seconds}s"));
+            }
+            format!("{sign}{}", parts.join(" "))
+        }
+        "duration.clock.format" => {
+            let total_hours = days * BigInt::from(24u8) + BigInt::from(hours);
+            let total_hours = total_hours.to_str_radix(10);
+            let total_hours = if total_hours.len() < 2 {
+                format!("{total_hours:0>2}")
+            } else {
+                total_hours
+            };
+            format!("{sign}{total_hours}:{minutes:02}:{fractional_seconds:0>2}")
+        }
+        "duration.words.format" => {
+            let mut parts = Vec::new();
+            if !days.is_zero() {
+                parts.push(format!(
+                    "{days} day{}",
+                    if days == BigInt::from(1u8) { "" } else { "s" }
+                ));
+            }
+            if hours > 0 {
+                parts.push(format!(
+                    "{hours} hour{}",
+                    if hours == 1 { "" } else { "s" }
+                ));
+            }
+            if minutes > 0 {
+                parts.push(format!(
+                    "{minutes} minute{}",
+                    if minutes == 1 { "" } else { "s" }
+                ));
+            }
+            if whole_seconds > 0 || fraction > 0 || parts.is_empty() {
+                let singular = whole_seconds == 1 && fraction == 0;
+                parts.push(format!(
+                    "{fractional_seconds} second{}",
+                    if singular { "" } else { "s" }
+                ));
+            }
+            format!("{sign}{}", parts.join(", "))
+        }
+        "duration.iso.format" => {
+            let mut output = String::from(sign);
+            output.push('P');
+            if !days.is_zero() {
+                output.push_str(&days.to_str_radix(10));
+                output.push('D');
+            }
+            if hours > 0 || minutes > 0 || whole_seconds > 0 || fraction > 0 || days.is_zero() {
+                output.push('T');
+                if hours > 0 {
+                    output.push_str(&hours.to_string());
+                    output.push('H');
+                }
+                if minutes > 0 {
+                    output.push_str(&minutes.to_string());
+                    output.push('M');
+                }
+                if whole_seconds > 0 || fraction > 0 || (days.is_zero() && hours == 0 && minutes == 0) {
+                    output.push_str(&fractional_seconds);
+                    output.push('S');
+                }
+            }
+            output
+        }
+        _ => String::new(),
+    }
 }
 
 fn parse_local_datetime(text: &str) -> Option<LocalDateTime> {
