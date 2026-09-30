@@ -1169,6 +1169,60 @@ fn agreed_positionless_deletes_do_not_spend_budget_after_a_row_conflict() {
 }
 
 #[test]
+fn positionless_deletes_resolve_at_exact_row_change_budget_boundary() {
+    let build_inputs = || {
+        let mut source = FixtureRows::default();
+        source.add(MergeSide::Base, b"base", vec![parse_fixture(BASE, RowKeyKind::Explicit)]);
+        source.add(MergeSide::Left, b"left", vec![parse_fixture(LEFT, RowKeyKind::Explicit)]);
+        source.add(MergeSide::Right, b"right", vec![parse_fixture(RIGHT, RowKeyKind::Explicit)]);
+
+        let mut base = snapshot(schema(true, FieldType::Str), manifest(40, 40, b"base"), None);
+        let left = snapshot(schema(true, FieldType::Str), manifest(41, 41, b"left"), None);
+        let mut right = snapshot(schema(true, FieldType::Str), manifest(42, 42, b"right"), None);
+
+        let jointly_deleted_id = b"consumer/row-change-joint-positionless-delete".to_vec();
+        base.checkpoints.insert(
+            jointly_deleted_id,
+            CheckpointGeneration { generation: 80, position: None },
+        );
+        let one_side_deleted_id = b"consumer/row-change-one-side-positionless-delete".to_vec();
+        let one_side_deleted = CheckpointGeneration { generation: 90, position: None };
+        base.checkpoints.insert(one_side_deleted_id.clone(), one_side_deleted.clone());
+        right.checkpoints.insert(one_side_deleted_id, one_side_deleted);
+
+        (base, left, right, source)
+    };
+
+    // Below the exact three-row materialization budget, planning stops before
+    // the checkpoint phase. At the boundary, independent fixture row edits
+    // merge and both agreed/one-sided cursorless deletes resolve cleanly.
+    let (base, left, right, mut source) = build_inputs();
+    let below_exact = BranchMergeBudget { max_rows_examined: 2, max_conflicts: 0 };
+    let error = merge_three_way_snapshots(&base, &left, &right, &mut source, below_exact).unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("row materialization below the exact boundary must stop planning")
+    };
+    assert_eq!(report.rows_examined, 3);
+    assert_eq!(report.conflicts_lower_bound, 0);
+    assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+    assert!(report.affected_checkpoints.is_empty());
+
+    let (base, left, right, mut source) = build_inputs();
+    let exact_budget = BranchMergeBudget { max_rows_examined: 3, max_conflicts: 0 };
+    let plan = merge_three_way_snapshots(&base, &left, &right, &mut source, exact_budget).unwrap();
+    assert_eq!(plan.report.rows_examined, 3);
+    assert_eq!(plan.report.conflicts_lower_bound, 0);
+    assert_eq!(source.visited.len(), 3);
+    let MergedSegment::Rows { rows, .. } = &plan.tables[&id(1)].segments[0] else {
+        panic!("independent fixture row edits materialize a merged row")
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].fields[&id(2)], string("Grace"));
+    assert_eq!(rows[0].fields[&id(3)], string("Paris"));
+    assert!(plan.checkpoints.is_empty());
+}
+
+#[test]
 fn schema_conflict_is_a_boundary_before_row_reads_and_checkpoint_resolution() {
     let base_checkpoint = CheckpointGeneration {
         generation: 4,
