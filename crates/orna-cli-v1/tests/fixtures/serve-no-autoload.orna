@@ -1,1 +1,2 @@
+// This source is rendered as inert text: <script>alert('source')</script>
 pub fn main(): Int = 1 / 0;
