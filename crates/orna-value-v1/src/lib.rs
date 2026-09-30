@@ -52,7 +52,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Canonical CBOR's supported data model. `Tag` is public for schema and
 /// protocol adapters, but both construction and decoding validate the closed
 /// Orna tag registry before bytes may be emitted.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum Raw {
     Null,
     Bool(bool),
@@ -65,13 +65,56 @@ pub enum Raw {
     Tag(u64, Box<Raw>),
 }
 
+enum RawDebugValue {
+    Null,
+    Bool(bool),
+    Int(BigInt),
+    Float(u64),
+    Bytes(Vec<u8>),
+    Text(String),
+    Array(Vec<RawDebugValue>),
+    Map(Vec<(RawDebugValue, RawDebugValue)>),
+    Tag(u64, Box<RawDebugValue>),
+}
+
+impl fmt::Debug for RawDebugValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Null => formatter.write_str("Null"),
+            Self::Bool(value) => formatter.debug_tuple("Bool").field(value).finish(),
+            Self::Int(value) => formatter.debug_tuple("Int").field(value).finish(),
+            Self::Float(value) => formatter.debug_tuple("Float").field(value).finish(),
+            Self::Bytes(value) => formatter.debug_tuple("Bytes").field(value).finish(),
+            Self::Text(value) => formatter.debug_tuple("Text").field(value).finish(),
+            Self::Array(values) => formatter.debug_tuple("Array").field(values).finish(),
+            Self::Map(entries) => formatter.debug_tuple("Map").field(entries).finish(),
+            Self::Tag(tag, value) => formatter
+                .debug_tuple("Tag")
+                .field(tag)
+                .field(value)
+                .finish(),
+        }
+    }
+}
+
+impl fmt::Debug for Raw {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match raw_debug_value(self, 0, false) {
+            Ok(value) => fmt::Debug::fmt(&value, formatter),
+            // Raw is also used before canonical validation. If a malformed
+            // intermediate cannot be safely projected, traces fail closed.
+            Err(_) => formatter.write_str("\"<redacted>\""),
+        }
+    }
+}
+
 /// A validated OVB-1 value.  The inner raw value is never exposed mutably.
 #[derive(Clone, Eq, PartialEq)]
 pub struct Value(Raw);
 
 impl fmt::Debug for Value {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match redact_error_trace_values(&self.0, 0) {
+        match raw_debug_value(&self.0, 0, false) {
             Ok(raw) => formatter.debug_tuple("Value").field(&raw).finish(),
             // Invalid internal markers are never printed with their payload.
             Err(_) => formatter
@@ -1151,6 +1194,52 @@ fn redact_error_trace_values(raw: &Raw, depth: usize) -> Result<Raw> {
             Box::new(redact_error_trace_values(value, depth + 1)?),
         ),
         value => value.clone(),
+    })
+}
+
+fn raw_debug_value(raw: &Raw, depth: usize, errors_redacted: bool) -> Result<RawDebugValue> {
+    if depth > MAX_DEPTH {
+        return Err(Error::Limit);
+    }
+    if let Raw::Tag(0, _) = raw {
+        // Tag 0 is the in-memory protected-value marker. Raw intermediates
+        // can carry its payload before canonical validation rejects it, so a
+        // Debug trace must not print that payload.
+        return Ok(RawDebugValue::Text("<redacted>".into()));
+    }
+    if !errors_redacted && matches!(raw, Raw::Tag(60016, _)) {
+        let safe = redact_error_trace_values(raw, depth)?;
+        return raw_debug_value(&safe, depth, true);
+    }
+
+    Ok(match raw {
+        Raw::Null => RawDebugValue::Null,
+        Raw::Bool(value) => RawDebugValue::Bool(*value),
+        Raw::Int(value) => RawDebugValue::Int(value.clone()),
+        Raw::Float(value) => RawDebugValue::Float(*value),
+        Raw::Bytes(value) => RawDebugValue::Bytes(value.clone()),
+        Raw::Text(value) => RawDebugValue::Text(value.clone()),
+        Raw::Array(values) => RawDebugValue::Array(
+            values
+                .iter()
+                .map(|value| raw_debug_value(value, depth + 1, errors_redacted))
+                .collect::<Result<_>>()?,
+        ),
+        Raw::Map(entries) => RawDebugValue::Map(
+            entries
+                .iter()
+                .map(|(key, value)| {
+                    Ok((
+                        raw_debug_value(key, depth + 1, errors_redacted)?,
+                        raw_debug_value(value, depth + 1, errors_redacted)?,
+                    ))
+                })
+                .collect::<Result<_>>()?,
+        ),
+        Raw::Tag(tag, value) => RawDebugValue::Tag(
+            *tag,
+            Box::new(raw_debug_value(value, depth + 1, errors_redacted)?),
+        ),
     })
 }
 
@@ -4006,6 +4095,23 @@ mod tests {
     }
 
     #[test]
+    fn raw_debug_redacts_protected_payloads_before_wire_validation() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let raw = Raw::Map(vec![(
+            Raw::Text("credential".into()),
+            Raw::Array(vec![Raw::Tag(
+                0,
+                Box::new(Raw::Text(fixture.to_owned())),
+            )]),
+        )]);
+
+        let debug = format!("{raw:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains(fixture));
+        assert_eq!(Value::new(raw), Err(Error::ProtectedValue));
+    }
+
+    #[test]
     fn quantity_requires_a_numeric_amount() {
         let raw = tag(
             60006,
@@ -4087,6 +4193,7 @@ mod tests {
         assert!(traced.causes()[0].safe_details().is_empty());
         assert!(!format!("{error:?}").contains(fixture));
         assert!(!format!("{:?}", error.value()).contains(fixture));
+        assert!(!format!("{:?}", error.value().raw()).contains(fixture));
 
         let nested = Value::new(Raw::Array(vec![error.value().raw().clone()])).unwrap();
         let nested_bytes = nested.redacted_for_trace().unwrap().encode().unwrap();
