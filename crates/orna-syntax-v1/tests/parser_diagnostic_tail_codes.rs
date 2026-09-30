@@ -526,6 +526,88 @@ fn recovered_case_keeps_nested_interpolation_cases_as_the_final_tail() {
 }
 
 #[test]
+fn recovered_case_keeps_interpolated_block_case_as_the_final_tail() {
+    let source = include_str!("fixtures/malformed-case-arm-max-depth-interpolation-block-tail.orna");
+    let parsed = parse_module(source);
+
+    assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+    let diagnostic = &parsed.diagnostics[0];
+    assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+    assert_eq!(diagnostic.message, "expected pattern");
+    let invalid_pattern = source.find("\"layer").expect("fixture has a string pattern");
+    assert_eq!(diagnostic.span.start, invalid_pattern);
+    assert_eq!(diagnostic.span.end, invalid_pattern + 1);
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block { statements, tail, .. } = body else {
+        panic!("expected a function block");
+    };
+    assert!(statements.is_empty(), "{statements:?}");
+    let Some(Expr::Control {
+        arms: outer_arms, ..
+    }) = tail.as_deref()
+    else {
+        panic!("expected a case expression tail, got {tail:?}");
+    };
+    assert_eq!(outer_arms.len(), 1, "{outer_arms:?}");
+
+    let Expr::Control {
+        condition: Some(scrutinee),
+        arms: nested_arms,
+        ..
+    } = &outer_arms[0].body
+    else {
+        panic!("expected the recovered arm body to be a nested case");
+    };
+    assert_eq!(nested_arms.len(), 2, "{nested_arms:?}");
+    assert!(matches!(
+        &nested_arms[1].body,
+        Expr::Literal { text, .. } if text == "8"
+    ));
+
+    let Expr::InterpolatedString { segments, .. } = scrutinee.as_ref() else {
+        panic!("expected an interpolated case scrutinee");
+    };
+    let [StringSegment::Text { text, .. }, StringSegment::Expression { value, .. }] =
+        segments.as_slice()
+    else {
+        panic!("expected text and one block interpolation, got {segments:?}");
+    };
+    assert_eq!(text, "subject ");
+
+    let Expr::Control {
+        body: Some(interpolation_body),
+        ..
+    } = value
+    else {
+        panic!("expected an interpolated if control");
+    };
+    let Expr::Block {
+        statements,
+        tail: Some(block_tail),
+        ..
+    } = interpolation_body.as_ref()
+    else {
+        panic!("expected the interpolation control body to be a block with a tail");
+    };
+    assert!(statements.is_empty(), "{statements:?}");
+    let Expr::Control {
+        arms: interpolation_arms,
+        ..
+    } = block_tail.as_ref()
+    else {
+        panic!("expected the interpolation block tail to be a case expression");
+    };
+    assert_eq!(interpolation_arms.len(), 2, "{interpolation_arms:?}");
+    assert!(matches!(
+        &interpolation_arms[1].body,
+        Expr::Literal { text, .. } if text == "0"
+    ));
+}
+
+#[test]
 fn semicolon_keeps_control_expression_as_a_statement() {
     let parsed = parse_module(include_str!("fixtures/semicolon-control-block-item.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
