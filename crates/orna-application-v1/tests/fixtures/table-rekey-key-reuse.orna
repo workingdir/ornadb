@@ -1,0 +1,9 @@
+pub table Note(id: Int) {
+    text: Str,
+    quantity: Int,
+}
+
+fn main() {
+    Note.rekey(2, 3);
+    Note.rekey(1, 2);
+}
