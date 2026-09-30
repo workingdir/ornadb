@@ -1,0 +1,6 @@
+sys.Storage
+    | take(0)
+    | union(sys.Storage | project(storage => storage.id) | union(sys.Storage | project(storage => storage.id) | filter(id => id == 7) | union(sys.Storage | project(storage => storage.id) | filter(id => id == 8) | union(sys.Storage | project(storage => storage.id) | filter(id => id == 7)))))
+    | filter(id => sys.Storage.lookup(id).title == "later")
+    | take(2)
+    | last() ?? 0

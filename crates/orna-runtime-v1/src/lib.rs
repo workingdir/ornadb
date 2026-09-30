@@ -21110,6 +21110,27 @@ mod tests {
             "last() preserves the bracketed match across two trailing nonmatches"
         );
 
+        // The reference leaves a bracketed stream that fills take(2)
+        // before its final rejected row implicit. Preserve both accepted
+        // matches across the leading and interleaved rejects, then close
+        // without evaluating the trailing reject.
+        let (last_closes_full_bracketed_take_two_before_trailing_nonmatch, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-bracketed-matches-close-before-tail.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_full_bracketed_take_two_before_trailing_nonmatch.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 6),
+            "last() closes the bracketed take(2) after its second match before the trailing nonmatch"
+        );
+
         // The reference is silent when the entire bracketed candidate tail
         // is rejected before take(2) naturally exhausts. The empty last()
         // result keeps its explicit coalesce fallback.
