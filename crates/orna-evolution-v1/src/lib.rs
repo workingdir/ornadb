@@ -12,6 +12,13 @@ use std::{
     fmt,
 };
 
+mod merge;
+pub use merge::{
+    CheckpointGeneration, CheckpointMergeConflict, KeyedRow, RowKeyKind, RowMergeConflict,
+    SchemaMergeConflict, SchemaMergeFailure, merge_checkpoint_generation, merge_keyed_row,
+    merge_schema, merge_schema_bounded,
+};
+
 pub use orna_foundation_v1::CanonicalValue;
 
 /// Stable semantic identity (`sys.ObjectId`), deliberately distinct from a
