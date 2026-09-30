@@ -17,3 +17,10 @@ remain pending while later recovery handlers reuse the destination key;
 source inside a recovery handler, reuses its old key for an inserted row, then
 updates both identities while another source retries. Both assert the complete
 mutation order and the latest values at their eventual re-keys.
+
+The closure proof,
+`moved_source_updates_survive_retry_key_reuse_closure`, adds the return edge: an
+inserted replacement leaves the old source key, the moved source reclaims it,
+and updates before and after that return stay with the moved identity through
+its next re-key. The exact order remains a local adapter proof rather than a
+new language-level rule.
