@@ -1,0 +1,56 @@
+pub table Note(id: Int) {
+    text: Str,
+    quantity: Int,
+}
+
+fn main() {
+    Note.rekey(6, 2) |? (initial_competitor_failure => {
+        Note.update(2, { quantity: 33 });
+        Note.rekey(2, 5);
+        Note.update(5, { quantity: 34 });
+        Note.rekey(6, 2);
+        Note.update(2, { quantity: 45 });
+        Note.rekey(5, 2) |? (owner_retry_failure => {
+            Note.rekey(2, 4) |? (competitor_target_failure => {
+                Note.update(4, { quantity: 55 });
+                Note.rekey(4, 3) |? (blocker_move_failure => {
+                    Note.update(3, { quantity: 65 });
+                    Note.rekey(3, 7);
+                    Note.update(7, { quantity: 66 });
+                    Note.rekey(5, 3);
+                    Note.update(3, { quantity: 35 });
+                    Note.rekey(4, 3) |? (blocker_retry_failure => {
+                        Note.rekey(3, 8) |? (owner_move_failure => {
+                            Note.update(8, { quantity: 75 });
+                            Note.delete(8);
+                            Note.rekey(4, 8);
+                            Note.update(8, { quantity: 57 });
+                            Note.rekey(3, 8) |? (owner_reused_target_failure => {
+                                Note.update(8, { quantity: 58 });
+                                Note.delete(8);
+                                Note.rekey(7, 8);
+                                Note.update(8, { quantity: 67 });
+                                Note.rekey(3, 8) |? (owner_second_reuse_failure => {
+                                    Note.update(8, { quantity: 68 });
+                                    Note.delete(8);
+                                    Note.insert({ id: 8, text: "replacement target", quantity: 80 });
+                                    Note.update(8, { quantity: 81 });
+                                    Note.rekey(3, 8) |? (owner_inserted_target_failure => {
+                                        Note.update(8, { quantity: 82 });
+                                        Note.delete(8);
+                                        Note.rekey(3, 8);
+                                        Note.update(8, { quantity: 36 })
+                                    })
+                                })
+                            })
+                        })
+                    })
+                });
+                Note.rekey(2, 4);
+                Note.update(4, { quantity: 46 });
+                Note.rekey(8, 2);
+                Note.update(2, { quantity: 38 })
+            })
+        })
+    });
+}
