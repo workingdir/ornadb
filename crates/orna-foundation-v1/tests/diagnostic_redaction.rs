@@ -1395,6 +1395,164 @@ fn clone_from_grant_and_revoke_stay_local_at_cause_boundaries() {
 }
 
 #[test]
+fn sequential_clone_from_replacements_keep_admission_snapshots_local() {
+    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture_credential = fixture.split('"').nth(1).unwrap();
+    let diagnostic = |code: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let first_source = diagnostic("ORNA-E-REPLACEMENT-FIRST")
+        .redacted_with_message(SafeText::new("first replacement admission").unwrap())
+        .with_cause(
+            diagnostic("ORNA-E-REPLACEMENT-FIRST-CAUSE")
+                .redacted_with_message(SafeText::new("first nested admission").unwrap()),
+        );
+    let second_source = diagnostic("ORNA-E-REPLACEMENT-SECOND")
+        .redacted_with_message(SafeText::new("second replacement admission").unwrap())
+        .with_cause(
+            diagnostic("ORNA-E-REPLACEMENT-SECOND-CAUSE")
+                .redacted_with_message(SafeText::new("second nested admission").unwrap()),
+        );
+    let untrusted_source = diagnostic("ORNA-E-REPLACEMENT-UNTRUSTED").with_cause(
+        diagnostic("ORNA-E-REPLACEMENT-UNTRUSTED-CAUSE"),
+    );
+
+    let mut receiver = untrusted_source.clone();
+    receiver.clone_from(&first_source);
+    let first_snapshot = receiver.clone();
+    receiver.clone_from(&second_source);
+    let second_snapshot = receiver.clone();
+    receiver.clone_from(&untrusted_source);
+    assert_eq!(receiver, untrusted_source);
+
+    // Each replacement updates the receiver alone; older snapshots keep their
+    // own admissions, and nesting either snapshot drops that local authority.
+    let outer = Diagnostic::new(
+        SafeText::new("ORNA-E-REPLACEMENT-SEQUENCE-OUTER").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .redacted_with_message(SafeText::new("sequence outer admission").unwrap())
+    .with_cause(first_snapshot.clone())
+    .with_cause(second_snapshot.clone())
+    .with_cause(receiver.clone());
+
+    let outer_projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(outer_projection["message"], "sequence outer admission");
+    let outer_causes = outer_projection["causes"].as_array().unwrap();
+    assert_eq!(outer_causes.len(), 3);
+    for cause in outer_causes {
+        assert_eq!(cause["message"], "<redacted>");
+        assert_eq!(cause["notes"][0], "<redacted>");
+    }
+    assert_eq!(
+        outer_causes[0]["causes"][0]["message"],
+        "<redacted>"
+    );
+    let first_projection = serde_json::to_value(&first_snapshot).unwrap();
+    assert_eq!(first_projection["message"], "first replacement admission");
+    assert_eq!(
+        first_projection["causes"][0]["message"],
+        "<redacted>"
+    );
+    let second_projection = serde_json::to_value(&second_snapshot).unwrap();
+    assert_eq!(second_projection["message"], "second replacement admission");
+    assert_eq!(
+        second_projection["causes"][0]["message"],
+        "<redacted>"
+    );
+    assert_eq!(serde_json::to_value(&receiver).unwrap()["message"], "<redacted>");
+
+    let envelope = serde_json::json!({
+        "outer": outer,
+        "current": receiver,
+        "first": first_snapshot,
+        "second": second_snapshot,
+    });
+    let json = serde_json::to_vec(&envelope).unwrap();
+    for disclosure in [
+        b"first replacement admission".as_slice(),
+        b"second replacement admission".as_slice(),
+    ] {
+        assert_eq!(
+            json.windows(disclosure.len())
+                .filter(|window| *window == disclosure)
+                .count(),
+            1
+        );
+    }
+    for disclosure in [
+        b"first nested admission".as_slice(),
+        b"second nested admission".as_slice(),
+    ] {
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+    }
+    assert!(
+        !json
+            .windows(fixture_credential.len())
+            .any(|window| window == fixture_credential.as_bytes())
+    );
+
+    let first_wire = first_snapshot.encode_ovb().unwrap();
+    assert!(
+        first_wire
+            .windows(b"first replacement admission".len())
+            .any(|window| window == b"first replacement admission")
+    );
+    assert!(
+        !first_wire
+            .windows(b"first nested admission".len())
+            .any(|window| window == b"first nested admission")
+    );
+    let second_wire = second_snapshot.encode_ovb().unwrap();
+    assert!(
+        second_wire
+            .windows(b"second replacement admission".len())
+            .any(|window| window == b"second replacement admission")
+    );
+    let current_wire = receiver.encode_ovb().unwrap();
+    assert!(
+        !current_wire
+            .windows(b"first replacement admission".len())
+            .any(|window| window == b"first replacement admission")
+    );
+    let outer_wire = outer.encode_ovb().unwrap();
+    for disclosure in [
+        b"first replacement admission".as_slice(),
+        b"second replacement admission".as_slice(),
+        b"first nested admission".as_slice(),
+        b"second nested admission".as_slice(),
+    ] {
+        assert!(
+            !outer_wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+    }
+    assert!(
+        !outer_wire
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&outer_wire).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    for cause in decoded["causes"].as_array().unwrap() {
+        assert_eq!(cause["message"], "<redacted>");
+    }
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
