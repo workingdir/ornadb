@@ -1597,6 +1597,100 @@ fn explain_mixed_partial_bounds_accumulate_through_unknown_join_tails() {
 }
 
 #[test]
+fn explain_partial_scan_bounds_accumulate_across_unknown_join_chain() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_with_last_rows = |last_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-scan-join-chain"),
+            source: obj("table:row-bounded"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 3),
+                estimated_bytes: None,
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:byte-bounded"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(4_096),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:tail-row-bounded"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(last_rows),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:partial-scan-join-chain")),
+        })
+        .expect("partial scan statistics through unknown join operators")
+    };
+
+    // Each scan has one known nonnegative work component. The joins remain
+    // unknown, but the independent scan lower bounds still define the total boundary.
+    let exact = explain_with_last_rows(2);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let scans = exact
+        .nodes()
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Scan)
+        .collect::<Vec<_>>();
+    assert_eq!(scans.len(), 3);
+    for scan in &scans {
+        assert_eq!(scan.estimated_work(), None);
+    }
+    for (table, rows, bytes) in [
+        ("table:row-bounded", Some(u64::MAX - 3), None),
+        ("table:byte-bounded", None, Some(4_096)),
+        ("table:tail-row-bounded", Some(2), None),
+    ] {
+        let scan = scans
+            .iter()
+            .find(|node| node.object() == Some(&obj(table)))
+            .expect("partial-statistics scan");
+        assert_eq!(scan.estimated_rows(), rows);
+        assert_eq!(scan.estimated_bytes(), bytes);
+    }
+    let joins = exact
+        .nodes()
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Join)
+        .collect::<Vec<_>>();
+    assert_eq!(joins.len(), 2);
+    assert!(joins.iter().all(|node| node.estimated_work().is_none()));
+
+    let overflow = explain_with_last_rows(3);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the row and byte scan bounds exceed MAX across the unknown join chain"
+    );
+    let surface = serde_json::to_value(&overflow).expect("partial scans overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
 fn explain_partial_source_bounds_accumulate_through_unknown_join_and_mutation_tails() {
     let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
