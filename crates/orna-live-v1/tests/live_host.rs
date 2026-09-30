@@ -11747,7 +11747,7 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
     let exact_retry = block_on(host.dispatch_frame(
         [6; 16],
         7,
-        Frame::Binary(original_eval),
+        Frame::Binary(original_eval.clone()),
         &mut application,
     ))
     .unwrap()
@@ -11823,6 +11823,26 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
     ));
     assert_eq!(application.calls, 1);
 
+    // The reference is silent on an exact Eval replay after a status snapshot;
+    // preserve both cached outcomes and the single application execution.
+    let eval_replay_after_failure_query = block_on(host.dispatch_frame(
+        [6; 16],
+        9,
+        Frame::Binary(original_eval),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the failed Eval still replays after its status snapshot");
+    assert_eq!(eval_replay_after_failure_query, exact_retry);
+    assert_eq!(
+        eval_replay_after_failure_query
+            .encode(Limits::default().protocol)
+            .unwrap(),
+        terminal_bytes
+    );
+    assert_eq!(application.calls, 1);
+
     let retargeted_failure_query = Envelope {
         request: Some([93; 16]),
         watch: None,
@@ -11839,7 +11859,7 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
     // first terminal-failure snapshot bound to its original query identity.
     let first_retarget_mismatch = block_on(host.dispatch_frame(
         [6; 16],
-        9,
+        10,
         Frame::Binary(retargeted_failure_query.clone()),
         &mut application,
     ))
@@ -11852,7 +11872,7 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
     ));
     let retarget_mismatch_retry = block_on(host.dispatch_frame(
         [6; 16],
-        10,
+        11,
         Frame::Binary(retargeted_failure_query),
         &mut application,
     ))
@@ -11873,7 +11893,7 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
     assert_eq!(
         block_on(host.dispatch_frame(
             [6; 16],
-            11,
+            12,
             Frame::Binary(eval_reusing_failure_query_id.clone()),
             &mut application,
         )),
@@ -11882,7 +11902,7 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
     assert_eq!(
         block_on(host.dispatch_frame(
             [6; 16],
-            12,
+            13,
             Frame::Binary(eval_reusing_failure_query_id),
             &mut application,
         )),
@@ -11891,7 +11911,7 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
 
     let exact_failure_query_retry = block_on(host.dispatch_frame(
         [6; 16],
-        13,
+        14,
         Frame::Binary(failure_status_query),
         &mut application,
     ))
