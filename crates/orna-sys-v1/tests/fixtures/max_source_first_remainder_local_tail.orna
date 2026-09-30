@@ -1,0 +1,2 @@
+pub table MaxSourceFirstRemainderLocal(id: Int) { value: Int, }
+pub fn max_source_first_remainder_local() = MaxSourceFirstRemainderLocal;
