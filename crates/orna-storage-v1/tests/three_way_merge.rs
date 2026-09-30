@@ -3084,6 +3084,32 @@ fn conflict_budget_closes_fixture_row_tombstone_checkpoint_tail() {
     assert!(report.affected_checkpoints.contains(delete_update_id.as_slice()));
     assert!(report.affected_checkpoints.contains(divergent_id.as_slice()));
     assert_eq!(source.visited.len(), 9);
+
+    // With the row limit exactly consumed, checkpoint conflicts remain subject
+    // to the shared conflict budget. Storage finishes the tombstone range first
+    // and then reports only checkpoint identities up to the crossing conflict.
+    for max_conflicts in [2, 3] {
+        let (base, left, right, mut source, delete_update_id, divergent_id, closure_id) = build_inputs();
+        let error = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 5, max_conflicts },
+        )
+        .unwrap_err();
+        let BranchMergeError::BudgetExceeded { report } = error else {
+            panic!("the checkpoint tail exceeds the shared detail budget after exact row closure")
+        };
+        assert_eq!(report.rows_examined, 5);
+        assert_eq!(report.conflicts_lower_bound, max_conflicts + 1);
+        assert_eq!(report.affected_ranges.len(), 3);
+        assert_eq!(report.affected_checkpoints.len(), max_conflicts - 1);
+        assert!(report.affected_checkpoints.contains(delete_update_id.as_slice()));
+        assert_eq!(report.affected_checkpoints.contains(divergent_id.as_slice()), max_conflicts == 3);
+        assert!(!report.affected_checkpoints.contains(closure_id.as_slice()));
+        assert_eq!(source.visited.len(), 9);
+    }
 }
 
 #[test]
