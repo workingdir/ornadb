@@ -90,6 +90,27 @@ fn edge_interplay_fixture_closes_nullable_column_filter_arms() {
 }
 
 #[test]
+fn edge_interplay_fixture_closes_nullable_expression_projection_edges() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The frozen schema declares these expression and documentation fields nullable, but is
+    // silent on relationships between them; compose their checks and retain the nullable docs
+    // type in the projected relation without adding a domain invariant.
+    assert!(
+        analysis.is_ok(),
+        "nullable Column expression predicates and docs projection must resolve together: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn runtime_publication_counters_do_not_leak_into_frozen_sys_types() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-internal-publication-metadata.orna",
