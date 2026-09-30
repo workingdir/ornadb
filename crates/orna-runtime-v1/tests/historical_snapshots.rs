@@ -737,3 +737,133 @@ async fn retained_pins_cross_generation_encoding_boundaries() {
         );
     }
 }
+
+#[tokio::test]
+async fn stable_prefix_neighbor_survives_extension_pin_tails() {
+    let (_directory, repository) = repository();
+    let identity = RuntimeIdentity {
+        database_id: [52; 16],
+        repository_id: [53; 16],
+    };
+    let state = RuntimeState::open(&repository, identity, [54; 32])
+        .await
+        .expect("open runtime");
+    let writer = state.acquire_lease([55; 16]).await.expect("acquire writer");
+    let mut pins = Vec::new();
+
+    for generation in 1..=257_u64 {
+        let mut mutation_id = [0; 16];
+        mutation_id[8..].copy_from_slice(&generation.to_be_bytes());
+        // Exercise the reverse prefix orientation: the shorter key is stable while
+        // its longer neighbor is deleted at 256 and restored at 257.
+        let extension_value = match generation {
+            256 => None,
+            257 => Some(b"restored-extension".to_vec()),
+            _ => Some(b"steady-extension".to_vec()),
+        };
+        let mut mutations = vec![
+            TableMutation::new(mutation_id, "records", vec![5, 0], extension_value)
+                .expect("valid extension-row generation mutation"),
+        ];
+        if generation == 1 {
+            let mut prefix_mutation_id = mutation_id;
+            prefix_mutation_id[0] = 1;
+            mutations.push(
+                TableMutation::new(
+                    prefix_mutation_id,
+                    "records",
+                    vec![5],
+                    Some(b"stable-prefix".to_vec()),
+                )
+                .expect("valid stable prefix-row mutation"),
+            );
+        }
+        commit(&state, writer, &mutations, 56).await;
+
+        if matches!(generation, 255 | 256) {
+            let selected = state
+                .select_historical_snapshot(generation)
+                .await
+                .expect("select adjacent prefix boundary pin");
+            let descriptor = selected.capture().snapshot().clone();
+            let encoded = descriptor.encode().expect("encode prefix boundary pin");
+            let decoded = Snapshot::decode_bytes(&encoded).expect("decode prefix boundary pin");
+            assert_eq!(decoded, descriptor);
+            pins.push((generation, decoded, selected));
+        }
+    }
+
+    assert_eq!(
+        pins.iter().map(|(generation, _, _)| *generation).collect::<Vec<_>>(),
+        [255, 256]
+    );
+    let latest = state
+        .select_historical_snapshot(257)
+        .await
+        .expect("select generation after extension restoration");
+    assert_eq!(
+        state
+            .read_table_at(&latest, "records")
+            .await
+            .expect("read generation 257")
+            .rows(),
+        &[
+            (vec![5], b"stable-prefix".to_vec()),
+            (vec![5, 0], b"restored-extension".to_vec()),
+        ]
+    );
+
+    for (generation, descriptor, selected) in &pins {
+        let resolved = state
+            .resolve_historical_snapshot(descriptor)
+            .await
+            .expect("resolve adjacent prefix pin after later commits");
+        assert_eq!(&resolved, selected);
+        let expected_rows = if *generation == 255 {
+            vec![
+                (vec![5], b"stable-prefix".to_vec()),
+                (vec![5, 0], b"steady-extension".to_vec()),
+            ]
+        } else {
+            vec![(vec![5], b"stable-prefix".to_vec())]
+        };
+        assert_eq!(
+            state
+                .read_table_at(&resolved, "records")
+                .await
+                .expect("read exact prefix boundary pin")
+                .rows(),
+            expected_rows.as_slice(),
+            "generation {generation} retains the stable prefix row"
+        );
+    }
+
+    drop(state);
+    let reopened = RuntimeState::open(&repository, identity, [54; 32])
+        .await
+        .expect("reopen runtime");
+    for (generation, descriptor, selected) in &pins {
+        let resolved = reopened
+            .resolve_historical_snapshot(descriptor)
+            .await
+            .expect("resolve prefix pin after reopen");
+        assert_eq!(resolved, *selected);
+        assert_eq!(resolved.generation(), *generation);
+        let expected_rows = if *generation == 255 {
+            vec![
+                (vec![5], b"stable-prefix".to_vec()),
+                (vec![5, 0], b"steady-extension".to_vec()),
+            ]
+        } else {
+            vec![(vec![5], b"stable-prefix".to_vec())]
+        };
+        assert_eq!(
+            reopened
+                .read_table_at(&resolved, "records")
+                .await
+                .expect("read retained prefix pin after reopen")
+                .rows(),
+            expected_rows.as_slice()
+        );
+    }
+}
