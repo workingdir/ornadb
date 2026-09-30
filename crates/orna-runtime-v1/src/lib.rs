@@ -20870,6 +20870,25 @@ mod tests {
             "last() returns the first-row predicate failure before evaluating the later match"
         );
 
+        // The reference leaves last()'s handling of an early predicate
+        // failure after a nonmatching row implicit. A later row in the
+        // bounded union would match, but the missing lookup on row two stops
+        // last() before it evaluates that tail.
+        let (last_stops_at_middle_predicate_failure, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-middle-predicate-failure.orna"
+                ),
+            );
+        let predicate_failure = last_stops_at_middle_predicate_failure.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "last() returns a middle-row predicate failure before evaluating the later match"
+        );
+
         // The reference specifies first-match short-circuiting and bounded
         // enumeration separately, leaving their interaction with a later
         // failing filter predicate implicit. first() matches within the
