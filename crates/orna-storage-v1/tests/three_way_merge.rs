@@ -2310,18 +2310,18 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
     let mut deleted_row = parse_fixture(BASE, RowKeyKind::Explicit);
     deleted_row.key = high_key.clone();
 
-    let build_inputs = |delete_on_left, divergent_checkpoint| {
+    let build_inputs = |row_delete_on_left, checkpoint_delete_on_left, divergent_checkpoint| {
         let mut source = FixtureRows::default();
         source.add(MergeSide::Base, b"base-upper", vec![deleted_row.clone()]);
         source.add(
             MergeSide::Left,
             b"left-upper",
-            if delete_on_left { Vec::new() } else { vec![deleted_row.clone()] },
+            if row_delete_on_left { Vec::new() } else { vec![deleted_row.clone()] },
         );
         source.add(
             MergeSide::Right,
             b"right-upper",
-            if delete_on_left { vec![deleted_row.clone()] } else { Vec::new() },
+            if row_delete_on_left { vec![deleted_row.clone()] } else { Vec::new() },
         );
 
         let mut base = snapshot(
@@ -2349,14 +2349,14 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         let unchanged_delete_id = b"consumer/b-delete-against-unchanged".to_vec();
         let base_checkpoint = CheckpointGeneration { generation: 4, position: None };
         base.checkpoints.insert(unchanged_delete_id.clone(), base_checkpoint.clone());
-        let retained_side = if delete_on_left { &mut right } else { &mut left };
+        let retained_side = if checkpoint_delete_on_left { &mut right } else { &mut left };
         retained_side
             .checkpoints
             .insert(unchanged_delete_id.clone(), base_checkpoint.clone());
 
         let checkpoint_id = b"consumer/m-delete-update-after-tombstone".to_vec();
         base.checkpoints.insert(checkpoint_id.clone(), base_checkpoint.clone());
-        let update_side = if delete_on_left { &mut right } else { &mut left };
+        let update_side = if checkpoint_delete_on_left { &mut right } else { &mut left };
         let updated_checkpoint = if divergent_checkpoint {
             CheckpointGeneration { generation: 5, position: None }
         } else {
@@ -2381,7 +2381,11 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         (base, left, right, source, agreed_delete_id, unchanged_delete_id, checkpoint_id, tail_id)
     };
 
-    for delete_on_left in [true, false] {
+    // Row and checkpoint deletion orientations are independent; cover all
+    // combinations so a tombstone never hides the checkpoint budget tail.
+    for (row_delete_on_left, checkpoint_delete_on_left) in
+        [(true, true), (true, false), (false, true), (false, false)]
+    {
         let (
             base,
             left,
@@ -2391,7 +2395,7 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
             unchanged_delete_id,
             checkpoint_id,
             tail_id,
-        ) = build_inputs(delete_on_left, true);
+        ) = build_inputs(row_delete_on_left, checkpoint_delete_on_left, true);
 
         // MERGE-005 requires bounded impact evidence, but does not specify
         // cross-phase order. Storage finishes the segmented row phase first;
@@ -2422,8 +2426,11 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
 
         // The same row/checkpoint deletion orientation without the divergent
         // checkpoint proves the changed segment emits the tombstone itself.
-        let (base, left, right, mut source, _, _, checkpoint_id, tail_id) =
-            build_inputs(delete_on_left, false);
+        let (base, left, right, mut source, _, _, checkpoint_id, tail_id) = build_inputs(
+            row_delete_on_left,
+            checkpoint_delete_on_left,
+            false,
+        );
         let plan = merge_three_way_snapshots(
             &base,
             &left,
