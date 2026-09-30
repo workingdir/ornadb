@@ -3525,10 +3525,27 @@ impl LiveHost {
                     }
                 }
                 .await;
-                if dispatched.is_err() && !matches!(&dispatched, Err(Error::ApplicationDeferred)) {
-                    self.retain_failure(session, request, fingerprint).await?;
+                match dispatched {
+                    Err(error) if !matches!(error, Error::ApplicationDeferred) => {
+                        // Synchronous dispatch and supervised completions use
+                        // the same replay contract: retain a portable rejection
+                        // before returning it to the transport, so a retry does
+                        // not replace its event/watch context with a generic
+                        // failure result.
+                        if let Some(outcome) = self.operational_error_outcome(
+                            Some(session),
+                            &envelope,
+                            error,
+                            true,
+                        )? {
+                            self.complete(session, request, &envelope, outcome).await
+                        } else {
+                            self.retain_failure(session, request, fingerprint).await?;
+                            Err(error)
+                        }
+                    }
+                    result => result,
                 }
-                dispatched
             }
         }
     }
