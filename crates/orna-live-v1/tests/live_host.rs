@@ -50,6 +50,9 @@ use std::{
 
 };
 
+const LIVE_RUNTIME_BOUNDARY_FIXTURE: &str =
+    include_str!("fixtures/live-runtime-boundary.orna");
+
 fn commit_delivered(
     transport: &mut LiveTransport,
     upgrade: WebSocketUpgrade,
@@ -2433,6 +2436,65 @@ fn eval(session: [u8; 16], request: [u8; 16], source: &str) -> Vec<u8> {
     envelope.encode(Limits::default().protocol).unwrap()
 }
 
+fn eval_with_context(
+    session: [u8; 16],
+    request: [u8; 16],
+    database: [u8; 16],
+    snapshot: Option<CanonicalSnapshot>,
+) -> Vec<u8> {
+    let mut envelope = Envelope {
+        request: Some(request),
+        watch: None,
+        message: Message::Eval {
+            source: LIVE_RUNTIME_BOUNDARY_FIXTURE.into(),
+            database: DatabaseContext { database, snapshot },
+            presentation: PresentationContext {
+                locale: "en-GB".into(),
+                timezone: None,
+                width: None,
+                theme: "terminal/dark".into(),
+                supported_kinds: vec![],
+            },
+            fingerprint: [0; 32],
+        },
+        extensions: BTreeMap::new(),
+    };
+    let fingerprint =
+        canonical_request_fingerprint(session, &envelope, Limits::default().protocol).unwrap();
+    if let Message::Eval {
+        fingerprint: sent, ..
+    } = &mut envelope.message
+    {
+        *sent = fingerprint;
+    }
+    envelope.encode(Limits::default().protocol).unwrap()
+}
+
+fn watch_with_context(request: [u8; 16], database: [u8; 16]) -> Vec<u8> {
+    Envelope {
+        request: Some(request),
+        watch: None,
+        message: Message::Watch {
+            source: LIVE_RUNTIME_BOUNDARY_FIXTURE.into(),
+            database: DatabaseContext {
+                database,
+                snapshot: None,
+            },
+            presentation: PresentationContext {
+                locale: "en-GB".into(),
+                timezone: None,
+                width: None,
+                theme: "terminal/dark".into(),
+                supported_kinds: vec![],
+            },
+            refresh_floor: None,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap()
+}
+
 fn create(host: &mut LiveHost, issuer: &mut Issuer) -> SessionCredential {
     block_on(host.create(
         CreateRequest {
@@ -2674,6 +2736,117 @@ fn websocket_replacement_queues_retirement_and_close_is_idempotent() {
         block_on(transport.upgrade(upgrade([5; 16]).0, [5; 16], 6)).status,
         101
     );
+}
+
+#[test]
+fn live_requests_cannot_switch_the_issued_database_or_cwd_runtime() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"{}"}}"#,
+                uuid(2),
+                SUBPROTOCOL
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    assert_eq!(created.status, 201);
+    assert_eq!(
+        block_on(transport.upgrade(websocket_upgrade(1, &token(&created)), [5; 16], 1)).status,
+        101
+    );
+
+    let mut socket = WebSocketState::new([5; 16]);
+    let other_database = eval_with_context([1; 16], [21; 16], [3; 16], None);
+    assert!(matches!(
+        block_on(transport.prepare_websocket_application(
+            &mut socket,
+            2,
+            &masked_binary_payload(&other_database),
+        )),
+        Err(Error::Denied)
+    ));
+
+    let mut application = UnitApplication::default();
+    let rejected = block_on(transport.receive_with_application(
+        &mut socket,
+        2,
+        &masked_binary_payload(&other_database),
+        &mut application,
+    ))
+    .unwrap();
+    assert_eq!(rejected.len(), 1);
+    let WebSocketOutput::Binary { payload, .. } = &rejected[0] else {
+        panic!("a rejected request should receive a correlated diagnostic");
+    };
+    let rejected = Envelope::decode(payload, Limits::default().protocol).unwrap();
+    assert!(matches!(rejected.message, Message::Diagnostic { .. }));
+    assert_eq!(application.calls, 0);
+
+    let other_runtime_snapshot = CanonicalSnapshot::cwd([2; 16], [4; 16], 0.into()).unwrap();
+    let other_runtime = eval_with_context(
+        [1; 16],
+        [22; 16],
+        [2; 16],
+        Some(other_runtime_snapshot),
+    );
+    assert!(matches!(
+        block_on(transport.prepare_websocket_application(
+            &mut socket,
+            2,
+            &masked_binary_payload(&other_runtime),
+        )),
+        Err(Error::Denied)
+    ));
+
+    let other_database_watch = watch_with_context([23; 16], [3; 16]);
+    assert!(matches!(
+        block_on(transport.prepare_websocket_application(
+            &mut socket,
+            2,
+            &masked_binary_payload(&other_database_watch),
+        )),
+        Err(Error::Denied)
+    ));
+
+    let bound_request = eval_with_context([1; 16], [24; 16], [2; 16], None);
+    let accepted = block_on(transport.receive_with_application(
+        &mut socket,
+        2,
+        &masked_binary_payload(&bound_request),
+        &mut application,
+    ))
+    .unwrap();
+    assert_eq!(accepted.len(), 1);
+    assert!(matches!(&accepted[0], WebSocketOutput::Binary { .. }));
+    assert_eq!(application.calls, 1);
+
+    let bound_snapshot = CanonicalSnapshot::cwd([2; 16], [3; 16], 0.into()).unwrap();
+    let bound_snapshot_request = eval_with_context(
+        [1; 16],
+        [25; 16],
+        [2; 16],
+        Some(bound_snapshot),
+    );
+    let accepted = block_on(transport.receive_with_application(
+        &mut socket,
+        2,
+        &masked_binary_payload(&bound_snapshot_request),
+        &mut application,
+    ))
+    .unwrap();
+    assert_eq!(accepted.len(), 1);
+    assert!(matches!(&accepted[0], WebSocketOutput::Binary { .. }));
+    assert_eq!(application.calls, 2);
 }
 
 #[test]
@@ -6946,6 +7119,20 @@ fn masked(fin: bool, opcode: u8, body: &[u8]) -> Vec<u8> {
             .map(|(index, byte)| byte ^ key[index % 4]),
     );
     frame
+}
+
+fn masked_binary_payload(body: &[u8]) -> Vec<u8> {
+    if body.len() < 126 {
+        masked(true, 2, body)
+    } else {
+        masked_with_length_code(
+            true,
+            2,
+            body,
+            126,
+            u64::try_from(body.len()).expect("test payload length fits u64"),
+        )
+    }
 }
 
 fn unmasked(fin: bool, opcode: u8, body: &[u8]) -> Vec<u8> {

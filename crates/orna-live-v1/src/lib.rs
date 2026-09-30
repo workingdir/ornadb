@@ -1660,12 +1660,19 @@ pub struct LiveHost {
     watch_snapshots: BTreeMap<([u8; 16], [u8; 16]), AcceptedWatchSnapshot>,
     application_sessions: BTreeSet<[u8; 16]>,
     deleted_sessions: BTreeMap<[u8; 16], DeletedSession>,
+    session_runtime_contexts: BTreeMap<[u8; 16], SessionRuntimeContext>,
     runtime: Option<Arc<RuntimeState>>,
     runtime_owner: Option<[u8; 16]>,
     writer_lease: Option<WriterLease>,
     recovered_owner: Option<RequestOwner>,
     takeover_recovery_complete: bool,
     application_work: LiveApplicationWorkSupervisor,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SessionRuntimeContext {
+    database: [u8; 16],
+    runtime: [u8; 16],
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1817,6 +1824,7 @@ impl LiveHost {
             watch_snapshots: BTreeMap::new(),
             application_sessions: BTreeSet::new(),
             deleted_sessions: BTreeMap::new(),
+            session_runtime_contexts: BTreeMap::new(),
             runtime: runtime.map(Arc::new),
             runtime_owner,
             writer_lease: None,
@@ -1858,7 +1866,19 @@ impl LiveHost {
         request: CreateRequest<'_>,
         issuer: &mut impl LiveCredentialIssuer,
     ) -> Result<SessionCredential> {
+        self.create_with_runtime_context(request, None, issuer).await
+    }
+
+    async fn create_with_runtime_context(
+        &mut self,
+        request: CreateRequest<'_>,
+        runtime_context: Option<SessionRuntimeContext>,
+        issuer: &mut impl LiveCredentialIssuer,
+    ) -> Result<SessionCredential> {
         let subscribe = self.decode(request.subscribe)?;
+        if runtime_context.is_some() && self.session_runtime_contexts.contains_key(&request.id) {
+            return Err(Error::Denied);
+        }
         let security = self
             .security
             .create(
@@ -1883,6 +1903,10 @@ impl LiveHost {
         ) {
             let _ = self.security.revoke(session_id(request.id));
             return Err(map_serving(error));
+        }
+        if let Some(runtime_context) = runtime_context {
+            self.session_runtime_contexts
+                .insert(request.id, runtime_context);
         }
         Ok(SessionCredential { security, serving })
     }
@@ -2346,6 +2370,7 @@ impl LiveHost {
         self.watches.retain(|(owner, _)| *owner != request.id);
         self.watch_snapshots
             .retain(|(owner, _), _| *owner != request.id);
+        self.session_runtime_contexts.remove(&request.id);
         self.serving
             .credential_deleted(request.id, deleted)
             .map_err(|_| Error::DeletionFailed)?;
@@ -2473,6 +2498,7 @@ impl LiveHost {
             return Err(Error::InvalidFrame);
         };
         let envelope = self.decode(&bytes)?;
+        self.validate_session_runtime_context(session, &envelope.message)?;
         let request = envelope.request.ok_or(Error::InvalidMessage)?;
         if matches!(
             envelope.message,
@@ -3050,6 +3076,7 @@ impl LiveHost {
             }
             Frame::Binary(bytes) => {
                 let envelope = self.decode(&bytes)?;
+                self.validate_session_runtime_context(session, &envelope.message)?;
                 let request = envelope.request.ok_or(Error::InvalidMessage)?;
                 if matches!(
                     envelope.message,
@@ -4520,6 +4547,40 @@ impl LiveHost {
             orna_protocol_v1::Error::Limit => Error::Limit,
             _ => Error::InvalidMessage,
         })
+    }
+
+    fn validate_session_runtime_context(
+        &self,
+        session: [u8; 16],
+        message: &Message,
+    ) -> Result<()> {
+        let database_context = match message {
+            Message::Eval { database, .. } | Message::Watch { database, .. } => database,
+            _ => return Ok(()),
+        };
+        let Some(bound) = self.session_runtime_contexts.get(&session) else {
+            // Direct LiveHost users can supply their own application authority
+            // without a transport-created database session. The executable
+            // transport path always installs this binding during session create.
+            return Ok(());
+        };
+        if database_context.database != bound.database {
+            return Err(Error::Denied);
+        }
+        if let Some(snapshot) = &database_context.snapshot {
+            let (snapshot_database, snapshot_runtime) = match snapshot {
+                CanonicalSnapshot::Cwd {
+                    database, runtime, ..
+                } => (*database, Some(*runtime)),
+                CanonicalSnapshot::Commit { database, .. } => (*database, None),
+            };
+            if snapshot_database != bound.database
+                || snapshot_runtime.is_some_and(|runtime| runtime != bound.runtime)
+            {
+                return Err(Error::Denied);
+            }
+        }
+        Ok(())
     }
 
     /// The execution host calls these around work it has accepted from a
@@ -6244,7 +6305,7 @@ impl LiveTransport {
                 }
                 let credential = match self
                     .host
-                    .create(
+                    .create_with_runtime_context(
                         CreateRequest {
                             id: metadata.session,
                             origin: origin.clone(),
@@ -6252,6 +6313,10 @@ impl LiveTransport {
                             now,
                             subscribe: &metadata.subscribe,
                         },
+                        Some(SessionRuntimeContext {
+                            database: metadata.database,
+                            runtime: metadata.runtime,
+                        }),
                         issuer,
                     )
                     .await
@@ -7471,6 +7536,13 @@ impl LiveTransport {
             }
             Error::Denied if matches!(envelope.message, Message::Resync) => {
                 ("wire.unknown_handle", None)
+            }
+            Error::Denied
+                if matches!(envelope.message, Message::Eval { .. } | Message::Watch { .. }) =>
+            {
+                // DatabaseContext is client supplied; keep the session's
+                // trusted database/runtime selection authoritative.
+                ("wire.database_context_mismatch", None)
             }
             _ => return Ok(None),
         };
