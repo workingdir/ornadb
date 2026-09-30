@@ -1,0 +1,61 @@
+pub enum Color {
+    red,
+    blue,
+}
+
+type LocalSequence = Int;
+
+pub table AutoNote {
+    text: Str,
+    label: Str = text,
+    display: Str => self.label,
+}
+
+pub table Reading(sensor: Str, sequence: Int) {
+    value: Decimal,
+    label: Str => self.sensor,
+}
+
+pub table TupleReading(key: (Str, Int)) {
+    value: Str,
+}
+
+pub table Parent(id: Int) {
+    name: Str,
+}
+
+pub table Child(parent: Parent) {
+    note: Str,
+}
+
+pub table Colored(color: Color) {
+    label: Str,
+}
+
+pub table Dated(day: Date) {
+    label: Str,
+}
+
+pub table Timed(at: Instant) {
+    label: Str,
+}
+
+pub table DecimalKey(amount: Decimal) {
+    label: Str,
+}
+
+pub table UuidKey(id: Uuid) {
+    label: Str,
+}
+
+pub table AliasKey(key: LocalSequence) {
+    label: Str,
+}
+
+pub table AliasParent(id: LocalSequence) {
+    label: Str,
+}
+
+pub table AliasChild(parent: AliasParent) {
+    label: Str,
+}
