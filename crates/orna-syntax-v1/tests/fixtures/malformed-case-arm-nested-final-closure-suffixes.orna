@@ -1,0 +1,11 @@
+pub fn bad(flag: Bool): Int { case flag {
+1: 2 3 { value: 4 },
+true: 5,
+false: outer => { case outer {
+true: "prefix {outer} direct branch remains",
+false: inner => { case flag {
+true: "first {inner} keeps {outer} before close",
+false: "final {inner} keeps {flag} remainder"
+} }
+} }
+} }
