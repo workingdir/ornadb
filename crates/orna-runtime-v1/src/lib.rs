@@ -20260,6 +20260,50 @@ mod tests {
         );
         assert_eq!((lookups, scans), (2, 2), "right projection runs after the zero-take left child");
 
+        // Union siblings are separate effectful projection calls, processed
+        // left to right. Identical projection source must not reuse results.
+        let (both_projected, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-union-project-both-siblings.orna"),
+        );
+        assert_eq!(
+            both_projected.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(4u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "each sibling projects both rows independently"
+        );
+
+        let (right_projection_failure, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-union-project-right-failure.orna"),
+        );
+        assert_eq!(
+            right_projection_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "left projection completes before the right projection fails"
+        );
+
+        let (left_projection_failure, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-union-project-left-failure.orna"),
+        );
+        assert_eq!(
+            left_projection_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "a left projection failure stops the right sibling before its effects"
+        );
+
         let (missing, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
             include_str!("../tests/fixtures/query-session-projection-missing.orna"),
