@@ -10141,6 +10141,198 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
         )),
         Err(Error::Closed)
     ));
+
+    // The sixth scope reuses the same query ID after five owners have closed.
+    // Its Unknown snapshot remains tied to this scoped identity when a target
+    // with the same request bytes is later started, and survives its own close.
+    let sixth_subscribe = subscribe();
+    let mut sixth_issuer = Issuer(6, None);
+    let sixth_credential = block_on(host.create(
+        CreateRequest {
+            id: [6; 16],
+            origin: origin(),
+            expires_at: 100,
+            now: 9,
+            subscribe: &sixth_subscribe,
+        },
+        &mut sixth_issuer,
+    ))
+    .unwrap();
+    block_on(host.resume(ResumeRequest {
+        id: [6; 16],
+        origin: &origin(),
+        credential: &sixth_credential,
+        attachment: [11; 16],
+        now: 10,
+    }))
+    .unwrap();
+
+    let sixth_target_request = eval_with_context([6; 16], [91; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&sixth_target_request, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    let sixth_target_fingerprint = request_fingerprint(&sixth_target_request, [6; 16]);
+    let sixth_query_request = Envelope {
+        request: Some([96; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint: sixth_target_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let sixth_query_fingerprint = request_fingerprint(&sixth_query_request, [6; 16]);
+    let sixth_unknown = block_on(host.dispatch_frame(
+        [11; 16],
+        2,
+        Frame::Binary(sixth_query_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the sixth scope reuses the query ID after all earlier owners closed");
+    assert!(matches!(
+        &sixth_unknown.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Unknown,
+            fingerprint: None,
+            result: None,
+        } if *target == [91; 16]
+    ));
+    for (session_id, expected_fingerprint) in [
+        ([1; 16], closed_sibling_target_query_fingerprint),
+        ([3; 16], third_query_fingerprint),
+        ([4; 16], fourth_query_fingerprint),
+        ([5; 16], fifth_query_fingerprint),
+        ([6; 16], sixth_query_fingerprint),
+    ] {
+        assert!(matches!(
+            block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+                session_id,
+                request_id: [96; 16],
+            }))
+            .unwrap(),
+            Some(status)
+                if status.state == orna_runtime_v1::RequestState::Completed
+                    && status.fingerprint == expected_fingerprint
+        ));
+    }
+
+    let sixth_identity = RequestIdentity {
+        session_id: [6; 16],
+        request_id: [91; 16],
+    };
+    let runtime = open_durable_state(&repository);
+    let (_, capability) = block_on(runtime.reserve_request_with_admission(
+        sixth_identity,
+        sixth_target_fingerprint,
+    ))
+    .unwrap();
+    let capability = capability.expect("fresh owner-bound capability in the sixth session");
+    block_on(runtime.start_request_with_owner_and_admission(
+        sixth_identity,
+        sixth_target_fingerprint,
+        lease,
+        capability,
+    ))
+    .unwrap();
+    drop(runtime);
+
+    let sixth_unknown_retry = block_on(host.dispatch_frame(
+        [11; 16],
+        3,
+        Frame::Binary(sixth_query_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the exact query replays Unknown after its target starts");
+    assert_eq!(sixth_unknown_retry, sixth_unknown);
+    let sixth_fresh_request = Envelope {
+        request: Some([97; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint: sixth_target_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let sixth_fresh = block_on(host.dispatch_frame(
+        [11; 16],
+        4,
+        Frame::Binary(sixth_fresh_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a fresh query sees the same-scope target running");
+    assert!(matches!(
+        &sixth_fresh.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Running,
+            fingerprint: Some(returned),
+            result: None,
+        } if *target == [91; 16] && *returned == sixth_target_fingerprint
+    ));
+
+    let mut sixth_deletion = RecordingDelete::default();
+    let mut sixth_children = RecordingChildren::default();
+    assert_eq!(
+        block_on(host.http_delete_with_children(
+            DeleteRequest {
+                id: [6; 16],
+                origin: &origin(),
+                credential: &sixth_credential,
+                now: 11,
+            },
+            &mut sixth_deletion,
+            &mut sixth_children,
+        ))
+        .status,
+        204
+    );
+    assert_eq!(sixth_children.requests, vec![sixth_identity]);
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status(
+            sixth_identity,
+            sixth_target_fingerprint,
+        ))
+        .unwrap(),
+        Some(status) if status.state == orna_runtime_v1::RequestState::Cancelled
+    ));
+    for (request_id, expected_fingerprint) in [
+        ([96; 16], sixth_query_fingerprint),
+        ([97; 16], request_fingerprint(&sixth_fresh_request, [6; 16])),
+    ] {
+        assert!(matches!(
+            block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+                session_id: [6; 16],
+                request_id,
+            }))
+            .unwrap(),
+            Some(status)
+                if status.state == orna_runtime_v1::RequestState::Completed
+                    && status.fingerprint == expected_fingerprint
+        ));
+    }
+    assert!(matches!(
+        block_on(host.dispatch_frame(
+            [11; 16],
+            5,
+            Frame::Binary(sixth_query_request),
+            &mut application,
+        )),
+        Err(Error::Closed)
+    ));
     assert_eq!(application.calls, 0);
     drop(host);
     remove_test_repository(&root);
