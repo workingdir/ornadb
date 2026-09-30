@@ -26,3 +26,4 @@ pub fn direct_function_calls(functions: Relation<sys.Function>): Relation<sys.Fu
 pub fn second_level_function_calls(functions: Relation<sys.Function>): Relation<sys.Function> = direct_function_calls(functions) | flat_map(callee => callee.calls);
 pub fn third_level_function_calls(functions: Relation<sys.Function>): Relation<sys.Function> = second_level_function_calls(functions) | flat_map(descendant => descendant.calls);
 pub fn recursive_function_capture_rows(functions: Relation<sys.Function>): Relation<sys.Function> = functions | flat_map(root => root.calls | flat_map(child => child.calls | flat_map(descendant => [root, child, descendant])));
+pub fn inferred_recursive_function_grandchildren(functions: Relation<sys.Function>): Relation<sys.Function> = direct_function_calls(functions) | filter(callee => callee.inferred_signature) | flat_map(inferred => inferred.calls);

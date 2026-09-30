@@ -35,3 +35,5 @@ The fixture extends that path through `Function.calls`, so the five-edge proof s
 The fixture also follows `Function.calls` for three successive `flat_map` steps. The reference declares the recursive row field but does not detail repeated callback closure over its returned `Relation<Function>`; each step keeps the `sys.Function` descriptor for the next callback.
 
 The fixture nests two recursive `Function.calls` callbacks and returns a relation containing the root, child, and descendant rows. The reference does not specify capture of rows from enclosing recursive callbacks; the implementation preserves each lexical row descriptor through the nested callbacks, allowing all three `sys.Function` rows to share the emitted relation.
+
+The fixture also takes the helper result from `Function.calls`, filters rows by `Function.inferred_signature`, then follows `calls` again. The reference declares both fields but is silent on retaining the recursive row descriptor across a helper boundary and predicate; the semantic choice is for `filter` to preserve the `sys.Function` row type for the next callback.
