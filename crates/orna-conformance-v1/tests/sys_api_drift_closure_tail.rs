@@ -7,6 +7,7 @@ const PUBLICATION_SURFACE: &str = include_str!("fixtures/sys-api-drift-publicati
 const INTERNAL_PUBLICATION_METADATA: &str =
     include_str!("fixtures/sys-api-drift-internal-publication-metadata.orna");
 const DEFAULT_ARGUMENTS: &str = include_str!("fixtures/sys-api-drift-default-arguments.orna");
+const EDGE_INTERPLAY: &str = include_str!("fixtures/sys-api-drift-edge-interplay.orna");
 
 #[test]
 fn published_api_matches_the_frozen_schema_and_keeps_local_provenance() {
@@ -42,6 +43,23 @@ fn default_argument_fixture_uses_published_schema_edges() {
     assert!(
         analysis.is_ok(),
         "{:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn edge_interplay_fixture_closes_nested_relation_key_paths() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+    assert!(
+        analysis.is_ok(),
+        "nested DiffEntry key edges must remain usable through the published relation and value schemas: {:?}",
         analysis
             .diagnostics
             .iter()
