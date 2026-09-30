@@ -4011,3 +4011,93 @@ fn explain_closes_aligned_and_remainder_max_byte_write_edges() {
         node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
     }));
 }
+
+#[test]
+fn explain_closes_max_byte_write_remainder_through_materialization_tail() {
+    let parsed = orna_syntax_v1::parse_module(ROUNDING_TAIL_INTERPLAY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the existing 4-KiB
+    // rule, MAX write bytes round to 2^52 blocks. The scan leaves room for one
+    // such write and one matching materialization at the exact MAX boundary.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    let scan_rows = u64::MAX - (2 * MAX_BYTE_BLOCKS);
+    let explain_with_affected_rows = |affected_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:max-byte-write-materialize-tail"),
+            source: obj("table:RoundingFirst"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(scan_rows),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:RoundingWrite"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(affected_rows),
+                estimated_write_bytes: Some(u64::MAX),
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: Some(obj("materialization:rounding-write-tail")),
+        })
+        .expect("max-byte write remainder closes through materialization")
+    };
+
+    let exact = explain_with_affected_rows(0);
+    let max_cost = u64::MAX.to_string();
+    assert_eq!(exact.plan().estimated_cost(), Some(max_cost.as_str()));
+    let scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:RoundingFirst"))
+        })
+        .expect("fixture source scan");
+    assert_eq!(scan.estimated_work(), Some(scan_rows));
+    let write = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("max-byte write");
+    assert_eq!(write.estimated_rows(), Some(0));
+    assert_eq!(write.estimated_bytes(), Some(u64::MAX));
+    assert_eq!(write.estimated_work(), Some(MAX_BYTE_BLOCKS));
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().estimated_rows(), Some(0));
+    assert_eq!(exact.root().estimated_bytes(), Some(u64::MAX));
+    assert_eq!(exact.root().estimated_work(), Some(MAX_BYTE_BLOCKS));
+
+    let overflow = explain_with_affected_rows(1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().estimated_work(), Some(MAX_BYTE_BLOCKS + 1));
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the materialization tail pushes the rounded write total past MAX"
+    );
+    assert_eq!(overflow.root().details().get("estimated_work_overflow"), None);
+    let overflow_write = overflow
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("one-row max-byte write");
+    assert_eq!(overflow_write.estimated_work(), Some(MAX_BYTE_BLOCKS + 1));
+    let surface = serde_json::to_value(&overflow).expect("materialized write overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
