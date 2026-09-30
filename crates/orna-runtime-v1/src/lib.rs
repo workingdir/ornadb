@@ -24228,6 +24228,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sys_invocation_tail_generation_cursor_stays_stale_after_reopen() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(140)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let invocation_id = id(141);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(142)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .finish_invocation_observation(writer, invocation_id, InvocationCompletion::Succeeded)
+            .await
+            .unwrap();
+        let end_page = state.invocation_observation_tail(None, 2).await.unwrap();
+        assert_eq!(end_page.entries.len(), 2);
+        assert!(!end_page.has_more);
+        let stale_cursor = end_page.next_cursor.expect("tail end has a cursor");
+
+        let key = stream_delivery("generation-cursor-reopen", "generation-cursor-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("generation-cursor:reset").unwrap(),
+            },
+            reason: "generation cursor reopen boundary".into(),
+        };
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request, id(143))
+            .await
+            .unwrap();
+
+        let capture = state.capture().await.unwrap();
+        assert_eq!(stale_cursor.capture(), &capture);
+        let next = state
+            .commit(
+                writer,
+                &capture,
+                &mutation(144),
+                capture.generation_digest(),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert_eq!(next.generation_digest(), capture.generation_digest());
+        assert_ne!(next.generation(), capture.generation());
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(reopened.stream_checkpoint(&key).await.unwrap(), receipt);
+        assert_eq!(
+            reopened
+                .invocation_observation_tail(Some(stale_cursor), 2)
+                .await,
+            Err(RuntimeError::InvocationTailInvalid),
+            "reopening preserves the committed generation mismatch"
+        );
+        let current_tail = reopened
+            .invocation_observation_tail(None, 4)
+            .await
+            .unwrap();
+        assert_eq!(
+            current_tail
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "the lifecycle tail remains durable while its old generation cursor expires"
+        );
+        let fresh_cursor = current_tail.next_cursor.expect("non-empty tail has a cursor");
+        let empty = reopened
+            .invocation_observation_tail(Some(fresh_cursor.clone()), 2)
+            .await
+            .unwrap();
+        assert!(empty.entries.is_empty());
+        assert_eq!(empty.next_cursor, Some(fresh_cursor));
+    }
+
+    #[tokio::test]
     async fn sys_lifecycle_parent_waits_for_children_and_replacement_orphans_old_owner() {
         assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
         let (_temp, repo) = repository();
