@@ -189,3 +189,9 @@ the target when the owner retries. That failed retry is caught; the nested
 closure updates and deletes the inserted row before retrying the owner again.
 The asserted tail records this local inserted-target closure order where the
 reference is silent.
+
+`owner_retry_survives_successive_inserted_target_closures` inserts a second row
+at the same target after the first inserted blocker is deleted. The owner fails
+and retries through a second nested closure, which updates and deletes the new
+blocker before releasing the target. The ordered tail documents this repeated
+insert/retry behavior where the reference is silent.
