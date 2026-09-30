@@ -26,6 +26,8 @@ const MAX_SOURCE_MATERIALIZATION_OVERFLOW_TAIL: &str =
     include_str!("fixtures/max_source_materialization_overflow_tail.orna");
 const MAX_SOURCE_MATERIALIZATION_AGGREGATE_TAIL: &str =
     include_str!("fixtures/max_source_materialization_aggregate_tail.orna");
+const MAX_SOURCE_MATERIALIZATION_LAST_BLOCK_TAIL: &str =
+    include_str!("fixtures/max_source_materialization_last_block_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -4612,5 +4614,92 @@ fn explain_closes_max_source_materialization_at_aggregate_rounding_edge() {
             && node.get("estimated_work_overflow").is_none()
             && node.get("actual_rows").is_none()
             && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_max_source_materialization_after_terminal_byte_remainder() {
+    let parsed = orna_syntax_v1::parse_module(MAX_SOURCE_MATERIALIZATION_LAST_BLOCK_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // 4-KiB heuristic, MAX bytes include a 4095-byte tail and round to 2^52
+    // blocks. Removing that tail leaves an aligned size one block lower, so
+    // one more row restores the same exact aggregate closure.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const LAST_ALIGNED_SOURCE_BYTES: u64 = u64::MAX - 4_095;
+    let closing_rows = u64::MAX / 2 - MAX_BYTE_BLOCKS;
+    let explain = |rows, bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:max-source-materialization-terminal-byte-remainder",
+            ),
+            source: obj("table:MaxSourceMaterializationLastBlock"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(rows),
+                estimated_bytes: Some(bytes),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:max-source-last-block")),
+        })
+        .expect("max-source terminal byte remainder materialization boundary")
+    };
+
+    let with_terminal_remainder = explain(closing_rows, u64::MAX);
+    let max_cost_minus_one = (u64::MAX - 1).to_string();
+    assert_eq!(
+        with_terminal_remainder.plan().estimated_cost(),
+        Some(max_cost_minus_one.as_str())
+    );
+    assert_eq!(
+        with_terminal_remainder.root().estimated_work(),
+        Some(u64::MAX / 2)
+    );
+    assert_eq!(
+        with_terminal_remainder.root().details().get("estimated_cost_overflow"),
+        None
+    );
+
+    let aligned_before_tail = explain(closing_rows, LAST_ALIGNED_SOURCE_BYTES);
+    let max_cost_minus_three = (u64::MAX - 3).to_string();
+    assert_eq!(
+        aligned_before_tail.plan().estimated_cost(),
+        Some(max_cost_minus_three.as_str())
+    );
+    let aligned_scan = aligned_before_tail
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan)
+        .expect("scan before the terminal source-byte tail");
+    assert_eq!(aligned_scan.estimated_bytes(), Some(LAST_ALIGNED_SOURCE_BYTES));
+    assert_eq!(
+        aligned_scan.estimated_work(),
+        Some(u64::MAX / 2 - 1)
+    );
+    assert_eq!(
+        aligned_before_tail.root().estimated_work(),
+        Some(u64::MAX / 2 - 1)
+    );
+
+    let aligned_closed_by_row = explain(closing_rows + 1, LAST_ALIGNED_SOURCE_BYTES);
+    assert_eq!(
+        aligned_closed_by_row.plan().estimated_cost(),
+        Some(max_cost_minus_one.as_str())
+    );
+    assert_eq!(
+        aligned_closed_by_row.root().estimated_work(),
+        Some(u64::MAX / 2)
+    );
+    assert!(aligned_closed_by_row.nodes().iter().all(|node| {
+        node.details().get("estimated_cost_overflow").is_none()
+            && node.details().get("estimated_work_overflow").is_none()
     }));
 }
