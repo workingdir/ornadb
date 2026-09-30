@@ -1,0 +1,3 @@
+pub table Contact(id: Int) { active: Bool, name: Str, }
+pub table ContactTag(contact_id: Int) { tag: Str, }
+pub fn active_contacts() = Contact | filter(contact => contact.active);
