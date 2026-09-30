@@ -7095,6 +7095,8 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
         b"consumer/q-agreed-reset-full-base-between".to_vec();
     let terminal_reset_id = b"consumer/z-reset-versus-advance".to_vec();
     let agreed_reset_after_id = b"consumer/zy-agreed-reset-after".to_vec();
+    let agreed_reset_full_base_after_id =
+        b"consumer/zy-agreed-reset-full-base-after".to_vec();
     let trailing_delete_id = b"consumer/zz-agreed-delete".to_vec();
     let deleted_row = parse_fixture(BASE, RowKeyKind::Explicit);
     let edited_row = parse_fixture(LEFT, RowKeyKind::Explicit);
@@ -7106,7 +7108,8 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
     // shared traversal order open. This storage policy completes rows first,
     // then visits stable checkpoint IDs. Agreed resets and one-sided deletes
     // resolve cleanly before, between, and after the delete/reset conflicts,
-    // including a convergent reset from a full generation/position base.
+    // including convergent resets from full generation/position bases in the
+    // middle and after the terminal conflict.
     let build_inputs = |row_delete_left: bool, checkpoint_delete_left: bool, reset_left: bool| {
         let mut source = FixtureRows::default();
         source.add(MergeSide::Base, b"base", vec![deleted_row.clone()]);
@@ -7149,6 +7152,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
                 &agreed_reset_between_id,
                 &agreed_reset_full_base_between_id,
                 &agreed_reset_after_id,
+                &agreed_reset_full_base_after_id,
             ] {
                 side.checkpoints.insert(checkpoint_id.to_vec(), reset_fixture.clone());
             }
@@ -7157,6 +7161,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
             &agreed_reset_before_id,
             &agreed_reset_between_id,
             &agreed_reset_after_id,
+            &agreed_reset_full_base_after_id,
         ] {
             base.checkpoints.insert(
                 checkpoint_id.to_vec(),
@@ -7165,6 +7170,10 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
         }
         base.checkpoints.insert(
             agreed_reset_full_base_between_id.clone(),
+            full_checkpoint.clone(),
+        );
+        base.checkpoints.insert(
+            agreed_reset_full_base_after_id.clone(),
             full_checkpoint.clone(),
         );
 
@@ -7247,6 +7256,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
                     assert!(!report.affected_checkpoints.contains(between_delete_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(agreed_reset_between_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(agreed_reset_full_base_between_id.as_slice()));
+                    assert!(!report.affected_checkpoints.contains(agreed_reset_full_base_after_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(agreed_reset_before_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(trailing_delete_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(agreed_reset_after_id.as_slice()));
@@ -7286,6 +7296,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
                 assert!(!report.affected_checkpoints.contains(between_delete_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(agreed_reset_between_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(agreed_reset_full_base_between_id.as_slice()));
+                assert!(!report.affected_checkpoints.contains(agreed_reset_full_base_after_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(agreed_reset_before_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(trailing_delete_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(agreed_reset_after_id.as_slice()));
