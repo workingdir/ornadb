@@ -225,6 +225,54 @@ fn annotation_metadata_and_generated_inventory_fail_closed() {
 }
 
 #[test]
+fn erased_invoke_and_start_labels_require_matching_generic_tails() {
+    let mut generated: Value = serde_json::from_str(&orna_sys_v1::system_api_json()).unwrap();
+    build_support::validate_api_document(&generated).expect("published overload pairs are valid");
+
+    let functions = generated["functions"].as_array_mut().unwrap();
+    functions.retain(|function| function["name"] != "sys.invoke<T>");
+    let function_count = functions.len();
+    generated["counts"]["functions"] = serde_json::json!(function_count);
+    let error = build_support::validate_api_document(&generated).unwrap_err();
+    assert!(
+        error.contains("erased overload `sys.invoke(Value)` requires a matching generic sibling"),
+        "removing the generic overload must invalidate its erased partner: {error}"
+    );
+
+    let mut mismatched_input: Value = serde_json::from_str(&orna_sys_v1::system_api_json()).unwrap();
+    let generic = mismatched_input["functions"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|function| function["name"] == "sys.invoke<T>")
+        .unwrap();
+    generic["signature"] = serde_json::json!(
+        "fn sys.invoke<T>(function: sys.FunctionRef, arguments: sys.Value, as: T, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.inherit, idempotency_key: Str? = null): T"
+    );
+    let error = build_support::validate_api_document(&mismatched_input).unwrap_err();
+    assert!(
+        error.contains("erased overload `sys.invoke(Value)` requires a matching generic sibling"),
+        "the generic sibling must preserve all non-witness inputs: {error}"
+    );
+
+    let mut mismatched_result: Value = serde_json::from_str(&orna_sys_v1::system_api_json()).unwrap();
+    let generic = mismatched_result["functions"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|function| function["name"] == "sys.start<T>")
+        .unwrap();
+    generic["signature"] = serde_json::json!(
+        "fn sys.start<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap, as: T, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.separate, idempotency_key: Str? = null): sys.InvocationHandle<sys.Value>"
+    );
+    let error = build_support::validate_api_document(&mismatched_result).unwrap_err();
+    assert!(
+        error.contains("erased overload `sys.start(Value)` requires a matching generic sibling"),
+        "the generic type witness must determine the erased result: {error}"
+    );
+}
+
+#[test]
 fn in_crate_orna_fixture_uses_a_published_collected_api_signature() {
     assert!(
         orna_syntax_v1::parse_module(SYSTEM_API_FIXTURE).is_ok(),
