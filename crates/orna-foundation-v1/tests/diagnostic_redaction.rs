@@ -3796,6 +3796,228 @@ fn closure_replacement_sources_restore_parent_snapshots_after_resize() {
 }
 
 #[test]
+fn same_length_closure_sources_keep_replaced_parent_snapshots_local() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let original = vec![
+        admitted(
+            "ORNA-E-REMAINDER-SAME-OLD-A",
+            "same length old parent a admission",
+        )
+        .with_cause(admitted(
+            "ORNA-E-REMAINDER-SAME-OLD-A-CHILD",
+            "same length old child a admission",
+        )),
+        admitted(
+            "ORNA-E-REMAINDER-SAME-OLD-B",
+            "same length old parent b admission",
+        )
+        .with_cause(admitted(
+            "ORNA-E-REMAINDER-SAME-OLD-B-CHILD-A",
+            "same length old child b a admission",
+        ))
+        .with_cause(admitted(
+            "ORNA-E-REMAINDER-SAME-OLD-B-CHILD-B",
+            "same length old child b b admission",
+        )),
+    ];
+    let replacement = vec![
+        admitted(
+            "ORNA-E-REMAINDER-SAME-NEW-A",
+            "same length replacement a admission",
+        )
+        .with_cause(admitted(
+            "ORNA-E-REMAINDER-SAME-NEW-A-CHILD-A",
+            "same length replacement a child a admission",
+        ))
+        .with_cause(admitted(
+            "ORNA-E-REMAINDER-SAME-NEW-A-CHILD-B",
+            "same length replacement a child b admission",
+        )),
+        admitted(
+            "ORNA-E-REMAINDER-SAME-NEW-B",
+            "same length replacement b admission",
+        )
+        .with_cause(admitted(
+            "ORNA-E-REMAINDER-SAME-NEW-B-CHILD",
+            "same length replacement b child admission",
+        )),
+    ];
+    let mut destination = original.clone();
+    let before_replacement = destination.clone();
+    let before_projection = serde_json::to_value(&before_replacement).unwrap();
+    let before_wires = before_replacement
+        .iter()
+        .map(|diagnostic| diagnostic.encode_ovb().unwrap())
+        .collect::<Vec<_>>();
+
+    // The reference defines immutable lexical closure captures, but does not
+    // specify host Vec::clone_from slot reuse. Treat captured roots as owned
+    // snapshots and prove same-length replacements retain local admission.
+    let original_snapshot = before_replacement.clone();
+    let replacement_snapshot = replacement.clone();
+    let capture_original = move || original_snapshot.clone();
+    let capture_replacement = move || replacement_snapshot.clone();
+    destination.clone_from(&capture_replacement());
+    let after_replacement = destination.clone();
+    let replacement_projection = serde_json::to_value(&after_replacement).unwrap();
+    let replacement_wires = after_replacement
+        .iter()
+        .map(|diagnostic| diagnostic.encode_ovb().unwrap())
+        .collect::<Vec<_>>();
+
+    destination.clone_from(&capture_original());
+    let after_restore = destination.clone();
+    destination.clone_from(&capture_replacement());
+    let after_second_replacement = destination.clone();
+    assert_eq!(after_restore, before_replacement);
+    assert_eq!(after_second_replacement, replacement);
+    assert_eq!(
+        serde_json::to_value(&before_replacement).unwrap(),
+        before_projection
+    );
+    assert_eq!(
+        before_replacement
+            .iter()
+            .map(|diagnostic| diagnostic.encode_ovb().unwrap())
+            .collect::<Vec<_>>(),
+        before_wires
+    );
+    assert_eq!(
+        serde_json::to_value(&after_replacement).unwrap(),
+        replacement_projection
+    );
+    assert_eq!(
+        after_replacement
+            .iter()
+            .map(|diagnostic| diagnostic.encode_ovb().unwrap())
+            .collect::<Vec<_>>(),
+        replacement_wires
+    );
+
+    let compose_captured_slots = {
+        let old = before_replacement.clone();
+        let new = after_replacement.clone();
+        let restored = after_restore.clone();
+        let replaced_again = after_second_replacement.clone();
+        move || {
+            let mut outer = admitted(
+                "ORNA-E-REMAINDER-SAME-OUTER",
+                "same length outer closure admission",
+            );
+            for cause in [
+                old[0].clone(),
+                old[1].clone(),
+                new[0].clone(),
+                restored[0].clone(),
+                replaced_again[0].clone(),
+            ] {
+                outer = outer.with_cause(cause);
+            }
+            outer
+        }
+    };
+    let empty: Vec<Diagnostic> = Vec::new();
+    destination.clone_from(&empty);
+    assert!(destination.is_empty());
+
+    let outer = compose_captured_slots();
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["message"], "same length outer closure admission");
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 5);
+    for (cause, expected_children) in causes.iter().zip([1, 2, 2, 1, 2]) {
+        assert_eq!(cause["message"], "<redacted>");
+        let children = cause["causes"].as_array().unwrap();
+        assert_eq!(children.len(), expected_children);
+        for child in children {
+            assert_eq!(child["message"], "<redacted>");
+        }
+    }
+
+    let envelope = serde_json::json!({
+        "outer": outer.clone(),
+        "before_replacement": before_replacement,
+        "after_replacement": after_replacement,
+    });
+    let json = serde_json::to_vec(&envelope).unwrap();
+    for message in [
+        b"same length outer closure admission".as_slice(),
+        b"same length old parent a admission".as_slice(),
+        b"same length old parent b admission".as_slice(),
+        b"same length replacement a admission".as_slice(),
+        b"same length replacement b admission".as_slice(),
+    ] {
+        assert_eq!(
+            json.windows(message.len())
+                .filter(|window| *window == message)
+                .count(),
+            1
+        );
+    }
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            b"same length old child a admission".as_slice(),
+            b"same length old child b a admission".as_slice(),
+            b"same length old child b b admission".as_slice(),
+            b"same length replacement a child a admission".as_slice(),
+            b"same length replacement a child b admission".as_slice(),
+            b"same length replacement b child admission".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+
+    let wire = outer.encode_ovb().unwrap();
+    assert!(
+        wire.windows(b"same length outer closure admission".len())
+            .any(|window| window == b"same length outer closure admission")
+    );
+    for disclosure in [
+        fixture.as_bytes(),
+        b"same length old parent a admission".as_slice(),
+        b"same length old parent b admission".as_slice(),
+        b"same length replacement a admission".as_slice(),
+        b"same length replacement b admission".as_slice(),
+        b"same length replacement b child admission".as_slice(),
+    ]
+    .into_iter()
+    .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
+    {
+        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    assert_eq!(
+        decoded["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cause| cause["causes"].as_array().unwrap().len())
+            .collect::<Vec<_>>(),
+        [1, 2, 2, 1, 2]
+    );
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
