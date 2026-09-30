@@ -52,6 +52,17 @@ fn write_commit(directory: &Path, path: &str, contents: &str) -> String {
     git(directory, &["rev-parse", "HEAD"])
 }
 
+fn routed_module_source(
+    session: &AttachedDatabaseSession,
+    logical_path: &str,
+) -> Option<String> {
+    session
+        .module_inputs()
+        .into_iter()
+        .find(|module| module.logical_path == logical_path)
+        .map(|module| module.source)
+}
+
 #[test]
 fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
     let (_primary_dir, primary_repository, primary_commit) = repository(&[(
@@ -120,6 +131,8 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
         .modules()
         .iter()
         .any(|module| module.source.contains("= 42")));
+    assert!(routed_module_source(&session, "archive.orna")
+        .is_some_and(|source| source.contains("= 42")));
     let mut in_flight = session.clone();
     assert!(matches!(
         session.detach_database("../outside"),
@@ -147,6 +160,7 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
     ));
     session.detach_database("archive").unwrap();
     assert!(session.database("archive").is_none());
+    assert!(routed_module_source(&session, "archive.orna").is_none());
     assert!(matches!(
         session.validate_write_target("archive"),
         Err(AttachmentError::DatabaseUnavailable)
@@ -160,6 +174,8 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
             .as_str(),
         history_commit
     );
+    assert!(routed_module_source(&in_flight, "archive.orna")
+        .is_some_and(|source| source.contains("= 42")));
     assert!(matches!(
         in_flight.validate_write_target("archive"),
         Err(AttachmentError::AttachedSnapshotReadOnly)
@@ -176,6 +192,8 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
         session.validate_write_target("archive"),
         Err(AttachmentError::AttachedSnapshotReadOnly)
     ));
+    assert!(routed_module_source(&session, "archive.orna")
+        .is_some_and(|source| source.contains("= 99")));
     assert_eq!(
         in_flight
             .database("archive")
@@ -190,11 +208,13 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
         detached_clone.validate_write_target("archive"),
         Err(AttachmentError::DatabaseUnavailable)
     ));
+    assert!(routed_module_source(&detached_clone, "archive.orna").is_none());
     in_flight.detach_database("archive").unwrap();
     assert!(matches!(
         in_flight.validate_write_target("archive"),
         Err(AttachmentError::DatabaseUnavailable)
     ));
+    assert!(routed_module_source(&in_flight, "archive.orna").is_none());
     assert_eq!(
         session.database("archive").unwrap().pin().commit().as_str(),
         moved_head
@@ -203,6 +223,8 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
         session.validate_write_target("archive"),
         Err(AttachmentError::AttachedSnapshotReadOnly)
     ));
+    assert!(routed_module_source(&session, "archive.orna")
+        .is_some_and(|source| source.contains("= 99")));
     assert_eq!(git(history_dir.path(), &["rev-parse", "HEAD"]), head_before);
     assert_eq!(git(history_dir.path(), &["status", "--porcelain"]), status_before);
     assert_eq!(
