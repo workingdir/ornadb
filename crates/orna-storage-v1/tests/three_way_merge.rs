@@ -7757,6 +7757,8 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
     let agreed_reset_between_id = b"consumer/p-agreed-reset-between".to_vec();
     let agreed_reset_full_base_between_id =
         b"consumer/q-agreed-reset-full-base-between".to_vec();
+    let same_side_full_base_delete_before_first_checkpoint_conflict_id =
+        b"consumer/l-same-side-delete-before-checkpoint-conflict".to_vec();
     let terminal_reset_id = b"consumer/z-reset-versus-advance".to_vec();
     let agreed_reset_after_id = b"consumer/zy-agreed-reset-after".to_vec();
     let agreed_reset_full_base_after_id =
@@ -7789,7 +7791,8 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
     // A final one-sided full-base reset likewise resolves without adding an
     // impact or consuming conflict detail. Full-base tombstones before and
     // after the reset on both its own and opposite branches prove the stable-ID
-    // tail closure orderings.
+    // tail closure orderings. A same-side tombstone before the first checkpoint
+    // conflict also exercises the prefix edge of that ordered traversal.
     let build_inputs = |
         row_delete_left: bool,
         checkpoint_delete_left: bool,
@@ -7927,6 +7930,23 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
             );
         }
         base.checkpoints.insert(
+            same_side_full_base_delete_before_first_checkpoint_conflict_id.clone(),
+            full_checkpoint.clone(),
+        );
+        // This clean same-side tombstone sorts before the first checkpoint
+        // conflict; the opposite branch retains the full-position base.
+        if tail_reset_left {
+            right.checkpoints.insert(
+                same_side_full_base_delete_before_first_checkpoint_conflict_id.clone(),
+                full_checkpoint.clone(),
+            );
+        } else {
+            left.checkpoints.insert(
+                same_side_full_base_delete_before_first_checkpoint_conflict_id.clone(),
+                full_checkpoint.clone(),
+            );
+        }
+        base.checkpoints.insert(
             opposite_full_base_delete_tail_id.clone(),
             full_checkpoint.clone(),
         );
@@ -8053,6 +8073,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
                     assert!(!report.affected_checkpoints.contains(one_sided_full_base_reset_tail_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(opposite_full_base_delete_before_reset_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_before_reset_id.as_slice()));
+                    assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_before_first_checkpoint_conflict_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(opposite_full_base_delete_tail_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_tail_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(agreed_reset_after_id.as_slice()));
@@ -8099,6 +8120,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
                 assert!(!report.affected_checkpoints.contains(one_sided_full_base_reset_tail_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(opposite_full_base_delete_before_reset_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_before_reset_id.as_slice()));
+                assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_before_first_checkpoint_conflict_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(opposite_full_base_delete_tail_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_tail_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(agreed_reset_after_id.as_slice()));
