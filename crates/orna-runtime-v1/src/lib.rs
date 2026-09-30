@@ -14711,12 +14711,14 @@ async fn migrate_admin_checkpoint_reset_receipts(
 ) -> Result<(), RuntimeError> {
     let mut receipt_rows = connection
         .query(
-            "SELECT invocation_id, safe_arguments FROM admin_invocation_audit AS audit
+            "SELECT invocation_id, safe_arguments,
+                    (SELECT version FROM admin_invocation_checkpoint_result AS result
+                     WHERE result.invocation_id = audit.invocation_id),
+                    (SELECT committed_position FROM admin_invocation_checkpoint_result AS result
+                     WHERE result.invocation_id = audit.invocation_id)
+             FROM admin_invocation_audit AS audit
              WHERE terminal_outcome = 'checkpoint_reset' AND succeeded = 1
-               AND NOT EXISTS (
-                   SELECT 1 FROM admin_invocation_checkpoint_result AS result
-                   WHERE result.invocation_id = audit.invocation_id
-               )",
+             ORDER BY sequence",
             (),
         )
         .await
@@ -14731,6 +14733,10 @@ async fn migrate_admin_checkpoint_reset_receipts(
             row.get::<Vec<u8>>(0)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
             row.get::<String>(1)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            row.get::<Option<i64>>(2)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            row.get::<Option<String>>(3)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
         ));
     }
@@ -14766,23 +14772,50 @@ async fn migrate_admin_checkpoint_reset_receipts(
         ));
     }
 
-    for (invocation_id, safe_arguments) in receipts {
+    for (invocation_id, safe_arguments, stored_version, stored_position) in receipts {
+        let stored_result = match (stored_version, stored_position) {
+            (None, None) => None,
+            (Some(version), Some(position)) => Some((
+                decode_u64(version)?,
+                decode_position(position)?,
+            )),
+            _ => return Err(RuntimeError::RecoveryInvalid),
+        };
         let fields = safe_arguments
             .split(';')
             .filter_map(|field| field.split_once('='))
             .collect::<BTreeMap<_, _>>();
         let Some(key_digest) = fields.get("stream_key_digest") else {
+            if stored_result.is_some() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
             continue;
         };
         let Some(expected_version) = fields.get("expected_version") else {
+            if stored_result.is_some() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
             continue;
         };
         let Some(expected_position_digest) = fields.get("expected_position_digest") else {
+            if stored_result.is_some() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
             continue;
         };
         let Some(target_digest) = fields.get("target_digest") else {
+            if stored_result.is_some() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
             continue;
         };
+        if key_digest.is_empty()
+            || expected_version.is_empty()
+            || expected_position_digest.is_empty()
+            || target_digest.is_empty()
+        {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
         let mut matches = resets.iter().filter(|reset| {
             let (key, old_version, old_position, _, new_position) = *reset;
             let old_position_digest = old_position
@@ -14795,20 +14828,39 @@ async fn migrate_admin_checkpoint_reset_receipts(
                 && admin_digest(new_position.as_bytes()).as_str() == *target_digest
         });
         let Some((_, _, _, version, position)) = matches.next() else {
+            if stored_result.is_some() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
             continue;
         };
         if matches.next().is_some() {
             return Err(RuntimeError::RecoveryInvalid);
         }
-        decode_position(position.clone())?;
-        connection
-            .execute(
-                "INSERT OR IGNORE INTO admin_invocation_checkpoint_result
-                 (invocation_id, version, committed_position) VALUES (?1, ?2, ?3)",
-                params![invocation_id, version, position.clone()],
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let reconciled_version = *version;
+        let reconciled_position = position.clone();
+        let reconciled = (
+            decode_u64(reconciled_version)?,
+            decode_position(reconciled_position.clone())?,
+        );
+        match stored_result {
+            Some(stored) if stored != reconciled => {
+                // The specification does not define repair for contradictory
+                // durable receipts. Fail closed so a replay cannot report a
+                // checkpoint transition different from the retained CAS audit.
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            Some(_) => {}
+            None => {
+                connection
+                    .execute(
+                        "INSERT INTO admin_invocation_checkpoint_result
+                         (invocation_id, version, committed_position) VALUES (?1, ?2, ?3)",
+                        params![invocation_id, reconciled_version, reconciled_position],
+                    )
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+            }
+        }
     }
     Ok(())
 }
@@ -23378,6 +23430,55 @@ mod tests {
         assert_eq!(orphaned_child.status, InvocationObservationStatus::Orphaned);
         assert_eq!(orphaned_child.failure_code.as_deref(), Some("sys.invoke.orphaned"));
         assert!(!orphaned_child.live);
+
+        let first_tail = state
+            .invocation_observation_tail(None, 8)
+            .await
+            .unwrap();
+        assert_eq!(first_tail.entries.len(), 4);
+        assert_eq!(
+            first_tail
+                .entries
+                .iter()
+                .map(|entry| entry.status)
+                .collect::<Vec<_>>(),
+            vec![
+                InvocationObservationStatus::Running,
+                InvocationObservationStatus::Running,
+                InvocationObservationStatus::Orphaned,
+                InvocationObservationStatus::Orphaned,
+            ],
+            "replacement emits terminal tail events for every abandoned procedure"
+        );
+        assert_eq!(
+            first_tail.entries[0].observation.status,
+            InvocationObservationStatus::Orphaned,
+            "a historical lifecycle event links to the latest durable observation"
+        );
+        assert_eq!(first_tail.entries[2].invocation_id, parent_id);
+        assert_eq!(first_tail.entries[3].invocation_id, child_id);
+        assert_eq!(state.orphan_abandoned_invocations(replacement).await.unwrap(), 0);
+        assert_eq!(
+            state
+                .invocation_observation_tail(None, 8)
+                .await
+                .unwrap()
+                .entries,
+            first_tail.entries,
+            "reconciling an already-terminal procedure does not append duplicate tail events"
+        );
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(
+            reopened
+                .invocation_observation_tail(None, 8)
+                .await
+                .unwrap()
+                .entries,
+            first_tail.entries,
+            "procedure tail history and its latest observation survive reopening"
+        );
     }
 
     #[test]
@@ -25627,6 +25728,56 @@ mod tests {
             version: first_result.version,
             committed_position: first_result.committed.unwrap(),
         }));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_reset_receipt_reconciliation_rejects_conflicting_result_payload() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let key = stream_delivery("conflicting-reset-receipt", "conflicting-reset-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let invocation_id = id(88);
+        let request = CheckpointResetRequest {
+            key,
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("receipt:committed").unwrap(),
+            },
+            reason: "reconcile retained result".into(),
+        };
+        let result = state
+            .reset_checkpoint_with_invocation_id(writer, request, invocation_id)
+            .await
+            .unwrap();
+        assert_eq!(result.version, 1);
+        state
+            .connection
+            .execute(
+                "UPDATE admin_invocation_checkpoint_result
+                 SET version = version + 1 WHERE invocation_id = ?1",
+                params![invocation_id.to_vec()],
+            )
+            .await
+            .unwrap();
+        drop(state);
+
+        assert!(matches!(
+            RuntimeState::open(
+                &repo,
+                RuntimeIdentity {
+                    database_id: id(1),
+                    repository_id: id(2),
+                },
+                digest(3),
+            )
+            .await,
+            Err(RuntimeError::RecoveryInvalid)
+        ));
     }
 
     #[tokio::test]
