@@ -228,3 +228,9 @@ retry against the inserted row's second move destination. A further nested
 closure moves the inserted row once more and updates it before the competitor
 claims the vacated key and the owner returns. The asserted tail documents this
 successive local move and retry order where the reference is silent.
+
+The same fixture and proof then exercise the inserted row reclaiming the
+competitor's current key. Its closure updates and moves the competitor aside,
+the inserted row retries into the released key, and the competitor reuses the
+inserted row's vacated key. This successive moved-target reuse order is a
+pragmatic local choice because the reference does not specify it.
