@@ -443,6 +443,11 @@ impl CompactManifestEntry {
         self.row_count
     }
 
+    /// Returns the verified compressed byte size declared by this entry.
+    pub const fn compressed_bytes(&self) -> u64 {
+        self.compressed_bytes
+    }
+
     /// Returns the schema fingerprint authenticated by the committed
     /// segment's manifest entry.
     pub const fn schema_id(&self) -> [u8; 32] {
