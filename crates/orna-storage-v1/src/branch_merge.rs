@@ -233,6 +233,9 @@ pub fn merge_three_way_snapshots<R: BranchRowSource>(
         }
     }
 
+    // Defer checkpoint impacts until table planning completes. If the bounded
+    // row phase stops early, its report must not mix in checkpoint IDs from a
+    // merge whose row materialization was cut short.
     let checkpoint_ids: BTreeSet<_> = base.checkpoints.keys().chain(left.checkpoints.keys()).chain(right.checkpoints.keys()).cloned().collect();
     let mut checkpoints = BTreeMap::new();
     for id in checkpoint_ids {
