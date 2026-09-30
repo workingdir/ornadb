@@ -1313,6 +1313,7 @@ fn runner_command(profile: RunnerProfile, first_scenarios: Option<usize>) -> Str
     }
 }
 
+#[cfg(test)]
 fn run_profile(corpus: Corpus, profile: RunnerProfile) -> orna_conformance_v1::RunReport {
     run_profile_limited(corpus, profile, None)
 }

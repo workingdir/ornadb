@@ -506,7 +506,7 @@ impl Repository {
         // witnessed fetch: every advertised refs/orna/* ref must travel with
         // the requested branch/tag.  Exact witnesses still gate continuity
         // claims below; an unrequested internal ref is only synchronized.
-        let mut advertised =
+        let advertised =
             advertise_fetch(self, request.remote(), &requested_sources, object_id_length)?;
         let sources = advertised.keys().cloned().collect::<Vec<_>>();
 
