@@ -4589,6 +4589,7 @@ impl Parser {
                         };
                         if !self.is_punct(":") {
                             self.error_here("ORNA-PARSE-001", "expected `:` after case pattern");
+                            self.recover_case_arms();
                             break;
                         }
                         self.bump();
@@ -4602,6 +4603,13 @@ impl Parser {
                         });
                         if self.is_punct(",") {
                             self.bump()
+                        } else if !self.is_punct("}") {
+                            self.error_here(
+                                "ORNA-PARSE-001",
+                                "expected `,` or `}` after case arm",
+                            );
+                            self.recover_case_arms();
+                            break;
                         } else {
                             break;
                         }
@@ -5040,6 +5048,26 @@ impl Parser {
         }
         if self.is_punct(";") || self.is_punct("}") {
             self.bump()
+        }
+    }
+    fn recover_case_arms(&mut self) {
+        let (mut braces, mut parens, mut brackets) = (0usize, 0usize, 0usize);
+        while !self.eof() {
+            // A malformed arm must not consume the enclosing block's close;
+            // synchronize only at this case expression's brace boundary.
+            if self.is_punct("}") && braces == 0 && parens == 0 && brackets == 0 {
+                return;
+            }
+            match &self.current().kind {
+                TokenKind::Punct("{") => braces += 1,
+                TokenKind::Punct("}") => braces = braces.saturating_sub(1),
+                TokenKind::Punct("(") => parens += 1,
+                TokenKind::Punct(")") => parens = parens.saturating_sub(1),
+                TokenKind::Punct("[") => brackets += 1,
+                TokenKind::Punct("]") => brackets = brackets.saturating_sub(1),
+                _ => {}
+            }
+            self.bump();
         }
     }
     fn contextual(&self) -> bool {
