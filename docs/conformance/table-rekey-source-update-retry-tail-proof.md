@@ -255,3 +255,9 @@ The handoff also returns to a destination used by an earlier nested move: the
 inserted row moves into that released key while the competitor retries, then
 the inserted row claims the competitor's freed source. The fixture pins this
 reused-destination retry order where the reference is silent.
+
+The retry tail repeats that handoff through a destination freed by an earlier
+competitor move: the competitor moves into the released key, the inserted row
+retries into the competitor's target, and the competitor then reuses the
+inserted row's source. The fixture records this nested reuse order as local
+behavior because the reference is silent.
