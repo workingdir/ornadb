@@ -2979,6 +2979,199 @@ mod tests {
     }
 
     #[test]
+    fn nested_pin_swapped_alias_closure_composes_terminal_pin_swaps() {
+        let compatible_source = include_str!("../tests/fixtures/attached-equivalent-main.orna");
+        let incompatible_source = include_str!("../tests/fixtures/attached-incompatible-main.orna");
+        let (app_dir, app_repository, _) = repository(incompatible_source);
+        let (package_dir, package_repository, _) = repository(compatible_source);
+        let (leaf_dir, leaf_repository, _) = repository(compatible_source);
+        let (end_dir, end_repository, end_current_commit) = repository(compatible_source);
+
+        let end_historical_commit = write_commit(end_dir.path(), "main.orna", incompatible_source);
+        let leaf_current_commit = write_commit(
+            leaf_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("end {end_current_commit}\ntail {end_historical_commit}\n"),
+        );
+        write_commit(leaf_dir.path(), "main.orna", incompatible_source);
+        let leaf_historical_commit = write_commit(
+            leaf_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("end {end_historical_commit}\ntail {end_current_commit}\n"),
+        );
+        let package_current_commit = write_commit(
+            package_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("leaf {leaf_current_commit}\nterminal {leaf_historical_commit}\n"),
+        );
+        write_commit(package_dir.path(), "main.orna", incompatible_source);
+        let package_historical_commit = write_commit(
+            package_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("leaf {leaf_historical_commit}\nterminal {leaf_current_commit}\n"),
+        );
+        let app_commit = write_commit(
+            app_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive {package_current_commit}\nmirror {package_historical_commit}\n"),
+        );
+
+        let loader = ProjectLoader::default();
+        let app = PinnedDatabase::resolve(
+            "app",
+            app_repository.clone(),
+            &app_commit,
+            loader,
+        )
+        .unwrap();
+        let resolver = PackageResolver::new(
+            [
+                ("app".to_owned(), app_repository),
+                ("archive".to_owned(), package_repository.clone()),
+                ("mirror".to_owned(), package_repository),
+                ("leaf".to_owned(), leaf_repository.clone()),
+                ("terminal".to_owned(), leaf_repository),
+                ("end".to_owned(), end_repository.clone()),
+                ("tail".to_owned(), end_repository),
+            ],
+            loader,
+        )
+        .unwrap();
+
+        let root_session = resolver.resolve_for_parent(app).unwrap();
+        let archive_closure = resolver
+            .resolve_for_parent(root_session.database("archive").unwrap().clone())
+            .unwrap();
+        let mirror_closure = resolver
+            .resolve_for_parent(root_session.database("mirror").unwrap().clone())
+            .unwrap();
+
+        // The reference fixes exact pins but leaves recursive shared-alias
+        // traversal unspecified. V1 applies each selected snapshot's manifest
+        // edge by edge while retaining alias identity at both closure levels.
+        assert_eq!(
+            archive_closure.primary().pin().commit().as_str(),
+            package_current_commit
+        );
+        assert_eq!(
+            mirror_closure.primary().pin().commit().as_str(),
+            package_historical_commit
+        );
+        assert_eq!(
+            archive_closure.database("leaf").unwrap().pin().commit().as_str(),
+            leaf_current_commit
+        );
+        assert_eq!(
+            archive_closure
+                .database("terminal")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            leaf_historical_commit
+        );
+        assert_eq!(
+            mirror_closure.database("leaf").unwrap().pin().commit().as_str(),
+            leaf_historical_commit
+        );
+        assert_eq!(
+            mirror_closure
+                .database("terminal")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            leaf_current_commit
+        );
+        assert_eq!(
+            archive_closure.database("leaf").unwrap().pin().commit(),
+            mirror_closure
+                .database("terminal")
+                .unwrap()
+                .pin()
+                .commit()
+        );
+        assert_ne!(
+            archive_closure.database("leaf").unwrap().pin(),
+            mirror_closure.database("terminal").unwrap().pin()
+        );
+
+        let routes = [
+            (
+                &archive_closure,
+                "leaf",
+                leaf_current_commit.as_str(),
+                end_current_commit.as_str(),
+                end_historical_commit.as_str(),
+            ),
+            (
+                &archive_closure,
+                "terminal",
+                leaf_historical_commit.as_str(),
+                end_historical_commit.as_str(),
+                end_current_commit.as_str(),
+            ),
+            (
+                &mirror_closure,
+                "leaf",
+                leaf_historical_commit.as_str(),
+                end_historical_commit.as_str(),
+                end_current_commit.as_str(),
+            ),
+            (
+                &mirror_closure,
+                "terminal",
+                leaf_current_commit.as_str(),
+                end_current_commit.as_str(),
+                end_historical_commit.as_str(),
+            ),
+        ];
+        let mut leaf_closures = Vec::new();
+        for (closure, alias, expected_leaf, expected_end, expected_tail) in routes {
+            let leaf_closure = resolver
+                .resolve_for_parent(closure.database(alias).unwrap().clone())
+                .unwrap();
+            assert_eq!(leaf_closure.primary().pin().name(), alias);
+            assert_eq!(
+                leaf_closure.primary().pin().commit().as_str(),
+                expected_leaf
+            );
+            let end = leaf_closure.database("end").unwrap();
+            let tail = leaf_closure.database("tail").unwrap();
+            assert_eq!(end.pin().commit().as_str(), expected_end);
+            assert_eq!(tail.pin().commit().as_str(), expected_tail);
+            assert_ne!(end.pin(), tail.pin());
+            leaf_closures.push(leaf_closure);
+        }
+
+        for (closure, alias, expected_commit) in [
+            (&leaf_closures[0], "end", end_current_commit.as_str()),
+            (&leaf_closures[0], "tail", end_historical_commit.as_str()),
+            (&leaf_closures[1], "end", end_historical_commit.as_str()),
+            (&leaf_closures[1], "tail", end_current_commit.as_str()),
+        ] {
+            let terminal = resolver
+                .resolve_for_parent(closure.database(alias).unwrap().clone())
+                .unwrap();
+            assert_eq!(terminal.primary().pin().name(), alias);
+            assert_eq!(terminal.primary().pin().commit().as_str(), expected_commit);
+            assert_eq!(terminal.attached().count(), 0);
+        }
+
+        assert_eq!(git(package_dir.path(), &["rev-parse", "HEAD"]), package_historical_commit);
+        assert_eq!(git(leaf_dir.path(), &["rev-parse", "HEAD"]), leaf_historical_commit);
+        assert_eq!(git(end_dir.path(), &["rev-parse", "HEAD"]), end_historical_commit);
+        assert_eq!(
+            root_session.database("archive").unwrap().pin().commit().as_str(),
+            package_current_commit
+        );
+        assert_eq!(
+            root_session.database("mirror").unwrap().pin().commit().as_str(),
+            package_historical_commit
+        );
+    }
+
+    #[test]
     fn equivalent_units_interoperate_across_attachments_but_name_match_is_not_enough() {
         let primary_source = include_str!("fixtures/attached-primary-main.orna");
         let (_primary_dir, primary_repository, primary_commit) = repository(&primary_source);
