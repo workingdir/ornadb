@@ -754,6 +754,9 @@ fn inspect_raw(raw: &Raw, depth: usize) -> (String, &'static str) {
         Raw::Text(value) => (format!("\"{}\"", escape(value)), "Str"),
         Raw::Array(values) => (inspect_sequence(values, depth), "Array"),
         Raw::Map(entries) => (inspect_map(entries, depth), "Map"),
+        // OVB tag 0 is the protected-value boundary. Discard the whole inner
+        // subtree before rendering so even nested inspect fallbacks cannot
+        // turn a secret payload into printable structure.
         Raw::Tag(0, _) => ("<redacted>".into(), "Secret"),
         // OVB tag 37 is the closed 1.0 UUID representation. Keep its
         // structural fallback human-readable without turning presentation
@@ -860,6 +863,22 @@ mod tests {
             truncate(&"x".repeat(MAX_INSPECT_TEXT + 1)),
             format!("{}…", "x".repeat(MAX_INSPECT_TEXT))
         );
+    }
+
+    #[test]
+    fn inspect_redacts_payload_bearing_protected_values_inside_collections() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let raw = Raw::Map(vec![(
+            Raw::Text("credential".into()),
+            Raw::Array(vec![Raw::Tag(
+                0,
+                Box::new(Raw::Text(fixture.to_owned())),
+            )]),
+        )]);
+
+        let rendered = inspect_raw(&raw, 0).0;
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(!rendered.contains(fixture), "{rendered}");
     }
 
     #[test]

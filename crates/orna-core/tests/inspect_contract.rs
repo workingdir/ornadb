@@ -206,6 +206,82 @@ fn structural_epoch_redacts_values_without_erasing_cell_structure() {
 }
 
 #[test]
+fn structural_inspect_and_trace_events_do_not_publish_secret_fixture_values() {
+    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let secret = InvokeValue::new(RuntimeValue::Text(fixture.to_owned()))
+        .expect("fixture value is valid");
+    let key = UserStateKeyWithoutPrincipal::new(
+        FunctionId::from_bytes([0x61; 16]),
+        "default".to_owned(),
+        FunctionId::from_bytes([0x62; 16]),
+        "fixture".to_owned(),
+        StateSlotId::from_bytes([0x63; 16]),
+    )
+    .expect("fixture key is valid");
+    let row = StateCellRow::new(
+        key,
+        TypeId::from_bytes([0x64; 16]),
+        1,
+        SystemTime::UNIX_EPOCH,
+        Some(secret.clone()),
+    );
+    let epoch = InspectSnapshotEpoch::new(
+        InspectEpochId::from_bytes([0x65; 16]),
+        InvocationId::from_bytes([0x66; 16]),
+        SourceRevisionId::from_bytes([0x67; 16]),
+        CatalogueRevisionId::from_bytes([0x68; 16]),
+        SESSION,
+        SystemTime::UNIX_EPOCH,
+        FunctionId::from_bytes([0x69; 16]),
+        InspectOutcomeKind::Allowed,
+        InspectSnapshotSummary::new(
+            1,
+            InspectResultSummary::ValueBatch { value_count: 1 },
+            None,
+        )
+        .unwrap(),
+        &InspectSnapshotOptions::structural(),
+        Vec::new(),
+        vec![orna_core::inspect::CallRow::new(
+            InvocationId::from_bytes([0x66; 16]),
+            Some(secret.clone()),
+            1,
+            0,
+        )
+        .expect("fixture call is valid")],
+        Vec::new(),
+        vec![row],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("fixture epoch is valid");
+
+    assert!(epoch.state_cells()[0].value().is_none());
+    assert!(epoch.calls()[0].schema().is_none());
+    assert!(!format!("{epoch:?}").contains(fixture));
+
+    let event = orna_core::inspect::InspectTraceEvent::new(
+        InvocationId::from_bytes([0x66; 16]),
+        0,
+        orna_core::inspect::InspectTracePayload::ValueBatch {
+            schema: Some(secret.clone()),
+            values: vec![secret],
+        },
+        SystemTime::UNIX_EPOCH,
+        None,
+        None,
+    )
+    .expect("secret trace batch is normalized at construction");
+    assert!(matches!(
+        event.payload(),
+        orna_core::inspect::InspectTracePayload::ValueBatchRedacted { value_count: 1 }
+    ));
+    assert!(!format!("{event:?}").contains(fixture));
+}
+
+#[test]
 fn epoch_exposes_pinned_metadata_and_rejects_empty_or_zero_value_batch_facts() {
     let inspected = epoch(InspectSnapshotOptions::structural());
     assert_eq!(inspected.id(), InspectEpochId::from_bytes([0x41; 16]));

@@ -8,8 +8,9 @@
 //!
 //! Evidence grade: the new page fixture is a direct semantic witness (A for its
 //! exact fixture, not the entire page surface); the effect tests are direct
-//! rejection witnesses (A for attempted writes); the secret test proves that
-//! secrets cannot be Displayed, not that every Inspect renderer redacts secrets.
+//! rejection witnesses (A for attempted writes); the secret fixture proves the
+//! Display and standard UI constructor boundary, while host Inspect and wire
+//! Present fallbacks have their own crate-local proofs.
 //! The broader audit leaves PRES-001/003/004/005/006/007/009/010 and LIVE/WIRE
 //! behavior to their owning codec, Inspect, evaluator, live-host and client
 //! suites; this file does not promote their current evidence to complete.
@@ -85,11 +86,11 @@ fn present_implementation_write_is_rejected() {
 }
 
 #[test]
-fn secret_value_cannot_be_exposed_through_display() {
+fn secret_values_cannot_cross_display_or_present_boundaries() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
-            "secret-display.orna",
-            include_str!("fixtures/inline-semantic_graph/bf3665cb2f18.orna"),
+            "secret-presentation.orna",
+            include_str!("fixtures/secret-surface.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -97,7 +98,10 @@ fn secret_value_cannot_be_exposed_through_display() {
         result.diagnostics.iter().any(|diagnostic| {
             diagnostic.message() == "secret values cannot be displayed"
         }),
-        "secret display must be rejected without treating that as proof of every Inspect renderer: {:#?}",
+        "Display must reject secret values: {:#?}",
         result.diagnostics
     );
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message() == "secret values cannot be presented"
+    }), "secret values must not enter renderer-neutral UI trees: {:#?}", result.diagnostics);
 }
