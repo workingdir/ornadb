@@ -21272,6 +21272,25 @@ mod tests {
             "last() traverses six rejects between matches and closes before the failing tail"
         );
 
+        // The reference is silent when six rejected rows surround only one
+        // accepted row. Since take(2) is still short, continue through the
+        // tail and preserve its predicate failure.
+        let (last_preserves_failure_after_six_rejects_around_one_match, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-six-rejects-around-one-match-then-failing-tail.orna"
+                ),
+            );
+        let predicate_failure =
+            last_preserves_failure_after_six_rejects_around_one_match.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (8, 16),
+            "last() reaches the failing tail because six rejects leave take(2) short"
+        );
+
         // The reference is silent when the entire bracketed candidate tail
         // is rejected before take(2) naturally exhausts. The empty last()
         // result keeps its explicit coalesce fallback.
