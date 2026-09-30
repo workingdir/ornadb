@@ -7,10 +7,18 @@
 
 mod compact;
 mod compact_parquet;
+mod branch_merge;
 mod maintenance;
 mod placement;
 mod scan_planner;
 mod publication_policy;
+
+pub use branch_merge::{
+    BranchMergeBudget, BranchMergeConflict, BranchMergeError, BranchMergePlan,
+    BranchMergeReport, BranchRowSource, CheckpointId, KeyRange, MergeSide,
+    MergedSegment, MergedTable, RowSegmentManifest, TableManifest, ThreeWaySnapshot,
+    merge_three_way_snapshots,
+};
 
 pub use compact::{
     apply_migration_plan_to_compact, fold_compact_committed_base, lower_publication_freeze,
