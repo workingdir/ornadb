@@ -20908,6 +20908,25 @@ mod tests {
             "last() propagates a middle-row failure after a match before evaluating the tail predicate"
         );
 
+        // The reference leaves the inclusive outer edge after the final
+        // matching row implicit when that next predicate fails. Even though
+        // row three matches, last() consumes row four and propagates its
+        // missing lookup rather than returning the earlier match.
+        let (last_surfaces_failure_after_last_match, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-match-tail-predicate-failure.orna"
+                ),
+            );
+        let predicate_failure = last_surfaces_failure_after_last_match.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (6, 6),
+            "last() propagates the inclusive tail failure after the final match"
+        );
+
         // The reference specifies first-match short-circuiting and bounded
         // enumeration separately, leaving their interaction with a later
         // failing filter predicate implicit. first() matches within the
