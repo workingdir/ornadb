@@ -1,4 +1,4 @@
-use std::{fs, path::Path, process::Command};
+use std::{collections::HashSet, fs, path::Path, process::Command};
 
 use num_bigint::BigInt;
 use orna_foundation_v1::{GitHash, Snapshot};
@@ -328,4 +328,88 @@ async fn historical_snapshot_cannot_be_rebound_to_another_runtime_identity() {
     // The public snapshot type exposes no write operation; it remains a
     // context-bearing selection token for time-scoped reads only.
     let _: &HistoricalSnapshot = &first_pin;
+}
+
+#[tokio::test]
+async fn as_of_pins_stay_exact_across_generation_encoding_boundaries() {
+    let (_directory, repository) = repository();
+    let state = RuntimeState::open(
+        &repository,
+        RuntimeIdentity {
+            database_id: [32; 16],
+            repository_id: [33; 16],
+        },
+        [34; 32],
+    )
+    .await
+    .expect("open runtime");
+    let writer = state.acquire_lease([35; 16]).await.expect("acquire writer");
+    let initial = state
+        .select_historical_snapshot(0)
+        .await
+        .expect("select initial generation");
+    let initial_descriptor = initial.capture().snapshot().clone();
+
+    commit(&state, writer, &[table_mutation(36, 1, Some(b"later"))], 37).await;
+    let resolved_initial = state
+        .resolve_historical_snapshot(&initial_descriptor)
+        .await
+        .expect("resolve generation zero after a later commit");
+    assert_eq!(resolved_initial, initial);
+    assert!(state
+        .read_table_at(&resolved_initial, "records")
+        .await
+        .expect("read the pinned initial generation")
+        .rows()
+        .is_empty());
+
+    // CWD snapshot IDs hash the structural generation integer. Exercise the
+    // neighboring small-integer and multi-byte boundaries as well as the
+    // largest runtime generation and the first value outside its u64 domain.
+    let boundary_generations = [
+        BigInt::from(0_u8),
+        BigInt::from(23_u8),
+        BigInt::from(24_u8),
+        BigInt::from(255_u16),
+        BigInt::from(256_u16),
+        BigInt::from(u64::MAX),
+        BigInt::from(u64::MAX) + BigInt::from(1_u8),
+    ];
+    let boundary_snapshots: Vec<_> = boundary_generations
+        .iter()
+        .map(|generation| {
+            Snapshot::cwd([32; 16], initial.capture().runtime_id(), generation.clone())
+                .expect("canonical nonnegative generation")
+        })
+        .collect();
+    let boundary_ids: Vec<_> = boundary_snapshots
+        .iter()
+        .map(|snapshot| match snapshot {
+            Snapshot::Cwd { id, .. } => *id,
+            Snapshot::Commit { .. } => unreachable!("constructed CWD pin"),
+        })
+        .collect();
+    assert_eq!(
+        boundary_ids.iter().collect::<HashSet<_>>().len(),
+        boundary_ids.len(),
+        "distinct generation encodings retain distinct snapshot IDs"
+    );
+    for (generation, snapshot) in boundary_generations.iter().zip(&boundary_snapshots) {
+        assert_eq!(
+            Snapshot::cwd([32; 16], initial.capture().runtime_id(), generation.clone())
+                .expect("recompute canonical pin"),
+            *snapshot,
+            "generation {generation} receives a stable canonical descriptor"
+        );
+    }
+
+    for snapshot in boundary_snapshots.iter().skip(1) {
+        assert_eq!(
+            state.resolve_historical_snapshot(snapshot).await.unwrap_err(),
+            RuntimeError::SnapshotNotFound,
+            "an unretained generation boundary must not resolve to current CWD"
+        );
+    }
+    assert!(Snapshot::cwd([32; 16], initial.capture().runtime_id(), BigInt::from(-1))
+        .is_err());
 }
