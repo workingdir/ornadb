@@ -1270,6 +1270,7 @@ dependencies = [
  "orna-semantic-v1",
  "orna-serving-v1",
  "orna-value-v1",
+ "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "tokio",

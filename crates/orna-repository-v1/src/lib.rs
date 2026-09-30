@@ -3601,6 +3601,74 @@ impl Repository {
         self.read_tree_file(commit.as_str(), path, max_bytes)
     }
 
+    /// Returns the exact commit recorded by one gitlink in a committed tree.
+    /// The returned ID belongs to the attached repository; callers must open
+    /// that repository and resolve the object there before reading its files.
+    pub fn committed_submodule_commit(
+        &self,
+        commit: &GitCommitRef,
+        path: impl AsRef<Path>,
+    ) -> Result<GitCommitRef, RepositoryError> {
+        let resolved = self.commit_required(&format!("{}^{{commit}}", commit.as_str()))?;
+        if resolved != *commit {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        self.read_submodule_commit(commit.as_str(), path)
+    }
+
+    /// Returns the gitlink commit from a private publication candidate.
+    pub fn private_candidate_submodule_commit(
+        &self,
+        candidate: &PrivateCommit,
+        path: impl AsRef<Path>,
+    ) -> Result<GitCommitRef, RepositoryError> {
+        self.verify_private_candidate(candidate)?;
+        self.read_submodule_commit(candidate.tree.as_str(), path)
+    }
+
+    fn read_submodule_commit(
+        &self,
+        treeish: &str,
+        path: impl AsRef<Path>,
+    ) -> Result<GitCommitRef, RepositoryError> {
+        let path = ManagedPath::new(path)?;
+        let mut command = self.command();
+        command
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .args(["ls-tree", "-z", "--full-tree", treeish, "--"])
+            .arg(path.as_path());
+        let output = self.run(command)?;
+        let mut entries = output.stdout.split(|byte| *byte == 0).filter(|entry| !entry.is_empty());
+        let entry = entries
+            .next()
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        if entries.next().is_some() {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        let tab = entry
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        if &entry[tab + 1..] != path.as_path().as_os_str().as_encoded_bytes() {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        let mut fields = entry[..tab].split(|byte| *byte == b' ');
+        let mode = fields.next().unwrap_or_default();
+        let kind = fields.next().unwrap_or_default();
+        let object = fields.next().unwrap_or_default();
+        if fields.next().is_some()
+            || mode != b"160000"
+            || kind != b"commit"
+            || object.len() != self.native_object_id_length()?
+            || !object.iter().all(u8::is_ascii_hexdigit)
+        {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        let object =
+            String::from_utf8(object.to_vec()).map_err(|_| RepositoryError::GitOperationFailed)?;
+        GitCommitRef::from_verified_commit(object, self.native_object_id_length()?)
+    }
+
     /// Reads one bounded regular file from the exact immutable tree carried by
     /// a private candidate. The opaque `PrivateCommit` capability is required:
     /// raw unreachable commit IDs do not become valid committed snapshots.
