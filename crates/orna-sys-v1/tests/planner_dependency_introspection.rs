@@ -13,6 +13,7 @@ use serde_json::Value;
 
 const DEPENDENCY_DIAMOND: &str = include_str!("fixtures/dependency_diamond.orna");
 const MUTABLE_BRANCH_QUERY: &str = include_str!("fixtures/mutable_branch_query.orna");
+const ROUNDING_TAIL_INTERPLAY: &str = include_str!("fixtures/rounding_tail_interplay.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -3196,6 +3197,120 @@ fn explain_rounds_partial_scan_byte_tails_per_scan_before_unknown_suffix() {
     assert_eq!(nodes[unknown_position].estimated_work(), None);
 
     let surface = serde_json::to_value(&overflow).expect("partial rounding overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_keeps_per_scan_rounding_bounds_through_mutation_and_unknown_tails() {
+    let parsed = orna_syntax_v1::parse_module(ROUNDING_TAIL_INTERPLAY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    let explain_with_mutation_rows = |affected_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:rounding-mutation-tail"),
+            source: obj("table:RoundingFirst"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(4_095),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:RoundingTail"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(1),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:UnknownTail"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:RoundingWrite"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(affected_rows),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:RoundingWrite"),
+                    kind: QueryMutationKind::Delete,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+            ],
+            materialize_into: Some(obj("materialization:rounding-mutation-tail")),
+        })
+        .expect("rounded scans and partial mutation followed by unknown tails")
+    };
+
+    // ORNA-PLAN-002/003 require planner introspection and a correct fallback,
+    // but leave byte-cost units unspecified. Preserve the existing 4-KiB
+    // heuristic: round each scan independently, then carry its nonnegative
+    // lower bound into the total even when later estimates are unknown.
+    let exact = explain_with_mutation_rows(u64::MAX - 2);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let exact_nodes = exact.nodes();
+    for (table, bytes) in [("table:RoundingFirst", 4_095), ("table:RoundingTail", 1)] {
+        let scan = exact_nodes
+            .iter()
+            .find(|node| node.object() == Some(&obj(table)))
+            .expect("fixture scan in plan");
+        assert_eq!(scan.estimated_bytes(), Some(bytes));
+        assert_eq!(scan.estimated_work(), None);
+    }
+    let update = exact_nodes
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned())))
+        .expect("partially estimated update");
+    assert_eq!(update.estimated_rows(), Some(u64::MAX - 2));
+    assert_eq!(update.estimated_bytes(), None);
+    assert_eq!(update.estimated_work(), None);
+    let unknown_mutation = exact_nodes
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned())))
+        .expect("unknown mutation tail");
+    assert_eq!(unknown_mutation.estimated_work(), None);
+
+    // The two scan tails round to two units although their raw bytes total
+    // exactly one 4-KiB block. Adding MAX-1 mutation rows therefore proves
+    // overflow; unknown scans/mutations and materialization keep cost null.
+    let overflow = explain_with_mutation_rows(u64::MAX - 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let nodes = overflow.nodes();
+    let unknown_scan_position = nodes
+        .iter()
+        .position(|node| node.object() == Some(&obj("table:UnknownTail")))
+        .expect("unknown scan tail");
+    let update_position = nodes
+        .iter()
+        .position(|node| node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned())))
+        .expect("known partial mutation");
+    assert!(unknown_scan_position > update_position);
+    assert_eq!(nodes[unknown_scan_position].estimated_work(), None);
+    let surface = serde_json::to_value(&overflow).expect("unknown mutation tail surface");
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {

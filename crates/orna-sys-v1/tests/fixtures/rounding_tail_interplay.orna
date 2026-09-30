@@ -1,0 +1,5 @@
+pub table RoundingFirst(id: Int) { value: Int, }
+pub table RoundingTail(id: Int) { value: Int, }
+pub table RoundingWrite(id: Int) { value: Int, }
+pub table UnknownTail(id: Int) { value: Int, }
+pub fn update_rounding_write() = RoundingWrite.update(1, { value: 2 });
