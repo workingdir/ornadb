@@ -242,6 +242,11 @@ async fn activation_callback_pause_is_busy_and_does_not_mutate_runtime() {
         audits[0].terminal_outcome,
         "failure:runtime administration callback is busy"
     );
+    assert_eq!(audits[0].effect, orna_runtime_v1::AdminLifecycleEffect::Failed);
     assert_eq!(audits[1].function, "sys.admin.pause_stream");
     assert!(audits[1].succeeded);
+    assert_eq!(
+        audits[1].effect,
+        orna_runtime_v1::AdminLifecycleEffect::StreamPaused { changed: true }
+    );
 }
