@@ -20709,6 +20709,27 @@ mod tests {
             "first() stops after the filtered match without opening the failing sibling"
         );
 
+        // The reference defines filter order and bounded enumeration but is
+        // silent on `first()` continuing through a rejected child into a
+        // nested union. Reject both direct rows, then stop on the nested
+        // child's match before its following missing target is evaluated.
+        let (first_after_rejected_child, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-first-stops-after-rejected-child.orna"
+                ),
+            );
+        assert_eq!(
+            first_after_rejected_child.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(107u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "first() crosses the rejected child, then stops before the nested failing tail"
+        );
+
         // The reference fixes left-to-right union order and bounded
         // enumeration but leaves projection failures across a child-local
         // take boundary implicit. Keep the left child lazy: its excluded
