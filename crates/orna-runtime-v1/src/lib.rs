@@ -20459,6 +20459,27 @@ mod tests {
             "outer demand reaching the right child tail reports its failure"
         );
 
+        // The reference defines filter and take bounds independently, but
+        // does not spell out failure visibility while a downstream take is
+        // searching through a right child. A rejected row does not satisfy
+        // take(1), so continue in stream order and surface the next projection
+        // failure instead of treating it as an excluded tail.
+        let (filtered_right_child_failure, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-right-filter-demand-reaches-failure.orna"
+            ),
+        );
+        assert_eq!(
+            filtered_right_child_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "take(1) searches past the rejected right-child row and reaches its failure"
+        );
+
         // The reference fixes left-to-right union order and bounded
         // enumeration but leaves projection failures across a child-local
         // take boundary implicit. Keep the left child lazy: its excluded
