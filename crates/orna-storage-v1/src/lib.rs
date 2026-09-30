@@ -1268,7 +1268,10 @@ fn map_compact_runtime_error(error: RuntimeError) -> Error {
         | RuntimeError::InvalidCompactReceipt
         | RuntimeError::RecoveryInvalid
         | RuntimeError::CheckpointNotReplayable
-        | RuntimeError::StreamSourceNotReplayable => Error::InvalidTransition,
+        | RuntimeError::StreamSourceNotReplayable
+        | RuntimeError::SnapshotNotFound
+        | RuntimeError::SnapshotIncomplete
+        | RuntimeError::SnapshotContextMismatch => Error::InvalidTransition,
         RuntimeError::RecoveryPending | RuntimeError::AdminBusy => Error::RuntimeUnavailable,
         RuntimeError::StreamIdentityMismatch
         | RuntimeError::StreamCheckpointStale
