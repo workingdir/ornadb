@@ -6983,10 +6983,12 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
     let before_delete_id = b"consumer/a-agreed-delete".to_vec();
     let unchanged_id = b"consumer/b-unchanged".to_vec();
     let left_delete_id = b"consumer/c-left-delete-closure".to_vec();
+    let agreed_reset_before_id = b"consumer/d-agreed-reset-before".to_vec();
     let delete_reset_id = b"consumer/m-delete-versus-reset".to_vec();
     let right_delete_id = b"consumer/n-right-delete-closure".to_vec();
     let between_delete_id = b"consumer/o-agreed-delete".to_vec();
     let terminal_reset_id = b"consumer/z-reset-versus-advance".to_vec();
+    let agreed_reset_after_id = b"consumer/zy-agreed-reset-after".to_vec();
     let trailing_delete_id = b"consumer/zz-agreed-delete".to_vec();
     let deleted_row = parse_fixture(BASE, RowKeyKind::Explicit);
     let edited_row = parse_fixture(LEFT, RowKeyKind::Explicit);
@@ -6996,8 +6998,9 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
 
     // The reference defines typed row/checkpoint conflicts but leaves their
     // shared traversal order open. This storage policy completes rows first,
-    // then visits stable checkpoint IDs. Agreed and one-sided deletes resolve
-    // cleanly around the delete-versus-reset and reset-versus-advance edges.
+    // then visits stable checkpoint IDs. Agreed resets and one-sided deletes
+    // resolve cleanly around the delete-versus-reset and reset-versus-advance
+    // edges.
     let build_inputs = |row_delete_left: bool, checkpoint_delete_left: bool, reset_left: bool| {
         let mut source = FixtureRows::default();
         source.add(MergeSide::Base, b"base", vec![deleted_row.clone()]);
@@ -7033,6 +7036,15 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
         for side in [&mut left, &mut right] {
             side.checkpoints.insert(
                 unchanged_id.clone(),
+                parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS),
+            );
+            for checkpoint_id in [&agreed_reset_before_id, &agreed_reset_after_id] {
+                side.checkpoints.insert(checkpoint_id.to_vec(), reset_fixture.clone());
+            }
+        }
+        for checkpoint_id in [&agreed_reset_before_id, &agreed_reset_after_id] {
+            base.checkpoints.insert(
+                checkpoint_id.to_vec(),
                 parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS),
             );
         }
@@ -7114,7 +7126,9 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
                     assert!(!report.affected_checkpoints.contains(left_delete_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(right_delete_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(between_delete_id.as_slice()));
+                    assert!(!report.affected_checkpoints.contains(agreed_reset_before_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(trailing_delete_id.as_slice()));
+                    assert!(!report.affected_checkpoints.contains(agreed_reset_after_id.as_slice()));
                     assert_eq!(source.visited.len(), 3);
                 }
 
@@ -7149,7 +7163,9 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
                 assert!(!report.affected_checkpoints.contains(left_delete_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(right_delete_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(between_delete_id.as_slice()));
+                assert!(!report.affected_checkpoints.contains(agreed_reset_before_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(trailing_delete_id.as_slice()));
+                assert!(!report.affected_checkpoints.contains(agreed_reset_after_id.as_slice()));
                 assert_eq!(source.visited.len(), 3);
             }
         }
