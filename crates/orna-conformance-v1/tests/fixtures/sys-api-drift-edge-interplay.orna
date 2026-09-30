@@ -17,3 +17,6 @@ pub fn invocation_result_value<T>(result: sys.InvocationResult<T>): T? = result.
 pub fn generic_metadata_protocols<T>(rows: Relation<sys.ValueMetadata<T>>): Relation<sys.Protocol> = rows | flat_map(row => row.protocols);
 pub fn protocol_member_rows(protocols: Relation<sys.Protocol>): Relation<sys.ProtocolMember> = protocols | flat_map(candidate => candidate.members);
 pub fn generic_metadata_protocol_members<T>(rows: Relation<sys.ValueMetadata<T>>): Relation<sys.ProtocolMember> = generic_metadata_protocols(rows) | flat_map(candidate => candidate.members);
+pub fn type_parameters_from_types(types: Relation<sys.Type>): Relation<sys.TypeParameter> = types | flat_map(definition => definition.parameters);
+pub fn bounded_protocols_from_types(types: Relation<sys.Type>): Relation<sys.Protocol> = type_parameters_from_types(types) | flat_map(parameter => parameter.bounds);
+pub fn bounded_protocol_members_from_types(types: Relation<sys.Type>): Relation<sys.ProtocolMember> = bounded_protocols_from_types(types) | flat_map(bound => bound.members);
