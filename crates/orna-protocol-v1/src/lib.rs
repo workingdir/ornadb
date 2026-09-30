@@ -229,6 +229,38 @@ pub enum RequestState {
     Terminal,
     Orphaned,
 }
+
+/// Stable identity for one typed child in a Present tree.
+///
+/// Record fields use their declared name or ObjectId, relation rows use the
+/// table ObjectId and complete primary key, keyed UI children use an explicit
+/// typed value, and `None` on [`PresentNode::new`] represents an unkeyed,
+/// position-addressed child.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PresentIdentity {
+    RecordField(String),
+    RecordFieldObjectId([u8; 16]),
+    RelationRow {
+        table_object_id: [u8; 16],
+        primary_key: CanonicalValue,
+    },
+    Explicit(CanonicalValue),
+}
+
+/// Stable type/name used by a Present node.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PresentKind {
+    Name(String),
+    ObjectId([u8; 16]),
+}
+
+/// Stable key used by a typed Present property.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PresentPropertyKey {
+    Name(String),
+    ObjectId([u8; 16]),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PresentNode(ValueNode);
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -837,6 +869,70 @@ impl PresentNode {
     fn decode(node: &Node) -> Result<Self> {
         validate_present(node)?;
         Ok(Self(ValueNode(node.clone())))
+    }
+
+    /// Builds one validated renderer-neutral Present node with stable child
+    /// identities. The builder keeps record fields, relation rows, explicitly
+    /// keyed children and positional list children distinct at the API edge.
+    pub fn new(
+        kind: PresentKind,
+        identity: Option<PresentIdentity>,
+        properties: impl IntoIterator<Item = (PresentPropertyKey, CanonicalValue)>,
+        children: impl IntoIterator<Item = PresentNode>,
+    ) -> Result<Self> {
+        let kind = match kind {
+            PresentKind::Name(name) => Node::Text(name),
+            PresentKind::ObjectId(object_id) => uuid_node(object_id),
+        };
+        let identity = match identity {
+            None => Node::Null,
+            Some(PresentIdentity::RecordField(name)) => {
+                Node::Array(vec![uint(0), Node::Text(name)])
+            }
+            Some(PresentIdentity::RecordFieldObjectId(object_id)) => {
+                Node::Array(vec![uint(0), uuid_node(object_id)])
+            }
+            Some(PresentIdentity::RelationRow {
+                table_object_id,
+                primary_key,
+            }) => Node::Array(vec![
+                uint(1),
+                uuid_node(table_object_id),
+                value_node(&primary_key)?,
+            ]),
+            Some(PresentIdentity::Explicit(key)) => {
+                Node::Array(vec![uint(3), value_node(&key)?])
+            }
+        };
+        let mut properties = properties
+            .into_iter()
+            .map(|(key, value)| {
+                let key = match key {
+                    PresentPropertyKey::Name(name) => Node::Text(name),
+                    PresentPropertyKey::ObjectId(object_id) => uuid_node(object_id),
+                };
+                let encoded_key = encode_node(&key)?;
+                Ok((encoded_key, key, value_node(&value)?))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        properties.sort_by(|left, right| left.0.cmp(&right.0));
+        let properties = properties
+            .into_iter()
+            .map(|(_, key, value)| (key, value))
+            .collect();
+        let children = children
+            .into_iter()
+            .map(|child| child.0.0)
+            .collect();
+        Self::decode(&Node::Tag(
+            60012,
+            Box::new(Node::Array(vec![
+                kind,
+                identity,
+                Node::Map(properties),
+                Node::Array(children),
+            ])),
+        ))
     }
 
     /// Wraps one canonical application value in a renderer-neutral Present
@@ -1909,6 +2005,89 @@ mod tests {
         let present = PresentNode::from_value(value()).unwrap();
         present.validate_with_limits(Limits::default()).unwrap();
     }
+
+    #[test]
+    fn present_builder_distinguishes_stable_child_identities_from_positions() {
+        let text_value = |value: &str| {
+            CanonicalValue::new(OvbRaw::Text(value.to_owned())).unwrap()
+        };
+        let record = PresentNode::new(
+            PresentKind::Name("record".into()),
+            Some(PresentIdentity::RecordField("customer".into())),
+            [(PresentPropertyKey::Name("label".into()), text_value("record"))],
+            [],
+        )
+        .unwrap();
+        let field_id = PresentNode::new(
+            PresentKind::Name("record".into()),
+            Some(PresentIdentity::RecordFieldObjectId([3; 16])),
+            [],
+            [],
+        )
+        .unwrap();
+        let relation = PresentNode::new(
+            PresentKind::Name("row".into()),
+            Some(PresentIdentity::RelationRow {
+                table_object_id: [4; 16],
+                primary_key: CanonicalValue::new(OvbRaw::Int(1.into())).unwrap(),
+            }),
+            [],
+            [],
+        )
+        .unwrap();
+        let keyed = PresentNode::new(
+            PresentKind::Name("card".into()),
+            Some(PresentIdentity::Explicit(text_value("card-1"))),
+            [],
+            [],
+        )
+        .unwrap();
+        let positional = PresentNode::new(PresentKind::Name("item".into()), None, [], []).unwrap();
+        let tree = PresentNode::new(
+            PresentKind::Name("page".into()),
+            None,
+            [],
+            [record, field_id, relation, keyed, positional],
+        )
+        .unwrap();
+        tree.validate_with_limits(Limits::default()).unwrap();
+
+        let envelope = Envelope {
+            request: Some(id(1)),
+            watch: Some(id(2)),
+            message: Message::Snapshot {
+                revision: 0,
+                present: tree,
+                snapshot: snapshot(),
+            },
+            extensions: BTreeMap::new(),
+        };
+        let bytes = envelope.encode(Limits::default()).unwrap();
+        assert_eq!(Envelope::decode(&bytes, Limits::default()).unwrap(), envelope);
+    }
+
+    #[test]
+    fn present_builder_rejects_duplicate_sibling_identities() {
+        let child = || {
+            PresentNode::new(
+                PresentKind::Name("record".into()),
+                Some(PresentIdentity::RecordField("same".into())),
+                [],
+                [],
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            PresentNode::new(
+                PresentKind::Name("page".into()),
+                None,
+                [],
+                [child(), child()],
+            ),
+            Err(Error::InvalidValue)
+        );
+    }
+
     #[test]
     fn minimum_node_limit_accepts_one_hundred_thousand_present_nodes() {
         let children = (1..MIN_MAX_NODES)

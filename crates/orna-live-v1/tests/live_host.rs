@@ -17,7 +17,8 @@ use orna_live_v1::{
     WebSocketUpgrade, WireRequest, WireResponse, encode_websocket_output, parse_http_request,
 };
 use orna_protocol_v1::{
-    DatabaseContext, Envelope, Message, PresentationContext, ResultBody, ResultStatus, TargetKind,
+    DatabaseContext, Envelope, Message, PresentIdentity, PresentKind, PresentNode,
+    PresentPropertyKey, PresentationContext, ResultBody, ResultStatus, TargetKind,
     canonical_request_fingerprint,
 };
 use orna_repository_v1::Repository;
@@ -726,6 +727,104 @@ enum WatchEventMode {
 struct WatchEventApplication {
     mode: WatchEventMode,
     subscriptions: usize,
+}
+
+struct IdentityWatchApplication {
+    next_revision: u64,
+    next_present: PresentNode,
+}
+
+impl IdentityWatchApplication {
+    fn present(label: &str) -> PresentNode {
+        let text = |value: &str| CanonicalValue::new(OvbRaw::Text(value.to_owned())).unwrap();
+        let child = |kind: &str, identity: Option<PresentIdentity>, value: &str| {
+            PresentNode::new(
+                PresentKind::Name(kind.to_owned()),
+                identity,
+                [(PresentPropertyKey::Name("label".into()), text(value))],
+                [],
+            )
+            .unwrap()
+        };
+        let field = child(
+            "record-field",
+            Some(PresentIdentity::RecordField("name".into())),
+            label,
+        );
+        let relation = child(
+            "relation-row",
+            Some(PresentIdentity::RelationRow {
+                table_object_id: [41; 16],
+                primary_key: text("customer-7"),
+            }),
+            label,
+        );
+        let keyed = child(
+            "keyed-card",
+            Some(PresentIdentity::Explicit(text("summary"))),
+            label,
+        );
+        let positional = child("list-item", None, label);
+        PresentNode::new(
+            PresentKind::Name("page".into()),
+            None,
+            [],
+            [field, relation, keyed, positional],
+        )
+        .unwrap()
+    }
+
+    fn snapshot(request: [u8; 16], watch: [u8; 16], revision: u64, present: PresentNode) -> Envelope {
+        Envelope {
+            request: Some(request),
+            watch: Some(watch),
+            message: Message::Snapshot {
+                revision,
+                present,
+                snapshot: CanonicalSnapshot::cwd([2; 16], [3; 16], 0.into()).unwrap(),
+            },
+            extensions: BTreeMap::new(),
+        }
+    }
+}
+
+impl LiveApplication for IdentityWatchApplication {
+    fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
+        Err(Error::UnsupportedOperation)
+    }
+
+    fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
+        Err(Error::UnsupportedOperation)
+    }
+
+    fn subscribe(
+        &mut self,
+        _: [u8; 16],
+        request: [u8; 16],
+        _: &Message,
+    ) -> Result<Envelope, Error> {
+        Ok(Self::snapshot(
+            request,
+            [55; 16],
+            0,
+            Self::present("initial"),
+        ))
+    }
+
+    fn resync(
+        &mut self,
+        _: [u8; 16],
+        request: [u8; 16],
+        watch: [u8; 16],
+        _: &Message,
+    ) -> Result<Envelope, Error> {
+        Ok(Self::snapshot(
+            request,
+            watch,
+            self.next_revision,
+            self.next_present.clone(),
+        ))
+    }
 }
 
 impl WatchEventApplication {
@@ -3972,6 +4071,114 @@ fn subscribe_request_identity_replays_only_the_original_watch() {
     assert_ne!(
         resubscription.response.unwrap().watch,
         original.response.unwrap().watch
+    );
+}
+
+#[test]
+fn watch_resync_replaces_the_complete_identity_bearing_tree_at_a_new_revision() {
+    let mut host = host();
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = IdentityWatchApplication {
+        next_revision: 1,
+        next_present: IdentityWatchApplication::present("refreshed"),
+    };
+
+    let initial = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(subscribe_request([81; 16])),
+        &mut application,
+    ))
+    .unwrap();
+    let initial_response = initial.response.unwrap();
+    assert_eq!(initial_response.watch, Some([55; 16]));
+    assert!(matches!(
+        initial_response.message,
+        Message::Snapshot { revision: 0, present, .. }
+            if present == IdentityWatchApplication::present("initial")
+    ));
+
+    let refreshed = block_on(host.dispatch_frame(
+        [5; 16],
+        3,
+        Frame::Binary(resync_request([82; 16], [55; 16])),
+        &mut application,
+    ))
+    .unwrap();
+    assert_eq!(refreshed.outcome, FrameOutcome::Resync { revisions: 0 });
+    let refreshed_response = refreshed.response.unwrap();
+    assert_eq!(refreshed_response.watch, Some([55; 16]));
+    assert!(matches!(
+        refreshed_response.message,
+        Message::Snapshot { revision: 1, present, .. }
+            if present == IdentityWatchApplication::present("refreshed")
+    ));
+}
+
+#[test]
+fn watch_resync_rejects_changed_same_revision_and_regressed_snapshots() {
+    let mut host = host();
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = IdentityWatchApplication {
+        next_revision: 0,
+        next_present: IdentityWatchApplication::present("changed without revision"),
+    };
+    block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(subscribe_request([83; 16])),
+        &mut application,
+    ))
+    .unwrap();
+
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [5; 16],
+            3,
+            Frame::Binary(resync_request([84; 16], [55; 16])),
+            &mut application,
+        )),
+        Err(Error::ApplicationRejected)
+    );
+
+    application.next_revision = 1;
+    application.next_present = IdentityWatchApplication::present("revision one");
+    block_on(host.dispatch_frame(
+        [5; 16],
+        4,
+        Frame::Binary(resync_request([85; 16], [55; 16])),
+        &mut application,
+    ))
+    .unwrap();
+
+    application.next_revision = 0;
+    application.next_present = IdentityWatchApplication::present("regressed");
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [5; 16],
+            5,
+            Frame::Binary(resync_request([86; 16], [55; 16])),
+            &mut application,
+        )),
+        Err(Error::ApplicationRejected)
     );
 }
 
