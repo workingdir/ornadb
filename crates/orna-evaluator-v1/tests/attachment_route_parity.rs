@@ -102,6 +102,9 @@ fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
 
     let mut session =
         AdmittedReplSession::from_attached_database_session(&databases, Limits::default()).unwrap();
+    // Prefix aliases are exact names; a failed near-match must leave the
+    // evaluator able to recover by importing either real root alias.
+    assert!(session.submit("use main_arch;").is_err());
     assert_eq!(session.submit("use main;"), Ok(None));
     assert_eq!(
         session.submit("main.package_value()"),
