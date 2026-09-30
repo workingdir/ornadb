@@ -578,6 +578,53 @@ fn conflict_budget_tail_reports_prior_table_ranges_and_checkpoint_impact() {
 }
 
 #[test]
+fn checkpoint_budget_tail_reports_only_the_crossing_id_after_a_row_conflict() {
+    let (mut base, mut left, mut right, mut source) = row_checkpoint_conflict_inputs();
+    base.checkpoints.clear();
+    left.checkpoints.clear();
+    right.checkpoints.clear();
+
+    // The ordered checkpoint walk stops at the first conflict beyond budget;
+    // successful earlier entries and unexamined later IDs are not impacts.
+    let base_clean = CheckpointGeneration { generation: 1, position: Some(b"clean-base".to_vec()) };
+    let left_clean = CheckpointGeneration { generation: 2, position: Some(b"clean-left".to_vec()) };
+    for (side, checkpoint) in [
+        (&mut base, base_clean.clone()),
+        (&mut left, left_clean.clone()),
+        (&mut right, base_clean),
+    ] {
+        side.checkpoints.insert(b"consumer/a-clean".to_vec(), checkpoint);
+    }
+    for (snapshot, checkpoint) in [
+        (&mut base, CheckpointGeneration { generation: 4, position: Some(b"m-base".to_vec()) }),
+        (&mut left, CheckpointGeneration { generation: 5, position: Some(b"m-left".to_vec()) }),
+        (&mut right, CheckpointGeneration { generation: 6, position: Some(b"m-right".to_vec()) }),
+    ] {
+        snapshot.checkpoints.insert(b"consumer/m-conflict".to_vec(), checkpoint);
+    }
+    for (snapshot, checkpoint) in [
+        (&mut base, CheckpointGeneration { generation: 7, position: Some(b"z-base".to_vec()) }),
+        (&mut left, CheckpointGeneration { generation: 8, position: Some(b"z-left".to_vec()) }),
+        (&mut right, CheckpointGeneration { generation: 9, position: Some(b"z-right".to_vec()) }),
+    ] {
+        snapshot.checkpoints.insert(b"consumer/z-unvisited".to_vec(), checkpoint);
+    }
+
+    let one_detail_budget = BranchMergeBudget { max_rows_examined: 100, max_conflicts: 1 };
+    let error = merge_three_way_snapshots(&base, &left, &right, &mut source, one_detail_budget)
+        .unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("the first conflicting checkpoint exceeds the row conflict detail")
+    };
+    assert_eq!(report.conflicts_lower_bound, 2);
+    assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+    assert!(report.affected_checkpoints.contains(b"consumer/m-conflict".as_slice()));
+    assert!(!report.affected_checkpoints.contains(b"consumer/a-clean".as_slice()));
+    assert!(!report.affected_checkpoints.contains(b"consumer/z-unvisited".as_slice()));
+    assert_eq!(source.visited.len(), 3);
+}
+
+#[test]
 fn schema_conflict_is_a_boundary_before_row_reads_and_checkpoint_resolution() {
     let base_checkpoint = CheckpointGeneration {
         generation: 4,
