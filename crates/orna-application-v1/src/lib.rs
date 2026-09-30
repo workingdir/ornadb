@@ -1433,6 +1433,8 @@ impl EffectHandler for SourceMutationEffectHandler {
                 // Resolve the source through the current activation overlay
                 // before recording intent: a stale key after an earlier
                 // successful re-key is a rejected effect, not a new identity.
+                // If recovery reuses that source key for another row, the
+                // later key-addressed call follows the row now occupying it.
                 let existing = self
                     .current_row(&table, &old_key_bytes)?
                     .ok_or_else(|| Self::effect_error("ORNA-EVAL-TABLE-MISSING-ROW"))?;
@@ -2759,6 +2761,96 @@ mod tests {
         assert_eq!(first_identity, row(2, "first", 10));
         let second_identity = CanonicalValue::decode(mutations[0].value().unwrap()).unwrap();
         assert_eq!(second_identity, row(3, "second", 20));
+    }
+
+    #[test]
+    fn reclaimed_source_key_retry_follows_current_row_identity() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "table-rekey-reclaimed-source-key-retry.orna",
+                include_str!("../tests/fixtures/table-rekey-reclaimed-source-key-retry.orna"),
+                "main",
+            )
+            .expect("checked-in reclaimed-source fixture should be admitted");
+
+        let int = |value: i64| {
+            CanonicalValue::new(OvbRaw::Int(value.into())).expect("integer is canonical")
+        };
+        let row = |id: i64, text: &str, quantity: i64| {
+            CanonicalValue::new(OvbRaw::Map(vec![
+                (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
+                (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
+                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+            ]))
+            .expect("row is canonical")
+        };
+        let key = |value: i64| int(value).encode().expect("key is canonical");
+        let rows = BTreeMap::from([(
+            "Note".to_owned(),
+            vec![
+                (key(1), row(1, "source", 10).encode().unwrap()),
+                (key(2), row(2, "destination", 20).encode().unwrap()),
+            ],
+        )]);
+        let tables = admitted_table_schemas(&application.module_header);
+        let mut handler =
+            SourceMutationEffectHandler::with_table_rows(tables, rows).expect("valid snapshot");
+
+        invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            &Environment::new(),
+            application.limits,
+            &mut handler,
+        )
+        .expect("reclaimed source key should resolve to its current row identity");
+
+        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        assert_eq!(mutations.len(), 6);
+
+        assert_eq!(mutations[0].key(), key(2));
+        assert_eq!(mutations[0].rekey_to(), Some(key(3).as_slice()));
+        assert_eq!(
+            CanonicalValue::decode(mutations[0].value().unwrap()).unwrap(),
+            row(3, "destination", 20)
+        );
+
+        assert_eq!(mutations[1].key(), key(1));
+        assert_eq!(mutations[1].rekey_to(), Some(key(4).as_slice()));
+        assert_eq!(
+            CanonicalValue::decode(mutations[1].value().unwrap()).unwrap(),
+            row(4, "source", 10)
+        );
+
+        assert_eq!(mutations[2].key(), key(3));
+        assert_eq!(mutations[2].rekey_to(), Some(key(1).as_slice()));
+        assert_eq!(
+            CanonicalValue::decode(mutations[2].value().unwrap()).unwrap(),
+            row(1, "destination", 20)
+        );
+
+        assert_eq!(mutations[3].key(), key(1));
+        assert_eq!(mutations[3].rekey_to(), Some(key(2).as_slice()));
+        assert_eq!(
+            CanonicalValue::decode(mutations[3].value().unwrap()).unwrap(),
+            row(2, "destination", 20)
+        );
+
+        assert_eq!(mutations[4].key(), key(2));
+        assert_eq!(mutations[4].rekey_to(), None);
+        assert_eq!(
+            CanonicalValue::decode(mutations[4].value().unwrap()).unwrap(),
+            row(2, "destination", 21)
+        );
+
+        assert_eq!(mutations[5].key(), key(4));
+        assert_eq!(mutations[5].rekey_to(), None);
+        assert_eq!(
+            CanonicalValue::decode(mutations[5].value().unwrap()).unwrap(),
+            row(4, "source", 11)
+        );
     }
 
     #[test]
