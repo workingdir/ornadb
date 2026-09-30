@@ -11,12 +11,12 @@ use orna_evaluator_v1::{
     PureFunction, RelationPage, StepBudget, invoke_named, invoke_named_with_effects,
     reference_standard_profile, reference_standard_sources,
 };
-use orna_foundation_v1::{CanonicalValue, OvbRaw, SafeText};
+use orna_foundation_v1::{CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText};
 use orna_live_v1::{
     Error as LiveError, LiveAdminEffectDispatcher, LiveApplication, LiveApplicationWorkLease,
     LiveEvalResponse, LiveEvalTransaction,
 };
-use orna_protocol_v1::{Envelope, Message, ResultStatus};
+use orna_protocol_v1::{Envelope, Message, PresentNode, ResultStatus};
 use orna_runtime_v1::{
     NoFault, RuntimeActivationContext, RuntimeError, RuntimePublicationMetadataRows,
     RuntimeTableActivationSnapshot, RuntimeTableRows, StagedTableActivation, TableMutation,
@@ -1603,6 +1603,16 @@ pub struct ApplicationLiveAdapter {
     logical_path: String,
     entry: String,
     sessions: Arc<Mutex<BTreeMap<[u8; 16], ApplicationReplSession>>>,
+    watches: Arc<Mutex<BTreeMap<([u8; 16], [u8; 16]), ApplicationWatch>>>,
+    runtime_identity: Option<([u8; 16], [u8; 16])>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ApplicationWatch {
+    source: String,
+    snapshot: CanonicalSnapshot,
+    present: PresentNode,
+    revision: u64,
 }
 
 impl ApplicationLiveAdapter {
@@ -1614,7 +1624,17 @@ impl ApplicationLiveAdapter {
             logical_path: "remote_eval.orna".to_owned(),
             entry: "main".to_owned(),
             sessions: Arc::new(Mutex::new(BTreeMap::new())),
+            watches: Arc::new(Mutex::new(BTreeMap::new())),
+            runtime_identity: None,
         }
+    }
+
+    /// Pins live snapshots to the clone runtime selected by the executable
+    /// host. A watch cannot invent or switch its database/runtime identity.
+    #[must_use]
+    pub fn with_runtime_identity(mut self, database: [u8; 16], runtime: [u8; 16]) -> Self {
+        self.runtime_identity = Some((database, runtime));
+        self
     }
 
     /// Sets the logical module path and entry used for future Eval messages.
@@ -1721,6 +1741,34 @@ impl ApplicationLiveAdapter {
             },
             extensions: BTreeMap::new(),
         })
+    }
+
+    fn live_snapshot(
+        &self,
+        request: [u8; 16],
+        watch: [u8; 16],
+        state: &ApplicationWatch,
+    ) -> Envelope {
+        Envelope {
+            request: Some(request),
+            watch: Some(watch),
+            message: Message::Snapshot {
+                revision: state.revision,
+                present: state.present.clone(),
+                snapshot: state.snapshot.clone(),
+            },
+            extensions: BTreeMap::new(),
+        }
+    }
+
+    fn watch_value(&self, session: [u8; 16], source: &str) -> Result<PresentNode, LiveError> {
+        let repl = self.repl_candidate(session)?;
+        let value = repl
+            .preview(source)
+            .map_err(|_| LiveError::ApplicationRejected)?;
+        // A generic typed-value node is the universal fallback: rendering
+        // specializations may be added without making any value unwatchable.
+        PresentNode::from_value(value).map_err(|_| LiveError::ApplicationRejected)
     }
 }
 
@@ -1912,11 +1960,158 @@ impl LiveApplication for ApplicationLiveAdapter {
 
     fn watch(
         &mut self,
-        _session: [u8; 16],
-        _request: [u8; 16],
-        _message: &Message,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &Message,
     ) -> std::result::Result<Envelope, LiveError> {
-        Err(LiveError::UnsupportedOperation)
+        let Message::Watch {
+            source, database, ..
+        } = message
+        else {
+            return Err(LiveError::ApplicationRejected);
+        };
+        let Some((expected_database, runtime)) = self.runtime_identity else {
+            return Err(LiveError::RuntimeUnavailable);
+        };
+        if database.database != expected_database
+            || database.snapshot.as_ref().is_some_and(|snapshot| {
+                !snapshot_matches_runtime(snapshot, expected_database, runtime)
+            })
+        {
+            return Err(LiveError::ApplicationRejected);
+        }
+        let present = self.watch_value(session, source)?;
+        let snapshot = database.snapshot.clone().map_or_else(
+            || CanonicalSnapshot::cwd(database.database, runtime, 0.into()),
+            Ok,
+        )
+        .map_err(|_| LiveError::ApplicationRejected)?;
+        let mut watch = [0; 16];
+        getrandom::fill(&mut watch).map_err(|_| LiveError::RuntimeUnavailable)?;
+        let key = (session, watch);
+        let mut watches = self
+            .watches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if watches.len() >= 65_536 || watches.contains_key(&key) {
+            return Err(LiveError::ApplicationRejected);
+        }
+        let state = ApplicationWatch {
+            source: source.clone(),
+            snapshot,
+            present,
+            revision: 0,
+        };
+        watches.insert(key, state.clone());
+        Ok(self.live_snapshot(request, watch, &state))
+    }
+
+    fn resync(
+        &mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        watch: [u8; 16],
+        message: &Message,
+    ) -> std::result::Result<Envelope, LiveError> {
+        if !matches!(message, Message::Resync) {
+            return Err(LiveError::ApplicationRejected);
+        }
+        let key = (session, watch);
+        let mut watches = self
+            .watches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = watches.get_mut(&key).ok_or(LiveError::ApplicationRejected)?;
+        // This application adapter has no dependency scheduler yet. An
+        // explicit resync therefore re-evaluates the read-only expression
+        // and returns a complete root snapshot; a specialized delta is only
+        // an optimization and cannot be required for a live value to refresh.
+        let present = self.watch_value(session, &state.source)?;
+        if present != state.present {
+            state.revision = state
+                .revision
+                .checked_add(1)
+                .ok_or(LiveError::ApplicationRejected)?;
+            state.present = present;
+        }
+        Ok(self.live_snapshot(request, watch, state))
+    }
+
+    fn dispatch_with_work<'a>(
+        &'a mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &'a Message,
+        watch: Option<[u8; 16]>,
+        fingerprint: [u8; 32],
+        work: &'a mut LiveApplicationWorkLease,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<Envelope, LiveError>> + 'a>> {
+        Box::pin(async move {
+            work.check_active()?;
+            let response = match message {
+                Message::Watch { .. } => LiveApplication::watch(self, session, request, message),
+                Message::Resync => LiveApplication::resync(
+                    self,
+                    session,
+                    request,
+                    watch.ok_or(LiveError::ApplicationRejected)?,
+                    message,
+                ),
+                Message::Unsubscribe => {
+                    if let Some(watch) = watch {
+                        self.watches
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(&(session, watch));
+                    }
+                    Ok(control_result(request, fingerprint))
+                }
+                Message::Cancel {
+                    target_kind,
+                    target,
+                } => {
+                    if *target_kind == orna_protocol_v1::TargetKind::Watch {
+                        self.watches
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(&(session, *target));
+                    }
+                    Ok(control_result(request, fingerprint))
+                }
+                _ => Err(LiveError::UnsupportedOperation),
+            };
+            work.complete();
+            let response = response?;
+            work.check_active()?;
+            Ok(response)
+        })
+    }
+}
+
+fn control_result(request: [u8; 16], fingerprint: [u8; 32]) -> Envelope {
+    Envelope {
+        request: Some(request),
+        watch: None,
+        message: Message::Result {
+            status: ResultStatus::Success,
+            value: Some(CanonicalValue::unit()),
+            fingerprint,
+            diagnostic: None,
+        },
+        extensions: BTreeMap::new(),
+    }
+}
+
+fn snapshot_matches_runtime(
+    snapshot: &CanonicalSnapshot,
+    expected_database: [u8; 16],
+    expected_runtime: [u8; 16],
+) -> bool {
+    match snapshot {
+        CanonicalSnapshot::Cwd {
+            database, runtime, ..
+        } => *database == expected_database && *runtime == expected_runtime,
+        CanonicalSnapshot::Commit { database, .. } => *database == expected_database,
     }
 }
 
@@ -2038,6 +2233,128 @@ mod tests {
                 ))
                 .expect("canonical integer"),
             )
+        );
+    }
+
+    #[test]
+    fn live_watch_serves_a_pinned_typed_snapshot_and_resyncs_by_full_replacement() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let mut adapter =
+            ApplicationLiveAdapter::new(authority).with_runtime_identity([1; 16], [2; 16]);
+        let session = [3; 16];
+        let request = [4; 16];
+        let message = Message::Watch {
+            source: include_str!("../tests/fixtures/live-watch-expression.orna")
+                .trim()
+                .to_owned(),
+            database: orna_protocol_v1::DatabaseContext {
+                database: [1; 16],
+                snapshot: None,
+            },
+            presentation: orna_protocol_v1::PresentationContext {
+                locale: "en-US".to_owned(),
+                timezone: None,
+                width: Some(800),
+                theme: "web/default".to_owned(),
+                supported_kinds: vec!["value".to_owned()],
+            },
+            refresh_floor: None,
+        };
+        let first = LiveApplication::watch(&mut adapter, session, request, &message)
+            .expect("read-only watch should return a full snapshot");
+        assert_eq!(first.request, Some(request));
+        let Some(watch) = first.watch else {
+            panic!("watch snapshots carry a session-scoped handle");
+        };
+        let expected_value = CanonicalValue::new(OvbRaw::Int(42.into()))
+            .expect("canonical watched value");
+        let Message::Snapshot {
+            revision,
+            present,
+            snapshot,
+        } = first.message
+        else {
+            panic!("a new watch starts with a complete snapshot");
+        };
+        assert_eq!(revision, 0);
+        assert_eq!(present, PresentNode::from_value(expected_value).unwrap());
+        assert_eq!(
+            snapshot,
+            CanonicalSnapshot::cwd([1; 16], [2; 16], 0.into()).unwrap()
+        );
+
+        let refreshed = LiveApplication::resync(
+            &mut adapter,
+            session,
+            [5; 16],
+            watch,
+            &Message::Resync,
+        )
+        .expect("explicit resync returns a full replacement snapshot");
+        assert_eq!(refreshed.request, Some([5; 16]));
+        assert_eq!(refreshed.watch, Some(watch));
+        assert_eq!(
+            refreshed.message,
+            Message::Snapshot {
+                revision: 0,
+                present: PresentNode::from_value(
+                    CanonicalValue::new(OvbRaw::Int(42.into())).unwrap()
+                )
+                .unwrap(),
+                snapshot: CanonicalSnapshot::cwd([1; 16], [2; 16], 0.into()).unwrap(),
+            }
+        );
+    }
+
+    #[test]
+    fn live_watch_refuses_a_database_outside_its_deployed_runtime() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let mut adapter =
+            ApplicationLiveAdapter::new(authority).with_runtime_identity([1; 16], [2; 16]);
+        let message = Message::Watch {
+            source: include_str!("../tests/fixtures/live-watch-expression.orna")
+                .trim()
+                .to_owned(),
+            database: orna_protocol_v1::DatabaseContext {
+                database: [9; 16],
+                snapshot: None,
+            },
+            presentation: orna_protocol_v1::PresentationContext {
+                locale: "en-US".to_owned(),
+                timezone: None,
+                width: None,
+                theme: "web/default".to_owned(),
+                supported_kinds: Vec::new(),
+            },
+            refresh_floor: None,
+        };
+        assert_eq!(
+            LiveApplication::watch(&mut adapter, [3; 16], [4; 16], &message),
+            Err(LiveError::ApplicationRejected)
+        );
+
+        let wrong_runtime_snapshot = Message::Watch {
+            source: include_str!("../tests/fixtures/live-watch-expression.orna")
+                .trim()
+                .to_owned(),
+            database: orna_protocol_v1::DatabaseContext {
+                database: [1; 16],
+                snapshot: Some(CanonicalSnapshot::cwd([1; 16], [9; 16], 0.into()).unwrap()),
+            },
+            presentation: orna_protocol_v1::PresentationContext {
+                locale: "en-US".to_owned(),
+                timezone: None,
+                width: None,
+                theme: "web/default".to_owned(),
+                supported_kinds: Vec::new(),
+            },
+            refresh_floor: None,
+        };
+        assert_eq!(
+            LiveApplication::watch(&mut adapter, [3; 16], [5; 16], &wrong_runtime_snapshot),
+            Err(LiveError::ApplicationRejected)
         );
     }
 
