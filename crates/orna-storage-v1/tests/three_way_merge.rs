@@ -1169,6 +1169,62 @@ fn agreed_positionless_deletes_do_not_spend_budget_after_a_row_conflict() {
 }
 
 #[test]
+fn positionless_checkpoint_delete_stays_clean_beside_row_delete_update() {
+    for delete_on_left in [true, false] {
+        let mut source = FixtureRows::default();
+        let base_row = parse_fixture(BASE, RowKeyKind::Explicit);
+        let edited_row = parse_fixture(RIGHT, RowKeyKind::Explicit);
+        source.add(MergeSide::Base, b"base", vec![base_row]);
+        source.add(
+            MergeSide::Left,
+            b"left",
+            if delete_on_left { Vec::new() } else { vec![edited_row.clone()] },
+        );
+        source.add(
+            MergeSide::Right,
+            b"right",
+            if delete_on_left { vec![edited_row] } else { Vec::new() },
+        );
+
+        let mut base = snapshot(schema(true, FieldType::Str), manifest(40, 40, b"base"), None);
+        let mut left = snapshot(schema(true, FieldType::Str), manifest(41, 41, b"left"), None);
+        let mut right = snapshot(schema(true, FieldType::Str), manifest(42, 42, b"right"), None);
+        let checkpoint_id = b"consumer/positionless-delete-with-row-delete-update".to_vec();
+        let checkpoint = CheckpointGeneration { generation: 80, position: None };
+        base.checkpoints.insert(checkpoint_id.clone(), checkpoint.clone());
+
+        // Put the checkpoint deletion opposite the row deletion. Its other
+        // branch keeps the cursorless generation unchanged, so it resolves
+        // independently while row delete/update remains a conflict.
+        let (delete_checkpoint_side, retain_checkpoint_side) = if delete_on_left {
+            (&mut right, &mut left)
+        } else {
+            (&mut left, &mut right)
+        };
+        delete_checkpoint_side.checkpoints.remove(checkpoint_id.as_slice());
+        retain_checkpoint_side.checkpoints.insert(checkpoint_id, checkpoint);
+
+        let one_conflict_budget = BranchMergeBudget { max_rows_examined: 100, max_conflicts: 1 };
+        let error = merge_three_way_snapshots(&base, &left, &right, &mut source, one_conflict_budget)
+            .unwrap_err();
+        let BranchMergeError::Conflicts { conflicts, report } = error else {
+            panic!("row delete/update remains the only conflict")
+        };
+        assert!(matches!(
+            conflicts.as_slice(),
+            [BranchMergeConflict::Row {
+                conflict: orna_evolution_v1::RowMergeConflict::DeleteAndEdit { key, .. },
+                ..
+            }] if key == &integer(1)
+        ));
+        assert_eq!(report.conflicts_lower_bound, 1);
+        assert!(report.affected_checkpoints.is_empty());
+        assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+        assert_eq!(source.visited.len(), 3);
+    }
+}
+
+#[test]
 fn positionless_deletes_resolve_at_exact_row_change_budget_boundary() {
     let build_inputs = || {
         let mut source = FixtureRows::default();
