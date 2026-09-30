@@ -57,3 +57,9 @@ matching delete edge: the source that claims the returned key is deleted while
 blocking the final retry, after which the retry takes the freed key. Its fixture
 asserts the complete log, including the competitor deletion and final source
 re-key under the same evaluation-order choice.
+
+`returned_key_competitor_return_then_final_owner_delete_closes_retry` adds the
+follow-on owner cycle: the competitor returns to its vacated source key before
+the final source claims the returned key, then retries that key and deletes the
+new owner before claiming it. The fixture proves the ordered ownership changes;
+the reference remains silent on this caught-retry ordering.
