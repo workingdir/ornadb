@@ -159,6 +159,55 @@ fn known_deletions_emit_tombstones_but_never_created_rows_remain_absent() {
 }
 
 #[test]
+fn retained_tombstones_are_logical_absence_and_can_be_folded_from_complete_snapshots() {
+    let live = parse_fixture(BASE);
+    let deleted = RowMergeOperation::Tombstone {
+        table: live.table,
+        key: live.key.clone(),
+    };
+    assert_eq!(
+        merge_keyed_row_states(
+            RowSnapshotState::Present(&live),
+            RowSnapshotState::Tombstone,
+            RowSnapshotState::Present(&live),
+        ),
+        Ok(deleted),
+    );
+    let edited = parse_fixture(CONFLICT);
+    assert!(matches!(
+        merge_keyed_row_states(
+            RowSnapshotState::Present(&live),
+            RowSnapshotState::Tombstone,
+            RowSnapshotState::Present(&edited),
+        ),
+        Err(RowSnapshotMergeError::Conflict(RowMergeConflict::DeleteAndEdit { .. }))
+    ));
+
+    // A complete base already records absence. Once its tombstone effect is
+    // folded into a replacement snapshot, the marker can be omitted there.
+    assert_eq!(
+        merge_keyed_row_states(
+            RowSnapshotState::Tombstone,
+            RowSnapshotState::Tombstone,
+            RowSnapshotState::Absent,
+        ),
+        Ok(RowMergeOperation::Absent),
+    );
+
+    // If another branch inserts at an absent base key, an old marker is not
+    // a competing value and must not erase the new live row.
+    let inserted = parse_fixture(LEFT);
+    assert_eq!(
+        merge_keyed_row_states(
+            RowSnapshotState::Absent,
+            RowSnapshotState::Tombstone,
+            RowSnapshotState::Present(&inserted),
+        ),
+        Ok(RowMergeOperation::Upsert(inserted)),
+    );
+}
+
+#[test]
 fn pruned_history_is_unavailable_and_delete_update_stays_a_conflict() {
     let base = parse_fixture(BASE);
     assert_eq!(
