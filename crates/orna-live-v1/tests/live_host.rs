@@ -8992,12 +8992,35 @@ fn deletion_failure_closes_fail_closed_without_sensitive_diagnostics() {
 #[test]
 fn delete_cancels_durable_session_work_before_returning_success() {
     let (root, repository) = durable_repository();
+    // The reference scopes request identity by session but leaves the same-ID
+    // status-after-neighbor-deletion case unspecified; preserve each session's
+    // durable status while closing only the deleted session's work.
+    let first_target_request = eval_with_context([1; 16], [91; 16], [2; 16], None);
+    let first_fingerprint = request_fingerprint(&first_target_request, [1; 16]);
+    let second_target_request = eval_with_context([2; 16], [91; 16], [2; 16], None);
+    let second_fingerprint = request_fingerprint(&second_target_request, [2; 16]);
+    assert_ne!(first_fingerprint, second_fingerprint);
+
     let runtime = open_durable_state(&repository);
+    let second_identity = RequestIdentity {
+        session_id: [2; 16],
+        request_id: [91; 16],
+    };
+    let second_result = unit_result([91; 16], second_fingerprint);
+    block_on(runtime.reserve_request(second_identity, second_fingerprint)).unwrap();
+    block_on(runtime.start_request(second_identity, second_fingerprint)).unwrap();
+    block_on(runtime.complete_request(
+        second_identity,
+        second_fingerprint,
+        TerminalOutcome::new(second_result.encode(Limits::default().protocol).unwrap()).unwrap(),
+    ))
+    .unwrap();
+
     let identity = RequestIdentity {
         session_id: [1; 16],
         request_id: [91; 16],
     };
-    let fingerprint = [92; 32];
+    let fingerprint = first_fingerprint;
     let owner = [93; 16];
     let lease = block_on(runtime.acquire_lease(owner)).unwrap();
     let (_, capability) =
@@ -9013,11 +9036,72 @@ fn delete_cancels_durable_session_work_before_returning_success() {
     drop(runtime);
 
     let mut host = durable_host_with_owner(open_durable_state(&repository), owner);
-    let mut issuer = Issuer(1, None);
-    let credential = create(&mut host, &mut issuer);
+    let mut first_issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut first_issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [6; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let second_subscribe = subscribe();
+    let mut second_issuer = Issuer(2, None);
+    let second_credential = block_on(host.create(
+        CreateRequest {
+            id: [2; 16],
+            origin: origin(),
+            expires_at: 100,
+            now: 0,
+            subscribe: &second_subscribe,
+        },
+        &mut second_issuer,
+    ))
+    .unwrap();
+    block_on(host.resume(ResumeRequest {
+        id: [2; 16],
+        origin: &origin(),
+        credential: &second_credential,
+        attachment: [7; 16],
+        now: 1,
+    }))
+    .unwrap();
+
     let origin = origin();
     let mut deletion = RecordingDelete::default();
     let mut children = RecordingChildren::default();
+    let mut application = UnitApplication::default();
+    let first_status_request = Envelope {
+        request: Some([44; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint: first_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let first_status = block_on(host.dispatch_frame(
+        [6; 16],
+        2,
+        Frame::Binary(first_status_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the owning session can read its running request");
+    assert!(matches!(
+        first_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Running,
+            fingerprint: Some(returned),
+            result: None,
+        } if target == [91; 16] && returned == first_fingerprint
+    ));
+
     assert_eq!(
         block_on(host.http_delete_with_children(
             DeleteRequest {
@@ -9035,6 +9119,50 @@ fn delete_cancels_durable_session_work_before_returning_success() {
     assert_eq!(deletion.calls, 1);
     assert_eq!(children.calls, 1);
     assert_eq!(children.requests, vec![identity]);
+
+    let second_status_request = Envelope {
+        request: Some([44; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint: second_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let second_status = block_on(host.dispatch_frame(
+        [7; 16],
+        2,
+        Frame::Binary(second_status_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the other session keeps its same-ID request status after deletion");
+    let expected_result =
+        ResultBody::from_result(&second_result, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        &second_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(returned),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *returned == second_fingerprint
+            && result == &expected_result
+    ));
+    assert!(matches!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            2,
+            Frame::Binary(first_status_request),
+            &mut application,
+        )),
+        Err(Error::Closed)
+    ), "a deleted session cannot continue its status stream");
+
     assert_eq!(
         block_on(host.http_delete_with_children(
             DeleteRequest {
@@ -9055,6 +9183,23 @@ fn delete_cancels_durable_session_work_before_returning_success() {
         block_on(open_durable_state(&repository).request_status(identity, fingerprint)).unwrap(),
         Some(status) if status.state == orna_runtime_v1::RequestState::Cancelled
     ));
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status(second_identity, second_fingerprint))
+            .unwrap(),
+        Some(status) if status.state == orna_runtime_v1::RequestState::Completed
+    ));
+
+    let second_status_retry = block_on(host.dispatch_frame(
+        [7; 16],
+        3,
+        Frame::Binary(second_status_request),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the surviving session replays its own status snapshot");
+    assert_eq!(second_status_retry, second_status);
+    assert_eq!(application.calls, 0);
     assert_eq!(
         block_on(host.resume(ResumeRequest {
             id: [1; 16],
