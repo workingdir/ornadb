@@ -23850,6 +23850,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sys_invocation_stale_tail_cursor_stays_invalid_across_reset_replay_chain() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(110)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let invocation_id = id(111);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(109)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .finish_invocation_observation(writer, invocation_id, InvocationCompletion::Succeeded)
+            .await
+            .unwrap();
+        let end_page = state.invocation_observation_tail(None, 2).await.unwrap();
+        assert_eq!(end_page.entries.len(), 2);
+        assert!(!end_page.has_more);
+        let stale_cursor = end_page.next_cursor.expect("tail end has a cursor");
+
+        let key = stream_delivery("stale-tail-reset-chain", "stale-tail-reset-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let first_request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("stale-tail:first-reset").unwrap(),
+            },
+            reason: "first stale-tail reset boundary".into(),
+        };
+        let first_receipt_id = id(112);
+        let first_reset = state
+            .reset_checkpoint_with_invocation_id(
+                writer,
+                first_request.clone(),
+                first_receipt_id,
+            )
+            .await
+            .unwrap();
+
+        let capture = state.capture().await.unwrap();
+        state
+            .commit(writer, &capture, &mutation(113), digest(114), &NoFault)
+            .await
+            .unwrap();
+        let second_request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition::from(&first_reset),
+            to: Position {
+                token: Component::new("stale-tail:second-reset").unwrap(),
+            },
+            reason: "second stale-tail reset boundary".into(),
+        };
+        let second_receipt_id = id(115);
+        let second_reset = state
+            .reset_checkpoint_with_invocation_id(
+                writer,
+                second_request.clone(),
+                second_receipt_id,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(
+                    writer,
+                    first_request,
+                    first_receipt_id,
+                )
+                .await,
+            Ok(first_reset),
+            "replaying the older receipt keeps its original result"
+        );
+        assert_eq!(state.stream_checkpoint(&key).await.unwrap(), second_reset);
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(
+                    writer,
+                    second_request,
+                    second_receipt_id,
+                )
+                .await,
+            Ok(second_reset),
+            "replaying the newer receipt preserves the latest checkpoint"
+        );
+        assert_eq!(
+            state
+                .invocation_observation_tail(Some(stale_cursor), 2)
+                .await,
+            Err(RuntimeError::InvocationTailInvalid),
+            "neither receipt replay revives a cursor from the old CWD capture"
+        );
+        let tail = state
+            .invocation_observation_tail(None, 4)
+            .await
+            .unwrap();
+        assert_eq!(
+            tail.entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "reset receipts and their replays do not allocate invocation-tail sequence"
+        );
+    }
+
+    #[tokio::test]
     async fn sys_lifecycle_parent_waits_for_children_and_replacement_orphans_old_owner() {
         assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
         let (_temp, repo) = repository();
