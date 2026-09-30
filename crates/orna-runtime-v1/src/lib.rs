@@ -2176,6 +2176,98 @@ impl RuntimeQuerySession<'_> {
             .ok_or(RuntimeQueryError::RowNotFound)
     }
 
+    /// Reads one bounded page from the session's current relation view.
+    ///
+    /// Rows are ordered by canonical encoded key. `after` is exclusive, and
+    /// `next` is the last returned key only when a lookahead row proves that
+    /// another page exists. The reference specifies read-your-writes but not
+    /// a runtime cursor shape, so this follows the evaluator's exclusive
+    /// canonical-cursor contract and avoids empty continuation pages. Pages
+    /// are capped at 1,024 rows as a pragmatic runtime bound; the evaluator
+    /// currently requests one row per page.
+    pub fn query_page(
+        &self,
+        table: &str,
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<RuntimeQueryPage, RuntimeQueryError> {
+        if limit == 0 || limit > MAX_RUNTIME_QUERY_PAGE_ROWS {
+            return Err(RuntimeQueryError::InvalidPageSize);
+        }
+        let base = self
+            .snapshot
+            .table_rows
+            .get(table)
+            .ok_or(RuntimeQueryError::TableNotAdmitted)?;
+
+        let base_start = after.map_or(0, |cursor| {
+            base.partition_point(|(key, _)| key.as_slice() <= cursor)
+        });
+        let mut base_rows = base[base_start..].iter().peekable();
+        let mut staged_rows = self
+            .overlay
+            .get(table)
+            .into_iter()
+            .flat_map(|rows| {
+                use std::ops::Bound::{Excluded, Unbounded};
+
+                let bounds = after.map_or((Unbounded, Unbounded), |cursor| {
+                    (Excluded(cursor), Unbounded)
+                });
+                rows.range::<[u8], _>(bounds)
+            })
+            .peekable();
+        let mut rows = Vec::with_capacity(limit);
+        let mut has_more = false;
+        loop {
+            let base_next = base_rows.peek().copied();
+            let staged_next = staged_rows.peek().copied();
+            let (key, value) = match (base_next, staged_next) {
+                (Some((base_key, _)), Some((staged_key, _)))
+                    if base_key.as_slice() == staged_key.as_slice() =>
+                {
+                    base_rows.next();
+                    let (key, value) = staged_rows.next().expect("peeked staged row");
+                    (key.as_slice(), value.as_deref())
+                }
+                (Some((base_key, _)), Some((staged_key, _)))
+                    if base_key.as_slice() < staged_key.as_slice() =>
+                {
+                    let (key, value) = base_rows.next().expect("peeked base row");
+                    (key.as_slice(), Some(value.as_slice()))
+                }
+                (Some(_), Some(_)) => {
+                    let (key, value) = staged_rows.next().expect("peeked staged row");
+                    (key.as_slice(), value.as_deref())
+                }
+                (Some(_), None) => {
+                    let (key, value) = base_rows.next().expect("peeked base row");
+                    (key.as_slice(), Some(value.as_slice()))
+                }
+                (None, Some(_)) => {
+                    let (key, value) = staged_rows.next().expect("peeked staged row");
+                    (key.as_slice(), value.as_deref())
+                }
+                (None, None) => break,
+            };
+            let Some(value) = value else {
+                continue;
+            };
+            if after.is_some_and(|cursor| key <= cursor) {
+                continue;
+            }
+            if rows.len() == limit {
+                has_more = true;
+                break;
+            }
+            rows.push((key.to_vec(), value.to_vec()));
+        }
+        let next = has_more
+            .then(|| rows.last().map(|(key, _)| key.clone()))
+            .flatten();
+        Ok(RuntimeQueryPage { rows, next })
+    }
+
     /// Adds one already validated mutation to this private session.
     ///
     /// A repeated key replaces the session's query view in order of staging,
@@ -2203,11 +2295,23 @@ impl RuntimeQuerySession<'_> {
     }
 }
 
+const MAX_RUNTIME_QUERY_PAGE_ROWS: usize = 1024;
+
+/// A bounded page of visible runtime rows in canonical key order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeQueryPage {
+    /// Canonical encoded primary keys and canonical row values.
+    pub rows: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Exclusive cursor for a later page, present only when more rows exist.
+    pub next: Option<Vec<u8>>,
+}
+
 /// A query requested a relation that was not included in its activation snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeQueryError {
     TableNotAdmitted,
     RowNotFound,
+    InvalidPageSize,
 }
 
 impl fmt::Display for RuntimeQueryError {
@@ -2215,6 +2319,7 @@ impl fmt::Display for RuntimeQueryError {
         formatter.write_str(match self {
             Self::TableNotAdmitted => "table was not admitted to this query session",
             Self::RowNotFound => "exact query did not match a row",
+            Self::InvalidPageSize => "query page size is outside the supported range",
         })
     }
 }
@@ -19101,6 +19206,17 @@ mod tests {
     struct QuerySessionEffects<'session, 'snapshot> {
         session: &'session RuntimeQuerySession<'snapshot>,
         lookups: usize,
+        scans: usize,
+    }
+
+    fn static_query_table(expression: &orna_syntax_v1::Expr) -> Option<String> {
+        match expression {
+            orna_syntax_v1::Expr::Name { text, .. } => Some(text.clone()),
+            orna_syntax_v1::Expr::Field { base, name, .. } => {
+                Some(format!("{}.{}", static_query_table(base)?, name))
+            }
+            _ => None,
+        }
     }
 
     impl orna_evaluator_v1::EffectHandler for QuerySessionEffects<'_, '_> {
@@ -19117,7 +19233,7 @@ mod tests {
             let orna_syntax_v1::Expr::Field { base, name, .. } = callee else {
                 return Ok(None);
             };
-            let orna_syntax_v1::Expr::Name { text: table, .. } = base.as_ref() else {
+            let Some(table) = static_query_table(base) else {
                 return Ok(None);
             };
             if name != "lookup" {
@@ -19130,18 +19246,59 @@ mod tests {
             let encoded_key = key
                 .encode()
                 .map_err(|_| failure("ORNA-EVAL-TABLE-KEY"))?;
-            let row = self.session.lookup_exact(table, &encoded_key).map_err(|error| {
+            let row = self.session.lookup_exact(&table, &encoded_key).map_err(|error| {
                 // The reference leaves runtime diagnostic spelling open; use
                 // the table layer's established missing-row code and keep an
                 // unadmitted relation distinct from a present-but-empty one.
                 failure(match error {
                     RuntimeQueryError::TableNotAdmitted => "ORNA-EVAL-QUERY-TABLE",
                     RuntimeQueryError::RowNotFound => "ORNA-EVAL-TABLE-MISSING",
+                    RuntimeQueryError::InvalidPageSize => "ORNA-EVAL-QUERY-PAGE",
                 })
             })?;
             CanonicalValue::decode(row)
                 .map(Some)
                 .map_err(|_| failure("ORNA-EVAL-QUERY-ROW"))
+        }
+
+        fn scan_relation_page(
+            &mut self,
+            source: &str,
+            after: Option<&[u8]>,
+            limit: usize,
+            budget: &mut orna_evaluator_v1::StepBudget,
+        ) -> Result<Option<orna_evaluator_v1::RelationPage>, orna_evaluator_v1::EvaluationError> {
+            let failure = |code| {
+                orna_evaluator_v1::EvaluationError::redacted(
+                    SafeText::new(code).expect("static diagnostic code"),
+                )
+            };
+            let page = self
+                .session
+                .query_page(source, after, limit)
+                .map_err(|error| {
+                    failure(match error {
+                        RuntimeQueryError::TableNotAdmitted => "ORNA-EVAL-QUERY-TABLE",
+                        RuntimeQueryError::RowNotFound => "ORNA-EVAL-TABLE-MISSING",
+                        RuntimeQueryError::InvalidPageSize => "ORNA-EVAL-QUERY-PAGE",
+                    })
+                })?;
+            self.scans += 1;
+            // One unit admits each runtime page plus its decoded rows to the
+            // evaluator's activation budget, including an empty relation scan.
+            budget.debit(1 + page.rows.len() as u64)?;
+            let rows = page
+                .rows
+                .into_iter()
+                .map(|(_, row)| {
+                    CanonicalValue::decode(&row)
+                        .map_err(|_| failure("ORNA-EVAL-QUERY-ROW"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Some(orna_evaluator_v1::RelationPage {
+                rows,
+                next: page.next,
+            }))
         }
     }
 
@@ -19152,28 +19309,180 @@ mod tests {
         Result<CanonicalValue, orna_evaluator_v1::EvaluationError>,
         usize,
     ) {
-        let parsed = orna_syntax_v1::parse_expression(source);
-        assert!(parsed.is_ok(), "the in-crate query fixture must parse: {source}");
-        let functions = orna_evaluator_v1::Functions::from([(
-            "query".into(),
-            orna_evaluator_v1::PureFunction {
-                parameters: Vec::new(),
-                body: parsed.value,
-                environment: BTreeMap::new(),
-            },
-        )]);
         let mut effects = QuerySessionEffects {
             session,
             lookups: 0,
+            scans: 0,
         };
+        let result = invoke_with_query_effects(source, &mut effects);
+        (result, effects.lookups)
+    }
+
+    fn invoke_query_fixture_with_counts(
+        session: &RuntimeQuerySession<'_>,
+        source: &str,
+    ) -> (
+        Result<CanonicalValue, orna_evaluator_v1::EvaluationError>,
+        usize,
+        usize,
+    ) {
+        let mut effects = QuerySessionEffects {
+            session,
+            lookups: 0,
+            scans: 0,
+        };
+        let result = invoke_with_query_effects(source, &mut effects);
+        (result, effects.lookups, effects.scans)
+    }
+
+    fn invoke_with_query_effects(
+        source: &str,
+        effects: &mut QuerySessionEffects<'_, '_>,
+    ) -> Result<CanonicalValue, orna_evaluator_v1::EvaluationError> {
+        let parsed = orna_syntax_v1::parse_expression(source);
+        assert!(parsed.is_ok(), "the in-crate query fixture must parse: {source}");
         let result = orna_evaluator_v1::invoke_named_with_effects(
             "query",
-            &functions,
+            &orna_evaluator_v1::Functions::from([(
+                "query".into(),
+                orna_evaluator_v1::PureFunction {
+                    parameters: Vec::new(),
+                    body: parsed.value,
+                    environment: BTreeMap::new(),
+                },
+            )]),
             &BTreeMap::new(),
             orna_evaluator_v1::Limits::default(),
-            &mut effects,
+            effects,
         );
-        (result, effects.lookups)
+        result
+    }
+
+    fn query_test_key(value: u8) -> Vec<u8> {
+        CanonicalValue::new(OvbRaw::Int(BigInt::from(value)))
+            .unwrap()
+            .encode()
+            .unwrap()
+    }
+
+    fn query_test_row(id_value: u8, title: &str, target: u8) -> Vec<u8> {
+        CanonicalValue::new(publication_text_map(vec![
+            ("id", OvbRaw::Int(BigInt::from(id_value))),
+            ("title", OvbRaw::Text(title.to_owned())),
+            ("target", OvbRaw::Int(BigInt::from(target))),
+        ]))
+        .unwrap()
+        .encode()
+        .unwrap()
+    }
+
+    fn query_test_mutation(id_value: u8, key: u8, value: Option<Vec<u8>>) -> TableMutation {
+        TableMutation::new(id(id_value), "sys.Storage", query_test_key(key), value).unwrap()
+    }
+
+    #[tokio::test]
+    async fn query_relation_projection_effects_read_staged_insert_update_and_delete() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let original = query_test_row(7, "old", 7);
+        state
+            .commit_table_activation(
+                lease,
+                &context,
+                &[
+                    query_test_mutation(40, 7, Some(original.clone())),
+                    query_test_mutation(41, 8, Some(query_test_row(8, "remove", 8))),
+                ],
+                digest(42),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let mut session = snapshot.query_session();
+        let replacement = query_test_row(7, "new", 7);
+        let inserted = query_test_row(9, "new", 9);
+        session
+            .stage_mutation(query_test_mutation(43, 7, Some(replacement.clone())))
+            .unwrap();
+        session
+            .stage_mutation(query_test_mutation(44, 8, None))
+            .unwrap();
+        session
+            .stage_mutation(query_test_mutation(45, 9, Some(inserted.clone())))
+            .unwrap();
+
+        let first = session.query_page("sys.Storage", None, 1).unwrap();
+        assert_eq!(first.rows, vec![(query_test_key(7), replacement)]);
+        assert_eq!(first.next, Some(query_test_key(7)));
+        let second = session
+            .query_page("sys.Storage", first.next.as_deref(), 1)
+            .unwrap();
+        assert_eq!(second.rows, vec![(query_test_key(9), inserted)]);
+        assert_eq!(second.next, None);
+        assert_eq!(
+            session.query_page("sys.Storage", None, 0),
+            Err(RuntimeQueryError::InvalidPageSize)
+        );
+
+        let (projected, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-project-effects.orna"),
+        );
+        assert_eq!(
+            projected.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(2u8))).unwrap()
+        );
+        assert_eq!(lookups, 4, "each projected callback re-runs both effects");
+        assert_eq!(scans, 2, "the scan sees the updated row and staged insert only");
+        assert_eq!(snapshot.query_exact("sys.Storage", &query_test_key(7)).unwrap(), Some(&original[..]));
+    }
+
+    #[tokio::test]
+    async fn query_projection_failures_recover_at_the_outer_boundary() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        state
+            .commit_table_activation(
+                lease,
+                &context,
+                &[query_test_mutation(40, 7, Some(query_test_row(7, "current", 99)))],
+                digest(41),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let mut session = snapshot.query_session();
+
+        let (missing, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-projection-missing.orna"),
+        );
+        assert_eq!(
+            missing.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!((lookups, scans), (1, 1));
+
+        session
+            .stage_mutation(TableMutation::new(id(42), "sys.Storage", query_test_key(8), Some(vec![0xff])).unwrap())
+            .unwrap();
+        let (corrupt, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-projection-corrupt-row.orna"),
+        );
+        assert_eq!(
+            corrupt.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-ROW".into())).unwrap()
+        );
+        assert_eq!(lookups, 0);
+        assert_eq!(scans, 2, "the decode failure stops the following page");
     }
 
     #[tokio::test]
