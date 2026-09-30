@@ -21070,6 +21070,26 @@ mod tests {
             "last() returns the partial post-filter prefix after a nonmatching tail exhausts"
         );
 
+        // A short post-filter take may contain several matches before its
+        // final nonmatch exhausts the source. The reference leaves that
+        // closure with last() implicit; retain the final available match.
+        let (last_returns_multirow_short_post_filter_take, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-short-multiple-matches.orna"
+                ),
+            );
+        assert_eq!(
+            last_returns_multirow_short_post_filter_take.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 6),
+            "last() returns the last of two available matches after the short take's nonmatching tail"
+        );
+
         // The reference is silent when the bounded tail continues past a
         // nonmatch to a predicate failure, with another match after that
         // failure. Preserve the error instead of allowing last() to evaluate
