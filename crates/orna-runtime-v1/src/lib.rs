@@ -20583,6 +20583,28 @@ mod tests {
             "a later nested child satisfies the outer filter before the failing tail"
         );
 
+        // The reference specifies left-to-right union order and bounded
+        // filtering, but leaves demand propagation across a bounded sibling
+        // followed by a nested filter implicit. Reject the first sibling's
+        // bounded row, then reject the nested union's first child; the next
+        // child supplies the match and keeps its failing tail unevaluated.
+        let (nested_filter_after_bounded_sibling, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-nested-filter-after-bounded-sibling.orna"
+                ),
+            );
+        assert_eq!(
+            nested_filter_after_bounded_sibling.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "the nested later match satisfies demand before its failing sibling tail"
+        );
+
         // The reference fixes left-to-right union order and bounded
         // enumeration but leaves projection failures across a child-local
         // take boundary implicit. Keep the left child lazy: its excluded
