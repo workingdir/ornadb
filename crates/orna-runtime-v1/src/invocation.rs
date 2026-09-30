@@ -834,6 +834,9 @@ impl RuntimeState {
                 )?,
             ));
         }
+        // Page boundaries are live against the durable sequence: admissions
+        // appended between polls appear on the next page, whose `has_more`
+        // reflects the tail at that poll rather than a cached prior page.
         let has_more = events.len() > limit;
         events.truncate(limit);
         let mut entries = Vec::with_capacity(events.len());

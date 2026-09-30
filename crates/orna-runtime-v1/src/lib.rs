@@ -24114,6 +24114,124 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sys_invocation_tail_partial_cursor_tracks_admission_between_polls() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(201)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let earlier_invocations = [id(202), id(203)];
+        for (invocation_id, session_id) in earlier_invocations.into_iter().zip([id(204), id(205)]) {
+            state
+                .begin_invocation_observation(
+                    writer,
+                    InvocationObservationRegistration {
+                        id: invocation_id,
+                        procedure: procedure.clone(),
+                        owner: InvocationLaunchOwner::OwnerSession(session_id),
+                        run: None,
+                        arguments: vec![echo_invocation_input(&procedure)],
+                        idempotency_key_hash: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let first_page = state.invocation_observation_tail(None, 1).await.unwrap();
+        assert!(first_page.has_more);
+        assert_eq!(first_page.entries[0].sequence, 1);
+        assert_eq!(first_page.entries[0].invocation_id, earlier_invocations[0]);
+        let cursor = first_page.next_cursor.expect("partial page has a cursor");
+
+        let key = stream_delivery("tail-page-admission-reset", "tail-page-admission-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key,
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("tail-page-admission:reset").unwrap(),
+            },
+            reason: "partial invocation tail page across admission".into(),
+        };
+        let receipt_id = id(206);
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request.clone(), receipt_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(writer, request.clone(), receipt_id)
+                .await,
+            Ok(receipt.clone())
+        );
+
+        let admitted_invocation_id = id(207);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: admitted_invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(208)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let middle_page = state
+            .invocation_observation_tail(Some(cursor), 1)
+            .await
+            .unwrap();
+        assert_eq!(middle_page.entries.len(), 1);
+        assert_eq!(middle_page.entries[0].sequence, 2);
+        assert_eq!(middle_page.entries[0].invocation_id, earlier_invocations[1]);
+        assert!(middle_page.has_more, "new admission extends the partial tail");
+        let middle_cursor = middle_page.next_cursor.expect("middle page has a cursor");
+
+        let admission_page = state
+            .invocation_observation_tail(Some(middle_cursor), 1)
+            .await
+            .unwrap();
+        assert_eq!(admission_page.entries.len(), 1);
+        assert_eq!(admission_page.entries[0].sequence, 3);
+        assert_eq!(admission_page.entries[0].invocation_id, admitted_invocation_id);
+        assert_eq!(
+            admission_page.entries[0].status,
+            InvocationObservationStatus::Running
+        );
+        assert!(!admission_page.has_more);
+
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(writer, request, receipt_id)
+                .await,
+            Ok(receipt)
+        );
+        let after_replay = state
+            .invocation_observation_tail(admission_page.next_cursor, 1)
+            .await
+            .unwrap();
+        assert!(after_replay.entries.is_empty());
+        let whole_tail = state.invocation_observation_tail(None, 4).await.unwrap();
+        assert_eq!(
+            whole_tail
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[tokio::test]
     async fn sys_invocation_tail_end_cursor_rejects_cwd_write_after_receipt_replay() {
         assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
         let (_temp, repo) = repository();
