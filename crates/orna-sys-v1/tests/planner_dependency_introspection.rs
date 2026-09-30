@@ -22,6 +22,8 @@ const MAX_SOURCE_MATERIALIZED_WRITE_TAIL: &str =
     include_str!("fixtures/max_source_materialized_write_tail.orna");
 const MAX_SOURCE_MATERIALIZATION_CLOSURE_TAIL: &str =
     include_str!("fixtures/max_source_materialization_closure_tail.orna");
+const MAX_SOURCE_MATERIALIZATION_OVERFLOW_TAIL: &str =
+    include_str!("fixtures/max_source_materialization_overflow_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -4462,5 +4464,75 @@ fn explain_keeps_max_source_materialization_at_local_work_boundary() {
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
         node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_marks_max_source_rounding_overflow_on_materialization_closure_tail() {
+    let parsed = orna_syntax_v1::parse_module(MAX_SOURCE_MATERIALIZATION_OVERFLOW_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // 4-KiB heuristic, MAX bytes round to 2^52 blocks. The exact row boundary
+    // gives both scan and materialization local work of MAX; one more row
+    // makes each local sum unrepresentable, which stays distinct from an
+    // aggregate overflow computed from exact local contributions.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    let closing_rows = u64::MAX - MAX_BYTE_BLOCKS;
+    let explain_with_rows = |rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:max-source-materialization-rounding-overflow-tail",
+            ),
+            source: obj("table:MaxSourceMaterializationOverflow"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(rows),
+                estimated_bytes: Some(u64::MAX),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:max-source-rounding-overflow")),
+        })
+        .expect("MAX source materialization closure edge")
+    };
+
+    let exact = explain_with_rows(closing_rows);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.nodes()[0].estimated_work(), Some(u64::MAX));
+    assert_eq!(exact.nodes()[1].estimated_work(), Some(u64::MAX));
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+
+    let overflow = explain_with_rows(closing_rows + 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().kind(), PlanNodeKind::Materialize);
+    for node in overflow.nodes() {
+        assert_eq!(node.estimated_work(), None);
+        assert_eq!(
+            node.details().get("estimated_work_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "the extra row crosses the MAX-plus-rounded-source-bytes boundary"
+        );
+    }
+    assert_eq!(overflow.root().details().get("estimated_cost_overflow"), None);
+
+    let surface = serde_json::to_value(&overflow)
+        .expect("max-source materialization local overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_work_overflow"], true);
+    assert_eq!(surface["nodes"][1]["details"]["estimated_work_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("estimated_work").is_none()
+            && node.get("actual_rows").is_none()
+            && node.get("actual_bytes").is_none()
     }));
 }
