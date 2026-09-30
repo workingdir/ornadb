@@ -542,9 +542,24 @@ async fn retained_pins_cross_generation_encoding_boundaries() {
             257 => Some(b"after-256".to_vec()),
             _ => Some(b"steady".to_vec()),
         };
-        let mutation = TableMutation::new(mutation_id, "records", vec![1], value)
-            .expect("valid generation-specific table mutation");
-        commit(&state, writer, &[mutation], 55).await;
+        let mut mutations = vec![
+            TableMutation::new(mutation_id, "records", vec![1], value)
+                .expect("valid generation-specific table mutation"),
+        ];
+        if generation == 1 {
+            let mut retained_row_mutation_id = mutation_id;
+            retained_row_mutation_id[0] = 1;
+            mutations.push(
+                TableMutation::new(
+                    retained_row_mutation_id,
+                    "records",
+                    vec![2],
+                    Some(b"survivor".to_vec()),
+                )
+                .expect("valid unaffected-row seed mutation"),
+            );
+        }
+        commit(&state, writer, &mutations, 55).await;
         if matches!(generation, 23 | 24 | 255 | 256) {
             let selected = state
                 .select_historical_snapshot(generation)
@@ -585,10 +600,13 @@ async fn retained_pins_cross_generation_encoding_boundaries() {
     assert_eq!(
         state
             .read_table_at(&current, "records")
-            .await
+        .await
         .expect("read generation 257")
         .rows(),
-        &[(vec![1], b"after-256".to_vec())]
+        &[
+            (vec![1], b"after-256".to_vec()),
+            (vec![2], b"survivor".to_vec()),
+        ]
     );
 
     for (generation, descriptor, selected) in &pins {
@@ -598,9 +616,12 @@ async fn retained_pins_cross_generation_encoding_boundaries() {
             .expect("resolve exact boundary pin after later generation");
         assert_eq!(&resolved, selected);
         let expected_rows = if *generation == 256 {
-            Vec::new()
+            vec![(vec![2], b"survivor".to_vec())]
         } else {
-            vec![(vec![1], b"steady".to_vec())]
+            vec![
+                (vec![1], b"steady".to_vec()),
+                (vec![2], b"survivor".to_vec()),
+            ]
         };
         assert_eq!(
             state
@@ -625,9 +646,12 @@ async fn retained_pins_cross_generation_encoding_boundaries() {
         assert_eq!(resolved, *selected);
         assert_eq!(resolved.generation(), *generation);
         let expected_rows = if *generation == 256 {
-            Vec::new()
+            vec![(vec![2], b"survivor".to_vec())]
         } else {
-            vec![(vec![1], b"steady".to_vec())]
+            vec![
+                (vec![1], b"steady".to_vec()),
+                (vec![2], b"survivor".to_vec()),
+            ]
         };
         assert_eq!(
             reopened
