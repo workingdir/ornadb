@@ -1,4 +1,4 @@
-use std::{fs, path::Path, process::Command};
+use std::{error::Error, fs, path::Path, process::Command};
 
 use orna_project_v1::{
     AttachmentError, AttachedDatabaseSession, PACKAGE_PIN_MANIFEST_PATH, PackageResolver,
@@ -77,13 +77,16 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
         .unwrap();
     let history = PinnedDatabase::resolve(
         "archive",
-        history_repository,
+        history_repository.clone(),
         &history_commit,
         loader,
     )
     .unwrap();
+    let standard = PinnedDatabase::resolve("std", history_repository, &history_commit, loader)
+        .unwrap();
     let mut session = AttachedDatabaseSession::new(primary).unwrap();
     session.attach_database(history).unwrap();
+    session.attach_database(standard).unwrap();
 
     assert_eq!(head_before, moved_head);
     assert!(session.validate_write_target("app").is_ok());
@@ -93,6 +96,10 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
         Err(AttachmentError::AttachedSnapshotReadOnly)
     ));
     assert!(!session.is_writable_database("archive"));
+    assert!(matches!(
+        session.validate_write_target("std"),
+        Err(AttachmentError::AttachedSnapshotReadOnly)
+    ));
     assert!(matches!(
         session.validate_write_target("sys"),
         Err(AttachmentError::SystemDatabaseReadOnly)
@@ -167,8 +174,9 @@ fn package_pin_failures_are_redacted_and_fail_before_a_session_is_returned() {
     assert!(matches!(error, AttachmentError::PinUnavailable));
     assert_eq!(error.to_string(), "pinned package commit is unavailable");
 
-    let (_invalid_dir, invalid_repository, invalid_commit) =
+    let (invalid_dir, invalid_repository, invalid_commit) =
         repository(&[("README.md", "not an Orna project")]);
+    let invalid_repository_path = invalid_dir.path().to_string_lossy().into_owned();
     let invalid_manifest = format!("broken {invalid_commit}\n");
     let (_invalid_parent_dir, invalid_parent_repository, invalid_parent_commit) = repository(&[
         (
@@ -192,6 +200,11 @@ fn package_pin_failures_are_redacted_and_fail_before_a_session_is_returned() {
     let error = invalid_package
         .resolve_for_parent(invalid_parent)
         .unwrap_err();
-    assert!(matches!(error, AttachmentError::Project(_)));
-    assert_eq!(error.to_string(), "pinned database source could not be loaded");
+    assert!(matches!(error, AttachmentError::PinnedPackageInvalid));
+    assert_eq!(
+        error.to_string(),
+        "pinned package is not a loadable database"
+    );
+    assert!(!format!("{error:?}").contains(&invalid_repository_path));
+    assert!(Error::source(&error).is_none());
 }
