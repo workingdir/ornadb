@@ -449,8 +449,9 @@ impl AttachedDatabaseSession {
     /// Returns every row source for a table path together with the exact
     /// database snapshot that supplied it. Routing follows this session's own
     /// alias map, so clones retain distinct relation sources across detach and
-    /// reattach. A query layer can compose these reads without pretending the
-    /// separate write logs are atomic.
+    /// reattach. Detaching one alias leaves other aliases' rows routable. A
+    /// query layer can compose these reads without pretending the separate
+    /// write logs are atomic.
     pub fn relation_sources<'a>(
         &'a self,
         table_path: &str,
