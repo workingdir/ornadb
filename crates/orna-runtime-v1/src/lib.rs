@@ -20402,6 +20402,27 @@ mod tests {
             "the additional bound reaches and reports the second right-side projection"
         );
 
+        // ORNA-ORDER-003 fixes union's left-to-right concatenation, and the
+        // query-operator table says take must not enumerate beyond what the
+        // result requires. It does not spell out child-local take versus a
+        // larger outer bound, so keep the child bound lazy: its discarded
+        // tail must not run effects.
+        let (child_bound_tail, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-project-take-child-bound-tail.orna"
+            ),
+        );
+        assert_eq!(
+            child_bound_tail.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(3u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "a right child's take(1) caps its effects even when outer take asks for more"
+        );
+
         let (missing, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
             include_str!("../tests/fixtures/query-session-projection-missing.orna"),
