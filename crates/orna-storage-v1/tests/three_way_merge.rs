@@ -821,6 +821,90 @@ fn segmented_checkpoint_delete_update_impacts_cross_the_shared_budget_boundary()
 }
 
 #[test]
+fn disjoint_segment_edits_merge_with_one_sided_checkpoint_advance() {
+    let candidate_a = integer(10);
+    let candidate_b = integer(20);
+    let (low_key, high_key) = if candidate_a.encode().unwrap() < candidate_b.encode().unwrap() {
+        (candidate_a, candidate_b)
+    } else {
+        (candidate_b, candidate_a)
+    };
+    let low_boundary = low_key.encode().unwrap();
+    let high_boundary = high_key.encode().unwrap();
+    let shared_range = KeyRange::new(None, Some(low_boundary.clone())).unwrap();
+    let lower_range = KeyRange::new(Some(low_boundary), Some(high_boundary.clone())).unwrap();
+    let upper_range = KeyRange::new(Some(high_boundary), None).unwrap();
+    let split_manifest = |digest, lower_digest, upper_digest, locators: [&[u8]; 3]| TableManifest {
+        digest: [digest; 32],
+        segments: vec![
+            RowSegmentManifest {
+                locator: locators[0].to_vec(),
+                range: shared_range.clone(),
+                digest: [7; 32],
+            },
+            RowSegmentManifest {
+                locator: locators[1].to_vec(),
+                range: lower_range.clone(),
+                digest: [lower_digest; 32],
+            },
+            RowSegmentManifest {
+                locator: locators[2].to_vec(),
+                range: upper_range.clone(),
+                digest: [upper_digest; 32],
+            },
+        ],
+    };
+    let row_with_key = |fixture: &str, key: CanonicalValue| {
+        let mut row = parse_fixture(fixture, RowKeyKind::Explicit);
+        row.key = key;
+        row
+    };
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"base-lower", vec![row_with_key(BASE, low_key.clone())]);
+    source.add(MergeSide::Left, b"left-lower", vec![row_with_key(LEFT, low_key.clone())]);
+    source.add(MergeSide::Right, b"right-lower", vec![row_with_key(RIGHT, low_key.clone())]);
+    source.add(MergeSide::Base, b"base-upper", vec![row_with_key(BASE, high_key.clone())]);
+    source.add(MergeSide::Left, b"left-upper", vec![row_with_key(LEFT, high_key.clone())]);
+    source.add(MergeSide::Right, b"right-upper", vec![row_with_key(RIGHT, high_key)]);
+
+    let base_checkpoint = CheckpointGeneration { generation: 4, position: Some(b"base-token".to_vec()) };
+    let left_checkpoint = CheckpointGeneration { generation: 5, position: Some(b"left-token".to_vec()) };
+    let base = snapshot(
+        schema(true, FieldType::Str),
+        split_manifest(10, 1, 4, [b"base-shared", b"base-lower", b"base-upper"]),
+        Some(base_checkpoint.clone()),
+    );
+    let left = snapshot(
+        schema(true, FieldType::Str),
+        split_manifest(11, 2, 5, [b"left-shared", b"left-lower", b"left-upper"]),
+        Some(left_checkpoint.clone()),
+    );
+    let right = snapshot(
+        schema(true, FieldType::Str),
+        split_manifest(12, 3, 6, [b"right-shared", b"right-lower", b"right-upper"]),
+        Some(base_checkpoint),
+    );
+
+    // Equal digests reuse the untouched first segment; independent row edits
+    // and a one-sided checkpoint advance can then be adopted together.
+    let plan = merge_three_way_snapshots(&base, &left, &right, &mut source, budget()).unwrap();
+    assert_eq!(plan.report.conflicts_lower_bound, 0);
+    assert_eq!(plan.report.rows_examined, 6);
+    assert_eq!(source.visited.len(), 6);
+    assert!(source.visited.iter().all(|(_, locator)| !locator.ends_with(b"shared")));
+    let segments = &plan.tables[&id(1)].segments;
+    assert_eq!(segments.len(), 3);
+    assert!(matches!(segments[0], MergedSegment::Reuse { from: MergeSide::Left, .. }));
+    for segment in &segments[1..] {
+        let MergedSegment::Rows { rows, .. } = segment else { panic!("changed segments are merged by row") };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].fields[&id(2)], string("Grace"));
+        assert_eq!(rows[0].fields[&id(3)], string("Paris"));
+    }
+    assert_eq!(plan.checkpoints[b"consumer/source".as_slice()], left_checkpoint);
+}
+
+#[test]
 fn schema_conflict_is_a_boundary_before_row_reads_and_checkpoint_resolution() {
     let base_checkpoint = CheckpointGeneration {
         generation: 4,
