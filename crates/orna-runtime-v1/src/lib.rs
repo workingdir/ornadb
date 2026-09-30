@@ -21090,6 +21090,26 @@ mod tests {
             "last() returns the last of two available matches after the short take's nonmatching tail"
         );
 
+        // The reference is silent when a short post-filter take reaches
+        // natural exhaustion after a rejected row between matches. Keep the
+        // accepted prefix and return its final match across that interleave.
+        let (last_returns_interleaved_multirow_short_post_filter_take, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-short-interleaved-matches-exhausts.orna"
+                ),
+            );
+        assert_eq!(
+            last_returns_interleaved_multirow_short_post_filter_take.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 4),
+            "last() retains both matches across an interleaved nonmatch on short exhaustion"
+        );
+
         // The reference is silent when a short post-filter take has already
         // collected multiple matches before its next predicate fails. Since
         // the requested prefix is still incomplete, preserve that failure
