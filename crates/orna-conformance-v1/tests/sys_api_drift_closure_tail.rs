@@ -52,14 +52,14 @@ fn default_argument_fixture_uses_published_schema_edges() {
 }
 
 #[test]
-fn edge_interplay_fixture_closes_filtered_target_column_rows() {
+fn edge_interplay_fixture_closes_column_rows_across_filter_helpers() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
         EDGE_INTERPLAY,
     )]);
     assert!(
         analysis.is_ok(),
-        "nested SYS projections plus successive optional and key-position filters on captured target Column rows must resolve through the published schema: {:?}",
+        "nested SYS projections plus target Column helper rows and successive optional, key-position, and computed-expression filters must resolve through the published schema: {:?}",
         analysis
             .diagnostics
             .iter()
