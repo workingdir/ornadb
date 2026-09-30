@@ -76,6 +76,8 @@ const SOURCE_REMAINDER_SPLIT_UNKNOWN_EDGE_TAIL: &str =
     include_str!("fixtures/source_remainder_split_unknown_edge_tail.orna");
 const SOURCE_REMAINDER_ROW_PREFIX_UNKNOWN_TAIL: &str =
     include_str!("fixtures/source_remainder_row_prefix_unknown_tail.orna");
+const REMAINDER_AFTER_UNKNOWN_MULTI_SCAN_TAIL: &str =
+    include_str!("fixtures/remainder_after_unknown_multi_scan_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -7643,6 +7645,127 @@ fn explain_closes_source_remainder_after_unknown_join_with_row_prefix() {
 
     let surface = serde_json::to_value(&overflow)
         .expect("row prefix and later source remainder overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_rows_bound_with_two_scans_after_unknown_tail() {
+    let parsed = orna_syntax_v1::parse_module(REMAINDER_AFTER_UNKNOWN_MULTI_SCAN_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 4);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Follow the established
+    // pragmatic 4-KiB-per-scan lower bound: each separate one-byte scan adds
+    // one unit. A rows-only source bound set to MAX-2 and the two later scan
+    // tails therefore close exactly at MAX across an unknown scan. A zero-byte
+    // second tail stays one below; either 4097 bytes or one extra source row
+    // crosses the closure edge.
+    let rows_to_close_two_scan_tails = u64::MAX - 2;
+    let explain = |second_tail_bytes, source_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:remainder-after-unknown-multiscan-tail",
+            ),
+            source: obj("table:RemainderAfterUnknownMultiSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: None,
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:RemainderAfterUnknownMultiUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:RemainderAfterUnknownMultiFirst"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(1),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:RemainderAfterUnknownMultiSecond"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(second_tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:remainder-after-unknown-multiscan")),
+        })
+        .expect("rows bound and separate scan tails after unknown scan")
+    };
+
+    let one_below = explain(0, rows_to_close_two_scan_tails);
+    assert_eq!(one_below.plan().estimated_cost(), None);
+    assert_eq!(one_below.root().details().get("estimated_cost_overflow"), None);
+
+    let exact = explain(1, rows_to_close_two_scan_tails);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None,
+        "two independently rounded scan tails close the source row bound at MAX"
+    );
+
+    let byte_overflow = explain(4_097, rows_to_close_two_scan_tails);
+    let row_overflow = explain(1, rows_to_close_two_scan_tails + 1);
+    for overflow in [&byte_overflow, &row_overflow] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "the second scan remainder or source row crosses MAX"
+        );
+    }
+
+    let nodes = byte_overflow.nodes();
+    let scan_position = |name: &str| {
+        nodes
+            .iter()
+            .position(|node| {
+                node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(name))
+            })
+            .expect("fixture scan appears in explained plan")
+    };
+    let source_position = scan_position("table:RemainderAfterUnknownMultiSource");
+    let unknown_position = scan_position("table:RemainderAfterUnknownMultiUnknown");
+    let first_position = scan_position("table:RemainderAfterUnknownMultiFirst");
+    let second_position = scan_position("table:RemainderAfterUnknownMultiSecond");
+    assert!(source_position < unknown_position);
+    assert!(unknown_position < first_position);
+    assert!(first_position < second_position);
+    assert_eq!(
+        nodes[source_position].estimated_rows(),
+        Some(rows_to_close_two_scan_tails)
+    );
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+    assert_eq!(nodes[first_position].estimated_bytes(), Some(1));
+    assert_eq!(nodes[second_position].estimated_bytes(), Some(4_097));
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&byte_overflow)
+        .expect("multiple post-unknown scan-tail overflow surface");
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
