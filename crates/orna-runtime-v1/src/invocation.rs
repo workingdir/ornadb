@@ -914,6 +914,8 @@ async fn append_invocation_tail_event(
     observed_ms: i64,
     status: InvocationObservationStatus,
 ) -> Result<(), RuntimeError> {
+    // Administrative effects use their own durable receipt journal; only
+    // sys.Invocation lifecycle transitions consume this tail sequence.
     connection
         .execute(
             "INSERT INTO sys_invocation_observation_tail
