@@ -1,0 +1,4 @@
+pub table PostUnknownRemainderUnknown(id: Int) { value: Int, }
+pub table PostUnknownRemainderScan(id: Int) { value: Int, }
+pub table PostUnknownRemainderRows(id: Int) { value: Int, }
+pub table PostUnknownRemainderTail(id: Int) { value: Int, }
