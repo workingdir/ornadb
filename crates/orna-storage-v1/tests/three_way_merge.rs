@@ -2854,6 +2854,188 @@ fn positionless_checkpoint_delete_resolves_with_upper_segment_tombstone() {
 }
 
 #[test]
+fn conflict_budget_closes_fixture_row_tombstone_checkpoint_tail() {
+    let mut keys = [integer(10), integer(20), integer(30)];
+    keys.sort_by_key(|key| key.encode().unwrap());
+    let [first_conflict_key, second_conflict_key, tombstone_key] = keys;
+    let first_boundary = second_conflict_key.encode().unwrap();
+    let second_boundary = tombstone_key.encode().unwrap();
+    let ranges = [
+        KeyRange::new(None, Some(first_boundary.clone())).unwrap(),
+        KeyRange::new(Some(first_boundary), Some(second_boundary.clone())).unwrap(),
+        KeyRange::new(Some(second_boundary), None).unwrap(),
+    ];
+    let split_manifest = |table_digest: u8, digests: [u8; 3], locators: [&[u8]; 3]| TableManifest {
+        digest: [table_digest; 32],
+        segments: (0..3)
+            .map(|index| RowSegmentManifest {
+                locator: locators[index].to_vec(),
+                range: ranges[index].clone(),
+                digest: [digests[index]; 32],
+            })
+            .collect(),
+    };
+    let fixture_row = |fixture: &str, key: &CanonicalValue| {
+        let mut row = parse_fixture(fixture, RowKeyKind::Explicit);
+        row.key = key.clone();
+        row
+    };
+    let build_inputs = || {
+        let mut source = FixtureRows::default();
+        source.add(MergeSide::Base, b"base-first", vec![fixture_row(BASE, &first_conflict_key)]);
+        source.add(MergeSide::Left, b"left-first", Vec::new());
+        source.add(MergeSide::Right, b"right-first", vec![fixture_row(RIGHT, &first_conflict_key)]);
+        source.add(MergeSide::Base, b"base-second", vec![fixture_row(BASE, &second_conflict_key)]);
+        source.add(MergeSide::Left, b"left-second", vec![fixture_row(LEFT, &second_conflict_key)]);
+        source.add(MergeSide::Right, b"right-second", Vec::new());
+        source.add(MergeSide::Base, b"base-tombstone", vec![fixture_row(BASE, &tombstone_key)]);
+        source.add(MergeSide::Left, b"left-tombstone", Vec::new());
+        source.add(MergeSide::Right, b"right-tombstone", Vec::new());
+
+        let base_locators = [b"base-first".as_slice(), b"base-second".as_slice(), b"base-tombstone".as_slice()];
+        let left_locators = [b"left-first".as_slice(), b"left-second".as_slice(), b"left-tombstone".as_slice()];
+        let right_locators = [b"right-first".as_slice(), b"right-second".as_slice(), b"right-tombstone".as_slice()];
+        let mut base = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(90, [30, 31, 32], base_locators),
+            None,
+        );
+        let mut left = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(91, [40, 41, 42], left_locators),
+            None,
+        );
+        let mut right = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(92, [50, 51, 52], right_locators),
+            None,
+        );
+
+        let delete_update_id = b"consumer/m-delete-update".to_vec();
+        base.checkpoints.insert(delete_update_id.clone(), parse_checkpoint_fixture(CHECKPOINT_BASE));
+        right.checkpoints.insert(delete_update_id.clone(), parse_checkpoint_fixture(CHECKPOINT_EDITED));
+
+        let divergent_id = b"consumer/z-divergent-tail".to_vec();
+        base.checkpoints.insert(divergent_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_BASE));
+        left.checkpoints.insert(divergent_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_LEFT));
+        right.checkpoints.insert(divergent_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_RIGHT));
+
+        // The final checkpoint is a clean suffix after the fixture conflicts.
+        let closure_id = b"consumer/zz-clean-closure".to_vec();
+        for snapshot in [&mut base, &mut left, &mut right] {
+            snapshot.checkpoints.insert(closure_id.clone(), parse_checkpoint_fixture(CHECKPOINT_BASE));
+        }
+        (base, left, right, source, delete_update_id, divergent_id, closure_id)
+    };
+
+    // ORNA-MERGE-005 requires bounded evidence but does not prescribe ordering.
+    // Storage's local policy resolves every changed row range (including clean
+    // tombstones) before checkpoint identities, then stops at the first detail
+    // beyond the shared budget. Exact capacity completes the conflict tail.
+    let segment_visits = [
+        [
+            (MergeSide::Base, b"base-first".to_vec()),
+            (MergeSide::Left, b"left-first".to_vec()),
+            (MergeSide::Right, b"right-first".to_vec()),
+        ],
+        [
+            (MergeSide::Base, b"base-second".to_vec()),
+            (MergeSide::Left, b"left-second".to_vec()),
+            (MergeSide::Right, b"right-second".to_vec()),
+        ],
+        [
+            (MergeSide::Base, b"base-tombstone".to_vec()),
+            (MergeSide::Left, b"left-tombstone".to_vec()),
+            (MergeSide::Right, b"right-tombstone".to_vec()),
+        ],
+    ];
+    for max_conflicts in 0..=4 {
+        let (base, left, right, mut source, delete_update_id, divergent_id, closure_id) = build_inputs();
+        let result = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 100, max_conflicts },
+        );
+        let reached_segments = (max_conflicts + 1).min(3);
+        let expected_visits = segment_visits
+            .iter()
+            .take(reached_segments)
+            .flat_map(|visits| visits.iter().cloned())
+            .collect::<Vec<_>>();
+        assert_eq!(source.visited, expected_visits);
+
+        let expected_rows = [2, 4, 5, 5, 5][max_conflicts];
+        let expected_ranges = reached_segments;
+        let expected_checkpoints = max_conflicts.saturating_sub(1).min(2);
+        if max_conflicts < 4 {
+            let BranchMergeError::BudgetExceeded { report } = result.unwrap_err() else {
+                panic!("the next row or checkpoint conflict must stop beyond the configured budget")
+            };
+            assert_eq!(report.conflicts_lower_bound, max_conflicts + 1);
+            assert_eq!(report.rows_examined, expected_rows);
+            assert_eq!(report.affected_ranges.len(), expected_ranges);
+            for range in ranges.iter().take(expected_ranges) {
+                assert!(report.affected_ranges.contains(&(id(1), range.clone())));
+            }
+            assert_eq!(report.affected_checkpoints.len(), expected_checkpoints);
+            assert_eq!(report.affected_checkpoints.contains(delete_update_id.as_slice()), max_conflicts >= 2);
+            assert_eq!(report.affected_checkpoints.contains(divergent_id.as_slice()), max_conflicts >= 3);
+            assert!(!report.affected_checkpoints.contains(closure_id.as_slice()));
+        } else {
+            let BranchMergeError::Conflicts { conflicts, report } = result.unwrap_err() else {
+                panic!("the exact four-conflict budget closes after the tombstone and checkpoint tail")
+            };
+            assert_eq!(conflicts.len(), 4);
+            assert!(matches!(
+                &conflicts[0],
+                BranchMergeConflict::Row {
+                    conflict: orna_evolution_v1::RowMergeConflict::DeleteAndEdit { key, .. },
+                    ..
+                } if key == &first_conflict_key
+            ));
+            assert!(matches!(
+                &conflicts[1],
+                BranchMergeConflict::Row {
+                    conflict: orna_evolution_v1::RowMergeConflict::DeleteAndEdit { key, .. },
+                    ..
+                } if key == &second_conflict_key
+            ));
+            assert_eq!(
+                &conflicts[2],
+                &BranchMergeConflict::CheckpointConflict {
+                    id: delete_update_id.clone(),
+                    conflict: orna_evolution_v1::CheckpointMergeConflict {
+                        base: Some(parse_checkpoint_fixture(CHECKPOINT_BASE)),
+                        left: None,
+                        right: Some(parse_checkpoint_fixture(CHECKPOINT_EDITED)),
+                    },
+                }
+            );
+            assert_eq!(
+                &conflicts[3],
+                &BranchMergeConflict::CheckpointConflict {
+                    id: divergent_id.clone(),
+                    conflict: orna_evolution_v1::CheckpointMergeConflict {
+                        base: Some(parse_checkpoint_fixture(CHECKPOINT_TAIL_BASE)),
+                        left: Some(parse_checkpoint_fixture(CHECKPOINT_TAIL_LEFT)),
+                        right: Some(parse_checkpoint_fixture(CHECKPOINT_TAIL_RIGHT)),
+                    },
+                }
+            );
+            assert_eq!(report.conflicts_lower_bound, 4);
+            assert_eq!(report.rows_examined, expected_rows);
+            assert_eq!(report.affected_ranges.len(), 3);
+            assert_eq!(report.affected_checkpoints.len(), 2);
+            assert!(report.affected_checkpoints.contains(delete_update_id.as_slice()));
+            assert!(report.affected_checkpoints.contains(divergent_id.as_slice()));
+            assert!(!report.affected_checkpoints.contains(closure_id.as_slice()));
+        }
+    }
+}
+
+#[test]
 fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
     let candidate_a = integer(10);
     let candidate_b = integer(20);
