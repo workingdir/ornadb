@@ -239,3 +239,9 @@ The fixture then repeats the handoff in reverse: the inserted row tries the
 competitor's reused key, the competitor moves aside, the inserted row retries,
 and the competitor takes the newly released key. This repeated direction change
 is another local closure choice where the reference is silent.
+
+The same proof repeats the handoff once more: the competitor tries the inserted
+row's reused key, the inserted row moves to a free key, and the competitor
+retries before the inserted row reuses the competitor's vacated source key.
+This final alternating reuse order is recorded as local behavior because the
+reference does not define this retry closure sequence.
