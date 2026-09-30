@@ -2866,6 +2866,81 @@ fn live_requests_cannot_switch_the_issued_database_or_cwd_runtime() {
 }
 
 #[test]
+fn async_rejection_after_session_delete_stays_behind_the_session_fence() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(r#"{{"database":"{}","protocol":"{}"}}"#, uuid(2), SUBPROTOCOL),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    assert_eq!(created.status, 201);
+    let session_token = token(&created);
+    assert_eq!(
+        block_on(transport.upgrade(
+            websocket_upgrade(1, &session_token),
+            [5; 16],
+            1,
+        ))
+        .status,
+        101
+    );
+
+    let mut socket = WebSocketState::new([5; 16]);
+    let preparation = block_on(transport.prepare_websocket_application(
+        &mut socket,
+        2,
+        &masked_binary_payload(&eval_with_context([1; 16], [30; 16], [2; 16], None)),
+    ))
+    .unwrap();
+    let WebSocketApplicationPreparation::Work(ticket) = preparation else {
+        panic!("the fixture-backed evaluation should be admitted as async work");
+    };
+    let completion = ticket.reject(Error::UnsupportedOperation);
+
+    assert_eq!(
+        block_on(transport.close_attachment([5; 16], 2)),
+        Ok(FrameOutcome::Closed)
+    );
+    assert_eq!(transport.take_retired_attachments(), vec![[5; 16]]);
+    assert!(transport.acknowledge_retired_attachment([5; 16]));
+
+    let mut delete = wire("DELETE", "/orna/session/01010101-0101-0101-0101-010101010101", "");
+    delete.headers.push((
+        "authorization".into(),
+        format!("Bearer {session_token}"),
+    ));
+    let mut children = RecordingChildren::default();
+    let deleted = block_on(transport.handle_with_children(
+        delete,
+        3,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+        &mut children,
+    ));
+    assert_eq!(deleted.status, 204);
+    assert_eq!(children.requests, vec![RequestIdentity {
+        session_id: [1; 16],
+        request_id: [30; 16],
+    }]);
+
+    assert_eq!(
+        block_on(transport.complete_application(completion)),
+        Err(Error::Closed),
+        "a stale rejection must not become a diagnostic after the session was deleted"
+    );
+}
+
+#[test]
 fn websocket_commit_without_completed_delivery_aborts_candidate_and_preserves_incumbent() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
     let mut issuer = Issuer(1, None);
