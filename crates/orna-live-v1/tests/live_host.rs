@@ -4283,35 +4283,74 @@ fn durable_unknown_status_retry_survives_orphan_resolution() {
         fresh_status
     );
 
-    let unknown_retry = block_on(recovered_transport.receive_with_application(
-        &mut recovered_socket,
-        15,
-        &masked_binary_payload(&unknown_status_request),
-        &mut recovered_application,
-    ))
-    .unwrap();
-    let WebSocketOutput::Binary { payload, .. } = &unknown_retry[0] else {
-        panic!("the exact status retry preserves its original Unknown snapshot");
-    };
-    assert_eq!(
-        Envelope::decode(payload, Limits::default().protocol).unwrap(),
-        unknown_status
-    );
+    // Both query IDs predate orphan resolution. A collision against either
+    // bound snapshot must be fenced without replacing its exact replay.
+    for (index, (query_id, original_request, original_snapshot)) in [
+        ([38; 16], &unknown_status_request, &unknown_status),
+        ([39; 16], &orphan_status_request, &orphan_status),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let collision_request = Envelope {
+            request: Some(query_id),
+            watch: None,
+            message: Message::RequestStatus {
+                target: [37; 16],
+                fingerprint: conflicting_fingerprint,
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap();
+        let sequence = 15 + index as u64 * 3;
+        let collision_output = block_on(recovered_transport.receive_with_application(
+            &mut recovered_socket,
+            sequence,
+            &masked_binary_payload(&collision_request),
+            &mut recovered_application,
+        ))
+        .unwrap();
+        let WebSocketOutput::Binary { payload, .. } = &collision_output[0] else {
+            panic!("a reused snapshot ID with a competing fingerprint is rejected");
+        };
+        let collision_diagnostic = Envelope::decode(payload, Limits::default().protocol).unwrap();
+        assert_eq!(collision_diagnostic.request, Some(query_id));
+        assert!(matches!(
+            &collision_diagnostic.message,
+            Message::Diagnostic { .. }
+        ));
 
-    let orphan_status_retry = block_on(recovered_transport.receive_with_application(
-        &mut recovered_socket,
-        16,
-        &masked_binary_payload(&orphan_status_request),
-        &mut recovered_application,
-    ))
-    .unwrap();
-    let WebSocketOutput::Binary { payload, .. } = &orphan_status_retry[0] else {
-        panic!("the exact orphan status retry preserves its earlier snapshot");
-    };
-    assert_eq!(
-        Envelope::decode(payload, Limits::default().protocol).unwrap(),
-        orphan_status
-    );
+        let collision_retry = block_on(recovered_transport.receive_with_application(
+            &mut recovered_socket,
+            sequence + 1,
+            &masked_binary_payload(&collision_request),
+            &mut recovered_application,
+        ))
+        .unwrap();
+        let WebSocketOutput::Binary { payload, .. } = &collision_retry[0] else {
+            panic!("the exact collision retry replays its diagnostic");
+        };
+        assert_eq!(
+            Envelope::decode(payload, Limits::default().protocol).unwrap(),
+            collision_diagnostic
+        );
+
+        let original_retry = block_on(recovered_transport.receive_with_application(
+            &mut recovered_socket,
+            sequence + 2,
+            &masked_binary_payload(original_request),
+            &mut recovered_application,
+        ))
+        .unwrap();
+        let WebSocketOutput::Binary { payload, .. } = &original_retry[0] else {
+            panic!("the original status snapshot remains replayable after collision");
+        };
+        assert_eq!(
+            Envelope::decode(payload, Limits::default().protocol).unwrap(),
+            *original_snapshot
+        );
+    }
     assert_eq!(recovered_application.calls, 0);
 
     drop(recovered_transport);
