@@ -1,5 +1,7 @@
 use std::{fs, path::Path, process::Command};
 
+use num_bigint::BigInt;
+use orna_foundation_v1::{GitHash, Snapshot};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     HistoricalSnapshot, NoFault, RuntimeError, RuntimeIdentity, RuntimeState, TableMutation,
@@ -83,6 +85,11 @@ async fn historical_reads_are_pinned_to_checkpoint_generations_and_cover_deletes
     let writer = state.acquire_lease([4; 16]).await.expect("acquire writer");
 
     commit(&state, writer, &[table_mutation(5, 1, Some(b"one"))], 6).await;
+    let generation_one = state
+        .select_historical_snapshot(1)
+        .await
+        .expect("select first checkpoint generation");
+    let generation_one_descriptor = generation_one.capture().snapshot().clone();
     commit(
         &state,
         writer,
@@ -93,20 +100,16 @@ async fn historical_reads_are_pinned_to_checkpoint_generations_and_cover_deletes
         6,
     )
     .await;
+    let generation_two = state
+        .select_historical_snapshot(2)
+        .await
+        .expect("select second checkpoint generation");
     commit(&state, writer, &[table_mutation(10, 1, None)], 11).await;
 
     let generation_zero = state
         .select_historical_snapshot(0)
         .await
         .expect("select initialized generation");
-    let generation_one = state
-        .select_historical_snapshot(1)
-        .await
-        .expect("select first checkpoint generation");
-    let generation_two = state
-        .select_historical_snapshot(2)
-        .await
-        .expect("select second checkpoint generation");
     let generation_three = state
         .select_historical_snapshot(3)
         .await
@@ -130,6 +133,50 @@ async fn historical_reads_are_pinned_to_checkpoint_generations_and_cover_deletes
         generation_one.snapshot_id(),
         repeated_generation_one.snapshot_id(),
         "reselecting the same generation yields a stable canonical ID"
+    );
+    let resolved_generation_one = state
+        .resolve_historical_snapshot(&generation_one_descriptor)
+        .await
+        .expect("resolve the exact as-of descriptor after later generations");
+    assert_eq!(resolved_generation_one, generation_one);
+
+    let mut forged_descriptor = generation_one_descriptor.clone();
+    if let Snapshot::Cwd { id, .. } = &mut forged_descriptor {
+        id[0] ^= 1;
+    }
+    assert_eq!(
+        state
+            .resolve_historical_snapshot(&forged_descriptor)
+            .await
+            .unwrap_err(),
+        RuntimeError::SnapshotContextMismatch,
+        "an invalid canonical ID cannot be rebound by generation alone"
+    );
+    let future_descriptor = Snapshot::cwd(
+        [1; 16],
+        generation_one.capture().runtime_id(),
+        generation_three.capture().generation().clone() + BigInt::from(1_u8),
+    )
+    .expect("construct a canonical future pin");
+    assert_eq!(
+        state
+            .resolve_historical_snapshot(&future_descriptor)
+            .await
+            .unwrap_err(),
+        RuntimeError::SnapshotNotFound
+    );
+    let committed_descriptor = Snapshot::Commit {
+        database: [1; 16],
+        algorithm: GitHash::Sha1,
+        oid: vec![7; 20],
+    };
+    assert_eq!(
+        state
+            .resolve_historical_snapshot(&committed_descriptor)
+            .await
+            .unwrap_err(),
+        RuntimeError::SnapshotNotFound,
+        "the runtime resolver does not reinterpret Git snapshots as CWD pins"
     );
 
     assert!(state
@@ -222,6 +269,11 @@ async fn historical_reads_are_pinned_to_checkpoint_generations_and_cover_deletes
         reopened_generation_one.snapshot_id(),
         "canonical generation identity survives runtime reopen"
     );
+    let reopened_as_of = reopened
+        .resolve_historical_snapshot(&generation_one_descriptor)
+        .await
+        .expect("resolve the original as-of descriptor after reopen");
+    assert_eq!(reopened_as_of.snapshot_id(), generation_one.snapshot_id());
     assert_eq!(
         reopened
             .read_table_at(&generation_one, "records")
@@ -263,6 +315,13 @@ async fn historical_snapshot_cannot_be_rebound_to_another_runtime_identity() {
     .expect("open second runtime");
     assert_eq!(
         second.read_table_at(&first_pin, "records").await.unwrap_err(),
+        RuntimeError::SnapshotContextMismatch
+    );
+    assert_eq!(
+        second
+            .resolve_historical_snapshot(first_pin.capture().snapshot())
+            .await
+            .unwrap_err(),
         RuntimeError::SnapshotContextMismatch
     );
 
