@@ -2483,6 +2483,47 @@ mod tests {
     }
 
     #[test]
+    fn malformed_function_defaults_fail_closed() {
+        for (default, label) in [
+            ("sys.MissingScope.all", "unresolved enum namespace"),
+            ("sys.DiffScope.missing", "unknown enum variant"),
+            ("sys.database.missing", "unknown singleton field"),
+            ("sys.database.cwd", "singleton value with the wrong type"),
+            ("true", "boolean with the wrong type"),
+            ("null", "null for a required parameter"),
+        ] {
+            let mut invalid = document();
+            let diff = function_index(&invalid, "sys.diff");
+            let signature = invalid["functions"][diff]["signature"]
+                .as_str()
+                .unwrap()
+                .replace("sys.DiffScope.all", default);
+            invalid["functions"][diff]["signature"] = serde_json::json!(signature);
+            assert_eq!(
+                SystemApi::from_json(&invalid.to_string()),
+                Err(SystemApiError::InvalidDefault),
+                "{label} must be rejected"
+            );
+        }
+
+        let mut required_after_default = document();
+        let resolve = function_index(&required_after_default, "sys.resolve");
+        let signature = required_after_default["functions"][resolve]["signature"]
+            .as_str()
+            .unwrap()
+            .replace(
+                "from: sys.ModuleRef? = null): sys.ObjectRef",
+                "from: sys.ModuleRef? = null, required: Bool): sys.ObjectRef",
+            );
+        required_after_default["functions"][resolve]["signature"] = serde_json::json!(signature);
+        assert_eq!(
+            SystemApi::from_json(&required_after_default.to_string()),
+            Err(SystemApiError::InvalidDefault),
+            "required parameters after a default must be rejected"
+        );
+    }
+
+    #[test]
     fn malformed_value_type_metadata_fails_closed() {
         for (member, value) in [
             ("kind", serde_json::json!("unknown")),
