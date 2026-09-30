@@ -20792,6 +20792,26 @@ mod tests {
             "last() closes the filtered outer prefix without evaluating the failing tail"
         );
 
+        // The reference leaves `last()`'s empty result at a filtered outer
+        // edge implicit. Consume the full three-row prefix, but keep its
+        // matching fourth row outside the bound so the result stays empty.
+        let (last_excludes_next_filtered_match, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-excludes-next-match.orna"
+                ),
+            );
+        assert_eq!(
+            last_excludes_next_filtered_match.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 3),
+            "last() returns empty after the bounded prefix without scanning its next match"
+        );
+
         // The reference leaves the first matching row immediately beyond a
         // filtered outer bound implicit. The three-row prefix has no match;
         // do not scan its fourth row, which would satisfy `first()`.
