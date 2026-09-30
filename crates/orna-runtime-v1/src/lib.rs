@@ -20873,6 +20873,25 @@ mod tests {
             "first() stops after its match without evaluating a later in-bound failing predicate"
         );
 
+        // The reference specifies first-match short-circuiting and bounded
+        // enumeration separately, leaving a predicate failure on the final
+        // admitted row implicit. With no earlier match, first() evaluates
+        // each predicate through the bound and surfaces that failure.
+        let (first_includes_bounded_predicate_failure, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-first-includes-bound-predicate-failure.orna"
+                ),
+            );
+        let predicate_failure = first_includes_bounded_predicate_failure.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (6, 4),
+            "first() reaches the failing predicate on the outer bound's final admitted row"
+        );
+
         // The reference leaves the first matching row immediately beyond a
         // filtered outer bound implicit. The three-row prefix has no match;
         // do not scan its fourth row, which would satisfy `first()`.
