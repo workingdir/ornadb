@@ -12,6 +12,8 @@ const RIGHT: &str = include_str!("fixtures/merge-row-right.orna");
 const SAME_EDIT: &str = include_str!("fixtures/merge-row-same-edit.orna");
 const CONFLICT: &str = include_str!("fixtures/merge-row-conflict.orna");
 const DELETE_CITY: &str = include_str!("fixtures/merge-row-delete-city.orna");
+const MULTI_CONFLICT_LEFT: &str = include_str!("fixtures/merge-row-multi-conflict-left.orna");
+const MULTI_CONFLICT_RIGHT: &str = include_str!("fixtures/merge-row-multi-conflict-right.orna");
 
 fn id(value: u8) -> ObjectId {
     ObjectId::new([value; 16])
@@ -173,6 +175,17 @@ fn retained_tombstones_are_logical_absence_and_can_be_folded_from_complete_snaps
         ),
         Ok(deleted),
     );
+    assert_eq!(
+        merge_keyed_row_states(
+            RowSnapshotState::Present(&live),
+            RowSnapshotState::Tombstone,
+            RowSnapshotState::Tombstone,
+        ),
+        Ok(RowMergeOperation::Tombstone {
+            table: live.table,
+            key: live.key.clone(),
+        }),
+    );
     let edited = parse_fixture(CONFLICT);
     assert!(matches!(
         merge_keyed_row_states(
@@ -204,6 +217,16 @@ fn retained_tombstones_are_logical_absence_and_can_be_folded_from_complete_snaps
             RowSnapshotState::Present(&inserted),
         ),
         Ok(RowMergeOperation::Upsert(inserted)),
+    );
+
+    let reinserted = parse_fixture(LEFT);
+    assert_eq!(
+        merge_keyed_row_states(
+            RowSnapshotState::Tombstone,
+            RowSnapshotState::Present(&reinserted),
+            RowSnapshotState::Tombstone,
+        ),
+        Ok(RowMergeOperation::Upsert(reinserted)),
     );
 }
 
@@ -240,4 +263,60 @@ fn pruned_history_is_unavailable_and_delete_update_stays_a_conflict() {
         ),
         Err(RowSnapshotMergeError::Conflict(RowMergeConflict::DeleteAndEdit { .. }))
     ));
+}
+
+#[test]
+fn pruned_sides_are_reported_deterministically_in_merge_argument_order() {
+    let base = parse_fixture(BASE);
+    let expected = Err(RowSnapshotMergeError::PrunedInput {
+        sides: vec![RowSnapshotSide::Base, RowSnapshotSide::Right],
+    });
+    for _ in 0..3 {
+        assert_eq!(
+            merge_keyed_row_states(
+                RowSnapshotState::Pruned,
+                RowSnapshotState::Present(&base),
+                RowSnapshotState::Pruned,
+            ),
+            expected,
+        );
+    }
+    assert_eq!(
+        merge_keyed_row_states(
+            RowSnapshotState::Pruned,
+            RowSnapshotState::Pruned,
+            RowSnapshotState::Pruned,
+        ),
+        Err(RowSnapshotMergeError::PrunedInput {
+            sides: vec![RowSnapshotSide::Base, RowSnapshotSide::Left, RowSnapshotSide::Right],
+        }),
+    );
+}
+
+#[test]
+fn multi_field_conflicts_are_stable_under_branch_and_fixture_field_order() {
+    let base = parse_fixture(BASE);
+    let left = parse_fixture(MULTI_CONFLICT_LEFT);
+    let right = parse_fixture(MULTI_CONFLICT_RIGHT);
+    let expected = Err(RowSnapshotMergeError::Conflict(RowMergeConflict::Fields {
+        table: id(1),
+        key: base.key.clone(),
+        fields: vec![id(2), id(3)],
+    }));
+    assert_eq!(
+        merge_keyed_row_states(
+            RowSnapshotState::Present(&base),
+            RowSnapshotState::Present(&left),
+            RowSnapshotState::Present(&right),
+        ),
+        expected,
+    );
+    assert_eq!(
+        merge_keyed_row_states(
+            RowSnapshotState::Present(&base),
+            RowSnapshotState::Present(&right),
+            RowSnapshotState::Present(&left),
+        ),
+        expected,
+    );
 }

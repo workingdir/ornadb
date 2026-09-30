@@ -392,8 +392,11 @@ pub enum RowSnapshotState<'a> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RowSnapshotSide {
+    /// The common ancestor snapshot.
     Base,
+    /// The first branch being merged.
     Left,
+    /// The second branch being merged.
     Right,
 }
 
@@ -425,6 +428,8 @@ pub fn merge_keyed_row_states(
     right: RowSnapshotState<'_>,
 ) -> Result<RowMergeOperation, RowSnapshotMergeError> {
     let mut pruned_sides = Vec::new();
+    // Keep diagnostics stable in merge-argument order even when callers
+    // discovered unavailable ranges in a different physical order.
     for (side, state) in [
         (RowSnapshotSide::Base, base),
         (RowSnapshotSide::Left, left),
@@ -498,6 +503,8 @@ pub fn merge_keyed_row(
             if left.key_kind != base.key_kind || right.key_kind != base.key_kind {
                 return Err(RowMergeConflict::Identity { table: base.table, key: base.key.clone() });
             }
+            // Stable field IDs define both merge order and conflict detail
+            // order, independent of row or source-fixture field ordering.
             let ids: BTreeSet<_> = base.fields.keys().chain(left.fields.keys()).chain(right.fields.keys()).copied().collect();
             let mut fields = BTreeMap::new();
             let mut conflicts = Vec::new();
