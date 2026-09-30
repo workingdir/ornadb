@@ -1,0 +1,3 @@
+[submodule "std"]
+	path = stdlib/std
+	url = https://github.com/workingdir/ornadb-std.git

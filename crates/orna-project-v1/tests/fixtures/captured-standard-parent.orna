@@ -1,0 +1,2 @@
+use std.collection.{answer};
+pub fn run(): Int = answer();

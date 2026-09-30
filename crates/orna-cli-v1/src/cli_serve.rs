@@ -129,7 +129,8 @@ pub(super) fn run(endpoint: &Endpoint, port: u16) -> Result<(), Diagnostic> {
     // Project loading parses the reachable source modules only. In
     // particular, serving a clone never invokes its root `main()`; functions
     // run only after an explicit query or live Eval request reaches a route.
-    let _project = load_project(endpoint)?;
+    let project = load_project(endpoint)?;
+    let catalogue = semantic_catalogue(&project)?;
     let (identity, _) = runtime_identity(&repository)?;
     let listener = LiveTransport::bind_default_listener(port).map_err(|_| {
         Diagnostic::target(
@@ -139,7 +140,7 @@ pub(super) fn run(endpoint: &Endpoint, port: u16) -> Result<(), Diagnostic> {
         )
     })?;
     let address = listener.status().address;
-    let state = new_serve_state(repository.worktree().to_path_buf(), identity, address)?;
+    let state = new_serve_state(repository.worktree().to_path_buf(), identity, address, catalogue)?;
     writeln!(
         io::stdout().lock(),
         "Serving {} at http://{} (loopback)",
@@ -167,6 +168,7 @@ fn new_serve_state(
     root: PathBuf,
     identity: RuntimeIdentity,
     listener_address: SocketAddr,
+    catalogue: orna_semantic_v1::Catalogue,
 ) -> Result<ServeState, Diagnostic> {
     let origin = Origin::parse(&format!("http://{listener_address}")).map_err(|_| {
         Diagnostic::target(
@@ -202,7 +204,7 @@ fn new_serve_state(
         )
     })?;
     let application = ApplicationLiveAdapter::new(ApplicationAuthority::new(
-        semantic_catalogue(),
+        catalogue,
         Limits::default(),
     ));
     Ok(ServeState {
@@ -779,7 +781,13 @@ mod tests {
         let root = directory.path().to_path_buf();
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.listener().accept().expect("accepted request");
-            let mut state = new_serve_state(root, identity, status.address).expect("serve host");
+            let mut state = new_serve_state(
+                root,
+                identity,
+                status.address,
+                orna_semantic_v1::Catalogue::authoritative_core(),
+            )
+            .expect("serve host");
             serve_connection(stream, &mut state).expect("served clone route");
         });
 

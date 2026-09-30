@@ -1,0 +1,12 @@
+pub table Note(id: Int) {
+    text: Str,
+    assert every(note => note.id > 0);
+}
+
+fn insert_note(id: Int): Bool {
+    Note.insert({ id: id, text: "transactional" });
+    true
+}
+
+pub fn seed(): Bool = insert_note(1);
+pub fn violate(): Bool = insert_note(0);

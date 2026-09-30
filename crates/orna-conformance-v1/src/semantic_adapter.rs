@@ -6102,9 +6102,49 @@ fn admit_transaction_project(
     limits: EvaluatorLimits,
     entry: &str,
 ) -> Result<AdmittedTransaction, AdmissionFailure> {
+    let standard_sources = project
+        .modules
+        .iter()
+        .filter(|unit| is_standard_source(unit))
+        .map(|unit| (unit.source_id.clone(), unit.source.clone()))
+        .collect::<Vec<_>>();
+    let catalogue = if let Some(dependency) = &project.expectations.environment.stdlib {
+        let Some(snapshot) = dependency.get("snapshot").and_then(serde_json::Value::as_str) else {
+            return Err(Box::new(StageOutcome::Failed(standard_profile_diagnostic())));
+        };
+        let Some(sources) = dependency.get("sources").and_then(serde_json::Value::as_object)
+        else {
+            return Err(Box::new(StageOutcome::Failed(standard_profile_diagnostic())));
+        };
+        let sources = sources
+            .iter()
+            .map(|(logical_path, source)| {
+                source
+                    .as_str()
+                    .map(|source| (logical_path.clone(), source.to_owned()))
+                    .ok_or_else(|| Box::new(StageOutcome::Failed(standard_profile_diagnostic())))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let profile = StandardDependencyProfile::from_sources(snapshot, sources.clone())
+            .map_err(|_| Box::new(StageOutcome::Failed(standard_profile_diagnostic())))?;
+        for (logical_path, source) in &standard_sources {
+            profile
+                .verify_source(logical_path, source)
+                .map_err(|_| Box::new(StageOutcome::Failed(standard_profile_diagnostic())))?;
+        }
+        Catalogue::authoritative_fixture()
+            .with_standard_sources(&profile, sources)
+            .map_err(|_| Box::new(StageOutcome::Failed(standard_profile_diagnostic())))?
+    } else {
+        Catalogue::authoritative_fixture()
+    };
+    let application_modules = project
+        .modules
+        .iter()
+        .filter(|unit| !is_standard_source(unit))
+        .collect::<Vec<_>>();
     let analysis = analyze_with_catalogue(
-        &project
-            .modules
+        &application_modules
             .iter()
             .map(|unit| {
                 let prefix = format!("{}/", project.project_id.trim_end_matches('/'));
@@ -6116,7 +6156,7 @@ fn admit_transaction_project(
                 ModuleInput::new(path, unit.source.clone())
             })
             .collect::<Vec<_>>(),
-        &Catalogue::authoritative_fixture(),
+        &catalogue,
     );
     if let Some(diagnostic) = analysis.diagnostics.first() {
         return Err(Box::new(StageOutcome::Failed(
@@ -6164,20 +6204,22 @@ fn admit_transaction_project(
                 reason: "project transaction module has no semantic namespace".into(),
             })
         })?;
-        let plans = analysis
-            .assertions
-            .get(&semantic_namespace)
-            .ok_or_else(|| {
-                Box::new(StageOutcome::Skipped {
-                    reason: "project transaction assertion metadata is incomplete".into(),
-                })
-            })?;
-        attach_assertion_dependencies(
-            &mut module_assertions_by_table,
-            &mut module_assertions_only,
-            plans,
-        )
-        .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
+        if !is_standard_source(unit) {
+            let plans = analysis
+                .assertions
+                .get(&semantic_namespace)
+                .ok_or_else(|| {
+                    Box::new(StageOutcome::Skipped {
+                        reason: "project transaction assertion metadata is incomplete".into(),
+                    })
+                })?;
+            attach_assertion_dependencies(
+                &mut module_assertions_by_table,
+                &mut module_assertions_only,
+                plans,
+            )
+            .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
+        }
         if let Err(error) = limits.check_items(module_functions.len()) {
             return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
         }
@@ -6201,6 +6243,42 @@ fn admit_transaction_project(
         table_assertions.extend(module_assertions_by_table);
         module_assertions.extend(module_assertions_only);
     }
+    let mut standard_aliases = BTreeMap::<String, String>::new();
+    for unit in &project.modules {
+        let parsed = parse_module(&unit.source);
+        for item in parsed.value.items {
+            let Declaration::Use {
+                path,
+                tail: orna_syntax_v1::UseTail::Names(names),
+            } = item.declaration
+            else {
+                continue;
+            };
+            if path.first().map(|segment| segment.name.as_str()) != Some("std") {
+                continue;
+            }
+            let namespace = path
+                .iter()
+                .map(|segment| segment.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            for name in names {
+                let target = format!("{namespace}.{}", name.name);
+                if let Some(previous) = standard_aliases.insert(name.name.clone(), target.clone())
+                    && previous != target
+                {
+                    return Err(Box::new(StageOutcome::Skipped {
+                        reason: "standard imports have conflicting unqualified function names".into(),
+                    }));
+                }
+            }
+        }
+    }
+    for (alias, target) in standard_aliases {
+        if let Some(function) = functions.get(&target).cloned() {
+            functions.entry(alias).or_insert(function);
+        }
+    }
     if !functions.contains_key(entry) {
         return Err(Box::new(StageOutcome::Skipped {
             reason: "configured qualified project transaction entry function is not present".into(),
@@ -6214,6 +6292,10 @@ fn admit_transaction_project(
         table_assertions,
         module_assertions,
     })
+}
+
+fn is_standard_source(unit: &SourceUnit) -> bool {
+    unit.source_id.starts_with("std/")
 }
 
 fn controlled_table_effects(summary: &EffectSummary) -> bool {

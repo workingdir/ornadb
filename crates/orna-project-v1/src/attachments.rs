@@ -10,9 +10,12 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
+    path::Path,
 };
 
-use orna_repository_v1::{GitCommitRef, Repository, RepositoryError};
+use orna_repository_v1::{
+    CommittedTreeEntryKind, GitCommitRef, Repository, RepositoryError,
+};
 use orna_semantic_v1::ModuleInput;
 use orna_syntax_v1::{Declaration, Keyword, TokenKind, lex, parse_module};
 
@@ -207,8 +210,21 @@ impl PackageResolver {
         primary: PinnedDatabase,
     ) -> Result<AttachedDatabaseSession, AttachmentError> {
         let manifest = PackagePinManifest::load(&primary.repository, &primary.pin.commit)?;
+        // `stdlib/std` is the project import's source authority; `.orna/packages`
+        // is the explicit host attachment map. If both pin the `std` alias,
+        // require one immutable snapshot so the package map cannot retarget
+        // `use std.*` away from the program's captured Git module.
+        let standard_gitlink =
+            captured_standard_gitlink(&primary.repository, &primary.pin.commit)?;
         let mut session = AttachedDatabaseSession::new(primary)?;
         for spec in manifest.pins() {
+            if spec.name() == "std"
+                && standard_gitlink
+                    .as_ref()
+                    .is_some_and(|commit| commit.as_str() != spec.object_id())
+            {
+                return Err(AttachmentError::PinUnavailable);
+            }
             let repository = self
                 .repositories
                 .get(spec.name())
@@ -331,6 +347,11 @@ impl AttachedDatabaseSession {
         })
     }
 
+    /// Exact source snapshot used by an optional `std` package attachment.
+    pub fn standard_snapshot(&self) -> Option<&GitCommitRef> {
+        self.attached.get("std").map(|database| database.pin.commit())
+    }
+
     /// Returns every row source for a table path together with the exact
     /// database snapshot that supplied it. A query layer can compose these
     /// read sources without pretending their separate write logs are atomic.
@@ -381,6 +402,28 @@ impl AttachedDatabaseSession {
         };
         left == right
     }
+}
+
+fn captured_standard_gitlink(
+    repository: &Repository,
+    parent: &GitCommitRef,
+) -> Result<Option<GitCommitRef>, AttachmentError> {
+    let tree = repository
+        .list_committed_tree(parent, 4_096)
+        .map_err(AttachmentError::Repository)?;
+    let Some(entry) = tree
+        .iter()
+        .find(|entry| entry.path().as_path() == Path::new("stdlib/std"))
+    else {
+        return Ok(None);
+    };
+    if entry.kind() != CommittedTreeEntryKind::Submodule {
+        return Err(AttachmentError::PinUnavailable);
+    }
+    repository
+        .committed_submodule_commit(parent, "stdlib/std")
+        .map(Some)
+        .map_err(AttachmentError::Repository)
 }
 
 /// One row source from a pinned database snapshot.
@@ -700,6 +743,86 @@ mod tests {
         assert!(PackagePinManifest::parse("math HEAD\n").is_err());
         assert!(PackagePinManifest::parse(&format!("math {oid}\nmath {oid}\n")).is_err());
         assert!(PackagePinManifest::parse(&format!("sys {oid}\n")).is_err());
+    }
+
+    #[test]
+    fn std_package_pin_must_match_the_gitlink_when_both_are_committed() {
+        let (std_directory, std_repository, first_std_commit) =
+            repository(include_str!("fixtures/attached-package-main.orna"));
+        let second_std_source = include_str!("fixtures/attached-package-main.orna").replace("42", "43");
+        let second_std_commit = write_commit(
+            std_directory.path(),
+            "main.orna",
+            &second_std_source,
+        );
+
+        let primary_directory = tempfile::tempdir().unwrap();
+        git(primary_directory.path(), &["init", "--quiet"]);
+        git(primary_directory.path(), &["config", "user.name", "kierandrewett"]);
+        git(
+            primary_directory.path(),
+            &["config", "user.email", "kieran@drewett.dev"],
+        );
+        git(primary_directory.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(
+            primary_directory.path().join("main.orna"),
+            include_str!("fixtures/attached-primary-main.orna"),
+        )
+        .unwrap();
+        fs::create_dir_all(primary_directory.path().join(".orna")).unwrap();
+        fs::write(
+            primary_directory.path().join(PACKAGE_PIN_MANIFEST_PATH),
+            format!("std {first_std_commit}\n"),
+        )
+        .unwrap();
+        git(primary_directory.path(), &["add", "main.orna", ".orna/packages"]);
+        let link = format!("160000,{second_std_commit},stdlib/std");
+        git(
+            primary_directory.path(),
+            &["update-index", "--add", "--cacheinfo", &link],
+        );
+        git(
+            primary_directory.path(),
+            &["commit", "--quiet", "-m", "conflicting std pins"],
+        );
+        let primary_repository = Repository::discover(primary_directory.path()).unwrap();
+        let parent = git(primary_directory.path(), &["rev-parse", "HEAD"]);
+        let loader = ProjectLoader::default();
+        let primary = PinnedDatabase::resolve(
+            "app",
+            primary_repository.clone(),
+            &parent,
+            loader,
+        )
+        .unwrap();
+        let resolver = PackageResolver::new(
+            [("std".to_owned(), std_repository.clone())],
+            loader,
+        )
+        .unwrap();
+        assert!(matches!(
+            resolver.resolve_for_parent(primary),
+            Err(AttachmentError::PinUnavailable)
+        ));
+
+        write_commit(
+            primary_directory.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("std {second_std_commit}\n"),
+        );
+        let matching_parent = git(primary_directory.path(), &["rev-parse", "HEAD"]);
+        let primary = PinnedDatabase::resolve(
+            "app",
+            primary_repository,
+            &matching_parent,
+            loader,
+        )
+        .unwrap();
+        let session = resolver.resolve_for_parent(primary).unwrap();
+        assert_eq!(
+            session.standard_snapshot().unwrap().as_str(),
+            second_std_commit
+        );
     }
 
     #[test]
