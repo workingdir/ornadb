@@ -4,6 +4,7 @@ use crate::{
     REFERENCE_STANDARD_COLLECTION_PATH_V1, REFERENCE_STANDARD_MATH_PATH_V1,
     REFERENCE_STANDARD_BITS_PATH_V1, REFERENCE_STANDARD_QUERY_PATH_V1,
     REFERENCE_STANDARD_TEXT_PATH_V1, REFERENCE_STANDARD_STATS_PATH_V1,
+    REFERENCE_STANDARD_TIME_PATH_V1,
     reference_standard_catalogue_v1,
     reference_standard_profile_v1, reference_standard_sources_v1,
 };
@@ -24,6 +25,9 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     assert_eq!(sources[5].0, REFERENCE_STANDARD_STATS_PATH_V1);
     assert!(sources[5].1.contains("pub fn mean<T>"));
     assert!(sources[5].1.contains("pub fn percentile<T, P>"));
+    assert_eq!(sources[6].0, REFERENCE_STANDARD_TIME_PATH_V1);
+    assert!(sources[6].1.contains("pub fn timezone_data_version()"));
+    assert!(sources[6].1.contains("pub fn resolve_local("));
 
     let profile = reference_standard_profile_v1();
     assert_eq!(profile.snapshot(), "orna.std/v1-reference-library");
