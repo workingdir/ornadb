@@ -1,9 +1,9 @@
 //! The executable edge for `orna serve`.
 //!
 //! The reference requires a loopback default but does not prescribe URL
-//! paths, so this host provides a small stable surface: a landing page,
-//! read-only clone/page routes, a pure expression query, and the existing
-//! authenticated `orna.present.v1` session/WebSocket routes.
+//! paths, so this host provides a small stable surface: a rendered project and
+//! module browser, per-clone metadata, pure expression queries, Git smart HTTP,
+//! and the existing authenticated `orna.present.v1` session/WebSocket routes.
 
 use super::*;
 use orna_application_v1::ApplicationLiveAdapter;
@@ -21,11 +21,13 @@ use std::{
     io::{self, BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     time::{Duration as StdDuration, SystemTime, UNIX_EPOCH},
 };
 
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_GIT_REQUEST_BODY_BYTES: usize = 512 * 1024 * 1024;
 const SESSION_LEASE_MS: u64 = 60 * 60 * 1000;
 
 struct ServeState {
@@ -96,6 +98,7 @@ impl SessionDeletionAdapter for LocalSessionDeletion {
 struct Request {
     method: String,
     path: String,
+    query: String,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
@@ -103,6 +106,7 @@ struct Request {
 struct Response {
     status: u16,
     content_type: String,
+    headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
@@ -111,6 +115,7 @@ impl Response {
         Self {
             status,
             content_type: content_type.into(),
+            headers: Vec::new(),
             body: body.into(),
         }
     }
@@ -290,13 +295,27 @@ fn serve_connection(mut stream: TcpStream, state: &mut ServeState) -> io::Result
     write_response(&mut stream, response)
 }
 
-// This slice wires clone metadata, project source pages, pure queries, and
-// authenticated live sessions. The full browser frontend and Git transport
-// remain implemented-later work; the reference leaves their concrete routes
-// open, so this host does not present placeholder Git URLs as working routes.
+// The reference leaves concrete page and Git URLs open, so this host uses
+// `/pages/<module path>` for browsable source and mounts standard Git smart
+// HTTP at `/git`. The project root is selected once by `orna serve`; requests
+// never supply a repository path.
 fn host_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Response {
+    if let Some(response) = git_transport_route(root, request) {
+        return response;
+    }
     match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/") => Response::new(200, "text/html; charset=utf-8", LANDING_PAGE),
+        ("GET", "/") => {
+            let host = request_header(request, "host")
+                .filter(|host| {
+                    !host.is_empty()
+                        && host.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric()
+                                || matches!(byte, b'.' | b'-' | b':' | b'[' | b']')
+                        })
+                })
+                .unwrap_or("127.0.0.1");
+            project_home_page(root, identity, host)
+        }
         ("GET", "/api/clone") => match clone_report(root, identity) {
             Ok(report) => Response::new(200, "application/json", report),
             Err(_) => unavailable_response(),
@@ -310,7 +329,10 @@ fn host_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Resp
                     }
                     pages.push_str(&format!(
                         "{{\"path\":{},\"source\":{}}}",
-                        json_string(&format!("/pages/{}", identity.logical_path())),
+                        json_string(&format!(
+                            "/pages/{}",
+                            percent_encode_path(identity.logical_path())
+                        )),
                         json_string(identity.logical_path()),
                     ));
                 }
@@ -320,19 +342,10 @@ fn host_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Resp
             Err(_) => unavailable_response(),
         },
         ("GET", path) if path.starts_with("/pages/") => {
-            let requested = &path[7..];
-            match load_current_project(root) {
-                Ok(project) => project
-                    .identities()
-                    .iter()
-                    .position(|identity| identity.logical_path() == requested)
-                    .and_then(|index| project.modules().get(index))
-                    .map_or_else(
-                        || not_found_response(),
-                        |module| Response::new(200, "text/plain; charset=utf-8", module.source.clone()),
-                    ),
-                Err(_) => unavailable_response(),
-            }
+            let Ok(requested) = percent_decode(&path[7..]) else {
+                return bad_request_response();
+            };
+            module_source_page(root, &requested)
         }
         ("POST", "/api/query") => match std::str::from_utf8(&request.body) {
             Ok(source) => orna_evaluator_v1::evaluate_repl(
@@ -354,6 +367,323 @@ fn host_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Resp
         },
         _ => not_found_response(),
     }
+}
+
+fn project_home_page(root: &Path, identity: RuntimeIdentity, host: &str) -> Response {
+    let Ok(project) = load_current_project(root) else {
+        return unavailable_response();
+    };
+    let Ok(report) = clone_report(root, identity) else {
+        return unavailable_response();
+    };
+    let report = String::from_utf8_lossy(&report);
+    let clone_url = format!("http://{host}/git");
+    let mut modules = String::new();
+    for module in project.identities() {
+        let logical_path = module.logical_path();
+        let href = format!("/pages/{}", percent_encode_path(logical_path));
+        modules.push_str(&format!(
+            "<li><a href=\"{}\">{}</a></li>",
+            html_escape(&href),
+            html_escape(logical_path),
+        ));
+    }
+    if modules.is_empty() {
+        modules.push_str("<li>No Orna modules are available in this clone.</li>");
+    }
+
+    // The reference recommends an ordinary Orna frontend but does not define
+    // an installed application contract. This server-rendered project browser
+    // therefore renders discovered module and clone data without evaluating
+    // source code or requiring an optional UI package.
+    let page = format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>Orna project</title><style>body{{font:16px system-ui,sans-serif;max-width:64rem;margin:2rem auto;padding:0 1rem;color:#17212b}}a{{color:#075985}}pre{{overflow:auto;background:#f1f5f9;padding:1rem;border-radius:.5rem}}input{{min-width:20rem;padding:.5rem}}button{{padding:.5rem}}</style></head><body><header><h1>Orna project</h1><p>Clone: <code>{}</code></p><nav><a href=\"/\">Project</a> · <a href=\"/api/clone\">Clone JSON</a> · <a href=\"/api/pages\">Module index</a></nav><p>Clone this repository with <code>git clone {}</code>.</p></header><main><section><h2>Modules</h2><ul>{}</ul></section><section><h2>Clone HEAD and CWD</h2><pre>{}</pre></section><section><h2>Evaluate an expression</h2><form id=\"query\"><label>Pure Orna expression <input name=\"source\" value=\"1 + 1\"></label> <button>Evaluate</button></form><pre id=\"result\" aria-live=\"polite\"></pre></section></main><script>document.querySelector('#query').addEventListener('submit',async e=>{{e.preventDefault();let r=await fetch('/api/query',{{method:'POST',body:new FormData(e.target).get('source')}});document.querySelector('#result').textContent=await r.text()}})</script></body></html>",
+        html_escape(&root.to_string_lossy()),
+        html_escape(&clone_url),
+        modules,
+        html_escape(&report),
+    );
+    Response::new(200, "text/html; charset=utf-8", page)
+}
+
+fn module_source_page(root: &Path, requested: &str) -> Response {
+    let Ok(project) = load_current_project(root) else {
+        return unavailable_response();
+    };
+    let Some(index) = project
+        .identities()
+        .iter()
+        .position(|identity| identity.logical_path() == requested)
+    else {
+        return not_found_response();
+    };
+    let Some(module) = project.modules().get(index) else {
+        return unavailable_response();
+    };
+    let page = format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>{} · Orna source</title><style>body{{font:16px system-ui,sans-serif;max-width:72rem;margin:2rem auto;padding:0 1rem;color:#17212b}}a{{color:#075985}}pre{{overflow:auto;background:#0f172a;color:#e2e8f0;padding:1rem;border-radius:.5rem;line-height:1.5}}code{{font-family:ui-monospace,monospace}}</style></head><body><nav><a href=\"/\">← Project</a></nav><main><h1>{}</h1><p>Source from the current clone. Viewing a module does not execute it.</p><pre><code>{}</code></pre></main></body></html>",
+        html_escape(requested),
+        html_escape(requested),
+        html_escape(&module.source),
+    );
+    Response::new(200, "text/html; charset=utf-8", page)
+}
+
+fn html_escape(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            '"' => output.push_str("&quot;"),
+            '\'' => output.push_str("&#39;"),
+            character if character.is_control() && !matches!(character, '\n' | '\r' | '\t') => {
+                use std::fmt::Write as _;
+                let _ = write!(output, "&#x{:x};", u32::from(character));
+            }
+            character => output.push(character),
+        }
+    }
+    output
+}
+
+fn percent_encode_path(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+fn percent_decode(path: &str) -> Result<String, ()> {
+    let input = path.as_bytes();
+    let mut decoded = Vec::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        if input[index] == b'%' {
+            let high = input.get(index + 1).and_then(|byte| hex_digit(*byte)).ok_or(())?;
+            let low = input.get(index + 2).and_then(|byte| hex_digit(*byte)).ok_or(())?;
+            decoded.push((high << 4) | low);
+            index += 3;
+        } else {
+            decoded.push(input[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).map_err(|_| ())
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn git_transport_route(root: &Path, request: &Request) -> Option<Response> {
+    let (suffix, service) = match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/git/info/refs") => {
+            let service = match request.query.as_str() {
+                "service=git-upload-pack" => "git-upload-pack",
+                "service=git-receive-pack" => "git-receive-pack",
+                _ => return Some(bad_request_response()),
+            };
+            ("info/refs", service)
+        }
+        ("POST", "/git/git-upload-pack") => {
+            if request_header(request, "content-type")
+                != Some("application/x-git-upload-pack-request")
+            {
+                return Some(bad_request_response());
+            }
+            ("git-upload-pack", "git-upload-pack")
+        }
+        ("POST", "/git/git-receive-pack") => {
+            if request_header(request, "content-type")
+                != Some("application/x-git-receive-pack-request")
+            {
+                return Some(bad_request_response());
+            }
+            ("git-receive-pack", "git-receive-pack")
+        }
+        (_, path) if path.starts_with("/git/") => return Some(not_found_response()),
+        _ => return None,
+    };
+    Some(
+        run_git_http_backend(root, request, suffix, service)
+            .unwrap_or_else(|_| unavailable_response()),
+    )
+}
+
+fn request_header<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
+    request
+        .headers
+        .iter()
+        .find(|(header, _)| header.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+fn run_git_http_backend(
+    root: &Path,
+    request: &Request,
+    suffix: &str,
+    service: &str,
+) -> io::Result<Response> {
+    let repository_name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| io::Error::other("repository path is not representable"))?;
+    let project_root = root
+        .parent()
+        .ok_or_else(|| io::Error::other("repository parent is unavailable"))?;
+    let mut command = Command::new("git");
+    scrub_host_git_environment(&mut command);
+    command
+        .arg("http-backend")
+        .current_dir(root)
+        .env("GIT_PROJECT_ROOT", project_root)
+        .env("GIT_HTTP_EXPORT_ALL", "1")
+        .env("PATH_INFO", format!("/{repository_name}/{suffix}"))
+        .env("SCRIPT_NAME", "/git")
+        .env("QUERY_STRING", &request.query)
+        .env("REQUEST_METHOD", &request.method)
+        .env("SERVER_PROTOCOL", "HTTP/1.1")
+        .env("CONTENT_LENGTH", request.body.len().to_string())
+        .env(
+            "CONTENT_TYPE",
+            request_header(request, "content-type").unwrap_or_default(),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if let Some(protocol) = request_header(request, "git-protocol") {
+        if protocol == "version=2" {
+            command.env("GIT_PROTOCOL", protocol);
+        }
+    }
+    // The listener is loopback-only and this profile trusts local OS users.
+    // Keep Git's ordinary receive-pack checks (including checked-out-branch
+    // protection), while making the standard smart-HTTP push service usable.
+    if service == "git-receive-pack" {
+        command
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "http.receivepack")
+            .env("GIT_CONFIG_VALUE_0", "true");
+    }
+
+    let mut child = command.spawn()?;
+    let mut child_stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("Git transport input is unavailable"))?;
+    let request_body = request.body.clone();
+    let input_writer = std::thread::spawn(move || child_stdin.write_all(&request_body));
+    let mut cgi_output = Vec::new();
+    child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("Git transport output is unavailable"))?
+        .read_to_end(&mut cgi_output)?;
+    input_writer
+        .join()
+        .map_err(|_| io::Error::other("Git transport input failed"))??;
+    if !child.wait()?.success() {
+        return Err(io::Error::other("Git HTTP backend failed"));
+    }
+    parse_cgi_response(&cgi_output)
+}
+
+fn scrub_host_git_environment(command: &mut Command) {
+    for variable in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_PREFIX",
+        "GIT_NAMESPACE",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_GRAFT_FILE",
+        "GIT_SHALLOW_FILE",
+        "GIT_PROTOCOL",
+    ] {
+        command.env_remove(variable);
+    }
+    for (variable, _) in std::env::vars_os() {
+        if variable.as_encoded_bytes().starts_with(b"GIT_CONFIG_KEY_")
+            || variable
+                .as_encoded_bytes()
+                .starts_with(b"GIT_CONFIG_VALUE_")
+        {
+            command.env_remove(variable);
+        }
+    }
+}
+
+fn parse_cgi_response(output: &[u8]) -> io::Result<Response> {
+    let header_end = output
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|position| (position, 4))
+        .or_else(|| {
+            output
+                .windows(2)
+                .position(|window| window == b"\n\n")
+                .map(|position| (position, 2))
+        })
+        .ok_or_else(|| io::Error::other("Git HTTP backend returned malformed headers"))?;
+    let (header_bytes, separator_len) = header_end;
+    let header_text = std::str::from_utf8(&output[..header_bytes])
+        .map_err(|_| io::Error::other("Git HTTP backend returned malformed headers"))?;
+    let mut status = 200;
+    let mut content_type = String::from("application/octet-stream");
+    let mut headers = Vec::new();
+    for line in header_text.lines() {
+        let line = line.trim_end_matches('\r');
+        let Some((name, value)) = line.split_once(':') else {
+            return Err(io::Error::other("Git HTTP backend returned malformed headers"));
+        };
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("status") {
+            status = value
+                .split_ascii_whitespace()
+                .next()
+                .and_then(|code| code.parse().ok())
+                .ok_or_else(|| io::Error::other("Git HTTP backend returned malformed status"))?;
+        } else if name.eq_ignore_ascii_case("content-type") {
+            content_type = value.to_owned();
+        } else if ["cache-control", "expires", "pragma"]
+            .iter()
+            .any(|allowed| name.eq_ignore_ascii_case(allowed))
+        {
+            headers.push((name.to_owned(), value.to_owned()));
+        }
+    }
+    Ok(Response {
+        status,
+        content_type,
+        headers,
+        body: output[header_bytes + separator_len..].to_vec(),
+    })
 }
 
 fn load_current_project(root: &Path) -> Result<orna_project_v1::LoadedProject, ()> {
@@ -425,6 +755,9 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Request> {
     {
         return Err(io::Error::other("bad request"));
     }
+    let (path, query) = target
+        .split_once('?')
+        .map_or((target.as_str(), ""), |(path, query)| (path, query));
     let mut headers = Vec::new();
     let mut content_length = None;
     loop {
@@ -477,15 +810,20 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Request> {
         return Err(io::Error::other("missing Host header"));
     }
     let body_length = content_length.unwrap_or(0);
-    if body_length > MAX_REQUEST_BODY_BYTES {
+    let body_limit = if path.starts_with("/git/") {
+        MAX_GIT_REQUEST_BODY_BYTES
+    } else {
+        MAX_REQUEST_BODY_BYTES
+    };
+    if body_length > body_limit {
         return Err(io::Error::other("request body limit"));
     }
     let mut body = vec![0; body_length];
     reader.read_exact(&mut body)?;
-    let path = target.split_once('?').map_or(target.as_str(), |(path, _)| path);
     Ok(Request {
         method,
         path: path.to_owned(),
+        query: query.to_owned(),
         headers,
         body,
     })
@@ -536,6 +874,9 @@ fn write_response(stream: &mut TcpStream, response: Response) -> io::Result<()> 
     write!(stream, "HTTP/1.1 {} {reason}\r\n", response.status)?;
     if !response.content_type.is_empty() {
         write!(stream, "Content-Type: {}\r\n", response.content_type)?;
+    }
+    for (name, value) in &response.headers {
+        write!(stream, "{name}: {value}\r\n")?;
     }
     write!(
         stream,
@@ -593,6 +934,10 @@ fn not_found_response() -> Response {
     Response::new(404, "application/json", br#"{"error":"not_found"}"#.to_vec())
 }
 
+fn bad_request_response() -> Response {
+    Response::new(400, "application/json", br#"{"error":"bad_request"}"#.to_vec())
+}
+
 fn unavailable_response() -> Response {
     Response::new(
         503,
@@ -600,14 +945,6 @@ fn unavailable_response() -> Response {
         br#"{"error":"temporarily_unavailable"}"#.to_vec(),
     )
 }
-
-const LANDING_PAGE: &str = r#"<!doctype html>
-<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>Orna</title><main><h1>Orna</h1><p>This page is served from the current clone.</p>
-<p><a href="/api/clone">Clone status</a> · <a href="/api/pages">Project modules</a></p>
-<form id="query"><label>Pure Orna expression <input name="source" value="1 + 1"></label><button>Evaluate</button></form><pre id="result"></pre>
-<script>document.querySelector('#query').addEventListener('submit',async e=>{e.preventDefault();let r=await fetch('/api/query',{method:'POST',body:new FormData(e.target).get('source')});document.querySelector('#result').textContent=await r.text()})</script>
-</main></html>"#;
 
 #[cfg(test)]
 mod tests {
@@ -646,18 +983,53 @@ mod tests {
             &Request {
                 method: "GET".into(),
                 path: "/api/pages".into(),
+                query: String::new(),
                 headers: Vec::new(),
                 body: Vec::new(),
             },
         );
         assert_eq!(pages.status, 200);
         assert!(String::from_utf8(pages.body).unwrap().contains("/pages/main.orna"));
+        let home = host_route(
+            directory.path(),
+            identity,
+            &Request {
+                method: "GET".into(),
+                path: "/".into(),
+                query: String::new(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(home.status, 200);
+        let home = String::from_utf8(home.body).expect("project HTML");
+        assert!(home.contains("Modules"));
+        assert!(home.contains("/pages/main.orna"));
+        assert!(home.contains("git clone http://127.0.0.1/git"));
+        let source_page = host_route(
+            directory.path(),
+            identity,
+            &Request {
+                method: "GET".into(),
+                path: "/pages/main.orna".into(),
+                query: String::new(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(source_page.status, 200);
+        assert_eq!(source_page.content_type, "text/html; charset=utf-8");
+        let source_page = String::from_utf8(source_page.body).expect("source HTML");
+        assert!(source_page.contains("1 / 0"));
+        assert!(source_page.contains("&lt;script&gt;alert(&#39;source&#39;)&lt;/script&gt;"));
+        assert!(!source_page.contains("<script>alert('source')</script>"));
         let query = host_route(
             directory.path(),
             identity,
             &Request {
                 method: "POST".into(),
                 path: "/api/query".into(),
+                query: String::new(),
                 headers: Vec::new(),
                 body: b"1 + 1".to_vec(),
             },
@@ -808,5 +1180,170 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(response.contains("\"HEAD\":null"));
         assert!(response.contains("\"CWD\":{\"branch\":\"listener-test\""));
+    }
+
+    #[test]
+    fn smart_http_clones_and_pushes_the_selected_clones_head() {
+        for (index, branch, dirty) in [
+            (0_u8, "http-left", false),
+            (1_u8, "http-right", true),
+        ] {
+            let source = tempfile::tempdir().expect("source clone");
+            std::fs::write(source.path().join("main.orna"), SERVE_FIXTURE)
+                .expect("vendored project source");
+            assert!(
+                Command::new("git")
+                    .args(["init", "--quiet", "--initial-branch", branch])
+                    .current_dir(source.path())
+                    .status()
+                    .expect("git init")
+                    .success()
+            );
+            assert!(
+                Command::new("git")
+                    .args([
+                        "-c",
+                        "user.name=kierandrewett",
+                        "-c",
+                        "user.email=kieran@drewett.dev",
+                        "add",
+                        "main.orna",
+                    ])
+                    .current_dir(source.path())
+                    .status()
+                    .expect("git add")
+                    .success()
+            );
+            assert!(
+                Command::new("git")
+                    .args([
+                        "-c",
+                        "user.name=kierandrewett",
+                        "-c",
+                        "user.email=kieran@drewett.dev",
+                        "commit",
+                        "--quiet",
+                        "-m",
+                        branch,
+                    ])
+                    .current_dir(source.path())
+                    .status()
+                    .expect("git commit")
+                    .success()
+            );
+            if dirty {
+                std::fs::write(source.path().join("local-only.txt"), "clone-local CWD")
+                    .expect("local CWD change");
+            }
+            let expected_head = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(source.path())
+                .output()
+                .expect("source HEAD")
+                .stdout;
+            let expected_head = String::from_utf8(expected_head)
+                .expect("source HEAD UTF-8")
+                .trim()
+                .to_owned();
+
+            let identity = RuntimeIdentity {
+                database_id: [index + 10; 16],
+                repository_id: [index + 20; 16],
+            };
+            let listener = LiveTransport::bind_default_listener(0).expect("loopback listener");
+            let address = listener.status().address;
+            let root = source.path().to_path_buf();
+            let (stop_server, server_stopped) = std::sync::mpsc::channel();
+            let server = std::thread::spawn(move || {
+                let mut state = new_serve_state(
+                    root,
+                    identity,
+                    address,
+                    orna_semantic_v1::Catalogue::authoritative_core(),
+                )
+                .expect("serve host");
+                listener
+                    .listener()
+                    .set_nonblocking(true)
+                    .expect("non-blocking accept");
+                loop {
+                    match server_stopped.try_recv() {
+                        Ok(()) | Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    }
+                    match listener.listener().accept() {
+                        Ok((stream, _)) => {
+                            serve_connection(stream, &mut state).expect("served Git request");
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(StdDuration::from_millis(2));
+                        }
+                        Err(error) => panic!("listener accept failed: {error}"),
+                    }
+                }
+            });
+
+            let destination = tempfile::tempdir().expect("client clone parent");
+            let clone_path = destination.path().join("checkout");
+            let remote = format!("http://{address}/git");
+            let cloned = Command::new("git")
+                .args(["-c", "http.proxy=", "clone", "--quiet", &remote])
+                .arg(&clone_path)
+                .output()
+                .expect("git clone");
+            assert!(
+                cloned.status.success(),
+                "Git clone failed: {}",
+                String::from_utf8_lossy(&cloned.stderr)
+            );
+            let cloned_head = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&clone_path)
+                .output()
+                .expect("cloned HEAD")
+                .stdout;
+            assert_eq!(String::from_utf8(cloned_head).unwrap().trim(), expected_head);
+            let pushed = Command::new("git")
+                .args([
+                    "-c",
+                    "http.proxy=",
+                    "-C",
+                    clone_path.to_str().expect("clone path UTF-8"),
+                    "push",
+                    "--quiet",
+                    &remote,
+                    "HEAD:refs/heads/served-client",
+                ])
+                .output()
+                .expect("git push");
+            assert!(
+                pushed.status.success(),
+                "Git push failed: {}",
+                String::from_utf8_lossy(&pushed.stderr)
+            );
+            let published_head = Command::new("git")
+                .args(["rev-parse", "refs/heads/served-client"])
+                .current_dir(source.path())
+                .output()
+                .expect("published HEAD")
+                .stdout;
+            assert_eq!(String::from_utf8(published_head).unwrap().trim(), expected_head);
+
+            let mut client = TcpStream::connect(address).expect("clone report connection");
+            client
+                .write_all(
+                    format!("GET /api/clone HTTP/1.1\r\nHost: {address}\r\n\r\n").as_bytes(),
+                )
+                .expect("clone report request");
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).expect("clone report response");
+            let response = String::from_utf8(response).expect("clone report UTF-8");
+            assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+            assert!(response.contains(&format!("\"HEAD\":\"{expected_head}\"")));
+            assert!(response.contains(&format!("\"branch\":\"{branch}\"")));
+            assert!(response.contains(&format!("\"worktree_clean\":{}", !dirty)));
+            stop_server.send(()).expect("stop Git server");
+            server.join().expect("Git server thread");
+        }
     }
 }
