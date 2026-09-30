@@ -3505,6 +3505,64 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
 }
 
 #[test]
+fn checkpoint_creation_orientations_survive_row_tombstones() {
+    let deleted_row = parse_fixture(BASE, RowKeyKind::Explicit);
+
+    // ORNA-MERGE-011 requires conflicts for divergent opaque checkpoints but
+    // leaves one-sided checkpoint creation beside an independent row
+    // tombstone unspecified. Treat map membership as presence and merge the
+    // independent creation and deletion in all four branch orientations.
+    for (row_delete_on_left, checkpoint_create_on_left) in
+        [(true, true), (true, false), (false, true), (false, false)]
+    {
+        let mut source = FixtureRows::default();
+        source.add(MergeSide::Base, b"base", vec![deleted_row.clone()]);
+        source.add(
+            MergeSide::Left,
+            b"left",
+            if row_delete_on_left { Vec::new() } else { vec![deleted_row.clone()] },
+        );
+        source.add(
+            MergeSide::Right,
+            b"right",
+            if row_delete_on_left { vec![deleted_row.clone()] } else { Vec::new() },
+        );
+
+        let base = snapshot(schema(true, FieldType::Str), manifest(1, 10, b"base"), None);
+        let mut left = snapshot(schema(true, FieldType::Str), manifest(2, 11, b"left"), None);
+        let mut right = snapshot(schema(true, FieldType::Str), manifest(3, 12, b"right"), None);
+        let checkpoint_id = b"consumer/new-after-row-tombstone".to_vec();
+        let checkpoint_fixture = if checkpoint_create_on_left {
+            CHECKPOINT_BASE
+        } else {
+            CHECKPOINT_EDITED
+        };
+        let checkpoint = parse_checkpoint_fixture(checkpoint_fixture);
+        let create_side = if checkpoint_create_on_left { &mut left } else { &mut right };
+        create_side.checkpoints.insert(checkpoint_id.clone(), checkpoint.clone());
+
+        let plan = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 0 },
+        )
+        .unwrap();
+
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        assert_eq!(plan.checkpoints.get(&checkpoint_id), Some(&checkpoint));
+        let segments = &plan.tables[&id(1)].segments;
+        let MergedSegment::Rows { rows, tombstones, .. } = &segments[0] else {
+            panic!("the independent row deletion must materialize its tombstone")
+        };
+        assert!(rows.is_empty());
+        assert_eq!(tombstones, &[deleted_row.key.clone()]);
+        assert_eq!(source.visited.len(), 3);
+    }
+}
+
+#[test]
 fn schema_conflict_is_a_boundary_before_row_reads_and_checkpoint_resolution() {
     let base_checkpoint = CheckpointGeneration {
         generation: 4,
