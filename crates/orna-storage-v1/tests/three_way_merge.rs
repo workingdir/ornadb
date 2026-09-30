@@ -274,6 +274,102 @@ fn schema_conflict_budget_caps_details_and_reports_affected_table() {
 }
 
 #[test]
+fn row_and_checkpoint_conflicts_accumulate_in_phase_order_without_a_partial_plan() {
+    let base_checkpoint = CheckpointGeneration {
+        generation: 4,
+        position: Some(b"base-token".to_vec()),
+    };
+    let left_checkpoint = CheckpointGeneration {
+        generation: 5,
+        position: Some(b"left-token".to_vec()),
+    };
+    let right_checkpoint = CheckpointGeneration {
+        generation: 6,
+        position: Some(b"right-token".to_vec()),
+    };
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"base", vec![parse_fixture(BASE, RowKeyKind::Explicit)]);
+    source.add(MergeSide::Left, b"left", vec![parse_fixture(LEFT, RowKeyKind::Explicit)]);
+    source.add(MergeSide::Right, b"right", vec![parse_fixture(CONFLICT, RowKeyKind::Explicit)]);
+    let base = snapshot(
+        schema(true, FieldType::Str),
+        manifest(1, 1, b"base"),
+        Some(base_checkpoint.clone()),
+    );
+    let left = snapshot(
+        schema(true, FieldType::Str),
+        manifest(2, 2, b"left"),
+        Some(left_checkpoint.clone()),
+    );
+    let right = snapshot(
+        schema(true, FieldType::Str),
+        manifest(3, 3, b"right"),
+        Some(right_checkpoint.clone()),
+    );
+
+    let error = merge_three_way_snapshots(&base, &left, &right, &mut source, budget())
+        .unwrap_err();
+    let BranchMergeError::Conflicts { conflicts, report } = error else {
+        panic!("row and checkpoint conflicts must reject the complete plan")
+    };
+    assert_eq!(conflicts.len(), 2);
+    assert!(matches!(&conflicts[0], BranchMergeConflict::Row { .. }));
+    assert!(matches!(
+        &conflicts[1],
+        BranchMergeConflict::CheckpointConflict { id: checkpoint_id, conflict }
+            if checkpoint_id.as_slice() == b"consumer/source"
+                && conflict.base.as_ref() == Some(&base_checkpoint)
+                && conflict.left.as_ref() == Some(&left_checkpoint)
+                && conflict.right.as_ref() == Some(&right_checkpoint)
+    ));
+    assert_eq!(report.conflicts_lower_bound, 2);
+    assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+    assert!(report.affected_checkpoints.contains(b"consumer/source".as_slice()));
+    assert_eq!(source.visited.len(), 3);
+}
+
+#[test]
+fn schema_conflict_is_a_boundary_before_row_reads_and_checkpoint_resolution() {
+    let base_checkpoint = CheckpointGeneration {
+        generation: 4,
+        position: Some(b"base-token".to_vec()),
+    };
+    let left_checkpoint = CheckpointGeneration {
+        generation: 5,
+        position: Some(b"left-token".to_vec()),
+    };
+    let right_checkpoint = CheckpointGeneration {
+        generation: 6,
+        position: Some(b"right-token".to_vec()),
+    };
+    let mut left_schema = schema(true, FieldType::Str);
+    left_schema.tables[0].fields[1].ty = FieldType::Int;
+    let mut right_schema = schema(true, FieldType::Str);
+    right_schema.tables[0].fields[1].ty = FieldType::Bool;
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"base", vec![parse_fixture(BASE, RowKeyKind::Explicit)]);
+    source.add(MergeSide::Left, b"left", vec![parse_fixture(LEFT, RowKeyKind::Explicit)]);
+    source.add(MergeSide::Right, b"right", vec![parse_fixture(CONFLICT, RowKeyKind::Explicit)]);
+    let base = snapshot(
+        schema(true, FieldType::Str),
+        manifest(1, 1, b"base"),
+        Some(base_checkpoint),
+    );
+    let left = snapshot(left_schema, manifest(2, 2, b"left"), Some(left_checkpoint));
+    let right = snapshot(right_schema, manifest(3, 3, b"right"), Some(right_checkpoint));
+
+    let error = merge_three_way_snapshots(&base, &left, &right, &mut source, budget())
+        .unwrap_err();
+    let BranchMergeError::Conflicts { conflicts, report } = error else {
+        panic!("schema conflict must reject before producing a plan")
+    };
+    assert!(matches!(conflicts.as_slice(), [BranchMergeConflict::Schema(_)]));
+    assert_eq!(report.conflicts_lower_bound, 1);
+    assert!(report.affected_checkpoints.is_empty());
+    assert!(source.visited.is_empty(), "unresolved schema prevents row decoding");
+}
+
+#[test]
 fn divergent_checkpoint_generations_preserve_conflict_positions() {
     let base_position = CheckpointGeneration { generation: 4, position: Some(b"base-token".to_vec()) };
     let left_position = CheckpointGeneration { generation: 5, position: Some(b"left-token".to_vec()) };
