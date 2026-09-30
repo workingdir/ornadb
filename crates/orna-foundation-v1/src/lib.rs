@@ -1419,8 +1419,9 @@ impl Diagnostic {
     }
     fn boundary_projection(&self) -> Self {
         // The wire `redacted` bit is descriptive, not trusted admission.
-        // Keep a root message only when this object received local admission;
-        // children still have no admission when composed into another record.
+        // Keep a root message only when this object received local admission.
+        // Admission is record-local: cause edges discard a child's trust mark
+        // whether the child or parent was admitted first during composition.
         let mut projection = if self.root_message_admitted {
             self.clone()
         } else {
