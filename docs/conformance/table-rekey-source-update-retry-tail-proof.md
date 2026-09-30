@@ -130,3 +130,9 @@ follow-on collision: after the blocker moves aside, the owner takes the released
 competitor target, so the competitor must enter a second failure closure before
 the owner can retry its original key. The fixture asserts the full ordered log;
 the reference does not specify this nested caught-retry ordering.
+
+`owner_retries_after_nested_competitor_target_closure` adds a blocker on the
+competitor closure's own release move. That closure moves the secondary blocker
+aside, releases the competitor target, and then lets the owner retry its original
+key. The full log is adapter behavior because the reference is silent on this
+nested caught-retry order.
