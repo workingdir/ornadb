@@ -1,0 +1,6 @@
+use vehicle.corsa.*;
+
+pub fn recent() =
+    Reading
+    | filter(reading => reading.time > now() - 1.min)
+    | last();
