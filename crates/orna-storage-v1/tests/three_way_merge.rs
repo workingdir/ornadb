@@ -3796,12 +3796,30 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
 
         // Without a divergent checkpoint tail, exact row capacity still
         // closes the clean delete and materializes the tombstone.
-        let (base, left, right, mut source, _, _, checkpoint_id, tail_id) = build_inputs(
+        let (mut base, mut left, mut right, mut source, _, _, checkpoint_id, tail_id) = build_inputs(
             row_delete_on_left,
             checkpoint_delete_on_left,
             false,
             regular_checkpoint_fixtures,
         );
+        let mut ordered_keys = [integer(10), integer(20), integer(30)];
+        ordered_keys.sort_by_key(|key| key.encode().unwrap());
+        let suffix_boundary = ordered_keys[2].encode().unwrap();
+        let tombstone_range = KeyRange::new(high_range.start.clone(), Some(suffix_boundary.clone())).unwrap();
+        let suffix_range = KeyRange::new(Some(suffix_boundary), None).unwrap();
+        for snapshot in [&mut base, &mut left, &mut right] {
+            let manifest = snapshot.tables.get_mut(&id(1)).unwrap();
+            manifest.segments[1].range = tombstone_range.clone();
+            manifest.segments.push(RowSegmentManifest {
+                locator: b"shared-clean-suffix".to_vec(),
+                range: suffix_range.clone(),
+                digest: [99; 32],
+            });
+        }
+
+        // ORNA-MERGE-005 is silent about row budgets for unchanged aligned
+        // suffixes. Storage reuses equal-digest segments without reads, so the
+        // exact tombstone boundary still closes the checkpoint tail.
         let plan = merge_three_way_snapshots(
             &base,
             &left,
@@ -3812,17 +3830,21 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         .unwrap();
         assert_eq!(plan.report.conflicts_lower_bound, 0);
         assert_eq!(plan.report.rows_examined, 2);
-        assert!(plan.report.affected_ranges.contains(&(id(1), high_range.clone())));
+        assert!(plan.report.affected_ranges.contains(&(id(1), tombstone_range.clone())));
+        assert!(!plan.report.affected_ranges.contains(&(id(1), suffix_range)));
         assert_eq!(source.visited.len(), 3);
+        assert!(source.visited.iter().all(|(_, locator)| locator.ends_with(b"upper")));
         assert!(!plan.checkpoints.contains_key(checkpoint_id.as_slice()));
         assert!(plan.checkpoints.contains_key(tail_id.as_slice()));
         let segments = &plan.tables[&id(1)].segments;
+        assert_eq!(segments.len(), 3);
         assert!(matches!(segments[0], MergedSegment::Reuse { from: MergeSide::Left, .. }));
         let MergedSegment::Rows { rows, tombstones, .. } = &segments[1] else {
             panic!("the upper segment deletion must materialize a tombstone")
         };
         assert!(rows.is_empty());
         assert_eq!(tombstones, &[high_key.clone()]);
+        assert!(matches!(segments[2], MergedSegment::Reuse { from: MergeSide::Left, .. }));
 
         // With enough detail budget, the fixture-backed m and z conflicts
         // retain their full base/left/right values after the row tombstone.
