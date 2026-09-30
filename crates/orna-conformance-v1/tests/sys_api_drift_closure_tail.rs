@@ -52,14 +52,14 @@ fn default_argument_fixture_uses_published_schema_edges() {
 }
 
 #[test]
-fn edge_interplay_fixture_closes_nested_relation_key_paths() {
+fn edge_interplay_fixture_closes_nested_relation_and_record_paths() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
         EDGE_INTERPLAY,
     )]);
     assert!(
         analysis.is_ok(),
-        "nested DiffEntry key edges must remain usable through the published relation and value schemas: {:?}",
+        "nested DiffEntry paths and applied generic record fields must resolve through the published SYS schema: {:?}",
         analysis
             .diagnostics
             .iter()
