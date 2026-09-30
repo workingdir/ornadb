@@ -10,6 +10,8 @@ use orna_storage_v1::{
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 
 const EDITABLE_ROW: &str = include_str!("fixtures/storage-placement-row.orna");
+const CASE_COLLISION_UPPER_ROW: &str = include_str!("fixtures/storage-placement-case-upper.orna");
+const CASE_COLLISION_LOWER_ROW: &str = include_str!("fixtures/storage-placement-case-lower.orna");
 const REWRITE_TAIL_FIRST: &str = include_str!("fixtures/storage-rewrite-tail-first.orna");
 const REWRITE_TAIL_LAST: &str = include_str!("fixtures/storage-rewrite-tail-last.orna");
 const KEY_FIELD: Uuid = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
@@ -19,6 +21,10 @@ fn profile() -> CompactOvbProfile {
 }
 
 fn profile_for_table(table: Uuid) -> CompactOvbProfile {
+    profile_for_key_type(table, "Int")
+}
+
+fn profile_for_key_type(table: Uuid, key_type: &str) -> CompactOvbProfile {
     CompactOvbProfile::new(
         SchemaDescriptor::new(OvbRaw::Map(vec![
             (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
@@ -38,7 +44,7 @@ fn profile_for_table(table: Uuid) -> CompactOvbProfile {
                 OvbRaw::Array(vec![OvbRaw::Array(vec![
                     OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(KEY_FIELD.as_bytes().to_vec()))),
                     OvbRaw::Text(format!("f_{}", KEY_FIELD.simple())),
-                    OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".into())]),
+                    OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text(key_type.into())]),
                     OvbRaw::Int(0.into()),
                     OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
                 ])]),
@@ -94,6 +100,13 @@ fn row(value: i64) -> CanonicalValue {
 
 fn editable_path(key: &str) -> orna_storage_v1::LoosePath {
     orna_storage_v1::LoosePath::for_key("Placement", &[key.to_owned()]).unwrap()
+}
+
+fn text_key(value: &str) -> Vec<u8> {
+    CanonicalValue::new(OvbRaw::Text(value.to_owned()))
+        .unwrap()
+        .encode()
+        .unwrap()
 }
 
 #[test]
@@ -182,6 +195,70 @@ fn automatic_thresholds_and_explicit_editable_path_errors_are_checked_before_mut
             [PlacementCandidate::insert(key(3), body, None)],
         ),
         Err(StoragePlacementError::UnrepresentableEditableKey)
+    );
+}
+
+#[test]
+fn automatic_placement_keeps_inclusive_row_and_byte_limits() {
+    let profile = profile();
+    let at_row_limit = plan_storage_placement(
+        &profile,
+        StoragePreference::Automatic,
+        9_999,
+        false,
+        [PlacementCandidate::insert(
+            key(11),
+            EDITABLE_ROW.len(),
+            Some(editable_path("11")),
+        )],
+    )
+    .unwrap();
+    assert_eq!(at_row_limit.resulting_row_count(), 10_000);
+    assert_eq!(at_row_limit.new_row_placement(), PhysicalPlacement::Editable);
+
+    let at_byte_limit = plan_storage_placement(
+        &profile,
+        StoragePreference::Automatic,
+        0,
+        false,
+        [PlacementCandidate::insert(
+            key(12),
+            AUTOMATIC_EDITABLE_MAX_PUBLICATION_BYTES,
+            Some(editable_path("12")),
+        )],
+    )
+    .unwrap();
+    assert_eq!(at_byte_limit.new_row_placement(), PhysicalPlacement::Editable);
+}
+
+#[test]
+fn placement_rejects_case_only_portable_path_aliases_from_row_fixtures() {
+    for fixture in [CASE_COLLISION_UPPER_ROW, CASE_COLLISION_LOWER_ROW] {
+        let parsed = parse_row(fixture);
+        assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    }
+
+    let profile = profile_for_key_type(Uuid::from_u128(3), "Str");
+    assert_eq!(
+        plan_storage_placement(
+            &profile,
+            StoragePreference::Automatic,
+            0,
+            false,
+            [
+                PlacementCandidate::insert(
+                    text_key("Alice"),
+                    CASE_COLLISION_UPPER_ROW.len(),
+                    Some(editable_path("Alice")),
+                ),
+                PlacementCandidate::insert(
+                    text_key("alice"),
+                    CASE_COLLISION_LOWER_ROW.len(),
+                    Some(editable_path("alice")),
+                ),
+            ],
+        ),
+        Err(StoragePlacementError::PathCollision)
     );
 }
 

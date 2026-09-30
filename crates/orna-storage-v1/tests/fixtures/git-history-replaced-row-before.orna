@@ -1,0 +1,5 @@
+{
+  id: 1,
+  observed_at: "2001-01-01",
+  amount: 4,
+}
