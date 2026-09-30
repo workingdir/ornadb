@@ -13,8 +13,9 @@ use orna_live_v1::{
     ListenerExposure, LiveApplication, LiveApplicationWorkLease, LiveApplicationWorkSupervisor,
     LiveCredentialIssuer, LiveEvalResponse, LiveEvalTransaction, LiveHost, LiveListenerAcceptor,
     LiveSessionAuthority, LiveSessionChildren, LiveTransport, ResumeRequest, SUBPROTOCOL,
-    SessionCredential, SessionMetadata, TransportLimits, WebSocketOutput, WebSocketState,
-    WebSocketUpgrade, WireRequest, WireResponse, encode_websocket_output, parse_http_request,
+    SessionCredential, SessionMetadata, TransportLimits, WebSocketApplicationPreparation,
+    WebSocketOutput, WebSocketState, WebSocketUpgrade, WireRequest, WireResponse,
+    encode_websocket_output, parse_http_request,
 };
 use orna_protocol_v1::{
     DatabaseContext, Envelope, Message, PresentIdentity, PresentKind, PresentNode,
@@ -2767,14 +2768,19 @@ fn live_requests_cannot_switch_the_issued_database_or_cwd_runtime() {
 
     let mut socket = WebSocketState::new([5; 16]);
     let other_database = eval_with_context([1; 16], [21; 16], [3; 16], None);
-    assert!(matches!(
-        block_on(transport.prepare_websocket_application(
-            &mut socket,
-            2,
-            &masked_binary_payload(&other_database),
-        )),
-        Err(Error::Denied)
-    ));
+    let prepared = block_on(transport.prepare_websocket_application(
+        &mut socket,
+        2,
+        &masked_binary_payload(&other_database),
+    ))
+    .expect("a decoded database rejection is returned as a wire diagnostic");
+    let WebSocketApplicationPreparation::Output(WebSocketOutput::Binary { payload, .. }) = prepared
+    else {
+        panic!("database mismatch should produce a correlated diagnostic");
+    };
+    let rejected = Envelope::decode(&payload, Limits::default().protocol).unwrap();
+    assert_eq!(rejected.request, Some([21; 16]));
+    assert!(matches!(rejected.message, Message::Diagnostic { .. }));
 
     let mut application = UnitApplication::default();
     let rejected = block_on(transport.receive_with_application(
@@ -2799,24 +2805,34 @@ fn live_requests_cannot_switch_the_issued_database_or_cwd_runtime() {
         [2; 16],
         Some(other_runtime_snapshot),
     );
-    assert!(matches!(
-        block_on(transport.prepare_websocket_application(
-            &mut socket,
-            2,
-            &masked_binary_payload(&other_runtime),
-        )),
-        Err(Error::Denied)
-    ));
+    let prepared = block_on(transport.prepare_websocket_application(
+        &mut socket,
+        2,
+        &masked_binary_payload(&other_runtime),
+    ))
+    .expect("a decoded runtime rejection is returned as a wire diagnostic");
+    let WebSocketApplicationPreparation::Output(WebSocketOutput::Binary { payload, .. }) = prepared
+    else {
+        panic!("runtime mismatch should produce a correlated diagnostic");
+    };
+    let rejected = Envelope::decode(&payload, Limits::default().protocol).unwrap();
+    assert_eq!(rejected.request, Some([22; 16]));
+    assert!(matches!(rejected.message, Message::Diagnostic { .. }));
 
     let other_database_watch = watch_with_context([23; 16], [3; 16]);
-    assert!(matches!(
-        block_on(transport.prepare_websocket_application(
-            &mut socket,
-            2,
-            &masked_binary_payload(&other_database_watch),
-        )),
-        Err(Error::Denied)
-    ));
+    let prepared = block_on(transport.prepare_websocket_application(
+        &mut socket,
+        2,
+        &masked_binary_payload(&other_database_watch),
+    ))
+    .expect("a decoded watch rejection is returned as a wire diagnostic");
+    let WebSocketApplicationPreparation::Output(WebSocketOutput::Binary { payload, .. }) = prepared
+    else {
+        panic!("watch mismatch should produce a correlated diagnostic");
+    };
+    let rejected = Envelope::decode(&payload, Limits::default().protocol).unwrap();
+    assert_eq!(rejected.request, Some([23; 16]));
+    assert!(matches!(rejected.message, Message::Diagnostic { .. }));
 
     let bound_request = eval_with_context([1; 16], [24; 16], [2; 16], None);
     let accepted = block_on(transport.receive_with_application(
