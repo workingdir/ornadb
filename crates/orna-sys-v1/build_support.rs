@@ -414,6 +414,153 @@ fn valid_sys_path(path: &str) -> bool {
         })
 }
 
+fn validate_object_fields<'a>(
+    value: &'a Value,
+    context: &str,
+    required: &[&str],
+    optional: &[&str],
+) -> Result<&'a serde_json::Map<String, Value>, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{context} must be an object"))?;
+    if let Some(field) = required.iter().find(|field| !object.contains_key(**field)) {
+        return Err(format!("{context} is missing required field `{field}`"));
+    }
+    if let Some(field) = object
+        .keys()
+        .find(|field| !required.contains(&field.as_str()) && !optional.contains(&field.as_str()))
+    {
+        return Err(format!("{context} has unknown field `{field}`"));
+    }
+    Ok(object)
+}
+
+fn validate_nonblank_string(value: &Value, context: &str) -> Result<(), String> {
+    if value.as_str().is_none_or(|text| text.trim().is_empty()) {
+        Err(format!("{context} must be a nonblank string"))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_unique_string_array(value: &Value, context: &str) -> Result<(), String> {
+    let values = value
+        .as_array()
+        .ok_or_else(|| format!("{context} must be an array of strings"))?;
+    let mut seen = BTreeSet::new();
+    for (index, value) in values.iter().enumerate() {
+        validate_nonblank_string(value, &format!("{context}[{index}]"))?;
+        let text = value.as_str().expect("string validated");
+        if !seen.insert(text) {
+            return Err(format!("{context} contains duplicate `{text}`"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_named_rows(
+    value: &Value,
+    inventory: &str,
+    required: &[&str],
+    optional: &[&str],
+    string_fields: &[&str],
+    boolean_fields: &[&str],
+    string_array_fields: &[&str],
+    nested_name_type_fields: &[&str],
+) -> Result<(), String> {
+    let rows = value
+        .as_array()
+        .ok_or_else(|| format!("system API `{inventory}` must be an array"))?;
+    let mut names = BTreeSet::new();
+    for (index, row) in rows.iter().enumerate() {
+        let context = format!("{inventory}[{index}]");
+        let object = validate_object_fields(row, &context, required, optional)?;
+        for field in string_fields {
+            validate_nonblank_string(
+                object.get(*field).expect("required field was checked"),
+                &format!("{context}.{field}"),
+            )?;
+        }
+        for field in boolean_fields {
+            if !object.get(*field).is_some_and(Value::is_boolean) {
+                return Err(format!("{context}.{field} must be a boolean"));
+            }
+        }
+        for field in string_array_fields {
+            if let Some(value) = object.get(*field) {
+                validate_unique_string_array(value, &format!("{context}.{field}"))?;
+            }
+        }
+        for field in nested_name_type_fields {
+            let nested = object
+                .get(*field)
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("{context}.{field} must be an array of named types"))?;
+            let mut nested_names = BTreeSet::new();
+            for (nested_index, item) in nested.iter().enumerate() {
+                let item_context = format!("{context}.{field}[{nested_index}]");
+                let item = validate_object_fields(
+                    item,
+                    &item_context,
+                    &["name", "type"],
+                    &[],
+                )?;
+                for item_field in ["name", "type"] {
+                    validate_nonblank_string(
+                        item.get(item_field).expect("nested field was checked"),
+                        &format!("{item_context}.{item_field}"),
+                    )?;
+                }
+                let name = item["name"].as_str().expect("nested name validated");
+                if !nested_names.insert(name) {
+                    return Err(format!("{item_context} duplicates field `{name}`"));
+                }
+            }
+        }
+        let name = object
+            .get("name")
+            .and_then(Value::as_str)
+            .expect("named inventory requires a validated name string");
+        if !names.insert(name) {
+            return Err(format!("system API `{inventory}` duplicates name `{name}`"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_enum_inventory(value: &Value) -> Result<(), String> {
+    let enums = value
+        .as_object()
+        .ok_or_else(|| "system API `enums` must be an object".to_owned())?;
+    for (name, variants) in enums {
+        validate_nonblank_string(&Value::String(name.clone()), "system API enum name")?;
+        validate_unique_string_array(variants, &format!("system API enum `{name}` variants"))?;
+    }
+    Ok(())
+}
+
+fn validate_removed_names(value: &Value) -> Result<(), String> {
+    let names = value
+        .as_object()
+        .ok_or_else(|| "system API `removed_names` must be an object".to_owned())?;
+    for (name, descriptor) in names {
+        let context = format!("system API removed name `{name}`");
+        let descriptor = validate_object_fields(
+            descriptor,
+            &context,
+            &["replacement", "diagnostic"],
+            &[],
+        )?;
+        for field in ["replacement", "diagnostic"] {
+            validate_nonblank_string(
+                descriptor.get(field).expect("required field was checked"),
+                &format!("{context}.{field}"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn valid_function_label(label: &str, signature: &SignatureIdentity) -> bool {
     let Some(suffix) = label.strip_prefix(&signature.name) else {
         return false;
@@ -705,6 +852,70 @@ pub fn validate_api_document(api: &Value) -> Result<(), String> {
             ));
         }
     }
+
+    validate_removed_names(&object["removed_names"])?;
+    validate_named_rows(
+        &object["singletons"],
+        "singletons",
+        &["name", "type", "availability"],
+        &[],
+        &["name", "type", "availability"],
+        &[],
+        &[],
+        &[],
+    )?;
+    validate_unique_string_array(&object["opaque_identifiers"], "opaque_identifiers")?;
+    validate_named_rows(
+        &object["reference_aliases"],
+        "reference_aliases",
+        &["name", "target", "definition"],
+        &[],
+        &["name", "target", "definition"],
+        &[],
+        &[],
+        &[],
+    )?;
+    validate_named_rows(
+        &object["value_types"],
+        "value_types",
+        &["name", "kind", "purpose", "type_parameters", "fields", "invariants"],
+        &[],
+        &["name", "kind", "purpose"],
+        &[],
+        &["type_parameters", "invariants"],
+        &["fields"],
+    )?;
+    validate_enum_inventory(&object["enums"])?;
+    validate_named_rows(
+        &object["relations"],
+        "relations",
+        &[
+            "name",
+            "kind",
+            "availability",
+            "grouped_handle",
+            "writable",
+            "key",
+            "key_fields",
+            "purpose",
+            "reference_type",
+            "fields",
+        ],
+        &["invariants"],
+        &[
+            "name",
+            "kind",
+            "availability",
+            "grouped_handle",
+            "key",
+            "purpose",
+            "reference_type",
+        ],
+        &["writable"],
+        &["key_fields", "invariants"],
+        &["fields"],
+    )?;
+    validate_unique_string_array(&object["failure_codes"], "failure_codes")?;
 
     let functions = object["functions"]
         .as_array()

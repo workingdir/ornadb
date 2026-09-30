@@ -7,3 +7,4 @@ pub fn start_erased(function: sys.FunctionRef, arguments: sys.ArgumentMap): sys.
 pub fn start_typed<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap, output: T): sys.InvocationHandle<T> = sys.start(function, arguments, output);
 pub fn snapshot_default(): sys.SnapshotRef = sys.snapshot();
 pub fn resolve_default(name: Str): sys.ObjectRef = sys.resolve(name);
+pub fn history_of(object: sys.ObjectRef): Relation<sys.Revision> = sys.history(object);
