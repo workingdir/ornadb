@@ -3471,3 +3471,91 @@ fn explain_closes_per_scan_rounding_at_zero_and_one_byte_join_tails() {
         }));
     }
 }
+
+#[test]
+fn explain_keeps_per_scan_rounding_representable_at_max_byte_closure() {
+    let parsed = orna_syntax_v1::parse_module(ROUNDING_TAIL_INTERPLAY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    let explain = |materialize| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:max-byte-rounding-closure"),
+            source: obj("table:RoundingFirst"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(1),
+                estimated_bytes: Some(u64::MAX),
+                mutable_branch: None,
+            }),
+            joins: vec![QueryJoinDescription {
+                source: obj("table:RoundingTail"),
+                statistics: Some(QuerySourceStatistics {
+                    estimated_rows: Some(1),
+                    estimated_bytes: Some(1),
+                    mutable_branch: None,
+                }),
+                predicate: None,
+            }],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: materialize,
+        })
+        .expect("per-scan max-byte plan")
+    };
+
+    // ORNA-PLAN leaves byte-cost units unspecified. With the existing
+    // 4-KiB-per-scan heuristic, MAX and 1 are rounded independently; their
+    // raw byte sum cannot fit u64, so join output bytes become unknown without
+    // making either scan's own work overflow.
+    let exact = explain(None);
+    let source_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| node.object() == Some(&obj("table:RoundingFirst")))
+        .expect("MAX-byte source scan");
+    assert_eq!(source_scan.estimated_bytes(), Some(u64::MAX));
+    assert_eq!(source_scan.estimated_work(), Some(4_503_599_627_370_497));
+    let tail_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| node.object() == Some(&obj("table:RoundingTail")))
+        .expect("one-byte tail scan");
+    assert_eq!(tail_scan.estimated_bytes(), Some(1));
+    assert_eq!(tail_scan.estimated_work(), Some(2));
+    let join = exact
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("join whose output width exceeds u64");
+    assert_eq!(join.estimated_rows(), Some(1));
+    assert_eq!(join.estimated_bytes(), None);
+    assert_eq!(join.estimated_work(), Some(2));
+    assert_eq!(exact.plan().estimated_cost(), Some("4503599627370501"));
+
+    // Materialization needs a known output byte count. It makes the total
+    // unknown while preserving the known scan subtotal without a false
+    // overflow marker.
+    let with_materialization = explain(Some(obj("materialization:max-byte-tail")));
+    assert_eq!(with_materialization.plan().estimated_cost(), None);
+    assert_eq!(
+        with_materialization
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        None
+    );
+    assert_eq!(with_materialization.root().estimated_work(), None);
+    assert!(with_materialization.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+    }));
+    let surface = serde_json::to_value(&with_materialization)
+        .expect("unknown materialization tail surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
