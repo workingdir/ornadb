@@ -183,3 +183,9 @@ sequence with an inserted row taking the same target after both rekeyed rows
 have been deleted. The inserted row is updated and deleted before the owner
 retry succeeds; its ordered effects document local adapter behavior where the
 reference is silent.
+
+`owner_retry_closure_releases_inserted_reuse_target` keeps the inserted row at
+the target when the owner retries. That failed retry is caught; the nested
+closure updates and deletes the inserted row before retrying the owner again.
+The asserted tail records this local inserted-target closure order where the
+reference is silent.
