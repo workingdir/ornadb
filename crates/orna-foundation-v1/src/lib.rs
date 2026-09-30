@@ -62,7 +62,20 @@ impl RowRef {
             .encode()
             .map_err(FoundationError::Value)
     }
+
+    /// Decodes a canonical, snapshot-pinned row reference from OVB-1 bytes.
+    /// Strict snapshot decoding preserves the exact captured CWD generation;
+    /// it never substitutes a later current-CWD pin.
+    pub fn decode(bytes: &[u8]) -> Result<Self, FoundationError> {
+        let value = Value::decode(bytes).map_err(FoundationError::Value)?;
+        row_ref_from_raw(value.raw())
+    }
+
     fn raw(&self) -> Result<OvbRaw, FoundationError> {
+        // RowRef fields are public for compatibility. Revalidate the nested
+        // pin before encoding so malformed generation identities cannot enter
+        // storage through a directly constructed Snapshot enum variant.
+        Snapshot::decode(&self.snapshot.raw()).map_err(FoundationError::Value)?;
         Ok(OvbRaw::Tag(
             60010,
             Box::new(OvbRaw::Array(vec![
