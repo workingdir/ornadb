@@ -470,10 +470,19 @@ CREATE TABLE IF NOT EXISTS sys_invocation_observation_tail (
 CREATE INDEX IF NOT EXISTS sys_invocation_observation_tail_by_invocation
     ON sys_invocation_observation_tail(invocation_id, sequence);
 -- Backfill once for runtimes that already retained invocation rows before
--- tailing was added; the unique key makes startup reconciliation idempotent.
-INSERT OR IGNORE INTO sys_invocation_observation_tail
+-- tailing was added. Skip known rows before INSERT: SQLite may advance an
+-- AUTOINCREMENT sequence for a duplicate INSERT OR IGNORE, leaving cursor gaps
+-- on every restart even though no lifecycle event was appended.
+INSERT INTO sys_invocation_observation_tail
     (invocation_id, observed_ms, status)
-SELECT invocation_id, observed_ms, status FROM sys_invocation_observation;
+SELECT observation.invocation_id, observation.observed_ms, observation.status
+FROM sys_invocation_observation AS observation
+WHERE NOT EXISTS (
+    SELECT 1 FROM sys_invocation_observation_tail AS tail
+    WHERE tail.invocation_id = observation.invocation_id
+      AND tail.observed_ms = observation.observed_ms
+      AND tail.status = observation.status
+);
 CREATE TABLE IF NOT EXISTS runtime_catalogue_identity (
     object_id BLOB PRIMARY KEY CHECK (length(object_id) = 16),
     kind INTEGER NOT NULL CHECK (kind IN (1, 2, 3)),
@@ -24557,6 +24566,108 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2],
             "digest ABA does not affect durable lifecycle sequence"
+        );
+    }
+
+    #[tokio::test]
+    async fn sys_invocation_stale_cursor_rejects_post_reopen_terminal_tail() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(160)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let invocation_id = id(161);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(162)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        let initial_page = state.invocation_observation_tail(None, 1).await.unwrap();
+        assert_eq!(initial_page.entries.len(), 1);
+        assert!(!initial_page.has_more);
+        assert_eq!(initial_page.entries[0].sequence, 1);
+        assert_eq!(
+            initial_page.entries[0].status,
+            InvocationObservationStatus::Running
+        );
+        let stale_cursor = initial_page.next_cursor.expect("running event has a cursor");
+
+        let key = stream_delivery("stale-cursor-post-reopen", "stale-cursor-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("stale-cursor:receipt").unwrap(),
+            },
+            reason: "stale cursor restart receipt boundary".into(),
+        };
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request, id(163))
+            .await
+            .unwrap();
+
+        let capture = state.capture().await.unwrap();
+        state
+            .commit(
+                writer,
+                &capture,
+                &mutation(164),
+                capture.generation_digest(),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        let replacement = state.takeover_lease(writer, id(165)).await.unwrap();
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(reopened.stream_checkpoint(&key).await.unwrap(), receipt);
+        let replacement = reopened.acquire_lease(replacement.owner_id).await.unwrap();
+        assert_eq!(
+            reopened.orphan_abandoned_invocations(replacement).await.unwrap(),
+            1
+        );
+        assert_eq!(
+            reopened
+                .invocation_observation_tail(Some(stale_cursor), 1)
+                .await,
+            Err(RuntimeError::InvocationTailInvalid),
+            "a cursor from before commit cannot splice in a terminal event appended after reopen"
+        );
+        let tail = reopened
+            .invocation_observation_tail(None, 4)
+            .await
+            .unwrap();
+        assert_eq!(
+            tail.entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            tail.entries
+                .iter()
+                .map(|entry| entry.status)
+                .collect::<Vec<_>>(),
+            vec![
+                InvocationObservationStatus::Running,
+                InvocationObservationStatus::Orphaned,
+            ]
         );
     }
 
