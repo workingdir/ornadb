@@ -20851,6 +20851,28 @@ mod tests {
             "last() observes the failing predicate on the outer bound's final admitted row"
         );
 
+        // The reference specifies first-match short-circuiting and bounded
+        // enumeration separately, leaving their interaction with a later
+        // failing filter predicate implicit. first() matches within the
+        // prefix before that predicate is demanded, so the failure stays
+        // unevaluated even though the outer take includes its row.
+        let (first_stops_before_bounded_predicate_failure, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-first-stops-before-predicate-failure.orna"
+                ),
+            );
+        assert_eq!(
+            first_stops_before_bounded_predicate_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 2),
+            "first() stops after its match without evaluating a later in-bound failing predicate"
+        );
+
         // The reference leaves the first matching row immediately beyond a
         // filtered outer bound implicit. The three-row prefix has no match;
         // do not scan its fourth row, which would satisfy `first()`.
