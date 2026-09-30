@@ -46,6 +46,13 @@ fn admitted_root_message_does_not_disclose_notes_or_nested_causes() {
     let message = String::from("operation denied");
     let redacted = diagnostic_with_secret_text()
         .redacted_with_message(SafeText::new(message.clone()).unwrap());
+    let encoded = redacted.encode_ovb().unwrap();
+    assert!(
+        encoded
+            .windows(message.len())
+            .any(|window| window == message.as_bytes())
+    );
+    assert_eq!(Diagnostic::decode_ovb(&encoded).unwrap().message(), "<redacted>");
     assert_redacted_boundaries(redacted, &message);
 }
 
@@ -183,8 +190,10 @@ fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let projection = serde_json::to_value(decoded).unwrap();
     assert_eq!(projection["redacted"], true);
     assert_eq!(projection["message"], "<redacted>");
+    assert_eq!(projection["notes"][0], "<redacted>");
     assert_eq!(projection["causes"][0]["redacted"], true);
     assert_eq!(projection["causes"][0]["message"], "<redacted>");
+    assert_eq!(projection["causes"][0]["notes"][0], "<redacted>");
 
     // Neither a forged root admission bit nor a false nested cause bit grants
     // a generic decoder permission to expose fixture payloads.
@@ -214,7 +223,7 @@ fn raw_diagnostic(code: &str, message: &str, causes: Vec<OvbRaw>, redacted: bool
         (1, OvbRaw::Int(3.into())),
         (2, OvbRaw::Text(message.to_owned())),
         (3, OvbRaw::Array(Vec::new())),
-        (4, OvbRaw::Array(Vec::new())),
+        (4, OvbRaw::Array(vec![OvbRaw::Text(message.to_owned())])),
         (5, OvbRaw::Array(causes)),
         (6, OvbRaw::Bool(redacted)),
     ]
