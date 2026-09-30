@@ -10,8 +10,10 @@ handler remain in the activation; and a later successful re-key of a pending
 source carries that row's latest value. This records the adapter's observable
 mutation sequence without making it an additional language-level guarantee.
 
-The fixture-backed proof is
-`source_updates_to_pending_rows_survive_other_retry_tails` in
-`orna-application-v1`. It updates pending sources from later recovery handlers
-while an inserted destination occupant repeatedly leaves and reclaims the same
-key, then checks the complete mutation order and final re-key values.
+The fixture-backed proofs in `orna-application-v1` cover two final shapes:
+`source_updates_to_pending_rows_survive_other_retry_tails` updates sources that
+remain pending while later recovery handlers reuse the destination key;
+`rekeyed_source_and_reused_source_key_updates_survive_retry_tails` first moves a
+source inside a recovery handler, reuses its old key for an inserted row, then
+updates both identities while another source retries. Both assert the complete
+mutation order and the latest values at their eventual re-keys.
