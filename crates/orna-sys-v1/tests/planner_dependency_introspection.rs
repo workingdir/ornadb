@@ -3317,3 +3317,75 @@ fn explain_keeps_per_scan_rounding_bounds_through_mutation_and_unknown_tails() {
         node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
     }));
 }
+
+#[test]
+fn explain_rounds_complete_scan_bytes_independently_before_materialization() {
+    let parsed = orna_syntax_v1::parse_module(ROUNDING_TAIL_INTERPLAY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:complete-scan-rounding-tail"),
+        source: obj("table:RoundingFirst"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(1),
+            estimated_bytes: Some(2_048),
+            mutable_branch: None,
+        }),
+        joins: vec![QueryJoinDescription {
+            source: obj("table:RoundingTail"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(1),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            predicate: None,
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: Vec::new(),
+        materialize_into: Some(obj("materialization:complete-scan-rounding-tail")),
+    })
+    .expect("complete scan estimates with materialized join output");
+
+    // ORNA-PLAN-002/003 specify planner introspection and a correct fallback,
+    // not the byte-cost unit. Keep the current 4-KiB rule explicit: each
+    // half-block scan rounds on its own, and materialization prices the joined
+    // one-block output separately.
+    for table in ["table:RoundingFirst", "table:RoundingTail"] {
+        let scan = explained
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("fixture scan in complete-cost plan");
+        assert_eq!(scan.estimated_rows(), Some(1));
+        assert_eq!(scan.estimated_bytes(), Some(2_048));
+        assert_eq!(scan.estimated_work(), Some(2));
+    }
+    let join = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("join of the two fixture scans");
+    assert_eq!(join.estimated_rows(), Some(1));
+    assert_eq!(join.estimated_bytes(), Some(4_096));
+    assert_eq!(join.estimated_work(), Some(2));
+    let materialize = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Materialize)
+        .expect("materialized join output");
+    assert_eq!(materialize.estimated_rows(), Some(1));
+    assert_eq!(materialize.estimated_bytes(), Some(4_096));
+    assert_eq!(materialize.estimated_work(), Some(2));
+    assert_eq!(explained.plan().estimated_cost(), Some("8"));
+
+    let surface = serde_json::to_value(&explained).expect("complete scan rounding surface");
+    assert_eq!(surface["plan"]["estimated_cost"], "8");
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
