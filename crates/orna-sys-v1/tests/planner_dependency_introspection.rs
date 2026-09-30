@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use orna_sys_v1::{
     DependencyConfidence, DependencyGraph, DependencyGraphError, DependencyInput, DependencyKind,
     ExplainError,
-    FileRef, FunctionPlanDescription, FunctionRef, ObjectRef, PlanNodeKind, PlanOrdering,
+    FileRef, FunctionPlanDescription, FunctionRef, ObjectRef, PlanDetail, PlanNodeKind, PlanOrdering,
     PlanSortDirection, PlanNullOrder, QueryJoinDescription, QueryPlanDescription,
     QuerySourceStatistics, QueryMutationDescription, QueryMutationKind,
     MutableBranchSnapshot, SnapshotRef, MAX_PLAN_EXPRESSIONS,
@@ -437,6 +437,11 @@ fn explain_builds_a_deep_join_materialization_plan_from_mutable_branch_stats() {
     let explained = explain_query(&query).expect("deep query plan");
     assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
     assert_eq!(explained.root().object(), Some(&obj("materialization:active_contact_names")));
+    assert_eq!(explained.root().estimated_work(), Some(3));
+    assert_eq!(
+        explained.root().details().get("estimated_work"),
+        Some(&PlanDetail::Integer(3))
+    );
     assert!(explained.nodes().iter().any(|node| node.kind() == PlanNodeKind::Join));
     let join = explained
         .nodes()
@@ -572,6 +577,16 @@ fn explain_builds_a_deep_join_materialization_plan_from_mutable_branch_stats() {
         .sum::<u64>();
     let expected_cost = total_work.to_string();
     assert_eq!(explained.plan().estimated_cost(), Some(expected_cost.as_str()));
+    let sys_surface = serde_json::to_value(&explained).expect("complete sys.explain surface");
+    assert_eq!(sys_surface["plan"]["estimated_cost"], expected_cost);
+    assert_eq!(
+        sys_surface["plan"]["root"],
+        sys_surface["nodes"][0]["reference"]
+    );
+    assert_eq!(
+        sys_surface["nodes"][0]["details"]["estimated_work"],
+        3
+    );
 
     let mut next_generation = query.clone();
     next_generation.source_statistics.as_mut().unwrap().mutable_branch.as_mut().unwrap().generation = 8;
@@ -595,6 +610,73 @@ fn explain_builds_a_deep_join_materialization_plan_from_mutable_branch_stats() {
     .expect("reference scan/query fallback");
     assert_ne!(fallback.root().kind(), PlanNodeKind::Materialize);
     assert!(fallback.nodes().iter().any(|node| node.kind() == PlanNodeKind::Scan));
+}
+
+#[test]
+fn explain_estimate_reporting_distinguishes_unknown_zero_and_partial_cost() {
+    let zero = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:zero-estimates"),
+        source: obj("table:empty"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(0),
+            estimated_bytes: Some(0),
+            mutable_branch: None,
+        }),
+        joins: Vec::new(),
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: Some(0),
+        mutations: Vec::new(),
+        materialize_into: Some(obj("materialization:empty")),
+    })
+    .expect("known empty plan");
+    assert_eq!(zero.plan().estimated_cost(), Some("0"));
+    assert!(zero
+        .nodes()
+        .iter()
+        .all(|node| node.estimated_work() == Some(0)));
+
+    let partial = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:partial-estimates"),
+        source: obj("table:known"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(2),
+            estimated_bytes: Some(32),
+            mutable_branch: None,
+        }),
+        joins: vec![QueryJoinDescription {
+            source: obj("table:unknown"),
+            statistics: None,
+            predicate: Some(orna_sys_v1::ExpressionRef::descriptive("expr:join")),
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("partially estimated plan");
+    assert_eq!(partial.plan().estimated_cost(), None);
+    let known_scan = partial
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj("table:known")))
+        .expect("known input estimate");
+    assert_eq!(known_scan.estimated_work(), Some(3));
+    let unknown_scan = partial
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj("table:unknown")))
+        .expect("unknown input estimate");
+    assert_eq!(unknown_scan.estimated_work(), None);
+    assert!(partial
+        .nodes()
+        .iter()
+        .all(|node| node.actual_rows().is_none() && node.actual_bytes().is_none()));
 }
 
 #[test]
