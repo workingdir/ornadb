@@ -20443,6 +20443,26 @@ mod tests {
             "the left child caps its failing tail before the right sibling's two projections"
         );
 
+        // The reference requires bounded enumeration and ordered union, but
+        // does not separately describe equal child and outer take bounds.
+        // Once both limits are met, neither the child's failing tail nor the
+        // right sibling is needed to produce the result.
+        let (left_exact_bound, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-project-left-child-exact-outer-bound.orna"
+            ),
+        );
+        assert_eq!(
+            left_exact_bound.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (1, 1),
+            "equal child and outer bounds skip both the left tail and right sibling"
+        );
+
         let (missing, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
             include_str!("../tests/fixtures/query-session-projection-missing.orna"),
