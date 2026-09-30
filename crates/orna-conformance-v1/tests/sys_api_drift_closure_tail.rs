@@ -52,14 +52,14 @@ fn default_argument_fixture_uses_published_schema_edges() {
 }
 
 #[test]
-fn edge_interplay_fixture_closes_projected_table_reference_rows() {
+fn edge_interplay_fixture_closes_reference_target_table_rows() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
         EDGE_INTERPLAY,
     )]);
     assert!(
         analysis.is_ok(),
-        "nested SYS projections plus filtered Reference rows and captured Table rows across their Reference relation must resolve through the published schema: {:?}",
+        "nested SYS projections plus filtered Reference rows captured while resolving target Table rows must resolve through the published schema: {:?}",
         analysis
             .diagnostics
             .iter()
