@@ -1,0 +1,5 @@
+pub table FirstRemainderScanMutationSource(id: Int) { value: Int, }
+pub table FirstRemainderScanMutationTail(id: Int) { value: Int, }
+pub table FirstRemainderScanMutationUnknown(id: Int) { value: Int, }
+pub table FirstRemainderScanMutationTarget(id: Int) { value: Int, }
+pub fn update_first_remainder_scan_mutation() = FirstRemainderScanMutationTarget.update(1, { value: 2 });
