@@ -555,7 +555,7 @@ mod tests {
     };
     use orna_repository_v1::Repository;
     use orna_semantic_v1::StandardDependencyProfile;
-    use orna_value_v1::Value;
+    use orna_value_v1::{Raw, Value};
     use std::{fs, process::Command};
     use tempfile::TempDir;
 
@@ -837,6 +837,73 @@ mod tests {
                 .unwrap_err()
                 .code(),
             "ORNA-S021-TYPE"
+        );
+    }
+
+    #[test]
+    fn pinned_collection_and_query_exports_use_the_shared_intrinsic_bindings() {
+        let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+        assert_eq!(
+            session.submit(include_str!(
+                "fixtures/repl-inline-use-std-query-collection-2165.orna"
+            )),
+            Ok(None)
+        );
+        assert_eq!(
+            session.submit(include_str!(
+                "fixtures/repl-inline-use-std-collection-2165.orna"
+            )),
+            Ok(None)
+        );
+        assert_eq!(
+            session.submit(include_str!(
+                "fixtures/repl-inline-use-std-query-alias-2165.orna"
+            )),
+            Ok(None)
+        );
+        assert_eq!(
+            session.submit(include_str!("fixtures/repl-inline-std-query-map-2165.orna")),
+            Ok(Some(
+                Value::new(Raw::Array(vec![
+                    Raw::Int(2.into()),
+                    Raw::Int(4.into()),
+                    Raw::Int(6.into()),
+                ]))
+                .unwrap(),
+            ))
+        );
+        assert_eq!(
+            session.submit(include_str!(
+                "fixtures/repl-inline-std-query-alias-map-2165.orna"
+            )),
+            Ok(Some(
+                Value::new(Raw::Array(vec![
+                    Raw::Int(2.into()),
+                    Raw::Int(3.into()),
+                    Raw::Int(4.into()),
+                ]))
+                .unwrap(),
+            ))
+        );
+        assert_eq!(
+            session.submit(include_str!("fixtures/repl-inline-std-query-filter-2165.orna")),
+            Ok(Some(
+                Value::new(Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())])).unwrap(),
+            ))
+        );
+        assert_eq!(
+            session.submit(include_str!("fixtures/repl-inline-std-collection-one-2165.orna")),
+            Ok(Some(Value::int(4.into())))
+        );
+        assert_eq!(
+            session.submit(include_str!("fixtures/repl-inline-std-query-every-2165.orna")),
+            Ok(Some(Value::new(Raw::Bool(true)).unwrap()))
+        );
+        assert_eq!(
+            session.submit(include_str!(
+                "fixtures/repl-inline-std-collection-first-2165.orna"
+            )),
+            Ok(Some(Value::option(Some(Value::int(4.into()))).unwrap()))
         );
     }
 
