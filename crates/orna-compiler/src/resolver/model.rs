@@ -1829,11 +1829,13 @@ pub const STD_JSON_SOURCE_UNIT_ID: SourceUnitId =
 pub const STD_UI_SCHEMA_ID: SchemaId =
     SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x08]);
 /// The fixed ADR 0075 `std.json.Value` kernel representation contract.
+#[cfg(test)]
 pub const STD_JSON_CONTRACT: &str = "orna.std.value.json@1";
 /// The fixed ADR 0062 `std.ui.UI` value-type identity: `...19`.
 pub const STD_UI_TYPE_ID: TypeId =
     TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x13]);
 /// The fixed ADR 0062 `std.ui.UI` kernel representation contract.
+#[cfg(test)]
 pub const STD_UI_CONTRACT: &str = "orna.std.value.ui@1";
 /// The fixed ADR 0055 `std.invoke` schema identity: 15 zero bytes then `0x03`.
 pub const STD_INVOKE_SCHEMA_ID: SchemaId =
