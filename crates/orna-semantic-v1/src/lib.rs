@@ -7751,11 +7751,14 @@ fn infer(
                 ("+" | "-", left, right) if left == &duration && right == &duration => {
                     Some(duration)
                 }
-                // Duration scaling is kept to exact integer factors; runtime
-                // rejects division whose quotient is finer than a nanosecond.
+                // Duration scaling accepts exact numeric factors only; the
+                // runtime rejects results finer than its nanosecond grid.
                 ("*", left, Type::Int) if left == &duration => Some(duration.clone()),
                 ("*", Type::Int, right) if right == &duration => Some(duration.clone()),
                 ("/", left, Type::Int) if left == &duration => Some(duration.clone()),
+                ("*", left, Type::Decimal) if left == &duration => Some(duration.clone()),
+                ("*", Type::Decimal, right) if right == &duration => Some(duration.clone()),
+                ("/", left, Type::Decimal) if left == &duration => Some(duration.clone()),
                 _ => None,
             };
             if let Some(ty) = elapsed_result {
