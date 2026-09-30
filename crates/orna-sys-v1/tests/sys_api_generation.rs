@@ -470,6 +470,51 @@ fn relation_natural_key_summary_stays_aligned_with_key_paths() {
 }
 
 #[test]
+fn function_defaults_resolve_paths_variants_and_parameter_order() {
+    let generated: Value = serde_json::from_str(&orna_sys_v1::system_api_json()).unwrap();
+    build_support::validate_api_document(&generated).expect("published function defaults are valid");
+
+    for (default, expected) in [
+        ("sys.MissingScope.all", "does not resolve to an enum variant"),
+        ("sys.DiffScope.missing", "references unknown `sys.DiffScope.missing`"),
+        ("sys.database.missing", "cannot resolve singleton field path"),
+        ("sys.database.cwd", "has type `sys.SnapshotRef`, not parameter type `sys.DiffScope`"),
+        ("true", "has type `Bool`, not parameter type `sys.DiffScope`"),
+        ("null", "uses `null` with non-optional type `sys.DiffScope`"),
+    ] {
+        let mut invalid = generated.clone();
+        let diff = invalid["functions"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|function| function["name"] == "sys.diff")
+            .unwrap();
+        let signature = diff["signature"].as_str().unwrap();
+        diff["signature"] = serde_json::json!(signature.replace("sys.DiffScope.all", default));
+        let error = build_support::validate_api_document(&invalid).unwrap_err();
+        assert!(error.contains(expected), "default {default}: {error}");
+    }
+
+    let mut required_after_default = generated;
+    let resolve = required_after_default["functions"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|function| function["name"] == "sys.resolve")
+        .unwrap();
+    let signature = resolve["signature"].as_str().unwrap();
+    resolve["signature"] = serde_json::json!(signature.replace(
+        "from: sys.ModuleRef? = null): sys.ObjectRef",
+        "from: sys.ModuleRef? = null, required: Bool): sys.ObjectRef"
+    ));
+    let error = build_support::validate_api_document(&required_after_default).unwrap_err();
+    assert!(
+        error.contains("function `sys.resolve` parameter 4 is required after a defaulted parameter"),
+        "required parameters must precede defaulted parameters: {error}"
+    );
+}
+
+#[test]
 fn erased_invoke_and_start_labels_require_matching_generic_tails() {
     let mut generated: Value = serde_json::from_str(&orna_sys_v1::system_api_json()).unwrap();
     build_support::validate_api_document(&generated).expect("published overload pairs are valid");
