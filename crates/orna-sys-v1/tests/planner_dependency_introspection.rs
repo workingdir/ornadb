@@ -1691,6 +1691,98 @@ fn explain_partial_scan_bounds_accumulate_across_unknown_join_chain() {
 }
 
 #[test]
+fn explain_partial_scan_overflow_survives_unknown_scan_suffixes() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_with_last_rows = |last_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-scan-unknown-suffix"),
+            source: obj("table:row-bounded"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 2),
+                estimated_bytes: None,
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:byte-bounded"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(4_096),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:tail-row-bounded"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(last_rows),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:unknown-tail-first"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:unknown-tail-second"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:partial-scan-suffix")),
+        })
+        .expect("partial scan boundary followed by unknown scan suffixes")
+    };
+
+    // Bounds from the leading scans reach the boundary before the unknown
+    // right-side scans; those suffixes cannot clear or create overflow state.
+    let exact = explain_with_last_rows(1);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let overflow = explain_with_last_rows(2);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "overflow established by partial scan bounds survives unknown scan suffixes"
+    );
+
+    let nodes = overflow.nodes();
+    let bounded_tail_position = nodes
+        .iter()
+        .position(|node| node.object() == Some(&obj("table:tail-row-bounded")))
+        .expect("last scan with a known row bound");
+    for table in ["table:unknown-tail-first", "table:unknown-tail-second"] {
+        let unknown_position = nodes
+            .iter()
+            .position(|node| node.object() == Some(&obj(table)))
+            .expect("unknown suffix scan");
+        assert!(unknown_position > bounded_tail_position);
+        assert_eq!(nodes[unknown_position].estimated_work(), None);
+    }
+    assert!(nodes.iter().filter(|node| node.kind() == PlanNodeKind::Join).all(|node| {
+        node.estimated_work().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow).expect("partial scan overflow suffix surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
 fn explain_partial_scan_bounds_survive_unknown_scan_chain() {
     let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
