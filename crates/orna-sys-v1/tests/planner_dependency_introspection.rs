@@ -763,6 +763,80 @@ fn explain_total_work_overflow_keeps_known_operator_estimates_in_the_tail() {
 }
 
 #[test]
+fn explain_cost_boundary_includes_final_mutation_and_materialization_work() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_after_update = |affected_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:tail-cost-boundary"),
+            source: obj("table:large"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:large"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(affected_rows),
+                estimated_write_bytes: Some(0),
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: Some(obj("materialization:tail-boundary")),
+        })
+        .expect("estimate boundary plan")
+    };
+
+    let exact = explain_after_update(0);
+    let max_cost = u64::MAX.to_string();
+    assert_eq!(exact.plan().estimated_cost(), Some(max_cost.as_str()));
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().estimated_work(), Some(0));
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None
+    );
+    let exact_mutation = exact
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Invoke)
+        .expect("update tail");
+    assert_eq!(exact_mutation.estimated_work(), Some(0));
+    assert!(exact.nodes().iter().any(|node| {
+        node.kind() == PlanNodeKind::Scan
+            && node.object() == Some(&obj("table:large"))
+            && node.estimated_work() == Some(u64::MAX)
+    }));
+
+    let overflow = explain_after_update(1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().estimated_work(), Some(1));
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+    }));
+    let overflow_surface = serde_json::to_value(&overflow).expect("cost overflow tail surface");
+    assert_eq!(overflow_surface["nodes"][0]["details"]["estimated_work"], 1);
+    assert_eq!(
+        overflow_surface["nodes"][0]["details"]["estimated_cost_overflow"],
+        true
+    );
+    assert!(overflow_surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
 fn explain_local_work_overflow_is_explicit_on_cost_and_write_tails() {
     let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
