@@ -1,0 +1,5 @@
+pub table FirstRemainderScanClosureSource(id: Int) { value: Int, }
+pub table FirstRemainderScanClosureTail(id: Int) { value: Int, }
+pub table FirstRemainderScanClosureUnknown(id: Int) { value: Int, }
+pub table FirstRemainderScanClosureTarget(id: Int) { value: Int, }
+pub fn delete_first_remainder_scan_closure() = FirstRemainderScanClosureTarget.delete(1);
