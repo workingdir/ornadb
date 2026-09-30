@@ -388,6 +388,19 @@ fn schema_type_graph_rejects_dangling_and_misaligned_inventory_edges() {
     build_support::validate_api_document(&generic_record_row)
         .expect("applied record-generic row types allow parser whitespace before `<`");
 
+    let mut generic_parameter_row = generated.clone();
+    let meta = generic_parameter_row["functions"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|function| function["name"] == "sys.meta")
+        .unwrap();
+    meta["signature"] = serde_json::json!(
+        "fn sys.meta<T>(value: T): Relation<sys.ValueMetadata<T>>"
+    );
+    build_support::validate_api_document(&generic_parameter_row)
+        .expect("an in-scope function parameter can specialize a record-generic relation row");
+
     let mut enum_relation_result = generated.clone();
     let history = enum_relation_result["functions"]
         .as_array_mut()
