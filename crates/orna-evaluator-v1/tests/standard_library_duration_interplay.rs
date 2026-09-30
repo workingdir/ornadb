@@ -115,6 +115,38 @@ fn pinned_duration_formatters_preserve_exact_fractional_elapsed_values() {
             include_str!("fixtures/stdlib-time-duration-scaled-after-minute-iso-kzs8s.orna"),
             "PT1M0.000000001S",
         ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scaled-before-hour-compact-u9jg9.orna"),
+            "59m 59.999999999s",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scaled-before-hour-clock-u9jg9.orna"),
+            "00:59:59.999999999",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scaled-before-hour-words-u9jg9.orna"),
+            "59 minutes, 59.999999999 seconds",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scaled-before-hour-iso-u9jg9.orna"),
+            "PT59M59.999999999S",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scaled-after-hour-compact-u9jg9.orna"),
+            "1h 0.000000001s",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scaled-after-hour-clock-u9jg9.orna"),
+            "01:00:00.000000001",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scaled-after-hour-words-u9jg9.orna"),
+            "1 hour, 0.000000001 seconds",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scaled-after-hour-iso-u9jg9.orna"),
+            "PT1H0.000000001S",
+        ),
     ] {
         let result = session.submit(source);
         assert_eq!(
