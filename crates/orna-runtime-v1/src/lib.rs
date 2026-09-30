@@ -20770,6 +20770,28 @@ mod tests {
             "first() includes a match at the outer boundary and leaves the tail unopened"
         );
 
+        // The reference defines last(), filtering, and bounded take
+        // separately but leaves their nested-union closure interplay
+        // implicit. Unlike first(), last() must consume the whole three-row
+        // prefix to return its boundary match, while the failing fourth row
+        // remains outside the closed outer bound.
+        let (last_closes_filtered_outer_bound, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-closes-bound.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_filtered_outer_bound.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(107u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "last() closes the filtered outer prefix without evaluating the failing tail"
+        );
+
         // The reference leaves the first matching row immediately beyond a
         // filtered outer bound implicit. The three-row prefix has no match;
         // do not scan its fourth row, which would satisfy `first()`.
