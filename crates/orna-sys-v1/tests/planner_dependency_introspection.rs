@@ -24,6 +24,8 @@ const MAX_SOURCE_MATERIALIZATION_CLOSURE_TAIL: &str =
     include_str!("fixtures/max_source_materialization_closure_tail.orna");
 const MAX_SOURCE_MATERIALIZATION_OVERFLOW_TAIL: &str =
     include_str!("fixtures/max_source_materialization_overflow_tail.orna");
+const MAX_SOURCE_MATERIALIZATION_AGGREGATE_TAIL: &str =
+    include_str!("fixtures/max_source_materialization_aggregate_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -4532,6 +4534,82 @@ fn explain_marks_max_source_rounding_overflow_on_materialization_closure_tail() 
     assert_eq!(surface["nodes"][1]["details"]["estimated_work_overflow"], true);
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
         node.get("estimated_work").is_none()
+            && node.get("actual_rows").is_none()
+            && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_max_source_materialization_at_aggregate_rounding_edge() {
+    let parsed = orna_syntax_v1::parse_module(MAX_SOURCE_MATERIALIZATION_AGGREGATE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // 4-KiB heuristic, MAX bytes charge 2^52 blocks on both scan and
+    // materialization. Half of MAX local work per node sums to MAX - 1; one
+    // more row per node crosses only the aggregate boundary.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    let local_work_at_boundary = u64::MAX / 2;
+    let closing_rows = local_work_at_boundary - MAX_BYTE_BLOCKS;
+    let explain_with_rows = |rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:max-source-materialization-aggregate-rounding-edge",
+            ),
+            source: obj("table:MaxSourceMaterializationAggregate"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(rows),
+                estimated_bytes: Some(u64::MAX),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:max-source-aggregate-boundary")),
+        })
+        .expect("MAX source materialization aggregate boundary")
+    };
+
+    let exact = explain_with_rows(closing_rows);
+    let exact_cost = (u64::MAX - 1).to_string();
+    assert_eq!(exact.plan().estimated_cost(), Some(exact_cost.as_str()));
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let exact_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan)
+        .expect("MAX-source scan at aggregate boundary");
+    assert_eq!(exact_scan.estimated_work(), Some(local_work_at_boundary));
+    assert_eq!(exact_scan.details().get("estimated_work_overflow"), None);
+    assert_eq!(
+        exact.root().estimated_work(),
+        Some(local_work_at_boundary)
+    );
+
+    let overflow = explain_with_rows(closing_rows + 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    for node in overflow.nodes() {
+        assert_eq!(node.estimated_work(), Some(local_work_at_boundary + 1));
+        assert_eq!(node.details().get("estimated_work_overflow"), None);
+    }
+
+    let surface = serde_json::to_value(&overflow)
+        .expect("max-source materialization aggregate overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node["details"]["estimated_work"] == serde_json::json!(local_work_at_boundary + 1)
+            && node.get("estimated_work_overflow").is_none()
             && node.get("actual_rows").is_none()
             && node.get("actual_bytes").is_none()
     }));
