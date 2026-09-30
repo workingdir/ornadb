@@ -211,7 +211,8 @@ fn new_serve_state(
     let application = ApplicationLiveAdapter::new(ApplicationAuthority::new(
         catalogue,
         Limits::default(),
-    ));
+    ))
+    .with_runtime_identity(identity.database_id, identity.repository_id);
     Ok(ServeState {
         root,
         identity,
