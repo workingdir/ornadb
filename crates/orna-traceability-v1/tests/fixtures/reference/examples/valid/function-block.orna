@@ -1,0 +1,4 @@
+pub fn create_note(text: Str) {
+    let note = Note.insert({ created: now(), text: text });
+    note
+}

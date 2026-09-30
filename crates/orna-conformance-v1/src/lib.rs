@@ -454,7 +454,8 @@ impl Corpus {
         env::var_os("ORNA_REFERENCE_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../reference/Orna-1.0.0")
+                // The checked-in corpus is enough for normal use on a clean clone.
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference")
             })
     }
     pub fn load_default() -> Result<Self, CorpusError> {

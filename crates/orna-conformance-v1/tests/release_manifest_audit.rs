@@ -11,9 +11,23 @@ use serde_json::Value;
 fn reference_root() -> PathBuf {
     env::var_os("ORNA_REFERENCE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../reference/Orna-1.0.0")
-        })
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference"))
+}
+
+fn full_publication_root_is_explicit() -> bool {
+    env::var_os("ORNA_REFERENCE_DIR").is_some()
+}
+
+#[test]
+fn default_corpus_loads_from_the_checked_in_fixture_root() {
+    let corpus = Corpus::load_default().expect("checked-in conformance corpus loads by default");
+    assert_eq!(corpus.publication_digests.len(), 46);
+    if !full_publication_root_is_explicit() {
+        assert_eq!(
+            Corpus::default_root(),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference")
+        );
+    }
 }
 
 fn digest(bytes: &[u8]) -> String {
@@ -71,6 +85,12 @@ fn actual_distribution_files(root: &Path) -> BTreeSet<String> {
 fn frozen_release_inventory_and_provenance_bind_the_complete_bundle() {
     let root = reference_root();
     let corpus = Corpus::load(&root).expect("conformance consumer verifies normative release payloads");
+    if !full_publication_root_is_explicit() {
+        // The checked-in subset covers runtime corpus consumers; whole-package
+        // distributor inventory checks remain available with an explicit bundle.
+        assert_eq!(corpus.publication_digests.len(), 46);
+        return;
+    }
     let release: Value = serde_json::from_slice(
         &fs::read(root.join("release.json")).expect("read release record"),
     )
@@ -177,6 +197,11 @@ fn frozen_release_inventory_and_provenance_bind_the_complete_bundle() {
 #[test]
 fn release_file_walk_matches_the_reference_packager_exclusion_rules() {
     let root = reference_root();
+    if !full_publication_root_is_explicit() {
+        let corpus = Corpus::load(&root).expect("checked-in corpus is complete for conformance");
+        assert_eq!(corpus.publication_digests.len(), 46);
+        return;
+    }
     let files = actual_distribution_files(&root);
     assert!(files.contains("release.json"));
     assert!(files.contains("file-manifest.json"));

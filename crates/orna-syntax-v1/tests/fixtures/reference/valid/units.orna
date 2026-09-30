@@ -1,0 +1,8 @@
+pub dim Length;
+pub dim Time;
+pub dim Speed = Length / Time;
+pub unit m : Length base;
+pub unit s : Time base;
+pub unit km : Length = 1000.m;
+pub unit hour : Time = 3600.s;
+pub unit mph : Speed = 0.44704.m / s;

@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Orna live-session HTTP JSON structures",
+  "description": "Select one $defs entry. Duplicate JSON members must be rejected before schema validation. Validate token base64 canonical bits, matching path/session IDs and retention >= lease separately.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/create_request"
+    },
+    {
+      "$ref": "#/$defs/resume_request"
+    },
+    {
+      "$ref": "#/$defs/session_response"
+    }
+  ],
+  "$defs": {
+    "create_request": {
+      "type": "object",
+      "required": [
+        "database",
+        "protocol"
+      ],
+      "properties": {
+        "database": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+        },
+        "protocol": {
+          "const": "orna.present.v1"
+        }
+      },
+      "additionalProperties": false
+    },
+    "resume_request": {
+      "type": "object",
+      "required": [
+        "resume_token",
+        "protocol"
+      ],
+      "properties": {
+        "resume_token": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{43}$"
+        },
+        "protocol": {
+          "const": "orna.present.v1"
+        }
+      },
+      "additionalProperties": false
+    },
+    "session_response": {
+      "type": "object",
+      "required": [
+        "session",
+        "database",
+        "runtime",
+        "resume_token",
+        "websocket_path",
+        "lease_ms",
+        "limits"
+      ],
+      "properties": {
+        "session": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+        },
+        "database": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+        },
+        "runtime": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+        },
+        "resume_token": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{43}$"
+        },
+        "websocket_path": {
+          "type": "string",
+          "pattern": "^/orna/live/[0-9a-fA-F-]{36}$"
+        },
+        "lease_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "limits": {
+          "type": "object",
+          "required": [
+            "max_message_bytes",
+            "max_depth",
+            "max_nodes",
+            "max_collection_items",
+            "max_outgoing_bytes",
+            "request_retention_ms"
+          ],
+          "properties": {
+            "max_message_bytes": {
+              "type": "integer",
+              "minimum": 16777216
+            },
+            "max_depth": {
+              "type": "integer",
+              "minimum": 64
+            },
+            "max_nodes": {
+              "type": "integer",
+              "minimum": 100000
+            },
+            "max_collection_items": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_outgoing_bytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "request_retention_ms": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
