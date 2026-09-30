@@ -1687,21 +1687,6 @@ impl Parser {
                     "ORNA091-E-STATIC-FN",
                     "protocols use instance functions and static properties, not static functions",
                 )),
-                (_, TokenKind::Punct("?"))
-                    if matches!(
-                        tokens[i].kind,
-                        TokenKind::Integer | TokenKind::Punct(")" | "]")
-                    ) =>
-                {
-                    Some((
-                        "ORNA091-E-POSTFIX-QUESTION",
-                        if matches!(tokens[i].kind, TokenKind::Integer) {
-                            "postfix propagation `?` was removed; failures propagate automatically"
-                        } else {
-                            "remove postfix `?`; failure propagation is automatic"
-                        },
-                    ))
-                }
                 (TokenKind::Punct("|"), TokenKind::Punct("!")) => Some((
                     "ORNA-A091-010",
                     "`|!` is not assertion syntax; use `assert`",
@@ -3734,6 +3719,12 @@ impl Parser {
     fn parse_generic_parameters(&mut self) -> Vec<GenericParameter> {
         let mut parameters = Vec::new();
         self.require_punct("<", "expected `<`");
+        if self.is_punct(">") {
+            self.error_here(
+                "ORNA-PARSE-001",
+                "generic parameter lists require at least one parameter",
+            );
+        }
         while !self.eof() && !self.is_punct(">") {
             let start = self.current().span.clone();
             let name = self.require_name_text();
@@ -3809,18 +3800,25 @@ impl Parser {
                 let mut arguments = Vec::new();
                 if self.is_punct("<") {
                     self.bump();
-                    while !self.eof() && !self.is_punct(">") {
-                        arguments.push(self.parse_type_expr()?);
-                        if self.is_punct(",") {
-                            self.bump();
-                            if self.is_punct(">") {
-                                self.error_here(
-                                    "ORNA-PARSE-001",
-                                    "trailing commas are not allowed in generic type arguments",
-                                );
+                    if self.is_punct(">") {
+                        self.error_here(
+                            "ORNA-PARSE-001",
+                            "generic types require at least one type argument",
+                        );
+                    } else {
+                        while !self.eof() && !self.is_punct(">") {
+                            arguments.push(self.parse_type_expr()?);
+                            if self.is_punct(",") {
+                                self.bump();
+                                if self.is_punct(">") {
+                                    self.error_here(
+                                        "ORNA-PARSE-001",
+                                        "trailing commas are not allowed in generic type arguments",
+                                    );
+                                }
+                            } else {
+                                break;
                             }
-                        } else {
-                            break;
                         }
                     }
                     if self.is_punct(">") {
@@ -4113,6 +4111,18 @@ impl Parser {
                     self.error_here("ORNA-PARSE-001", "expected field name");
                     break;
                 }
+            }
+            // `?` is a postfix type suffix in type grammar and a removed
+            // propagation operator in expressions. Keep this check here so
+            // every expression shape gets the targeted code without flagging
+            // optional types in declarations.
+            if self.is_punct("?") {
+                self.error_here(
+                    "ORNA091-E-POSTFIX-QUESTION",
+                    "remove postfix `?`; failure propagation is automatic",
+                );
+                self.bump();
+                continue;
             }
             let Some((prec, right)) = self.infix() else {
                 break;
