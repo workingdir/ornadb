@@ -8992,9 +8992,9 @@ fn deletion_failure_closes_fail_closed_without_sensitive_diagnostics() {
 #[test]
 fn delete_cancels_durable_session_work_before_returning_success() {
     let (root, repository) = durable_repository();
-    // The reference requires DELETE to cancel session-owned work, but leaves
-    // the same-ID running-status behavior across sessions unspecified. Prove
-    // the neighbor's active row survives closure and can still complete.
+    // The reference scopes IDs by session and rejects request-ID reuse for a
+    // different input, but leaves that collision's interaction with neighbor
+    // closure unspecified. Exercise both behaviors with fixture-backed work.
     let first_target_request = eval_with_context([1; 16], [91; 16], [2; 16], None);
     let first_fingerprint = request_fingerprint(&first_target_request, [1; 16]);
     let second_target_request = eval_with_context([2; 16], [91; 16], [2; 16], None);
@@ -9076,7 +9076,7 @@ fn delete_cancels_durable_session_work_before_returning_success() {
     let mut children = RecordingChildren::default();
     let mut application = UnitApplication::default();
     let first_status_request = Envelope {
-        request: Some([44; 16]),
+        request: Some([91; 16]),
         watch: None,
         message: Message::RequestStatus {
             target: [91; 16],
@@ -9094,16 +9094,9 @@ fn delete_cancels_durable_session_work_before_returning_success() {
     ))
     .unwrap()
     .response
-    .expect("the owning session can read its running request");
-    assert!(matches!(
-        first_status.message,
-        Message::RequestStatusResult {
-            target,
-            state: orna_protocol_v1::RequestState::Running,
-            fingerprint: Some(returned),
-            result: None,
-        } if target == [91; 16] && returned == first_fingerprint
-    ));
+    .expect("reusing the target ID for a status query is diagnosed");
+    assert_eq!(first_status.request, Some([91; 16]));
+    assert!(matches!(first_status.message, Message::Diagnostic { .. }));
 
     assert_eq!(
         block_on(host.http_delete_with_children(
@@ -9123,8 +9116,8 @@ fn delete_cancels_durable_session_work_before_returning_success() {
     assert_eq!(children.calls, 1);
     assert_eq!(children.requests, vec![identity]);
 
-    let second_running_status_request = Envelope {
-        request: Some([44; 16]),
+    let second_collision_request = Envelope {
+        request: Some([91; 16]),
         watch: None,
         message: Message::RequestStatus {
             target: [91; 16],
@@ -9137,12 +9130,36 @@ fn delete_cancels_durable_session_work_before_returning_success() {
     let second_running_status = block_on(host.dispatch_frame(
         [7; 16],
         2,
-        Frame::Binary(second_running_status_request.clone()),
+        Frame::Binary(second_collision_request),
         &mut application,
     ))
     .unwrap()
     .response
-    .expect("the other session keeps its same-ID request status after deletion");
+    .expect("the sibling's same-ID collision remains session-scoped after deletion");
+    assert!(matches!(
+        second_running_status.message,
+        Message::Diagnostic { .. }
+    ));
+    let second_running_status_request = Envelope {
+        request: Some([92; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint: second_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let second_running_status = block_on(host.dispatch_frame(
+        [7; 16],
+        3,
+        Frame::Binary(second_running_status_request),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a fresh query ID reads the sibling's untouched running status");
     assert!(matches!(
         &second_running_status.message,
         Message::RequestStatusResult {
@@ -9166,7 +9183,7 @@ fn delete_cancels_durable_session_work_before_returning_success() {
     ))
     .unwrap();
     let second_status_request = Envelope {
-        request: Some([45; 16]),
+        request: Some([93; 16]),
         watch: None,
         message: Message::RequestStatus {
             target: [91; 16],
@@ -9178,7 +9195,7 @@ fn delete_cancels_durable_session_work_before_returning_success() {
     .unwrap();
     let second_status = block_on(host.dispatch_frame(
         [7; 16],
-        3,
+        4,
         Frame::Binary(second_status_request.clone()),
         &mut application,
     ))
@@ -9236,7 +9253,7 @@ fn delete_cancels_durable_session_work_before_returning_success() {
 
     let second_status_retry = block_on(host.dispatch_frame(
         [7; 16],
-        4,
+        5,
         Frame::Binary(second_status_request),
         &mut application,
     ))
