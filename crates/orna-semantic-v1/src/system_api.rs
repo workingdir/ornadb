@@ -570,6 +570,12 @@ impl SystemApi {
             .get(field)
     }
 
+    pub(crate) fn type_parameters(&self, type_name: &str) -> Option<&[String]> {
+        self.types
+            .get(type_name)
+            .map(|descriptor| descriptor.type_parameters.as_slice())
+    }
+
     pub(crate) fn resolve(&self, path: &[&str]) -> PathResolution<'_> {
         let name = path.join(".");
         if let Some(removed) = self.removed.get(&name) {
@@ -2902,6 +2908,21 @@ mod tests {
         assert!(
             SystemApi::from_json(&generic_record_result.to_string()).is_ok(),
             "record-generic relation rows resolve with whitespace before their type arguments"
+        );
+
+        let mut generic_parameter_result = document();
+        let meta = &mut generic_parameter_result["functions"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|function| function["name"] == "sys.meta")
+            .unwrap()["signature"];
+        *meta = serde_json::json!(
+            "fn sys.meta<T>(value: T): Relation<sys.ValueMetadata<T>>"
+        );
+        assert!(
+            SystemApi::from_json(&generic_parameter_result.to_string()).is_ok(),
+            "an in-scope type parameter can specialize a record-generic relation row"
         );
 
         let mut function_result = document();
