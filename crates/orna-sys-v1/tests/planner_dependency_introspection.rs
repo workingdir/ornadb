@@ -3629,3 +3629,71 @@ fn explain_closes_independent_half_block_remainders_across_scans() {
         node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
     }));
 }
+
+#[test]
+fn explain_closes_max_byte_remainder_at_exact_scan_work_boundary() {
+    let parsed = orna_syntax_v1::parse_module(ROUNDING_TAIL_INTERPLAY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the existing 4-KiB
+    // rule, MAX bytes have a 4095-byte remainder and charge 2^52 blocks.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    let closing_rows = u64::MAX - MAX_BYTE_BLOCKS;
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:max-byte-remainder-work-boundary"),
+        source: obj("table:RoundingFirst"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(closing_rows),
+            estimated_bytes: Some(u64::MAX),
+            mutable_branch: None,
+        }),
+        joins: vec![QueryJoinDescription {
+            source: obj("table:RoundingTail"),
+            statistics: None,
+            predicate: None,
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("max-byte remainder closes exactly at the scan work boundary");
+
+    let source_scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:RoundingFirst"))
+        })
+        .expect("max-byte source scan");
+    assert_eq!(source_scan.estimated_rows(), Some(closing_rows));
+    assert_eq!(source_scan.estimated_bytes(), Some(u64::MAX));
+    assert_eq!(source_scan.estimated_work(), Some(u64::MAX));
+
+    let unknown_scan = explained
+        .nodes()
+        .iter()
+        .find(|node| node.object() == Some(&obj("table:RoundingTail")))
+        .expect("unknown fixture tail scan");
+    assert_eq!(unknown_scan.estimated_rows(), None);
+    assert_eq!(unknown_scan.estimated_bytes(), None);
+    assert_eq!(unknown_scan.estimated_work(), None);
+    assert_eq!(explained.plan().estimated_cost(), None);
+    assert_eq!(explained.root().estimated_work(), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        None,
+        "the unknown tail preserves an exact MAX subtotal without false overflow"
+    );
+
+    let surface = serde_json::to_value(&explained).expect("max-byte remainder surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
