@@ -868,7 +868,7 @@ fn segmented_checkpoint_delete_update_impacts_cross_the_shared_budget_boundary()
 }
 
 #[test]
-fn disjoint_segment_edits_merge_with_one_sided_checkpoint_advance() {
+fn disjoint_segment_edits_merge_with_checkpoint_agreement_and_delete() {
     let candidate_a = integer(10);
     let candidate_b = integer(20);
     let (low_key, high_key) = if candidate_a.encode().unwrap() < candidate_b.encode().unwrap() {
@@ -916,24 +916,28 @@ fn disjoint_segment_edits_merge_with_one_sided_checkpoint_advance() {
 
     let base_checkpoint = CheckpointGeneration { generation: 4, position: Some(b"base-token".to_vec()) };
     let left_checkpoint = CheckpointGeneration { generation: 5, position: Some(b"left-token".to_vec()) };
-    let base = snapshot(
+    let deleted_checkpoint_id = b"consumer/deleted".to_vec();
+    let deleted_checkpoint = CheckpointGeneration { generation: 7, position: Some(b"delete-base".to_vec()) };
+    let mut base = snapshot(
         schema(true, FieldType::Str),
         split_manifest(10, 1, 4, [b"base-shared", b"base-lower", b"base-upper"]),
         Some(base_checkpoint.clone()),
     );
+    base.checkpoints.insert(deleted_checkpoint_id.clone(), deleted_checkpoint.clone());
     let left = snapshot(
         schema(true, FieldType::Str),
         split_manifest(11, 2, 5, [b"left-shared", b"left-lower", b"left-upper"]),
         Some(left_checkpoint.clone()),
     );
-    let right = snapshot(
+    let mut right = snapshot(
         schema(true, FieldType::Str),
         split_manifest(12, 3, 6, [b"right-shared", b"right-lower", b"right-upper"]),
-        Some(base_checkpoint),
+        Some(left_checkpoint.clone()),
     );
+    right.checkpoints.insert(deleted_checkpoint_id.clone(), deleted_checkpoint);
 
-    // Equal digests reuse the untouched first segment; independent row edits
-    // and a one-sided checkpoint advance can then be adopted together.
+    // Equal digests reuse the untouched first segment; independent row edits,
+    // an agreed checkpoint advance, and a unilateral delete reconcile together.
     let plan = merge_three_way_snapshots(&base, &left, &right, &mut source, budget()).unwrap();
     assert_eq!(plan.report.conflicts_lower_bound, 0);
     assert_eq!(plan.report.rows_examined, 6);
@@ -949,6 +953,7 @@ fn disjoint_segment_edits_merge_with_one_sided_checkpoint_advance() {
         assert_eq!(rows[0].fields[&id(3)], string("Paris"));
     }
     assert_eq!(plan.checkpoints[b"consumer/source".as_slice()], left_checkpoint);
+    assert!(!plan.checkpoints.contains_key(deleted_checkpoint_id.as_slice()));
 }
 
 #[test]
