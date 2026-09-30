@@ -23657,6 +23657,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sys_invocation_tail_end_cursor_rejects_cwd_write_after_receipt_replay() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(100)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let invocation_id = id(101);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(102)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .finish_invocation_observation(writer, invocation_id, InvocationCompletion::Succeeded)
+            .await
+            .unwrap();
+
+        let end_page = state.invocation_observation_tail(None, 2).await.unwrap();
+        assert_eq!(end_page.entries.len(), 2);
+        assert!(!end_page.has_more, "the cursor is exactly at the tail end");
+        assert_eq!(
+            end_page
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        let stale_cursor = end_page
+            .next_cursor
+            .expect("the tail-end page provides a continuation");
+
+        let key = stream_delivery("tail-cursor-reconcile", "tail-cursor-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key,
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("tail-cursor:reset").unwrap(),
+            },
+            reason: "tail cursor receipt reconciliation boundary".into(),
+        };
+        let receipt_id = id(103);
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request.clone(), receipt_id)
+            .await
+            .unwrap();
+
+        let capture = state.capture().await.unwrap();
+        state
+            .commit(writer, &capture, &mutation(104), digest(105), &NoFault)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(writer, request, receipt_id)
+                .await,
+            Ok(receipt),
+            "a receipt replay after the CWD write preserves its original result"
+        );
+        assert_eq!(
+            state
+                .invocation_observation_tail(Some(stale_cursor), 2)
+                .await,
+            Err(RuntimeError::InvocationTailInvalid),
+            "a receipt replay cannot make a prior CWD cursor valid again"
+        );
+        let retained = state
+            .invocation_observation_tail(None, 4)
+            .await
+            .unwrap();
+        assert_eq!(
+            retained
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "receipt reconciliation does not consume or append lifecycle tail sequence"
+        );
+        assert_eq!(
+            retained.entries[1].status,
+            InvocationObservationStatus::Succeeded
+        );
+    }
+
+    #[tokio::test]
     async fn sys_lifecycle_parent_waits_for_children_and_replacement_orphans_old_owner() {
         assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
         let (_temp, repo) = repository();
