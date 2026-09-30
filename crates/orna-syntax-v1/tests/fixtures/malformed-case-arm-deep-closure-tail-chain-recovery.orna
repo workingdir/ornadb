@@ -1,0 +1,13 @@
+pub fn bad(flag: Bool): Int { case flag {
+1: 2 3 { value: 4 },
+true: "outer {outer => { case outer {
+1: 2 3 { value: 5 },
+true: outer,
+false: "inner {nested => { case nested {
+1: 2 3 { value: 6 },
+true: "leaf {flag} suffix",
+false: "last {outer} end",
+} }} terminal"
+}}} after",
+false: "fallback {flag} done"
+}}
