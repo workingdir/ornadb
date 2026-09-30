@@ -1021,6 +1021,14 @@ impl HistoricalSnapshot {
         self.generation
     }
 
+    /// Canonical logical ID for this database/runtime/generation pin.
+    ///
+    /// The checkpoint digest remains separate in [`CwdCapture`], so equal
+    /// payload digests at adjacent generations still have distinct IDs.
+    pub fn snapshot_id(&self) -> [u8; 32] {
+        historical_snapshot_id(&self.capture)
+    }
+
     /// The immutable checkpoint mutation boundary represented by this pin.
     pub const fn mutation_sequence(&self) -> u64 {
         self.mutation_sequence
@@ -1058,6 +1066,11 @@ pub struct HistoricalAuditRows<T> {
 impl<T> HistoricalAuditRows<T> {
     pub fn capture(&self) -> &CwdCapture {
         &self.capture
+    }
+
+    /// Canonical logical ID of the generation used for this audit read.
+    pub fn snapshot_id(&self) -> [u8; 32] {
+        historical_snapshot_id(&self.capture)
     }
 
     pub fn rows(&self) -> &[T] {
@@ -1103,6 +1116,11 @@ impl HistoricalSnapshotAttestation {
         self.generation
     }
 
+    /// Canonical logical ID of the generation whose rows were verified.
+    pub fn snapshot_id(&self) -> [u8; 32] {
+        historical_snapshot_id(&self.capture)
+    }
+
     pub const fn mutation_sequence(&self) -> u64 {
         self.mutation_sequence
     }
@@ -1124,6 +1142,16 @@ impl HistoricalSnapshotAttestation {
     }
 }
 
+fn historical_snapshot_id(capture: &CwdCapture) -> [u8; 32] {
+    // The canonical Snapshot ID hashes database, runtime and generation. Keep
+    // the mutable-data digest out of this stable logical key; CwdCapture still
+    // carries that digest for exact context validation.
+    match capture.snapshot() {
+        Snapshot::Cwd { id, .. } => *id,
+        Snapshot::Commit { .. } => unreachable!("CwdCapture only contains CWD snapshots"),
+    }
+}
+
 /// The result of reading one table at a pinned historical runtime generation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HistoricalTableRows {
@@ -1135,6 +1163,11 @@ pub struct HistoricalTableRows {
 impl HistoricalTableRows {
     pub fn capture(&self) -> &CwdCapture {
         &self.capture
+    }
+
+    /// Canonical logical ID of the generation used for this table read.
+    pub fn snapshot_id(&self) -> [u8; 32] {
+        historical_snapshot_id(&self.capture)
     }
 
     /// Whether rows read under these pins can be combined as one historical

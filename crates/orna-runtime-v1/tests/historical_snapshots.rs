@@ -90,7 +90,7 @@ async fn historical_reads_are_pinned_to_checkpoint_generations_and_cover_deletes
             table_mutation(7, 1, Some(b"two")),
             table_mutation(8, 2, Some(b"also two")),
         ],
-        9,
+        6,
     )
     .await;
     commit(&state, writer, &[table_mutation(10, 1, None)], 11).await;
@@ -111,6 +111,26 @@ async fn historical_reads_are_pinned_to_checkpoint_generations_and_cover_deletes
         .select_historical_snapshot(3)
         .await
         .expect("select third checkpoint generation");
+    let repeated_generation_one = state
+        .select_historical_snapshot(1)
+        .await
+        .expect("reselect first checkpoint generation");
+
+    assert_eq!(
+        generation_one.capture().generation_digest(),
+        generation_two.capture().generation_digest(),
+        "fixture repeats the payload digest to isolate generation identity"
+    );
+    assert_ne!(
+        generation_one.snapshot_id(),
+        generation_two.snapshot_id(),
+        "canonical snapshot IDs include generation even when payload digests repeat"
+    );
+    assert_eq!(
+        generation_one.snapshot_id(),
+        repeated_generation_one.snapshot_id(),
+        "reselecting the same generation yields a stable canonical ID"
+    );
 
     assert!(state
         .read_table_at(&generation_zero, "records")
@@ -166,6 +186,8 @@ async fn historical_reads_are_pinned_to_checkpoint_generations_and_cover_deletes
         .read_table_at(&generation_two, "records")
         .await
         .expect("read second generation with context");
+    assert_eq!(generation_one_rows.snapshot_id(), generation_one.snapshot_id());
+    assert_eq!(generation_two_rows.snapshot_id(), generation_two.snapshot_id());
     assert_eq!(
         generation_one_rows.require_same_context(&generation_two_rows),
         Err(RuntimeError::SnapshotContextMismatch)
@@ -191,6 +213,15 @@ async fn historical_reads_are_pinned_to_checkpoint_generations_and_cover_deletes
     )
     .await
     .expect("reopen runtime with retained row history");
+    let reopened_generation_one = reopened
+        .select_historical_snapshot(1)
+        .await
+        .expect("reselect historical generation after reopen");
+    assert_eq!(
+        generation_one.snapshot_id(),
+        reopened_generation_one.snapshot_id(),
+        "canonical generation identity survives runtime reopen"
+    );
     assert_eq!(
         reopened
             .read_table_at(&generation_one, "records")
