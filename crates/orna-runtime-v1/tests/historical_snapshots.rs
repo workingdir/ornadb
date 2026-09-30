@@ -912,14 +912,14 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     let writer = state.acquire_lease([65; 16]).await.expect("acquire writer");
     let mut pins = Vec::new();
 
-    for generation in 1..=260_u64 {
+    for generation in 1..=262_u64 {
         let mut mutation_id = [0; 16];
         mutation_id[8..].copy_from_slice(&generation.to_be_bytes());
         // Delete the prefix while its extended neighbor remains stable, restore an
         // intermediate value, return to the original bytes, then repeat delete and
-        // identical restoration to exercise the full retention tail.
+        // identical restoration twice to exercise the full retention tail.
         let prefix_value = match generation {
-            256 | 259 => None,
+            256 | 259 | 261 => None,
             257 => Some(b"intermediate-prefix".to_vec()),
             _ => Some(b"original-prefix".to_vec()),
         };
@@ -942,7 +942,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         }
         commit(&state, writer, &mutations, 57).await;
 
-        if matches!(generation, 255 | 256 | 257 | 258 | 259 | 260) {
+        if matches!(generation, 255 | 256 | 257 | 258 | 259 | 260 | 261 | 262) {
             let selected = state
                 .select_historical_snapshot(generation)
                 .await
@@ -957,7 +957,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
 
     assert_eq!(
         pins.iter().map(|(generation, _, _)| *generation).collect::<Vec<_>>(),
-        [255, 256, 257, 258, 259, 260]
+        [255, 256, 257, 258, 259, 260, 261, 262]
     );
     assert!(pins.windows(2).all(|pair| {
         pair[0].2.capture().generation_digest() == pair[1].2.capture().generation_digest()
@@ -991,10 +991,16 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             (vec![5], b"original-prefix".to_vec()),
             (vec![5, 0], b"stable-extension".to_vec()),
         ],
+        261 => vec![(vec![5, 0], b"stable-extension".to_vec())],
+        262 => vec![
+            (vec![5], b"original-prefix".to_vec()),
+            (vec![5, 0], b"stable-extension".to_vec()),
+        ],
         _ => unreachable!("only prefix restoration boundary generations are read"),
     };
     assert_eq!(expected_rows(255), expected_rows(258));
     assert_eq!(expected_rows(255), expected_rows(260));
+    assert_eq!(expected_rows(255), expected_rows(262));
 
     for (generation, descriptor, selected) in &pins {
         let resolved = state
