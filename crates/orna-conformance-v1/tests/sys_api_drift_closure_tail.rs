@@ -52,14 +52,14 @@ fn default_argument_fixture_uses_published_schema_edges() {
 }
 
 #[test]
-fn edge_interplay_fixture_closes_recursive_rows_across_table_columns() {
+fn edge_interplay_fixture_closes_table_reference_capture_rows() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
         EDGE_INTERPLAY,
     )]);
     assert!(
         analysis.is_ok(),
-        "nested DiffEntry and SourceMap projections plus recursive SYS Function to Table to Column rows and optional row-count filters must resolve through the published schema: {:?}",
+        "nested DiffEntry and SourceMap projections plus filtered Table references and captured TableRef rows must resolve through the published schema: {:?}",
         analysis
             .diagnostics
             .iter()
