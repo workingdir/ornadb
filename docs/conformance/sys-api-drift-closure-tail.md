@@ -31,3 +31,5 @@ The fixture extends the same rule over three published edges: `Type.parameters -
 The fixture also proves a four-edge chain from `Function.failure_types` through type parameters and protocol bounds to protocol members. The frozen descriptors define each relation edge but are silent on carrying row types across a longer callback pipeline; the semantic loader follows the declared descriptor at every `flat_map` step.
 
 The fixture extends that path through `Function.calls`, so the five-edge proof starts with a function row, enters its called functions, and continues through failure types, generic parameters, bounds, and members. `Function.calls` returns the same declared row type recursively; the loader preserves that descriptor before resolving the rest of the chain.
+
+The fixture also follows `Function.calls` for three successive `flat_map` steps. The reference declares the recursive row field but does not detail repeated callback closure over its returned `Relation<Function>`; each step keeps the `sys.Function` descriptor for the next callback.

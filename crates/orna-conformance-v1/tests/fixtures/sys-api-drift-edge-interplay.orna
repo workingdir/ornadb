@@ -22,3 +22,6 @@ pub fn bounded_protocols_from_types(types: Relation<sys.Type>): Relation<sys.Pro
 pub fn bounded_protocol_members_from_types(types: Relation<sys.Type>): Relation<sys.ProtocolMember> = bounded_protocols_from_types(types) | flat_map(bound => bound.members);
 pub fn function_failure_protocol_members(functions: Relation<sys.Function>): Relation<sys.ProtocolMember> = functions | flat_map(source => source.failure_types) | flat_map(definition => definition.parameters) | flat_map(parameter => parameter.bounds) | flat_map(bound => bound.members);
 pub fn called_function_failure_protocol_members(functions: Relation<sys.Function>): Relation<sys.ProtocolMember> = functions | flat_map(caller => caller.calls) | flat_map(source => source.failure_types) | flat_map(definition => definition.parameters) | flat_map(parameter => parameter.bounds) | flat_map(bound => bound.members);
+pub fn direct_function_calls(functions: Relation<sys.Function>): Relation<sys.Function> = functions | flat_map(caller => caller.calls);
+pub fn second_level_function_calls(functions: Relation<sys.Function>): Relation<sys.Function> = direct_function_calls(functions) | flat_map(callee => callee.calls);
+pub fn third_level_function_calls(functions: Relation<sys.Function>): Relation<sys.Function> = second_level_function_calls(functions) | flat_map(descendant => descendant.calls);
