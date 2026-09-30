@@ -1,0 +1,4 @@
+pub fn storage_published_rows(storage: sys.Storage): Int = storage.published_rows;
+pub fn storage_published_bytes(storage: sys.Storage): Int = storage.published_bytes;
+pub fn typed_publication_policy(storage: sys.Storage): Int = storage.publication_policy.compressed_target_bytes;
+pub fn maintenance_published_rows(job: sys.MaintenanceJob): Int = job.published_rows;
