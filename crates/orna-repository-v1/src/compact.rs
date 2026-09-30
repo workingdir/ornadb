@@ -22,7 +22,6 @@ use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 use parquet::{
     basic::{Compression, ConvertedType, Encoding, PageType, Type},
     column::{page::Page, reader::ColumnReader},
-    data_type::{AsBytes, BoolType, ByteArrayType, Int32Type, Int64Type},
     file::reader::{FileReader, SerializedFileReader},
 };
 use sha2::{Digest, Sha256};

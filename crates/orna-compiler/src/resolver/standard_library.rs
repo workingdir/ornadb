@@ -159,6 +159,7 @@ fn check_standard_library_source_v1(
     })
 }
 
+#[cfg(test)]
 pub(super) fn expected_standard_json_executable(
     declaration: &ServerFunctionDeclaration,
     catalogue: &CatalogueSnapshot,
@@ -219,6 +220,7 @@ pub(super) fn expected_standard_json_executable(
         .map_err(|source| StandardLibraryCheckError::Revision { source })
 }
 
+#[cfg(test)]
 pub(super) fn reconcile_standard_json_executable(
     stored: &StandardExecutable,
     declaration: &ServerFunctionDeclaration,

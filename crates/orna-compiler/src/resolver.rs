@@ -13,8 +13,8 @@ mod type_use;
 
 pub(crate) use client::durable_state_slot_id;
 use client::{
-    ClientExpressionResultShape, check_client_functions,
-    client_resource_targets, resolve_client_function_headers, resolve_client_function_inputs,
+    ClientExpressionResultShape, check_client_functions, client_resource_targets,
+    resolve_client_function_headers, resolve_client_function_inputs,
 };
 #[cfg(test)]
 use client::{
@@ -37,12 +37,11 @@ pub use model::{
     CheckedStandardApplicationBundle, CheckedStandardExecutable, CheckedStandardJsonEncode,
     CheckedStandardLibrary, CheckedStandardParameterEcho, CheckedStandardSchema,
     CheckedStandardTerminalPresentTable, CheckedStandardTypeBinding, CheckedStandardTypeReference,
-    CheckedStandardValueType,
-    CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue, STANDARD_LIBRARY_V3_REVISION_ID,
-    STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID,
-    STANDARD_LIBRARY_V6_REVISION_ID, STANDARD_LIBRARY_V7_REVISION_ID,
-    STANDARD_LIBRARY_V8_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID,
-    STANDARD_LIBRARY_V10_REVISION_ID, STD_BOOLEAN_TYPE_ID,
+    CheckedStandardValueType, CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue,
+    STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID,
+    STANDARD_LIBRARY_V5_REVISION_ID, STANDARD_LIBRARY_V6_REVISION_ID,
+    STANDARD_LIBRARY_V7_REVISION_ID, STANDARD_LIBRARY_V8_REVISION_ID,
+    STANDARD_LIBRARY_V9_REVISION_ID, STANDARD_LIBRARY_V10_REVISION_ID, STD_BOOLEAN_TYPE_ID,
     STD_CHARACTER_LARGE_OBJECT_TYPE_ID, STD_CLI_REPL_FUNCTION_ID,
     STD_CLI_REPL_FUNCTION_REVISION_ID, STD_CLI_REPL_REVISION_NUMBER, STD_CLI_SCHEMA_ID,
     STD_CLI_SOURCE_UNIT_ID, STD_CSV_ENCODE_FUNCTION_ID, STD_DATA_ROWS_TYPE_BINDING_ID,
@@ -71,20 +70,21 @@ pub use model::{
     STD_UI_TEXT_PARAMETER_ID, STD_UI_TEXT_RUNTIME_CONTRACT, STD_UI_TYPE_ID,
     STD_UI_WINDOW_CONTENT_PARAMETER_ID, STD_UI_WINDOW_FUNCTION_ID,
     STD_UI_WINDOW_FUNCTION_REVISION_ID, STD_UI_WINDOW_REVISION_NUMBER,
-    STD_UI_WINDOW_RUNTIME_CONTRACT, STD_UI_WINDOW_TITLE_PARAMETER_ID,
-    SemanticType, StandardApplicationCheckContext, StandardApplicationCheckReport,
+    STD_UI_WINDOW_RUNTIME_CONTRACT, STD_UI_WINDOW_TITLE_PARAMETER_ID, SemanticType,
+    StandardApplicationCheckContext, StandardApplicationCheckReport,
     StandardApplicationContextError, StandardLibraryCheckError,
 };
 pub(crate) use model::{
-    CheckedClientControlFlowBranch, CheckedClientControlFlowStatement,
-    CheckedClientExpression, CheckedClientFunctionBody, CheckedClientLocal, CheckedClientLocalKind,
+    CheckedClientControlFlowBranch, CheckedClientControlFlowStatement, CheckedClientExpression,
+    CheckedClientFunctionBody, CheckedClientLocal, CheckedClientLocalKind,
     CheckedClientReturnShape, CheckedClientStateSlot, CheckedClientStatement, CheckedFieldRename,
     CheckedInspectOperation, CheckedInspectProjection, CheckedResourceOperation,
     CheckedServerFunctionBody, CheckedServerFunctionReturn, CheckedStateDefault, CheckedStateScope,
     CheckedStateSlotId, QueryCatalogue, QueryField, QueryObjectType, ResolutionCatalogue,
-    STD_JSON_CONTRACT, STD_UI_CONTRACT,
 };
 use model::{CheckedEnumType, CheckedRecordValueField, CheckedRecordValueType};
+#[cfg(test)]
+pub(crate) use model::{STD_JSON_CONTRACT, STD_UI_CONTRACT};
 use server_functions::check_server_functions;
 #[cfg(test)]
 pub(crate) use standard_library::checked_standard_library_with_contract_overrides_for_test;
@@ -94,13 +94,11 @@ use standard_library::{
     check_standard_library_source_v2_parts, check_standard_library_source_v3_parts,
     check_standard_library_source_v4_parts, check_standard_library_source_v5_parts,
     expected_standard_json_executable, match_standard_source_facts, reconcile_standard_executable,
-    reconcile_standard_json_executable,
-    reconcile_standard_source, unquoted_prelude_name, unquoted_semantic_name,
-    validate_standard_source_origins,
+    reconcile_standard_json_executable, reconcile_standard_source, unquoted_prelude_name,
+    unquoted_semantic_name, validate_standard_source_origins,
 };
 pub use standard_library::{
-    check_standard_json_encode, check_standard_library_source,
-    check_standard_parameter_echo,
+    check_standard_json_encode, check_standard_library_source, check_standard_parameter_echo,
     check_standard_terminal_present_table,
 };
 
@@ -113,14 +111,12 @@ use std::{
 use orna_artifact::client_plan::{
     ControlFlowBinaryOperator, ControlFlowUnaryOperator, ResourceKind,
 };
+#[cfg(test)]
 use orna_artifact::server_json_encode::{self, JsonEncodePlan};
-use orna_artifact::server_parameter_echo::{self, ServerParameterEcho};
 use orna_core::{
     CallSiteId, ExpressionId, FunctionId, FunctionRevisionId, ParameterId, SchemaId, SourceUnitId,
     StateSlotId, TypeId,
-    canonical_hash::{
-        artifact_payload_digest, function_declaration_digest, function_semantic_digest_with_version,
-    },
+    canonical_hash::artifact_payload_digest,
     catalogue::{
         CatalogueSnapshot, CatalogueSnapshotError, FunctionDomain, FunctionReturn,
         FunctionSecurity as CatalogueFunctionSecurity,
@@ -131,15 +127,22 @@ use orna_core::{
     },
     inspect::{INSPECT_RENDER_CARRIER_SIGNATURE, INSPECT_RENDER_CONTRACT},
     revision::{
-        DefinitionIdentity, DefinitionOrigin, DefinitionReference, DefinitionReferenceKind,
-        DefinitionReferenceTarget, EMPTY_APPLICATION_CATALOGUE_REVISION_ID, ExecutableArtifact,
-        ExecutableArtifactKind, FunctionRevisionRecord, FunctionSemanticHashVersion, SourceOrigin,
-        StandardExecutable, StandardLibraryDigestVersion, StoredSourceRevision, StoredSourceUnit,
-        VerifiedStandardLibrarySnapshot,
+        DefinitionIdentity, DefinitionOrigin, DefinitionReferenceKind,
+        EMPTY_APPLICATION_CATALOGUE_REVISION_ID, SourceOrigin, StandardLibraryDigestVersion,
+        StoredSourceUnit, VerifiedStandardLibrarySnapshot,
     },
     source::{SourceBundle, SourceUnit},
     system::SYS_SOURCE_FUNCTION_TYPE_ID,
     types::{ResolvedType, StandardScalar},
+};
+#[cfg(test)]
+use orna_core::{
+    canonical_hash::{function_declaration_digest, function_semantic_digest_with_version},
+    revision::{
+        DefinitionReference, DefinitionReferenceTarget, ExecutableArtifact, ExecutableArtifactKind,
+        FunctionRevisionRecord, FunctionSemanticHashVersion, StandardExecutable,
+        StoredSourceRevision,
+    },
 };
 use orna_syntax::{
     CapabilitySpecification, ClientExpression, ClientFunctionDeclaration, FieldRenameDeclaration,
