@@ -385,8 +385,10 @@ pub enum RowSnapshotState<'a> {
     Absent,
     /// A retained storage deletion marker. It is logically absent for merge
     /// comparison; the output needs a marker only when the common base had a
-    /// live row that must remain deleted.
-    Tombstone,
+    /// live row that must remain deleted. Its identity must match the key
+    /// being reconciled; retaining it here prevents a marker for one key from
+    /// being mistaken for an unrelated missing row.
+    Tombstone { table: ObjectId, key: &'a CanonicalValue },
     Pruned,
 }
 
@@ -443,9 +445,45 @@ pub fn merge_keyed_row_states(
         return Err(RowSnapshotMergeError::PrunedInput { sides: pruned_sides });
     }
 
+    let identity = |state| match state {
+        RowSnapshotState::Present(row) => Some((row.table, &row.key)),
+        RowSnapshotState::Tombstone { table, key } => Some((table, key)),
+        RowSnapshotState::Absent | RowSnapshotState::Pruned => None,
+    };
+    let identities = [identity(base), identity(left), identity(right)];
+    let anchor = identities
+        .iter()
+        .flatten()
+        .min_by(|(left_table, left_key), (right_table, right_key)| {
+            left_table.cmp(right_table).then_with(|| {
+                left_key
+                    .encode()
+                    .expect("validated row keys remain encodable")
+                    .cmp(&right_key.encode().expect("validated row keys remain encodable"))
+            })
+        })
+        .copied();
+    // A supplied base is authoritative for conflict reporting. Without one,
+    // use canonical identity order so swapping branch arguments cannot change
+    // the identity carried by the error. The reference specifies conflicts
+    // but leaves their payload anchor unspecified.
+    let anchor = identity(base).or(anchor);
+    if let Some((table, key)) = anchor {
+        if identities.iter().flatten().any(|(other_table, other_key)| {
+            *other_table != table || *other_key != key
+        }) {
+            return Err(RowSnapshotMergeError::Conflict(RowMergeConflict::Identity {
+                table,
+                key: key.clone(),
+            }));
+        }
+    }
+
     let row = |state| match state {
         RowSnapshotState::Present(row) => Some(row),
-        RowSnapshotState::Absent | RowSnapshotState::Tombstone | RowSnapshotState::Pruned => None,
+        RowSnapshotState::Absent
+        | RowSnapshotState::Tombstone { .. }
+        | RowSnapshotState::Pruned => None,
     };
     let base_row = row(base);
     let merged = merge_keyed_row(base_row, row(left), row(right))
@@ -469,7 +507,21 @@ pub fn merge_keyed_row(
     left: Option<&KeyedRow>,
     right: Option<&KeyedRow>,
 ) -> Result<Option<KeyedRow>, RowMergeConflict> {
-    let exemplar = base.or(left).or(right);
+    let stable_branch_identity = [left, right]
+        .into_iter()
+        .flatten()
+        .min_by(|left, right| {
+            left.table.cmp(&right.table).then_with(|| {
+                left.key
+                    .encode()
+                    .expect("validated row keys remain encodable")
+                    .cmp(&right.key.encode().expect("validated row keys remain encodable"))
+            })
+        });
+    // Keep a supplied base as the diagnostic anchor; where there is no base,
+    // canonical table/key order makes identity conflicts invariant under
+    // swapping the two branches. ORNA-MERGE leaves this payload choice open.
+    let exemplar = base.or(stable_branch_identity);
     let Some(exemplar) = exemplar else { return Ok(None) };
     let identity_matches = |row: &KeyedRow| row.table == exemplar.table && row.key == exemplar.key;
     if [base, left, right].into_iter().flatten().any(|row| !identity_matches(row)) {
