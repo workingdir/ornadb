@@ -992,6 +992,89 @@ fn explain_cost_overflow_survives_unknown_intermediate_estimates() {
 }
 
 #[test]
+fn explain_unknown_intermediate_keeps_exact_maximum_known_subtotal() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    // Unknown join/input work makes total cost unavailable, but the update,
+    // its materialization, and the later known scan sum to u64::MAX exactly.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:unknown-at-exact-cost-boundary"),
+        source: obj("table:missing-stats"),
+        source_statistics: None,
+        joins: vec![QueryJoinDescription {
+            source: obj("table:large"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 2),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            predicate: None,
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: vec![QueryMutationDescription {
+            table: obj("table:missing-stats"),
+            kind: QueryMutationKind::Update,
+            estimated_affected_rows: Some(1),
+            estimated_write_bytes: Some(0),
+            estimated_table_rows_before: Some(1),
+        }],
+        materialize_into: Some(obj("materialization:unknown-boundary")),
+    })
+    .expect("unknown estimates around an exact maximum known subtotal");
+
+    assert_eq!(explained.plan().estimated_cost(), None);
+    assert_eq!(explained.root().estimated_work(), Some(1));
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        None,
+        "exactly u64::MAX of known nonnegative work is representable"
+    );
+    let mutation = explained
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned())))
+        .expect("known mutation work before the unknown join");
+    assert_eq!(mutation.estimated_work(), Some(1));
+    let join = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("unknown join work");
+    assert_eq!(join.estimated_work(), None);
+    let unknown_scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:missing-stats"))
+        })
+        .expect("unknown left scan");
+    assert_eq!(unknown_scan.estimated_work(), None);
+    let known_tail = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj("table:large"))
+        })
+        .expect("known right scan after unknown estimates");
+    assert_eq!(known_tail.estimated_work(), Some(u64::MAX - 2));
+
+    let surface = serde_json::to_value(&explained).expect("unknown-boundary plan surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert!(surface["nodes"][0]["details"]
+        .get("estimated_cost_overflow")
+        .is_none());
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
 fn explain_local_work_overflow_is_explicit_on_cost_and_write_tails() {
     let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
