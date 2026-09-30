@@ -837,6 +837,85 @@ fn explain_cost_boundary_includes_final_mutation_and_materialization_work() {
 }
 
 #[test]
+fn explain_known_cost_overflow_survives_an_unknown_final_tail() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_after_update = |affected_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:overflow-with-unknown-tail"),
+            source: obj("table:large"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(affected_rows),
+                    estimated_write_bytes: Some(0),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Insert,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+            ],
+            materialize_into: Some(obj("materialization:unknown-tail")),
+        })
+        .expect("plan with an incomplete final tail")
+    };
+
+    let exact_known_subtotal = explain_after_update(0);
+    assert_eq!(exact_known_subtotal.plan().estimated_cost(), None);
+    assert_eq!(
+        exact_known_subtotal
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        None
+    );
+    assert!(exact_known_subtotal.nodes().iter().any(|node| {
+        node.kind() == PlanNodeKind::Scan && node.estimated_work() == Some(u64::MAX)
+    }));
+
+    let explained = explain_after_update(1);
+
+    assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(explained.plan().estimated_cost(), None);
+    assert_eq!(explained.root().estimated_work(), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let unknown_insert = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Invoke && node.estimated_rows().is_none())
+        .expect("unknown mutation estimate tail");
+    assert_eq!(unknown_insert.estimated_work(), None);
+    assert_eq!(unknown_insert.details().get("estimated_work_overflow"), None);
+    let surface = serde_json::to_value(&explained).expect("unknown overflow tail surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"][0]["details"].get("estimated_work").is_none());
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
 fn explain_local_work_overflow_is_explicit_on_cost_and_write_tails() {
     let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
