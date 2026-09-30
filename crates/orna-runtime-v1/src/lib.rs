@@ -20344,6 +20344,55 @@ mod tests {
             "take(3) reaches and reports the later right-side projection failure"
         );
 
+        // Reaching the exact end of the complete left sibling is also a
+        // terminal boundary: the right sibling remains untouched until the
+        // requested result requires rows from it.
+        let (exact_left_bound, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-project-take-exact-left-bound.orna"
+            ),
+        );
+        assert_eq!(
+            exact_left_bound.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(2u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "the exact left-side bound does not enter the right sibling"
+        );
+
+        let (one_right_row, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-union-project-take-one-right.orna"),
+        );
+        assert_eq!(
+            one_right_row.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(3u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "one additional requested row evaluates one right-side projection"
+        );
+
+        let (right_failure, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-project-take-right-failure.orna"
+            ),
+        );
+        assert_eq!(
+            right_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "the additional bound reaches and reports the second right-side projection"
+        );
+
         let (missing, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
             include_str!("../tests/fixtures/query-session-projection-missing.orna"),
