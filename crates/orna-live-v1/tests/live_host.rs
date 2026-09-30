@@ -10012,6 +10012,135 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
         )),
         Err(Error::Closed)
     ));
+
+    // Continue the same identity through one more owner lifetime. The closed
+    // scopes retain separate status-query records, while this fifth scope
+    // receives a new Unknown snapshot for its own target lookup.
+    let fifth_subscribe = subscribe();
+    let mut fifth_issuer = Issuer(5, None);
+    let fifth_credential = block_on(host.create(
+        CreateRequest {
+            id: [5; 16],
+            origin: origin(),
+            expires_at: 100,
+            now: 6,
+            subscribe: &fifth_subscribe,
+        },
+        &mut fifth_issuer,
+    ))
+    .unwrap();
+    block_on(host.resume(ResumeRequest {
+        id: [5; 16],
+        origin: &origin(),
+        credential: &fifth_credential,
+        attachment: [10; 16],
+        now: 7,
+    }))
+    .unwrap();
+
+    let fifth_target_request = eval_with_context([5; 16], [91; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&fifth_target_request, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    let fifth_target_fingerprint = request_fingerprint(&fifth_target_request, [5; 16]);
+    let fifth_query_request = Envelope {
+        request: Some([96; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint: fifth_target_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let fifth_query_fingerprint = request_fingerprint(&fifth_query_request, [5; 16]);
+    let fifth_unknown = block_on(host.dispatch_frame(
+        [10; 16],
+        8,
+        Frame::Binary(fifth_query_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a fifth scope reuses the same ID with an independent Unknown snapshot");
+    assert!(matches!(
+        &fifth_unknown.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Unknown,
+            fingerprint: None,
+            result: None,
+        } if *target == [91; 16]
+    ));
+    for (session_id, expected_fingerprint) in [
+        ([1; 16], closed_sibling_target_query_fingerprint),
+        ([3; 16], third_query_fingerprint),
+        ([4; 16], fourth_query_fingerprint),
+        ([5; 16], fifth_query_fingerprint),
+    ] {
+        assert!(matches!(
+            block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+                session_id,
+                request_id: [96; 16],
+            }))
+            .unwrap(),
+            Some(status)
+                if status.state == orna_runtime_v1::RequestState::Completed
+                    && status.fingerprint == expected_fingerprint
+        ));
+    }
+    assert!(matches!(
+        block_on(host.dispatch_frame(
+            [10; 16],
+            9,
+            Frame::Binary(fifth_query_request.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response,
+        Some(response) if response == fifth_unknown
+    ));
+
+    let mut fifth_deletion = RecordingDelete::default();
+    let mut fifth_children = RecordingChildren::default();
+    assert_eq!(
+        block_on(host.http_delete_with_children(
+            DeleteRequest {
+                id: [5; 16],
+                origin: &origin(),
+                credential: &fifth_credential,
+                now: 8,
+            },
+            &mut fifth_deletion,
+            &mut fifth_children,
+        ))
+        .status,
+        204
+    );
+    assert!(fifth_children.requests.is_empty());
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [5; 16],
+            request_id: [96; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == fifth_query_fingerprint
+    ));
+    assert!(matches!(
+        block_on(host.dispatch_frame(
+            [10; 16],
+            10,
+            Frame::Binary(fifth_query_request),
+            &mut application,
+        )),
+        Err(Error::Closed)
+    ));
     assert_eq!(application.calls, 0);
     drop(host);
     remove_test_repository(&root);
