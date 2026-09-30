@@ -24,3 +24,9 @@ inserted replacement leaves the old source key, the moved source reclaims it,
 and updates before and after that return stay with the moved identity through
 its next re-key. The exact order remains a local adapter proof rather than a
 new language-level rule.
+
+`deleted_replacement_key_reuse_survives_retry_closure_edges` covers the related
+delete edge: a retry-created replacement is deleted, the moved source reclaims
+its original key, and a later retry lets another source reuse that key. It
+asserts the complete ordered log, including the deletion and post-reclaim
+updates, to make row identity through each key owner change explicit.
