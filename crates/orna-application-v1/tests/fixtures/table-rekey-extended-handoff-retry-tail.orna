@@ -1,0 +1,19 @@
+pub table Note(id: Int) {
+    text: Str,
+    quantity: Int,
+}
+
+fn main() {
+    Note.rekey(1, 2) |? (owner_retry_after_handoff => {
+        Note.rekey(2, 3) |? (competitor_waits_on_blocker => {
+            Note.delete(3);
+            Note.rekey(2, 3);
+            Note.rekey(1, 2);
+            Note.update(2, { quantity: 11 });
+            Note.rekey(3, 4);
+            Note.update(4, { quantity: 21 });
+            Note.rekey(2, 3);
+            Note.rekey(4, 2)
+        })
+    })
+}
