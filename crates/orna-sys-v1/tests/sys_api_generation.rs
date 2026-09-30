@@ -495,6 +495,41 @@ fn function_defaults_resolve_paths_variants_and_parameter_order() {
         assert!(error.contains(expected), "default {default}: {error}");
     }
 
+    let mut singleton_enum_collision = generated.clone();
+    singleton_enum_collision["singletons"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "availability": "fixture singleton",
+            "name": "sys.DiffScope",
+            "type": "sys.DatabaseView"
+        }));
+    let singleton_count = singleton_enum_collision["singletons"]
+        .as_array()
+        .unwrap()
+        .len();
+    singleton_enum_collision["counts"]["singletons"] = serde_json::json!(singleton_count);
+    let error = build_support::validate_api_document(&singleton_enum_collision).unwrap_err();
+    assert!(
+        error.contains("cannot resolve singleton field path `sys.DiffScope.all`"),
+        "singleton path prefixes resolve before enum variants: {error}"
+    );
+
+    let mut singleton_field_default = singleton_enum_collision;
+    let diff = singleton_field_default["functions"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|function| function["name"] == "sys.diff")
+        .unwrap();
+    let signature = diff["signature"].as_str().unwrap().replace(
+        "scope: sys.DiffScope = sys.DiffScope.all",
+        "scope: sys.SnapshotRef = sys.DiffScope.cwd",
+    );
+    diff["signature"] = serde_json::json!(signature);
+    build_support::validate_api_document(&singleton_field_default)
+        .expect("a colliding path resolves through the singleton field first");
+
     let mut required_after_default = generated;
     let resolve = required_after_default["functions"]
         .as_array_mut()
