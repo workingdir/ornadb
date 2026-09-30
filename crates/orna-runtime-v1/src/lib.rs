@@ -24104,6 +24104,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sys_invocation_tail_cursor_pins_committed_generation_when_digest_repeats() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(130)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let invocation_id = id(131);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(132)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .finish_invocation_observation(writer, invocation_id, InvocationCompletion::Succeeded)
+            .await
+            .unwrap();
+        let end_page = state.invocation_observation_tail(None, 2).await.unwrap();
+        assert_eq!(end_page.entries.len(), 2);
+        assert!(!end_page.has_more);
+        let cursor = end_page.next_cursor.expect("tail end has a cursor");
+
+        let key = stream_delivery("cursor-same-digest-reset", "cursor-same-digest-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("cursor-same-digest:reset").unwrap(),
+            },
+            reason: "same-digest cursor generation boundary".into(),
+        };
+        let receipt_id = id(133);
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request.clone(), receipt_id)
+            .await
+            .unwrap();
+
+        let capture = state.capture().await.unwrap();
+        let next = state
+            .commit(
+                writer,
+                &capture,
+                &mutation(134),
+                capture.generation_digest(),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            next.generation_digest(),
+            capture.generation_digest(),
+            "the committed write intentionally retains the prior digest"
+        );
+        assert_ne!(next.generation(), capture.generation());
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(writer, request, receipt_id)
+                .await,
+            Ok(receipt.clone()),
+            "reset replay does not change the committed CWD pin"
+        );
+        assert_eq!(state.stream_checkpoint(&key).await.unwrap(), receipt);
+        assert_eq!(
+            state
+                .invocation_observation_tail(Some(cursor), 2)
+                .await,
+            Err(RuntimeError::InvocationTailInvalid),
+            "cursor invalidation follows the committed generation even when the digest repeats"
+        );
+        let tail = state
+            .invocation_observation_tail(None, 4)
+            .await
+            .unwrap();
+        assert_eq!(
+            tail.entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "the CWD commit and reset receipt do not enter the lifecycle tail"
+        );
+    }
+
+    #[tokio::test]
     async fn sys_lifecycle_parent_waits_for_children_and_replacement_orphans_old_owner() {
         assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
         let (_temp, repo) = repository();
