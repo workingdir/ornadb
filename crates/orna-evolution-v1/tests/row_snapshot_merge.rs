@@ -1,6 +1,7 @@
 use orna_evolution_v1::{
     CanonicalValue, KeyedRow, ObjectId, RowKeyKind, RowMergeConflict, RowMergeOperation,
-    RowSnapshotMergeError, RowSnapshotSide, RowSnapshotState, merge_keyed_row_states,
+    RowSnapshotMergeError, RowSnapshotSide, RowSnapshotState, merge_keyed_row,
+    merge_keyed_row_states,
 };
 use orna_foundation_v1::OvbRaw;
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
@@ -14,6 +15,7 @@ const CONFLICT: &str = include_str!("fixtures/merge-row-conflict.orna");
 const DELETE_CITY: &str = include_str!("fixtures/merge-row-delete-city.orna");
 const MULTI_CONFLICT_LEFT: &str = include_str!("fixtures/merge-row-multi-conflict-left.orna");
 const MULTI_CONFLICT_RIGHT: &str = include_str!("fixtures/merge-row-multi-conflict-right.orna");
+const OTHER_KEY: &str = include_str!("fixtures/merge-row-other-key.orna");
 
 fn id(value: u8) -> ObjectId {
     ObjectId::new([value; 16])
@@ -48,6 +50,10 @@ fn parse_fixture(source: &str) -> KeyedRow {
         key_kind: RowKeyKind::Explicit,
         fields: values,
     }
+}
+
+fn tombstone(row: &KeyedRow) -> RowSnapshotState<'_> {
+    RowSnapshotState::Tombstone { table: row.table, key: &row.key }
 }
 
 #[test]
@@ -170,7 +176,7 @@ fn retained_tombstones_are_logical_absence_and_can_be_folded_from_complete_snaps
     assert_eq!(
         merge_keyed_row_states(
             RowSnapshotState::Present(&live),
-            RowSnapshotState::Tombstone,
+            tombstone(&live),
             RowSnapshotState::Present(&live),
         ),
         Ok(deleted),
@@ -178,8 +184,8 @@ fn retained_tombstones_are_logical_absence_and_can_be_folded_from_complete_snaps
     assert_eq!(
         merge_keyed_row_states(
             RowSnapshotState::Present(&live),
-            RowSnapshotState::Tombstone,
-            RowSnapshotState::Tombstone,
+            tombstone(&live),
+            tombstone(&live),
         ),
         Ok(RowMergeOperation::Tombstone {
             table: live.table,
@@ -190,7 +196,7 @@ fn retained_tombstones_are_logical_absence_and_can_be_folded_from_complete_snaps
     assert!(matches!(
         merge_keyed_row_states(
             RowSnapshotState::Present(&live),
-            RowSnapshotState::Tombstone,
+            tombstone(&live),
             RowSnapshotState::Present(&edited),
         ),
         Err(RowSnapshotMergeError::Conflict(RowMergeConflict::DeleteAndEdit { .. }))
@@ -200,8 +206,8 @@ fn retained_tombstones_are_logical_absence_and_can_be_folded_from_complete_snaps
     // folded into a replacement snapshot, the marker can be omitted there.
     assert_eq!(
         merge_keyed_row_states(
-            RowSnapshotState::Tombstone,
-            RowSnapshotState::Tombstone,
+            tombstone(&live),
+            tombstone(&live),
             RowSnapshotState::Absent,
         ),
         Ok(RowMergeOperation::Absent),
@@ -213,7 +219,7 @@ fn retained_tombstones_are_logical_absence_and_can_be_folded_from_complete_snaps
     assert_eq!(
         merge_keyed_row_states(
             RowSnapshotState::Absent,
-            RowSnapshotState::Tombstone,
+            tombstone(&inserted),
             RowSnapshotState::Present(&inserted),
         ),
         Ok(RowMergeOperation::Upsert(inserted)),
@@ -222,9 +228,9 @@ fn retained_tombstones_are_logical_absence_and_can_be_folded_from_complete_snaps
     let reinserted = parse_fixture(LEFT);
     assert_eq!(
         merge_keyed_row_states(
-            RowSnapshotState::Tombstone,
+            tombstone(&reinserted),
             RowSnapshotState::Present(&reinserted),
-            RowSnapshotState::Tombstone,
+            tombstone(&reinserted),
         ),
         Ok(RowMergeOperation::Upsert(reinserted)),
     );
@@ -318,5 +324,63 @@ fn multi_field_conflicts_are_stable_under_branch_and_fixture_field_order() {
             RowSnapshotState::Present(&left),
         ),
         expected,
+    );
+}
+
+#[test]
+fn identity_conflicts_have_a_stable_anchor_and_tombstones_cannot_change_keys() {
+    let base = parse_fixture(BASE);
+    let other = parse_fixture(OTHER_KEY);
+    let expected = RowMergeConflict::Identity {
+        table: base.table,
+        key: base.key.clone(),
+    };
+
+    // With no common base, the encoded canonical key order is the diagnostic
+    // tie-breaker. Integer key 1 precedes key 2 in OVB, independent of sides.
+    assert_eq!(merge_keyed_row(None, Some(&base), Some(&other)), Err(expected.clone()));
+    assert_eq!(merge_keyed_row(None, Some(&other), Some(&base)), Err(expected.clone()));
+    assert_eq!(
+        merge_keyed_row_states(
+            RowSnapshotState::Absent,
+            RowSnapshotState::Present(&other),
+            RowSnapshotState::Present(&base),
+        ),
+        Err(RowSnapshotMergeError::Conflict(expected.clone())),
+    );
+
+    // A tombstone is scoped to its own table/key and cannot be silently
+    // interpreted as a deletion for whichever row happens to be in the base.
+    assert_eq!(
+        merge_keyed_row_states(
+            RowSnapshotState::Present(&base),
+            tombstone(&other),
+            RowSnapshotState::Present(&base),
+        ),
+        Err(RowSnapshotMergeError::Conflict(expected.clone())),
+    );
+    assert_eq!(
+        merge_keyed_row_states(
+            RowSnapshotState::Absent,
+            tombstone(&other),
+            RowSnapshotState::Present(&base),
+        ),
+        Err(RowSnapshotMergeError::Conflict(expected)),
+    );
+}
+
+#[test]
+fn pruned_history_takes_precedence_over_tombstone_identity_checks() {
+    let base = parse_fixture(BASE);
+    let other = parse_fixture(OTHER_KEY);
+    assert_eq!(
+        merge_keyed_row_states(
+            RowSnapshotState::Present(&base),
+            tombstone(&other),
+            RowSnapshotState::Pruned,
+        ),
+        Err(RowSnapshotMergeError::PrunedInput {
+            sides: vec![RowSnapshotSide::Right],
+        }),
     );
 }
