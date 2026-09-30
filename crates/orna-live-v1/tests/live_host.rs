@@ -11028,6 +11028,62 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
                 && status.fingerprint == tenth_query_fingerprint
     ));
 
+    // The same query ID cannot be retargeted after closure made it reusable
+    // here; keep its first Unknown snapshot and return a collision diagnostic.
+    let tenth_alternate_target = eval_with_context([10; 16], [96; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&tenth_alternate_target, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    let tenth_alternate_fingerprint = request_fingerprint(&tenth_alternate_target, [10; 16]);
+    let tenth_retargeted_query = Envelope {
+        request: Some([91; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [96; 16],
+            fingerprint: tenth_alternate_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let tenth_retargeted_mismatch = block_on(host.dispatch_frame(
+        [15; 16],
+        4,
+        Frame::Binary(tenth_retargeted_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("retargeting a reused query ID returns a mismatch diagnostic");
+    assert_eq!(tenth_retargeted_mismatch.request, Some([91; 16]));
+    assert!(matches!(
+        tenth_retargeted_mismatch.message,
+        Message::Diagnostic { .. }
+    ));
+    let tenth_retargeted_retry = block_on(host.dispatch_frame(
+        [15; 16],
+        5,
+        Frame::Binary(tenth_retargeted_query),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the retargeting conflict retries its mismatch diagnostic");
+    assert_eq!(tenth_retargeted_retry, tenth_retargeted_mismatch);
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [10; 16],
+            request_id: [91; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == tenth_query_fingerprint
+    ));
+
     let runtime = open_durable_state(&repository);
     let (_, capability) = block_on(runtime.reserve_request_with_admission(
         tenth_identity,
@@ -11046,7 +11102,7 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
 
     let tenth_unknown_retry = block_on(host.dispatch_frame(
         [15; 16],
-        4,
+        6,
         Frame::Binary(tenth_query_request.clone()),
         &mut application,
     ))
@@ -11067,7 +11123,7 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     .unwrap();
     let tenth_fresh = block_on(host.dispatch_frame(
         [15; 16],
-        5,
+        7,
         Frame::Binary(tenth_fresh_request.clone()),
         &mut application,
     ))
@@ -11127,7 +11183,7 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     assert!(matches!(
         block_on(host.dispatch_frame(
             [15; 16],
-            6,
+            8,
             Frame::Binary(tenth_query_request),
             &mut application,
         )),
