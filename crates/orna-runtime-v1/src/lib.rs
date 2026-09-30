@@ -25875,51 +25875,90 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sys_admin_reset_receipt_replay_preserves_procedure_tail_across_reopen() {
+    async fn sys_admin_reset_receipt_replay_preserves_lifecycle_tail_order_across_reopen() {
         assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let writer = state.acquire_lease(id(80)).await.unwrap();
         let procedure = materialize_echo_procedure(&state, writer).await;
-        let invocation_id = id(81);
+        let parent_id = id(81);
         state
             .begin_invocation_observation(
                 writer,
                 InvocationObservationRegistration {
-                    id: invocation_id,
+                    id: parent_id,
                     procedure: procedure.clone(),
-                    owner: InvocationLaunchOwner::OwnerSession(id(82)),
+                    owner: InvocationLaunchOwner::OwnerSession(id(87)),
                     run: None,
                     arguments: vec![echo_invocation_input(&procedure)],
-                    idempotency_key_hash: Some(digest(83)),
+                    idempotency_key_hash: None,
                 },
             )
             .await
             .unwrap();
-        let terminal = state
-            .finish_invocation_observation(
+        let child_id = id(82);
+        state
+            .begin_invocation_observation(
                 writer,
-                invocation_id,
-                InvocationCompletion::Succeeded,
+                InvocationObservationRegistration {
+                    id: child_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::Parent(parent_id),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
             )
             .await
             .unwrap();
-        assert_eq!(terminal.status, InvocationObservationStatus::Succeeded);
-        let first_tail = state
-            .invocation_observation_tail(None, 1)
+        let grandchild_id = id(83);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: grandchild_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::Parent(child_id),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
             .await
             .unwrap();
-        assert_eq!(first_tail.entries.len(), 1);
+        let replacement = state.takeover_lease(writer, id(74)).await.unwrap();
+        assert_eq!(state.orphan_abandoned_invocations(replacement).await.unwrap(), 3);
+        let first_tail = state
+            .invocation_observation_tail(None, 4)
+            .await
+            .unwrap();
+        assert_eq!(first_tail.entries.len(), 4);
         assert!(first_tail.has_more);
         assert_eq!(
-            first_tail.entries[0].status,
-            InvocationObservationStatus::Running
+            first_tail
+                .entries
+                .iter()
+                .map(|entry| entry.status)
+                .collect::<Vec<_>>(),
+            vec![
+                InvocationObservationStatus::Running,
+                InvocationObservationStatus::Running,
+                InvocationObservationStatus::Running,
+                InvocationObservationStatus::Orphaned,
+            ]
         );
-        let cursor = first_tail.next_cursor.expect("running event provides a cursor");
+        assert_eq!(first_tail.entries[3].invocation_id, grandchild_id);
+        assert_eq!(
+            first_tail.entries[3].observation.status,
+            InvocationObservationStatus::Orphaned
+        );
+        let cursor = first_tail
+            .next_cursor
+            .expect("partial lifecycle page provides a cursor");
 
         let key = stream_delivery("receipt-tail-interplay", "receipt-tail-next")
             .checkpoint_key();
-        state.pause_stream(writer, key.clone()).await.unwrap();
+        state.pause_stream(replacement, key.clone()).await.unwrap();
         let first_request = CheckpointResetRequest {
             key: key.clone(),
             expected: CheckpointPrecondition {
@@ -25934,7 +25973,7 @@ mod tests {
         let first_reset_id = id(84);
         let first_reset = state
             .reset_checkpoint_with_invocation_id(
-                writer,
+                replacement,
                 first_request.clone(),
                 first_reset_id,
             )
@@ -25951,7 +25990,7 @@ mod tests {
         let second_reset_id = id(85);
         let second_reset = state
             .reset_checkpoint_with_invocation_id(
-                writer,
+                replacement,
                 second_request.clone(),
                 second_reset_id,
             )
@@ -25961,6 +26000,8 @@ mod tests {
 
         // Exercise startup reconstruction of a missing successful reset
         // result while invocation lifecycle events remain independently durable.
+        // Admin reset receipts live in their own audit journal and must not
+        // synthesize, reorder, or consume sys.Invocation tail events.
         state
             .connection
             .execute(
@@ -25972,20 +26013,32 @@ mod tests {
         drop(state);
 
         let reopened = open_state(&repo).await;
-        let writer = reopened.acquire_lease(id(80)).await.unwrap();
+        let writer = reopened.acquire_lease(id(74)).await.unwrap();
         let terminal_tail = reopened
-            .invocation_observation_tail(Some(cursor), 1)
+            .invocation_observation_tail(Some(cursor), 4)
             .await
             .unwrap();
-        assert_eq!(terminal_tail.entries.len(), 1);
+        assert_eq!(terminal_tail.entries.len(), 2);
         assert!(!terminal_tail.has_more);
         assert_eq!(
-            terminal_tail.entries[0].status,
-            InvocationObservationStatus::Succeeded
+            terminal_tail
+                .entries
+                .iter()
+                .map(|entry| entry.status)
+                .collect::<Vec<_>>(),
+            vec![
+                InvocationObservationStatus::Orphaned,
+                InvocationObservationStatus::Orphaned,
+            ]
         );
         assert_eq!(
-            terminal_tail.entries[0].observation.status,
-            InvocationObservationStatus::Succeeded
+            terminal_tail
+                .entries
+                .iter()
+                .map(|entry| entry.invocation_id)
+                .collect::<Vec<_>>(),
+            vec![child_id, parent_id],
+            "the page boundary continues from the orphaned grandchild to its ancestors"
         );
 
         assert_eq!(
@@ -26006,11 +26059,12 @@ mod tests {
             Ok(second_reset.clone())
         );
         assert_eq!(reopened.stream_checkpoint(&key).await.unwrap(), second_reset);
+        assert_eq!(reopened.orphan_abandoned_invocations(writer).await.unwrap(), 0);
         let full_tail = reopened
             .invocation_observation_tail(None, 8)
             .await
             .unwrap();
-        assert_eq!(full_tail.entries.len(), 2);
+        assert_eq!(full_tail.entries.len(), 6);
         assert_eq!(
             full_tail
                 .entries
@@ -26019,9 +26073,20 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 InvocationObservationStatus::Running,
-                InvocationObservationStatus::Succeeded,
+                InvocationObservationStatus::Running,
+                InvocationObservationStatus::Running,
+                InvocationObservationStatus::Orphaned,
+                InvocationObservationStatus::Orphaned,
+                InvocationObservationStatus::Orphaned,
             ],
             "reset receipt reconciliation does not duplicate or rewind procedure tails"
+        );
+        assert_eq!(
+            full_tail.entries[3..]
+                .iter()
+                .map(|entry| entry.invocation_id)
+                .collect::<Vec<_>>(),
+            vec![grandchild_id, child_id, parent_id]
         );
     }
 
