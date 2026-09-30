@@ -259,6 +259,24 @@ struct SignatureIdentity {
     name: String,
     type_parameters: BTreeSet<String>,
     parameters: Vec<(String, bool)>,
+    result: String,
+}
+
+#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct CallableIdentity {
+    name: String,
+    type_parameters: BTreeSet<String>,
+    parameters: Vec<(String, bool)>,
+}
+
+impl SignatureIdentity {
+    fn callable_identity(&self) -> CallableIdentity {
+        CallableIdentity {
+            name: self.name.clone(),
+            type_parameters: self.type_parameters.clone(),
+            parameters: self.parameters.clone(),
+        }
+    }
 }
 
 fn parse_signature_identity(signature: &str) -> Result<SignatureIdentity, String> {
@@ -321,6 +339,7 @@ fn parse_signature_identity(signature: &str) -> Result<SignatureIdentity, String
         name: name.to_owned(),
         type_parameters,
         parameters,
+        result: result.trim().to_owned(),
     })
 }
 
@@ -448,11 +467,137 @@ fn type_label(ty: &str) -> &str {
         .unwrap_or(ty)
 }
 
+/// The erased invoke/start labels are a published pairing with the generic
+/// overload. Validate that relationship as a collection invariant: the erased
+/// overload removes exactly the generic type witness and substitutes that
+/// witness into the result. This keeps the build collector aligned with the
+/// semantic SystemApi loader without requiring a second copy of its type table.
+fn validate_erased_generic_pairs(signatures: &[(String, SignatureIdentity)]) -> Result<(), String> {
+    for (label, erased) in signatures {
+        let Some((base, erased_type)) = [
+            ("sys.invoke(Value)", "sys.invoke"),
+            ("sys.start(Value)", "sys.start"),
+        ]
+        .into_iter()
+        .find(|(candidate, _)| label == candidate)
+        else {
+            continue;
+        };
+        let direct_input = erased
+            .parameters
+            .iter()
+            .any(|(parameter_type, _)| type_label(parameter_type) == "Value");
+        if direct_input {
+            continue;
+        }
+
+        let valid_sibling = erased.type_parameters.is_empty()
+            && signatures.iter().any(|(_, generic)| {
+                if generic.name != erased_type || generic.type_parameters.len() != 1 {
+                    return false;
+                }
+                let witness = generic
+                    .type_parameters
+                    .iter()
+                    .next()
+                    .expect("one generic type parameter");
+                let witness_indices = generic
+                    .parameters
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, (parameter_type, _))| {
+                        (parameter_type.trim() == witness).then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                if witness_indices.len() != 1 {
+                    return false;
+                }
+                let witness_index = witness_indices[0];
+                let remaining = generic
+                    .parameters
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, parameter)| (index != witness_index).then_some(parameter))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                remaining == erased.parameters
+                    && type_parameter_substitution(&generic.result, witness, &erased.result)
+                        .is_some()
+            });
+        if !valid_sibling {
+            return Err(format!(
+                "erased overload `{base}` requires a matching generic sibling with the same remaining inputs and result"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn type_parameter_substitution(template: &str, parameter: &str, concrete: &str) -> Option<String> {
+    let spans = type_parameter_spans(template, parameter);
+    let (first_start, first_end) = *spans.first()?;
+    let prefix = &template[..first_start];
+    let after_prefix = concrete.strip_prefix(prefix)?;
+    let fixed_suffix = spans
+        .get(1)
+        .map(|(next_start, _)| &template[first_end..*next_start])
+        .unwrap_or(&template[first_end..]);
+    let replacement = if fixed_suffix.is_empty() {
+        after_prefix
+    } else if spans.len() == 1 {
+        after_prefix.strip_suffix(fixed_suffix)?
+    } else {
+        let suffix_index = after_prefix.find(fixed_suffix)?;
+        &after_prefix[..suffix_index]
+    };
+    let substituted = substitute_type_parameter(template, parameter, replacement);
+    (substituted == concrete).then(|| replacement.to_owned())
+}
+
+fn type_parameter_spans(source: &str, parameter: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut characters = source.char_indices().peekable();
+    while let Some((start, character)) = characters.next() {
+        if character != '_' && !character.is_ascii_alphabetic() {
+            continue;
+        }
+        let mut end = start + character.len_utf8();
+        while let Some((index, next)) = characters.peek().copied() {
+            if next == '_' || next.is_ascii_alphanumeric() {
+                characters.next();
+                end = index + next.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if &source[start..end] == parameter
+            && !source[..start].trim_end().ends_with('.')
+        {
+            spans.push((start, end));
+        }
+    }
+    spans
+}
+
+fn substitute_type_parameter(source: &str, parameter: &str, replacement: &str) -> String {
+    let spans = type_parameter_spans(source, parameter);
+    let mut result = String::with_capacity(source.len() + replacement.len() * spans.len());
+    let mut cursor = 0;
+    for (start, end) in spans {
+        result.push_str(&source[cursor..start]);
+        result.push_str(replacement);
+        cursor = end;
+    }
+    result.push_str(&source[cursor..]);
+    result
+}
+
 /// Validate cross-annotation invariants before deriving constants or emitting JSON.
 pub fn validate_collection(functions: &[Function]) -> Result<(), String> {
     let mut names = BTreeSet::new();
     let mut constants = BTreeSet::new();
     let mut signatures = BTreeSet::new();
+    let mut parsed_signatures = Vec::new();
     for function in functions {
         validate_function_metadata(&function.metadata)?;
         let name = function.metadata["name"].as_str().expect("validated name");
@@ -466,13 +611,15 @@ pub fn validate_collection(functions: &[Function]) -> Result<(), String> {
         let signature = function.metadata["signature"]
             .as_str()
             .expect("validated signature");
-        if !signatures.insert(parse_signature_identity(signature)?) {
+        let parsed = parse_signature_identity(signature)?;
+        if !signatures.insert(parsed.callable_identity()) {
             return Err(format!(
                 "duplicate #[ornasys] callable signature for function `{name}`"
             ));
         }
+        parsed_signatures.push((name.to_owned(), parsed));
     }
-    Ok(())
+    validate_erased_generic_pairs(&parsed_signatures)
 }
 
 /// The normative system API has fixed top-level collection counts. Checking them
@@ -531,6 +678,7 @@ pub fn validate_api_document(api: &Value) -> Result<(), String> {
         .expect("function inventory validated");
     let mut names = std::collections::BTreeSet::new();
     let mut signatures = BTreeSet::new();
+    let mut parsed_signatures = Vec::new();
     for function in functions {
         validate_function_metadata(function)?;
         let name = function["name"].as_str().expect("validated name");
@@ -540,9 +688,11 @@ pub fn validate_api_document(api: &Value) -> Result<(), String> {
         let signature = function["signature"]
             .as_str()
             .expect("validated signature");
-        if !signatures.insert(parse_signature_identity(signature)?) {
+        let parsed = parse_signature_identity(signature)?;
+        if !signatures.insert(parsed.callable_identity()) {
             return Err(format!("duplicate callable signature for system API function `{name}`"));
         }
+        parsed_signatures.push((name.to_owned(), parsed));
     }
-    Ok(())
+    validate_erased_generic_pairs(&parsed_signatures)
 }
