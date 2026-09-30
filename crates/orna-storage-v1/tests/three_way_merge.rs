@@ -16,6 +16,7 @@ const LEFT: &str = include_str!("fixtures/merge-contact-left.orna");
 const RIGHT: &str = include_str!("fixtures/merge-contact-right.orna");
 const CONFLICT: &str = include_str!("fixtures/merge-contact-conflict.orna");
 const CHECKPOINT_POSITIONLESS: &str = include_str!("fixtures/merge-checkpoint-positionless.orna");
+const CHECKPOINT_POSITIONLESS_EDITED: &str = include_str!("fixtures/merge-checkpoint-positionless-edited.orna");
 const CHECKPOINT_BASE: &str = include_str!("fixtures/merge-checkpoint-base.orna");
 const CHECKPOINT_EDITED: &str = include_str!("fixtures/merge-checkpoint-edited.orna");
 const CHECKPOINT_TAIL_BASE: &str = include_str!("fixtures/merge-checkpoint-tail-base.orna");
@@ -3065,7 +3066,7 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
     let mut deleted_row = parse_fixture(BASE, RowKeyKind::Explicit);
     deleted_row.key = high_key.clone();
 
-    let build_inputs = |row_delete_on_left, checkpoint_delete_on_left, divergent_checkpoint| {
+    let build_inputs = |row_delete_on_left, checkpoint_delete_on_left, divergent_checkpoint, positionless_base| {
         let mut source = FixtureRows::default();
         source.add(MergeSide::Base, b"base-upper", vec![deleted_row.clone()]);
         source.add(
@@ -3102,7 +3103,11 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         );
 
         let unchanged_delete_id = b"consumer/b-delete-against-unchanged".to_vec();
-        let base_checkpoint = parse_checkpoint_fixture(CHECKPOINT_BASE);
+        let base_checkpoint = parse_checkpoint_fixture(if positionless_base {
+            CHECKPOINT_POSITIONLESS
+        } else {
+            CHECKPOINT_BASE
+        });
         base.checkpoints.insert(unchanged_delete_id.clone(), base_checkpoint.clone());
         let retained_side = if checkpoint_delete_on_left { &mut right } else { &mut left };
         retained_side
@@ -3112,7 +3117,11 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         let checkpoint_id = b"consumer/m-delete-update-after-tombstone".to_vec();
         base.checkpoints.insert(checkpoint_id.clone(), base_checkpoint.clone());
         let update_side = if checkpoint_delete_on_left { &mut right } else { &mut left };
-        let updated_checkpoint = parse_checkpoint_fixture(CHECKPOINT_EDITED);
+        let updated_checkpoint = parse_checkpoint_fixture(if positionless_base {
+            CHECKPOINT_POSITIONLESS_EDITED
+        } else {
+            CHECKPOINT_EDITED
+        });
         update_side.checkpoints.insert(
             checkpoint_id.clone(),
             if divergent_checkpoint { updated_checkpoint } else { base_checkpoint.clone() },
@@ -3146,7 +3155,7 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
             unchanged_delete_id,
             checkpoint_id,
             tail_id,
-        ) = build_inputs(row_delete_on_left, checkpoint_delete_on_left, true);
+        ) = build_inputs(row_delete_on_left, checkpoint_delete_on_left, true, false);
 
         // ORNA-MERGE-005 bounds conflict evidence but leaves cross-phase order
         // open. Storage finishes segmented row planning first, so clean row
@@ -3179,7 +3188,7 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         // One retained checkpoint detail fits; the later fixture conflict
         // crosses the shared tail after the clean row tombstone has resolved.
         let (base, left, right, mut source, agreed_delete_id, unchanged_delete_id, checkpoint_id, tail_id) =
-            build_inputs(row_delete_on_left, checkpoint_delete_on_left, true);
+            build_inputs(row_delete_on_left, checkpoint_delete_on_left, true, false);
         let error = merge_three_way_snapshots(
             &base,
             &left,
@@ -3207,7 +3216,7 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         // preserve the fixture-backed orientation and return a typed conflict
         // instead of reporting a budget overrun.
         let (mut base, mut left, mut right, mut source, agreed_delete_id, unchanged_delete_id, checkpoint_id, tail_id) =
-            build_inputs(row_delete_on_left, checkpoint_delete_on_left, true);
+            build_inputs(row_delete_on_left, checkpoint_delete_on_left, true, false);
         for snapshot in [&mut base, &mut left, &mut right] {
             snapshot.checkpoints.remove(&tail_id);
         }
@@ -3250,6 +3259,7 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
             row_delete_on_left,
             checkpoint_delete_on_left,
             false,
+            false,
         );
         let plan = merge_three_way_snapshots(
             &base,
@@ -3278,6 +3288,7 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
             row_delete_on_left,
             checkpoint_delete_on_left,
             true,
+            false,
         );
         let error = merge_three_way_snapshots(
             &base,
@@ -3323,7 +3334,7 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         // A terminal fixture conflict after the two retained details proves
         // the capped scan still closes the tail and reports its lower bound.
         let (mut base, mut left, mut right, mut source, agreed_delete_id, unchanged_delete_id, checkpoint_id, tail_id) =
-            build_inputs(row_delete_on_left, checkpoint_delete_on_left, true);
+            build_inputs(row_delete_on_left, checkpoint_delete_on_left, true, false);
         let final_tail_id = b"consumer/zz-final-tail-conflict".to_vec();
         base.checkpoints.insert(final_tail_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_BASE));
         left.checkpoints.insert(final_tail_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_LEFT));
@@ -3351,6 +3362,85 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         assert!(!report.affected_checkpoints.contains(unchanged_delete_id.as_slice()));
         assert_eq!(source.visited.len(), 3);
         assert!(source.visited.iter().all(|(_, locator)| locator.ends_with(b"upper")));
+
+        // ORNA-MERGE-011 requires divergent opaque checkpoints to conflict
+        // but is silent on cursorless presence. Snapshot membership is the
+        // presence marker here, so deleting a cursorless fixture while the
+        // other side advances it remains divergent after either row tombstone.
+        let (
+            base,
+            left,
+            right,
+            mut source,
+            agreed_delete_id,
+            unchanged_delete_id,
+            checkpoint_id,
+            tail_id,
+        ) = build_inputs(row_delete_on_left, checkpoint_delete_on_left, true, true);
+        let error = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 0 },
+        )
+        .unwrap_err();
+        let BranchMergeError::BudgetExceeded { report } = error else {
+            panic!("the cursorless checkpoint conflict follows the row tombstone")
+        };
+        assert_eq!(report.conflicts_lower_bound, 1);
+        assert_eq!(report.rows_examined, 2);
+        assert!(report.affected_ranges.contains(&(id(1), high_range.clone())));
+        assert_eq!(report.affected_checkpoints.len(), 1);
+        assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(agreed_delete_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(unchanged_delete_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(tail_id.as_slice()));
+
+        let (
+            mut base,
+            mut left,
+            mut right,
+            mut source,
+            agreed_delete_id,
+            unchanged_delete_id,
+            checkpoint_id,
+            tail_id,
+        ) = build_inputs(row_delete_on_left, checkpoint_delete_on_left, true, true);
+        for snapshot in [&mut base, &mut left, &mut right] {
+            snapshot.checkpoints.remove(&tail_id);
+        }
+        let error = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 1 },
+        )
+        .unwrap_err();
+        let BranchMergeError::Conflicts { conflicts, report } = error else {
+            panic!("one detail retains the cursorless delete/update conflict")
+        };
+        let updated_positionless = parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS_EDITED);
+        assert_eq!(
+            conflicts,
+            vec![BranchMergeConflict::CheckpointConflict {
+                id: checkpoint_id.clone(),
+                conflict: orna_evolution_v1::CheckpointMergeConflict {
+                    base: Some(parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS)),
+                    left: if checkpoint_delete_on_left { None } else { Some(updated_positionless.clone()) },
+                    right: if checkpoint_delete_on_left { Some(updated_positionless) } else { None },
+                },
+            }]
+        );
+        assert_eq!(report.conflicts_lower_bound, 1);
+        assert_eq!(report.rows_examined, 2);
+        assert!(report.affected_ranges.contains(&(id(1), high_range.clone())));
+        assert_eq!(report.affected_checkpoints.len(), 1);
+        assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(agreed_delete_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(unchanged_delete_id.as_slice()));
+        assert_eq!(source.visited.len(), 3);
     }
 }
 
