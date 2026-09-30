@@ -1,0 +1,4 @@
+pub table SourceRemainderSplitUnknownSource(id: Int) { value: Int, }
+pub table SourceRemainderSplitUnknownPrefix(id: Int) { value: Int, }
+pub table SourceRemainderSplitUnknownMiddle(id: Int) { value: Int, }
+pub table SourceRemainderSplitUnknownRows(id: Int) { value: Int, }
