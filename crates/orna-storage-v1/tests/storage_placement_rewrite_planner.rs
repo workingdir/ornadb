@@ -13,6 +13,9 @@ use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 const EDITABLE_ROW: &str = include_str!("fixtures/storage-placement-row.orna");
 const CASE_COLLISION_UPPER_ROW: &str = include_str!("fixtures/storage-placement-case-upper.orna");
 const CASE_COLLISION_LOWER_ROW: &str = include_str!("fixtures/storage-placement-case-lower.orna");
+const PATH_AT_LIMIT_ROW: &str = include_str!("fixtures/storage-placement-path-at-limit.orna");
+const PATH_OVER_LIMIT_ROW: &str = include_str!("fixtures/storage-placement-path-over-limit.orna");
+const PATH_ORDINARY_ROW: &str = include_str!("fixtures/storage-placement-path-ordinary.orna");
 const REWRITE_TAIL_FIRST: &str = include_str!("fixtures/storage-rewrite-tail-first.orna");
 const REWRITE_TAIL_LAST: &str = include_str!("fixtures/storage-rewrite-tail-last.orna");
 const KEY_FIELD: Uuid = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
@@ -57,6 +60,56 @@ fn profile_for_key_type(table: Uuid, key_type: &str) -> CompactOvbProfile {
     .unwrap()
 }
 
+fn profile_for_str_key_arity(table: Uuid, arity: usize) -> CompactOvbProfile {
+    let field_ids = (0..arity)
+        .map(|index| Uuid::from_u128(100 + index as u128))
+        .collect::<Vec<_>>();
+    CompactOvbProfile::new(
+        SchemaDescriptor::new(OvbRaw::Map(vec![
+            (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+            (
+                OvbRaw::Int(1.into()),
+                OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(table.as_bytes().to_vec()))),
+            ),
+            (
+                OvbRaw::Int(2.into()),
+                OvbRaw::Array(
+                    field_ids
+                        .iter()
+                        .map(|id| {
+                            OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(id.as_bytes().to_vec())))
+                        })
+                        .collect(),
+                ),
+            ),
+            (
+                OvbRaw::Int(3.into()),
+                OvbRaw::Array(
+                    field_ids
+                        .iter()
+                        .enumerate()
+                        .map(|(index, id)| {
+                            OvbRaw::Array(vec![
+                                OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(id.as_bytes().to_vec()))),
+                                OvbRaw::Text(format!("key_{index}")),
+                                OvbRaw::Array(vec![
+                                    OvbRaw::Int(0.into()),
+                                    OvbRaw::Text("Str".into()),
+                                ]),
+                                OvbRaw::Int(0.into()),
+                                OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+            (OvbRaw::Int(4.into()), OvbRaw::Array(Vec::new())),
+        ]))
+        .unwrap(),
+    )
+    .unwrap()
+}
+
 fn key(value: i64) -> Vec<u8> {
     CanonicalValue::new(OvbRaw::Int(value.into()))
         .unwrap()
@@ -83,6 +136,34 @@ fn rewrite_tail_fixture_key(source: &str) -> i64 {
         panic!("rewrite tail fixture key is an integer")
     };
     text.parse().unwrap()
+}
+
+fn text_key_components_from_fixture(source: &str) -> Vec<String> {
+    let parsed = parse_row(source);
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    let Expr::Record { fields, .. } = parsed.value else {
+        panic!("path boundary fixture is a row record")
+    };
+    fields
+        .into_iter()
+        .enumerate()
+        .map(|(index, field)| {
+            assert_eq!(field.name, format!("key_{index}"));
+            let Expr::Literal {
+                text,
+                kind: LiteralKind::String,
+                ..
+            } = field.value
+            else {
+                panic!("path boundary fixture key is a string")
+            };
+            text.strip_prefix('"')
+                .unwrap()
+                .strip_suffix('"')
+                .unwrap()
+                .to_owned()
+        })
+        .collect()
 }
 
 fn row(value: i64) -> CanonicalValue {
@@ -120,6 +201,18 @@ fn text_key(value: &str) -> Vec<u8> {
         .unwrap()
         .encode()
         .unwrap()
+}
+
+fn composite_text_key(values: &[String]) -> Vec<u8> {
+    CanonicalValue::new(OvbRaw::Tag(
+        60015,
+        Box::new(OvbRaw::Array(
+            values.iter().cloned().map(OvbRaw::Text).collect(),
+        )),
+    ))
+    .unwrap()
+    .encode()
+    .unwrap()
 }
 
 #[test]
@@ -391,7 +484,7 @@ fn portable_path_component_and_relative_path_limits_are_inclusive() {
     assert!(editable_path_components(&["x".repeat(201)]).is_err());
 
     let profile = profile_for_key_type(Uuid::from_u128(8), "Str");
-    let body_bytes = CASE_COLLISION_LOWER_ROW.len();
+    let body_bytes = PATH_AT_LIMIT_ROW.len();
     let at_component_limit = plan_storage_placement(
         &profile,
         StoragePreference::Automatic,
@@ -412,17 +505,77 @@ fn portable_path_component_and_relative_path_limits_are_inclusive() {
 
     // Five separators plus the final `.orna` suffix leave 1,014 bytes for
     // six encoded components at the exact table-relative path limit.
-    let at_path_limit = [200, 200, 200, 200, 200, 14]
-        .into_iter()
-        .map(|size| "x".repeat(size))
-        .collect::<Vec<_>>();
+    let at_path_limit = text_key_components_from_fixture(PATH_AT_LIMIT_ROW);
+    let over_path_limit = text_key_components_from_fixture(PATH_OVER_LIMIT_ROW);
+    let ordinary_components = text_key_components_from_fixture(PATH_ORDINARY_ROW);
+    assert_eq!(
+        at_path_limit.iter().map(String::len).collect::<Vec<_>>(),
+        [200, 200, 200, 200, 200, 14]
+    );
     assert!(editable_path_components(&at_path_limit).is_ok());
-
-    let over_path_limit = [200, 200, 200, 200, 200, 15]
-        .into_iter()
-        .map(|size| "x".repeat(size))
-        .collect::<Vec<_>>();
+    assert_eq!(
+        over_path_limit.iter().map(String::len).collect::<Vec<_>>(),
+        [200, 200, 200, 200, 200, 15]
+    );
     assert!(editable_path_components(&over_path_limit).is_err());
+
+    let composite_profile = profile_for_str_key_arity(Uuid::from_u128(9), 6);
+    let exact_path = editable_path_components(&at_path_limit).unwrap();
+    let exact_path_plan = plan_storage_placement(
+        &composite_profile,
+        StoragePreference::Automatic,
+        0,
+        false,
+        Vec::new(),
+        [PlacementCandidate::insert(
+            composite_text_key(&at_path_limit),
+            body_bytes,
+            Some(exact_path.clone()),
+        )],
+    )
+    .unwrap();
+    assert_eq!(exact_path_plan.new_row_placement(), PhysicalPlacement::Editable);
+
+    let over_limit_plan = plan_storage_placement(
+        &composite_profile,
+        StoragePreference::Automatic,
+        1,
+        false,
+        vec![exact_path.clone()],
+        [
+            PlacementCandidate::update(
+                composite_text_key(&at_path_limit),
+                body_bytes,
+                PhysicalPlacement::Editable,
+                Some(exact_path.clone()),
+            ),
+            PlacementCandidate::insert(
+                composite_text_key(&over_path_limit),
+                PATH_OVER_LIMIT_ROW.len(),
+                None,
+            ),
+            PlacementCandidate::insert(
+                composite_text_key(&ordinary_components),
+                PATH_ORDINARY_ROW.len(),
+                Some(editable_path_components(&ordinary_components).unwrap()),
+            ),
+        ],
+    )
+    .unwrap();
+    assert_eq!(over_limit_plan.new_row_placement(), PhysicalPlacement::Compact);
+    let retained_boundary_row = over_limit_plan
+        .decisions()
+        .iter()
+        .find(|decision| decision.key().encoded() == composite_text_key(&at_path_limit))
+        .unwrap();
+    assert_eq!(retained_boundary_row.action(), PlacementAction::Update);
+    assert_eq!(retained_boundary_row.placement(), PhysicalPlacement::Editable);
+    assert_eq!(retained_boundary_row.editable_path(), Some(&exact_path));
+    assert!(over_limit_plan
+        .decisions()
+        .iter()
+        .filter(|decision| decision.action() == PlacementAction::Insert)
+        .all(|decision| decision.placement() == PhysicalPlacement::Compact));
 }
 
 #[test]
