@@ -10912,6 +10912,199 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
         )),
         Err(Error::Closed)
     ));
+
+    // Once the mismatching session closes, ID 91 can identify a legitimate
+    // status query in a successor scope. Its old Eval row remains cancelled,
+    // while the new query snapshots only the successor's target.
+    let tenth_subscribe = subscribe();
+    let mut tenth_issuer = Issuer(10, None);
+    let tenth_credential = block_on(host.create(
+        CreateRequest {
+            id: [10; 16],
+            origin: origin(),
+            expires_at: 100,
+            now: 21,
+            subscribe: &tenth_subscribe,
+        },
+        &mut tenth_issuer,
+    ))
+    .unwrap();
+    block_on(host.resume(ResumeRequest {
+        id: [10; 16],
+        origin: &origin(),
+        credential: &tenth_credential,
+        attachment: [15; 16],
+        now: 22,
+    }))
+    .unwrap();
+
+    let tenth_target_request = eval_with_context([10; 16], [92; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&tenth_target_request, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    let tenth_target_fingerprint = request_fingerprint(&tenth_target_request, [10; 16]);
+    let tenth_identity = RequestIdentity {
+        session_id: [10; 16],
+        request_id: [92; 16],
+    };
+    let tenth_query_request = Envelope {
+        // ID 91 was an Eval and then a mismatch query in the closed prior scope.
+        request: Some([91; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [92; 16],
+            fingerprint: tenth_target_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let tenth_query_fingerprint = request_fingerprint(&tenth_query_request, [10; 16]);
+    let tenth_unknown = block_on(host.dispatch_frame(
+        [15; 16],
+        2,
+        Frame::Binary(tenth_query_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a successor session can reuse the closed mismatch ID as a query");
+    assert!(matches!(
+        &tenth_unknown.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Unknown,
+            fingerprint: None,
+            result: None,
+        } if *target == [92; 16]
+    ));
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status(
+            ninth_identity,
+            ninth_target_fingerprint,
+        ))
+        .unwrap(),
+        Some(status) if status.state == orna_runtime_v1::RequestState::Cancelled
+    ));
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [10; 16],
+            request_id: [91; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == tenth_query_fingerprint
+    ));
+
+    let runtime = open_durable_state(&repository);
+    let (_, capability) = block_on(runtime.reserve_request_with_admission(
+        tenth_identity,
+        tenth_target_fingerprint,
+    ))
+    .unwrap();
+    let capability = capability.expect("fresh owner-bound capability in the successor scope");
+    block_on(runtime.start_request_with_owner_and_admission(
+        tenth_identity,
+        tenth_target_fingerprint,
+        lease,
+        capability,
+    ))
+    .unwrap();
+    drop(runtime);
+
+    let tenth_unknown_retry = block_on(host.dispatch_frame(
+        [15; 16],
+        3,
+        Frame::Binary(tenth_query_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the successor scope preserves its Unknown snapshot after target start");
+    assert_eq!(tenth_unknown_retry, tenth_unknown);
+    let tenth_fresh_request = Envelope {
+        request: Some([97; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [92; 16],
+            fingerprint: tenth_target_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let tenth_fresh = block_on(host.dispatch_frame(
+        [15; 16],
+        4,
+        Frame::Binary(tenth_fresh_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a fresh query sees the successor target running");
+    assert!(matches!(
+        &tenth_fresh.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Running,
+            fingerprint: Some(returned),
+            result: None,
+        } if *target == [92; 16] && *returned == tenth_target_fingerprint
+    ));
+
+    let mut tenth_deletion = RecordingDelete::default();
+    let mut tenth_children = RecordingChildren::default();
+    assert_eq!(
+        block_on(host.http_delete_with_children(
+            DeleteRequest {
+                id: [10; 16],
+                origin: &origin(),
+                credential: &tenth_credential,
+                now: 23,
+            },
+            &mut tenth_deletion,
+            &mut tenth_children,
+        ))
+        .status,
+        204
+    );
+    assert_eq!(tenth_children.requests, vec![tenth_identity]);
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status(
+            tenth_identity,
+            tenth_target_fingerprint,
+        ))
+        .unwrap(),
+        Some(status) if status.state == orna_runtime_v1::RequestState::Cancelled
+    ));
+    for (request_id, expected_fingerprint) in [
+        ([91; 16], tenth_query_fingerprint),
+        ([97; 16], request_fingerprint(&tenth_fresh_request, [10; 16])),
+    ] {
+        assert!(matches!(
+            block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+                session_id: [10; 16],
+                request_id,
+            }))
+            .unwrap(),
+            Some(status)
+                if status.state == orna_runtime_v1::RequestState::Completed
+                    && status.fingerprint == expected_fingerprint
+        ));
+    }
+    assert!(matches!(
+        block_on(host.dispatch_frame(
+            [15; 16],
+            5,
+            Frame::Binary(tenth_query_request),
+            &mut application,
+        )),
+        Err(Error::Closed)
+    ));
     assert_eq!(application.calls, 0);
     drop(host);
     remove_test_repository(&root);
