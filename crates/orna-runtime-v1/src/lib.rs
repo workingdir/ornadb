@@ -20605,6 +20605,28 @@ mod tests {
             "the nested later match satisfies demand before its failing sibling tail"
         );
 
+        // The reference defines take and filter in pipeline order but does
+        // not spell out continuation after a post-take filter rejects a
+        // bounded sibling. Each of the first two siblings stops at its bound
+        // before filtering out its row; the next nested filter finds the
+        // match, so its failing sibling must remain untouched.
+        let (bounded_filter_after_nested_stop, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-nested-filter-after-take-bound.orna"
+                ),
+            );
+        assert_eq!(
+            bounded_filter_after_nested_stop.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "a nested filter match follows two bounded rejects without evaluating its tail"
+        );
+
         // The reference fixes left-to-right union order and bounded
         // enumeration but leaves projection failures across a child-local
         // take boundary implicit. Keep the left child lazy: its excluded
