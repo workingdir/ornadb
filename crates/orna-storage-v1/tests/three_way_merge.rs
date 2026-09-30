@@ -730,6 +730,91 @@ fn positionless_delete_update_conflict_keeps_impact_at_shared_budget_tail() {
 }
 
 #[test]
+fn positionless_checkpoint_delete_update_follows_row_delete_edit_at_budget_tail() {
+    let build_inputs = |row_delete_on_left, checkpoint_delete_on_left| {
+        let mut source = FixtureRows::default();
+        source.add(MergeSide::Base, b"base", vec![parse_fixture(BASE, RowKeyKind::Explicit)]);
+        let changed_row = parse_fixture(RIGHT, RowKeyKind::Explicit);
+        source.add(
+            MergeSide::Left,
+            b"left",
+            if row_delete_on_left { Vec::new() } else { vec![changed_row.clone()] },
+        );
+        source.add(
+            MergeSide::Right,
+            b"right",
+            if row_delete_on_left { vec![changed_row] } else { Vec::new() },
+        );
+
+        let base_checkpoint = CheckpointGeneration { generation: 100, position: None };
+        let updated_checkpoint = CheckpointGeneration { generation: 101, position: None };
+        let checkpoint_id = b"consumer/positionless-row-delete-edit-budget-tail".to_vec();
+        let mut base = snapshot(schema(true, FieldType::Str), manifest(60, 60, b"base"), None);
+        let mut left = snapshot(schema(true, FieldType::Str), manifest(61, 61, b"left"), None);
+        let mut right = snapshot(schema(true, FieldType::Str), manifest(62, 62, b"right"), None);
+        base.checkpoints.insert(checkpoint_id.clone(), base_checkpoint.clone());
+        let update_side = if checkpoint_delete_on_left {
+            &mut right
+        } else {
+            &mut left
+        };
+        update_side.checkpoints.insert(checkpoint_id.clone(), updated_checkpoint.clone());
+
+        (base, left, right, source, checkpoint_id, base_checkpoint, updated_checkpoint)
+    };
+
+    // ORNA-MERGE-011 requires a conflict for divergent checkpoint state but
+    // leaves cross-phase ordering open. Storage reports row conflicts first,
+    // so the positionless delete/update impact is the next shared-budget tail.
+    for row_delete_on_left in [true, false] {
+        for checkpoint_delete_on_left in [true, false] {
+            for max_conflicts in [1, 2] {
+                let (base, left, right, mut source, checkpoint_id, base_checkpoint, updated_checkpoint) =
+                    build_inputs(row_delete_on_left, checkpoint_delete_on_left);
+                let error = merge_three_way_snapshots(
+                    &base,
+                    &left,
+                    &right,
+                    &mut source,
+                    BranchMergeBudget { max_rows_examined: 100, max_conflicts },
+                )
+                .unwrap_err();
+
+                match error {
+                    BranchMergeError::BudgetExceeded { report } if max_conflicts == 1 => {
+                        assert_eq!(report.conflicts_lower_bound, 2);
+                        assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+                        assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
+                    }
+                    BranchMergeError::Conflicts { conflicts, report } if max_conflicts == 2 => {
+                        assert_eq!(report.conflicts_lower_bound, 2);
+                        assert!(matches!(
+                            conflicts.first(),
+                            Some(BranchMergeConflict::Row {
+                                conflict: orna_evolution_v1::RowMergeConflict::DeleteAndEdit { key, .. },
+                                ..
+                            }) if key == &integer(1)
+                        ));
+                        assert!(matches!(
+                            conflicts.get(1),
+                            Some(BranchMergeConflict::CheckpointConflict { id, conflict })
+                                if id == &checkpoint_id
+                                    && conflict.base.as_ref() == Some(&base_checkpoint)
+                                    && conflict.left.as_ref() == (if checkpoint_delete_on_left { None } else { Some(&updated_checkpoint) })
+                                    && conflict.right.as_ref() == (if checkpoint_delete_on_left { Some(&updated_checkpoint) } else { None })
+                        ));
+                        assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+                        assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
+                    }
+                    other => panic!("unexpected row/checkpoint conflict-budget result: {other:?}"),
+                }
+                assert_eq!(source.visited.len(), 3);
+            }
+        }
+    }
+}
+
+#[test]
 fn both_delete_update_orientations_survive_the_checkpoint_budget_tail() {
     let (mut base, mut left, mut right, mut source) = row_checkpoint_conflict_inputs();
     base.checkpoints.clear();
