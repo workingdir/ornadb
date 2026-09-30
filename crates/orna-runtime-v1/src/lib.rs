@@ -20463,6 +20463,26 @@ mod tests {
             "equal child and outer bounds skip both the left tail and right sibling"
         );
 
+        // The operator rule bounds enumeration by result demand, while the
+        // reference leaves a smaller outer take composed with a larger child
+        // cap implicit. Stop at the outer demand: do not project the failing
+        // second left row or enter the right sibling.
+        let (outer_tighter_than_left, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-project-left-child-larger-than-outer-bound.orna"
+            ),
+        );
+        assert_eq!(
+            outer_tighter_than_left.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (1, 1),
+            "outer demand below the child cap skips the failing left tail and right sibling"
+        );
+
         let (missing, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
             include_str!("../tests/fixtures/query-session-projection-missing.orna"),
