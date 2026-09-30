@@ -852,6 +852,82 @@ fn clone_from_nested_same_length_mixed_trust_slots_redacts_all_causes() {
 }
 
 #[test]
+fn root_readmission_after_clone_from_does_not_regrant_nested_slots() {
+    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture_credential = fixture.split('"').nth(1).unwrap();
+    let diagnostic = |code: &str, admitted: bool| {
+        let diagnostic = Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap();
+        let diagnostic = if admitted {
+            diagnostic.redacted_with_message(SafeText::new(fixture).unwrap())
+        } else {
+            diagnostic
+        };
+        diagnostic.with_note(SafeText::new(fixture).unwrap())
+    };
+
+    let source = Diagnostic::new(
+        SafeText::new("ORNA-E-READMISSION-SOURCE").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .with_note(SafeText::new(fixture).unwrap())
+    .with_cause(
+        diagnostic("ORNA-E-READMISSION-BRANCH", true)
+            .with_cause(diagnostic("ORNA-E-READMISSION-ADMITTED", true))
+            .with_cause(diagnostic("ORNA-E-READMISSION-UNTRUSTED", false)),
+    );
+    let mut destination = Diagnostic::new(
+        SafeText::new("ORNA-E-READMISSION-OLD-ROOT").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .redacted_with_message(SafeText::new("old root admission").unwrap())
+    .with_cause(diagnostic("ORNA-E-READMISSION-OLD-BRANCH", true));
+
+    destination.clone_from(&source);
+    assert_eq!(destination, source);
+    let readmitted = destination
+        .redacted_with_message(SafeText::new("new root admission").unwrap());
+
+    let json = serde_json::to_vec(&readmitted).unwrap();
+    let projection = serde_json::to_value(&readmitted).unwrap();
+    assert_eq!(projection["message"], "new root admission");
+    assert_eq!(projection["notes"][0], "<redacted>");
+    assert_eq!(projection["causes"][0]["message"], "<redacted>");
+    assert_eq!(projection["causes"][0]["notes"][0], "<redacted>");
+    assert_eq!(projection["causes"][0]["causes"].as_array().unwrap().len(), 2);
+    for cause in projection["causes"][0]["causes"].as_array().unwrap() {
+        assert_eq!(cause["message"], "<redacted>");
+        assert_eq!(cause["notes"][0], "<redacted>");
+    }
+    assert!(
+        !json
+            .windows(fixture_credential.len())
+            .any(|window| window == fixture_credential.as_bytes())
+    );
+
+    let encoded = readmitted.encode_ovb().unwrap();
+    assert!(
+        !encoded
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    assert_eq!(decoded["causes"][0]["message"], "<redacted>");
+    for cause in decoded["causes"][0]["causes"].as_array().unwrap() {
+        assert_eq!(cause["message"], "<redacted>");
+    }
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);

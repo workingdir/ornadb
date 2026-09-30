@@ -1410,8 +1410,9 @@ impl Diagnostic {
         self.root_message_admitted = false;
         self
     }
-    /// Recursively redacts messages and notes, then installs the caller-admitted
-    /// root message while preserving diagnostic identities and spans.
+    /// Recursively redacts messages and notes, revokes nested admissions, then
+    /// installs the caller-admitted root message while preserving diagnostic
+    /// identities and spans.
     /// [`SafeText`] validates control safety only; the caller is responsible
     /// for admitting this message for disclosure.
     pub fn redacted_with_message(self, message: SafeText) -> Self {
