@@ -4073,6 +4073,9 @@ impl LiveHost {
         target: [u8; 16],
         expected: [u8; 32],
     ) -> Result<DispatchOutcome> {
+        // RequestStatus has no separate wire state for a fingerprint
+        // collision. Withhold terminal details and return RequestMismatch for
+        // both retained and recovered requests instead of exposing stale data.
         let retained = self.requests.get(&(session, target));
         if retained.is_some_and(|record| record.fingerprint != expected) {
             return Err(Error::RequestMismatch);
