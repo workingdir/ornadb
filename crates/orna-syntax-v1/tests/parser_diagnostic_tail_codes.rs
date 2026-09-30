@@ -3045,6 +3045,119 @@ fn recovered_direct_final_closure_keeps_case_suffix_remainder() {
 }
 
 #[test]
+fn recovered_final_multi_closure_keeps_nested_case_suffixes() {
+    let source = include_str!("fixtures/malformed-case-arm-direct-final-multi-closure-suffixes.orna");
+    let parsed = parse_module(source);
+
+    assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+    let diagnostic = &parsed.diagnostics[0];
+    assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+    assert_eq!(diagnostic.message, "expected `:` after case pattern");
+    let malformed_separator = source.find("{ value").expect("fixture has malformed arm");
+    assert_eq!(diagnostic.span.start, malformed_separator);
+    assert_eq!(diagnostic.span.end, malformed_separator + 1);
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block { tail: Some(tail), .. } = body else {
+        panic!("expected the function body tail");
+    };
+    let Expr::Control { arms, .. } = tail.as_ref() else {
+        panic!("expected the outer case to remain the function tail");
+    };
+    assert_eq!(arms.len(), 3, "{arms:?}");
+    assert!(matches!(&arms[1].body, Expr::Literal { text, .. } if text == "5"));
+
+    let Expr::Lambda {
+        parameters,
+        body: closure_body,
+        ..
+    } = &arms[2].body
+    else {
+        panic!("final outer arm lost its direct closure: {:?}", arms[2].body);
+    };
+    assert_eq!(parameters.len(), 2);
+    let Expr::Block {
+        statements,
+        tail: Some(closure_tail),
+        ..
+    } = closure_body.as_ref()
+    else {
+        panic!("direct closure lost its final case expression");
+    };
+    assert!(statements.is_empty(), "{statements:?}");
+    let Expr::Control {
+        condition: Some(condition),
+        arms: closure_arms,
+        ..
+    } = closure_tail.as_ref()
+    else {
+        panic!("direct closure tail is not a case expression");
+    };
+    assert!(matches!(condition.as_ref(), Expr::Name { text, .. } if text == "selected"));
+    assert_eq!(closure_arms.len(), 2, "{closure_arms:?}");
+
+    fn interpolation_parts(expression: &Expr) -> Vec<String> {
+        let Expr::InterpolatedString { segments, .. } = expression else {
+            panic!("expected a direct interpolated closure body: {expression:?}");
+        };
+        segments
+            .iter()
+            .map(|segment| match segment {
+                StringSegment::Text { text, .. } => format!("text:{text}"),
+                StringSegment::Expression {
+                    value: Expr::Name { text, .. },
+                    ..
+                } => format!("expression:{text}"),
+                other => panic!("unexpected interpolation segment: {other:?}"),
+            })
+            .collect()
+    }
+
+    let expected_suffixes: [&[&str]; 2] = [
+        &[
+            "text:first ",
+            "expression:result",
+            "text: retains ",
+            "expression:spare",
+            "text: after",
+        ],
+        &[
+            "text:final ",
+            "expression:result",
+            "text: retains ",
+            "expression:selected",
+            "text: through",
+        ],
+    ];
+    for (index, arm) in closure_arms.iter().enumerate() {
+        let Expr::Lambda {
+            parameters,
+            body: nested_body,
+            ..
+        } = &arm.body
+        else {
+            panic!("nested case arm {index} lost its direct closure");
+        };
+        assert_eq!(parameters.len(), 1);
+        let expected = expected_suffixes[index]
+            .iter()
+            .map(|part| (*part).to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            interpolation_parts(nested_body.as_ref()),
+            expected,
+            "nested closure arm {index}"
+        );
+    }
+
+    // The grammar permits parenthesized lambda parameters, direct lambda case
+    // bodies, and optional commas. Recovery from the preceding malformed arm
+    // is unspecified; keep both closure tails and their suffix text pragmatically.
+}
+
+#[test]
 fn semicolon_keeps_control_expression_as_a_statement() {
     let parsed = parse_module(include_str!("fixtures/semicolon-control-block-item.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
