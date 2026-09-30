@@ -234,3 +234,8 @@ competitor's current key. Its closure updates and moves the competitor aside,
 the inserted row retries into the released key, and the competitor reuses the
 inserted row's vacated key. This successive moved-target reuse order is a
 pragmatic local choice because the reference does not specify it.
+
+The fixture then repeats the handoff in reverse: the inserted row tries the
+competitor's reused key, the competitor moves aside, the inserted row retries,
+and the competitor takes the newly released key. This repeated direction change
+is another local closure choice where the reference is silent.
