@@ -175,6 +175,30 @@ fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
         Ok(Some(Value::int(43.into())))
     );
 
+    // Detaching the surviving archive from this already-pruned clone leaves
+    // the primary root alone and does not mutate the source session.
+    let mut archive_detached = databases.clone();
+    archive_detached.detach_database("main_archive").unwrap();
+    let after_archive_detach = archive_detached.module_inputs();
+    assert_eq!(
+        after_archive_detach
+            .iter()
+            .filter(|module| module.logical_path == "main.orna")
+            .count(),
+        1
+    );
+    assert!(after_archive_detach.iter().any(|module| {
+        module.logical_path == "main.orna" && module.source.contains("primary_value")
+    }));
+    assert!(!after_archive_detach
+        .iter()
+        .any(|module| module.logical_path == "main/main.orna"));
+    assert!(!after_archive_detach
+        .iter()
+        .any(|module| module.logical_path == "main_archive.orna"));
+    assert!(archive_detached.database("main_archive").is_none());
+    assert!(databases.database("main_archive").is_some());
+
     // Detach prunes one exact route immediately; restoring the same pin must
     // recover only that route while preserving the overlapping alias.
     let recovered_pin = PinnedDatabase::resolve(
