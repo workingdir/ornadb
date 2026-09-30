@@ -1,0 +1,1 @@
+iso_fmt.format(((1.seconds * 0.000000006) / 2.0) / 3.0)
