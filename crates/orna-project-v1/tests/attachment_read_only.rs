@@ -1247,6 +1247,10 @@ fn attached_main_alias_has_a_distinct_prefix_chain_module_namespace() {
             "contacts.orna",
             include_str!("fixtures/attach-routing-table.orna"),
         ),
+        (
+            "contacts/Contact/1.orna",
+            include_str!("fixtures/attach-routing-primary-row.orna"),
+        ),
     ]);
     let (attached_dir, attached_repository, main_alias_commit) = repository(&[
         (
@@ -1257,11 +1261,25 @@ fn attached_main_alias_has_a_distinct_prefix_chain_module_namespace() {
             "contacts.orna",
             include_str!("fixtures/attach-routing-table.orna"),
         ),
+        (
+            "contacts/Contact/1.orna",
+            include_str!("fixtures/attach-routing-package-row.orna"),
+        ),
     ]);
+    write_commit(
+        attached_dir.path(),
+        "contacts/Contact/1.orna",
+        &include_str!("fixtures/attach-routing-package-row.orna").replace("42", "43"),
+    );
     let longer_alias_commit = write_commit(
         attached_dir.path(),
         "main.orna",
         &include_str!("fixtures/attach-routing-package.orna").replace("42", "43"),
+    );
+    write_commit(
+        attached_dir.path(),
+        "contacts/Contact/1.orna",
+        &include_str!("fixtures/attach-routing-package-row.orna").replace("42", "99"),
     );
     let replacement_commit = write_commit(
         attached_dir.path(),
@@ -1289,6 +1307,25 @@ fn attached_main_alias_has_a_distinct_prefix_chain_module_namespace() {
     let mut session = AttachedDatabaseSession::new(primary).unwrap();
     session.attach_database(main_alias).unwrap();
     session.attach_database(longer_alias).unwrap();
+    assert_eq!(session.relation_sources("contacts/Contact").len(), 3);
+    assert_relation_routes(
+        &session,
+        "app",
+        &primary_commit,
+        &[("contacts/Contact/1.orna", "value: 7")],
+    );
+    assert_relation_routes(
+        &session,
+        "main",
+        &main_alias_commit,
+        &[("contacts/Contact/1.orna", "value: 42")],
+    );
+    assert_relation_routes(
+        &session,
+        "main_archive",
+        &longer_alias_commit,
+        &[("contacts/Contact/1.orna", "value: 43")],
+    );
 
     let modules = session.module_inputs();
     assert_eq!(
@@ -1312,6 +1349,19 @@ fn attached_main_alias_has_a_distinct_prefix_chain_module_namespace() {
     let old_clone = session.clone();
     session.detach_database("main").unwrap();
     let detached_clone = session.clone();
+    assert_eq!(session.relation_sources("contacts/Contact").len(), 2);
+    assert_relation_routes(
+        &session,
+        "app",
+        &primary_commit,
+        &[("contacts/Contact/1.orna", "value: 7")],
+    );
+    assert_relation_routes(
+        &session,
+        "main_archive",
+        &longer_alias_commit,
+        &[("contacts/Contact/1.orna", "value: 43")],
+    );
     assert_routed_module_source(&session, "main.orna", "primary_value");
     assert!(routed_module_source(&session, "main/main.orna").is_none());
     assert_routed_module_source(&session, "main_archive.orna", "= 43");
@@ -1324,19 +1374,63 @@ fn attached_main_alias_has_a_distinct_prefix_chain_module_namespace() {
     )
     .unwrap();
     session.attach_database(replacement).unwrap();
+    assert_eq!(session.relation_sources("contacts/Contact").len(), 3);
+    assert_relation_routes(
+        &session,
+        "app",
+        &primary_commit,
+        &[("contacts/Contact/1.orna", "value: 7")],
+    );
+    assert_relation_routes(
+        &session,
+        "main",
+        &replacement_commit,
+        &[("contacts/Contact/1.orna", "value: 99")],
+    );
+    assert_relation_routes(
+        &session,
+        "main_archive",
+        &longer_alias_commit,
+        &[("contacts/Contact/1.orna", "value: 43")],
+    );
     assert_routed_module_source(&session, "main.orna", "primary_value");
     assert_routed_module_source(&session, "main/main.orna", "= 99");
     assert_routed_module_source(&session, "main_archive.orna", "= 43");
     assert_routed_module_source(&old_clone, "main/main.orna", "= 42");
     assert_routed_module_source(&old_clone, "main_archive.orna", "= 43");
+    assert_relation_routes(
+        &old_clone,
+        "main",
+        &main_alias_commit,
+        &[("contacts/Contact/1.orna", "value: 42")],
+    );
+    assert_relation_routes(
+        &old_clone,
+        "main_archive",
+        &longer_alias_commit,
+        &[("contacts/Contact/1.orna", "value: 43")],
+    );
     assert!(detached_clone.database("main").is_none());
     assert!(routed_module_source(&detached_clone, "main/main.orna").is_none());
     assert_routed_module_source(&detached_clone, "main_archive.orna", "= 43");
+    assert_relation_routes(
+        &detached_clone,
+        "main_archive",
+        &longer_alias_commit,
+        &[("contacts/Contact/1.orna", "value: 43")],
+    );
 
     session.detach_database("main_archive").unwrap();
+    assert_eq!(session.relation_sources("contacts/Contact").len(), 2);
     assert_routed_module_source(&session, "main.orna", "primary_value");
     assert_routed_module_source(&session, "main/main.orna", "= 99");
     assert!(routed_module_source(&session, "main_archive.orna").is_none());
+    assert_relation_routes(
+        &session,
+        "main",
+        &replacement_commit,
+        &[("contacts/Contact/1.orna", "value: 99")],
+    );
 }
 
 #[test]
