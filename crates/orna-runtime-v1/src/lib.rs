@@ -21252,6 +21252,26 @@ mod tests {
             "last() closes before six rejected branches and the failing tail"
         );
 
+        // The reference is silent on six rejected rows interleaved between
+        // the accepted rows. Traverse those rejects to reach match two, then
+        // close before the failing source beyond the completed take(2).
+        let (last_closes_bracketed_take_two_after_six_interleaved_rejects, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-bracketed-six-interleaved-rejects-then-failing-tail.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_bracketed_take_two_after_six_interleaved_rejects.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (10, 16),
+            "last() traverses six rejects between matches and closes before the failing tail"
+        );
+
         // The reference is silent when the entire bracketed candidate tail
         // is rejected before take(2) naturally exhausts. The empty last()
         // result keeps its explicit coalesce fallback.
