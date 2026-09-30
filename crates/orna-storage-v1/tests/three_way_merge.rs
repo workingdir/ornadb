@@ -663,6 +663,47 @@ fn checkpoint_delete_update_budget_tail_reports_identity_for_either_deleted_side
 }
 
 #[test]
+fn both_delete_update_orientations_survive_the_checkpoint_budget_tail() {
+    let (mut base, mut left, mut right, mut source) = row_checkpoint_conflict_inputs();
+    base.checkpoints.clear();
+    left.checkpoints.clear();
+    right.checkpoints.clear();
+    let checkpoint = |generation, position: &[u8]| CheckpointGeneration {
+        generation,
+        position: Some(position.to_vec()),
+    };
+
+    // A is deleted on left and edited on right; B has the opposite orientation.
+    // Their ordered impacts include both the final retained detail and the
+    // first checkpoint beyond budget, while the later Z conflict is unvisited.
+    let deleted_left = b"consumer/a-deleted-on-left".to_vec();
+    base.checkpoints.insert(deleted_left.clone(), checkpoint(4, b"a-base"));
+    right.checkpoints.insert(deleted_left.clone(), checkpoint(5, b"a-right"));
+
+    let deleted_right = b"consumer/b-deleted-on-right".to_vec();
+    base.checkpoints.insert(deleted_right.clone(), checkpoint(4, b"b-base"));
+    left.checkpoints.insert(deleted_right.clone(), checkpoint(5, b"b-left"));
+
+    let unvisited = b"consumer/z-unvisited".to_vec();
+    base.checkpoints.insert(unvisited.clone(), checkpoint(7, b"z-base"));
+    left.checkpoints.insert(unvisited.clone(), checkpoint(8, b"z-left"));
+    right.checkpoints.insert(unvisited.clone(), checkpoint(9, b"z-right"));
+
+    let two_detail_budget = BranchMergeBudget { max_rows_examined: 100, max_conflicts: 2 };
+    let error = merge_three_way_snapshots(&base, &left, &right, &mut source, two_detail_budget)
+        .unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("the second delete/update checkpoint crosses the shared budget")
+    };
+    assert_eq!(report.conflicts_lower_bound, 3);
+    assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+    assert!(report.affected_checkpoints.contains(deleted_left.as_slice()));
+    assert!(report.affected_checkpoints.contains(deleted_right.as_slice()));
+    assert!(!report.affected_checkpoints.contains(unvisited.as_slice()));
+    assert_eq!(source.visited.len(), 3);
+}
+
+#[test]
 fn schema_conflict_is_a_boundary_before_row_reads_and_checkpoint_resolution() {
     let base_checkpoint = CheckpointGeneration {
         generation: 4,
