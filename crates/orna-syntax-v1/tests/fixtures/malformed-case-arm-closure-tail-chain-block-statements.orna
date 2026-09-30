@@ -1,0 +1,17 @@
+pub fn bad(flag: Bool): Int { case flag {
+1: 2 3 { value: 4 },
+true: 5,
+false: outer => { let outer_value = outer; case outer {
+true: outer_value,
+false: inner => { let inner_value = inner; case inner {
+true: inner_value,
+false: "tail {probe => { let probe_value = probe; case probe {
+true: probe_value,
+false: nested => { let nested_value = nested; case nested {
+true: nested_value,
+false: "end {flag} done"
+} }
+} }} after"
+} }
+} }
+} }
