@@ -1,0 +1,4 @@
+pub table RemainderAfterUnknownMultiSource(id: Int) { value: Int, }
+pub table RemainderAfterUnknownMultiUnknown(id: Int) { value: Int, }
+pub table RemainderAfterUnknownMultiFirst(id: Int) { value: Int, }
+pub table RemainderAfterUnknownMultiSecond(id: Int) { value: Int, }
