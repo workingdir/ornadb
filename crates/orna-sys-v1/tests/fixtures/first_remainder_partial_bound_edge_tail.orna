@@ -1,0 +1,3 @@
+pub table FirstRemainderPartialBoundEdgeSource(id: Int) { value: Int, }
+pub table FirstRemainderPartialBoundEdgeTarget(id: Int) { value: Int, }
+pub fn update_first_remainder_partial_bound_edge() = FirstRemainderPartialBoundEdgeTarget.update(1, { value: 2 });
