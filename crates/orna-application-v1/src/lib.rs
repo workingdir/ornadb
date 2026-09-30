@@ -6539,6 +6539,87 @@ mod tests {
     }
 
     #[test]
+    fn original_owner_key_retries_after_competitor_deletion() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "table-rekey-original-owner-key-competitor-delete-final-retry.orna",
+                include_str!("../tests/fixtures/table-rekey-original-owner-key-competitor-delete-final-retry.orna"),
+                "main",
+            )
+            .expect("checked-in original owner-key deletion fixture should be admitted");
+
+        let int = |value: i64| {
+            CanonicalValue::new(OvbRaw::Int(value.into())).expect("integer is canonical")
+        };
+        let row = |id: i64, text: &str, quantity: i64| {
+            CanonicalValue::new(OvbRaw::Map(vec![
+                (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
+                (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
+                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+            ]))
+            .expect("row is canonical")
+        };
+        let key = |value: i64| int(value).encode().expect("key is canonical");
+        let rows = BTreeMap::from([(
+            "Note".to_owned(),
+            vec![
+                (key(2), row(2, "original destination", 32).encode().unwrap()),
+                (key(6), row(6, "second source", 44).encode().unwrap()),
+            ],
+        )]);
+        let tables = admitted_table_schemas(&application.module_header);
+        let mut handler =
+            SourceMutationEffectHandler::with_table_rows(tables, rows).expect("valid snapshot");
+
+        invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            &Environment::new(),
+            application.limits,
+            &mut handler,
+        )
+        .expect("owner retry succeeds after deleting the competitor at its original key");
+
+        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        assert_eq!(mutations.len(), 9);
+
+        let expected = [
+            (2, None, false, Some(row(2, "original destination", 33))),
+            (2, Some(5), false, Some(row(5, "original destination", 33))),
+            (5, None, false, Some(row(5, "original destination", 34))),
+            (6, Some(2), false, Some(row(2, "second source", 44))),
+            (2, None, false, Some(row(2, "second source", 45))),
+            (2, None, false, Some(row(2, "second source", 46))),
+            (2, None, false, None),
+            (5, Some(2), false, Some(row(2, "original destination", 34))),
+            (2, None, false, Some(row(2, "original destination", 35))),
+        ];
+
+        for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in
+            mutations.iter().zip(expected).enumerate()
+        {
+            assert_eq!(mutation.key(), key(old_key), "mutation {index} source key");
+            let expected_key = new_key.map(key);
+            assert_eq!(
+                mutation.rekey_to(),
+                expected_key.as_deref(),
+                "mutation {index} re-key destination"
+            );
+            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            match expected_row {
+                Some(expected_row) => assert_eq!(
+                    CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
+                    expected_row,
+                    "mutation {index} row value"
+                ),
+                None => assert_eq!(mutation.value(), None, "mutation {index} deletion value"),
+            }
+        }
+    }
+
+    #[test]
     fn failed_mutation_tail_does_not_return_earlier_effects_for_staging() {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
