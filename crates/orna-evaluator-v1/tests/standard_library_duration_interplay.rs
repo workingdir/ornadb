@@ -724,6 +724,50 @@ fn positive_factor_values_around_two_keep_the_minute_boundary_tails() {
 }
 
 #[test]
+fn positive_factor_values_around_three_keep_the_minute_remainder_tails() {
+    // The reference leaves fractional-factor remainders unspecified. Pin
+    // exact nanoseconds for 20 seconds scaled by factors just below/above 3.
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
+    ] {
+        assert_eq!(session.submit(source), Ok(None), "{source}");
+    }
+
+    for (source, expected) in [
+        (
+            include_str!("fixtures/stdlib-time-duration-factor-near-three-before-minute-b2kid.orna"),
+            texts(&[
+                "59.999999998s",
+                "00:00:59.999999998",
+                "59.999999998 seconds",
+                "PT59.999999998S",
+            ]),
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-factor-near-three-after-minute-b2kid.orna"),
+            texts(&[
+                "1m 0.000000002s",
+                "00:01:00.000000002",
+                "1 minute, 0.000000002 seconds",
+                "PT1M0.000000002S",
+            ]),
+        ),
+    ] {
+        let result = session.submit(source);
+        assert_eq!(
+            result,
+            Ok(Some(expected)),
+            "{source}; diagnostic={}",
+            result.as_ref().err().map_or("none", |error| error.code())
+        );
+    }
+}
+
+#[test]
 fn clock_output_bound_keeps_elapsed_hours_and_fractional_tail() {
     let limits = Limits {
         max_string_bytes: 129,
