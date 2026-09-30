@@ -52,14 +52,14 @@ fn default_argument_fixture_uses_published_schema_edges() {
 }
 
 #[test]
-fn edge_interplay_fixture_closes_relation_callback_captures() {
+fn edge_interplay_fixture_closes_captured_relation_callbacks() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
         EDGE_INTERPLAY,
     )]);
     assert!(
         analysis.is_ok(),
-        "nested DiffEntry and SourceMap projections, including callback captures, must resolve through the published SYS schema: {:?}",
+        "nested DiffEntry and SourceMap projections plus captured filter and flat_map callbacks must resolve through the published SYS schema: {:?}",
         analysis
             .diagnostics
             .iter()
