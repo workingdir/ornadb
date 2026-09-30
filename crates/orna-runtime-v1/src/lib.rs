@@ -23972,6 +23972,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sys_invocation_tail_cursor_invalidates_only_after_committed_cwd_write() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(120)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let invocation_id = id(121);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(122)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .finish_invocation_observation(writer, invocation_id, InvocationCompletion::Succeeded)
+            .await
+            .unwrap();
+        let end_page = state.invocation_observation_tail(None, 2).await.unwrap();
+        assert_eq!(end_page.entries.len(), 2);
+        assert!(!end_page.has_more);
+        let cursor = end_page.next_cursor.expect("tail end has a cursor");
+
+        let key = stream_delivery("tail-cursor-commit-boundary", "tail-cursor-commit-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("tail-cursor:before-write").unwrap(),
+            },
+            reason: "tail cursor commit boundary reset".into(),
+        };
+        let receipt_id = id(123);
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request.clone(), receipt_id)
+            .await
+            .unwrap();
+        let capture = state.capture().await.unwrap();
+
+        assert_eq!(
+            state
+                .commit(
+                    writer,
+                    &capture,
+                    &mutation(124),
+                    digest(125),
+                    &Fail(FaultPoint::AfterMutation),
+                )
+                .await,
+            Err(RuntimeError::FaultInjected(FaultPoint::AfterMutation))
+        );
+        assert_eq!(state.capture().await.unwrap(), capture);
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(writer, request.clone(), receipt_id)
+                .await,
+            Ok(receipt.clone())
+        );
+        let after_rollback = state
+            .invocation_observation_tail(Some(cursor.clone()), 2)
+            .await
+            .unwrap();
+        assert!(after_rollback.entries.is_empty());
+        assert!(!after_rollback.has_more);
+        assert_eq!(after_rollback.next_cursor, Some(cursor.clone()));
+
+        state
+            .commit(writer, &capture, &mutation(126), digest(127), &NoFault)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .invocation_observation_tail(Some(cursor), 2)
+                .await,
+            Err(RuntimeError::InvocationTailInvalid),
+            "only the committed CWD generation invalidates the cursor"
+        );
+        assert_eq!(state.stream_checkpoint(&key).await.unwrap(), receipt);
+        let tail = state
+            .invocation_observation_tail(None, 4)
+            .await
+            .unwrap();
+        assert_eq!(
+            tail.entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[tokio::test]
     async fn sys_lifecycle_parent_waits_for_children_and_replacement_orphans_old_owner() {
         assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
         let (_temp, repo) = repository();
