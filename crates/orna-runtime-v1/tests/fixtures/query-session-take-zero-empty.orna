@@ -1,0 +1,3 @@
+sys.MaintenanceJob
+    | take(0)
+    | count()
