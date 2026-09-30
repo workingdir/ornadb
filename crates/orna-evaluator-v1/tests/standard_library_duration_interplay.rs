@@ -1693,6 +1693,40 @@ fn positive_factor_rescaled_tails_close_after_twenty_second_doubling() {
 }
 
 #[test]
+fn positive_factor_rescaled_tails_close_after_twenty_third_doubling() {
+    // The reference is silent on extending positive-factor tail closure this
+    // far. Continue the symmetric edge correction through one more scaling:
+    // the 3 ns tail becomes 25,165,824 ns around 8,388,608 minutes, pinning 5825d 10h 8m.
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
+    ] {
+        assert_eq!(session.submit(source), Ok(None), "{source}");
+    }
+
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twenty-third-doubling-from-below-rin86.orna"),
+        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twenty-third-doubling-from-above-rin86.orna"),
+    ] {
+        let result = session.submit(source);
+        assert_eq!(
+            result,
+            Ok(Some(texts(&[
+                "5825d 10h 8m",
+                "139810:08:00",
+                "5825 days, 10 hours, 8 minutes",
+                "P5825DT10H8M",
+            ]))),
+            "{source}; diagnostic={}",
+            result.as_ref().err().map_or("none", |error| error.code())
+        );
+    }
+}
+
+#[test]
 fn clock_output_bound_keeps_elapsed_hours_and_fractional_tail() {
     let limits = Limits {
         max_string_bytes: 129,
