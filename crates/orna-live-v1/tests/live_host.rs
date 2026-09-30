@@ -9554,6 +9554,106 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
         )),
         Err(Error::Closed)
     ));
+
+    // The closed sibling's target ID can also identify a completed status
+    // query in this session. The reference defines request IDs as
+    // session-scoped and says deletion cancels session-owned work, but does
+    // not spell out retention of this aliased query snapshot after closing
+    // its session. Keep the durable query row distinct; close still blocks
+    // delivery on the old attachment.
+    let closed_target_id_query = Envelope {
+        request: Some([92; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint: first_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let closed_target_id_query_fingerprint =
+        request_fingerprint(&closed_target_id_query, [1; 16]);
+    let closed_target_id_status = block_on(host.dispatch_frame(
+        [6; 16],
+        5,
+        Frame::Binary(closed_target_id_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a closed sibling's ID is available to this session's status query");
+    assert!(matches!(
+        &closed_target_id_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(returned),
+            result: Some(_),
+        } if *target == [91; 16] && *returned == first_fingerprint
+    ));
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [1; 16],
+            request_id: [92; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == closed_target_id_query_fingerprint
+    ));
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status(second_identity, second_fingerprint))
+            .unwrap(),
+        Some(status) if status.state == orna_runtime_v1::RequestState::Cancelled
+    ));
+
+    let mut first_deletion = RecordingDelete::default();
+    let mut first_children = RecordingChildren::default();
+    assert_eq!(
+        block_on(host.http_delete_with_children(
+            DeleteRequest {
+                id: [1; 16],
+                origin: &origin(),
+                credential: &first_credential,
+                now: 1,
+            },
+            &mut first_deletion,
+            &mut first_children,
+        ))
+        .status,
+        204
+    );
+    assert!(first_children.requests.is_empty());
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [1; 16],
+            request_id: [92; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == closed_target_id_query_fingerprint
+    ));
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status(second_identity, second_fingerprint))
+            .unwrap(),
+        Some(status) if status.state == orna_runtime_v1::RequestState::Cancelled
+    ));
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status(first_identity, first_fingerprint))
+            .unwrap(),
+        Some(status) if status.state == orna_runtime_v1::RequestState::Completed
+    ));
+    assert!(matches!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            6,
+            Frame::Binary(closed_target_id_query),
+            &mut application,
+        )),
+        Err(Error::Closed)
+    ));
     assert_eq!(application.calls, 0);
     drop(host);
     remove_test_repository(&root);
