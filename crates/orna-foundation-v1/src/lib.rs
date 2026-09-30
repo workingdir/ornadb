@@ -1365,6 +1365,26 @@ impl Diagnostic {
         diagnostic.message = message;
         diagnostic
     }
+    fn boundary_projection(&self) -> Self {
+        // A redacted root may carry a caller-admitted message, but children
+        // have no such admission when composed into another diagnostic.
+        let mut projection = if self.redacted {
+            self.clone()
+        } else {
+            self.clone().redacted()
+        };
+        projection.notes = projection
+            .notes
+            .iter()
+            .map(|_| SafeText::redacted())
+            .collect();
+        projection.causes = projection
+            .causes
+            .iter()
+            .map(|cause| cause.clone().redacted())
+            .collect();
+        projection
+    }
     pub fn with_reference(mut self, reference: [u8; 16]) -> Self {
         self.reference = Some(reference);
         self
@@ -1376,7 +1396,7 @@ impl Diagnostic {
         self.message.as_str()
     }
     pub fn encode_ovb(&self) -> Result<Vec<u8>, FoundationError> {
-        Value::new(self.raw()?)
+        Value::new(self.boundary_projection().raw()?)
             .map_err(FoundationError::Value)?
             .encode()
             .map_err(FoundationError::Value)
@@ -1475,23 +1495,26 @@ impl Diagnostic {
 /// JSON evidence representation for the live protocol diagnostic. This is
 /// intentionally separate from tag-60011: JSON is an audit/report transport,
 /// whereas tag-60011 remains the normative binary codec.
+/// Both serializers apply a safe boundary projection before writing fields.
 ///
 /// Values that JSON cannot represent safely are deliberately strings: UUIDs
 /// are canonical lower-case UUID text, arbitrary precision integers are base
 /// ten text, and canonical OVB values are lower-case hexadecimal bytes.
 impl Serialize for Diagnostic {
     fn serialize<T: Serializer>(&self, serializer: T) -> Result<T::Ok, T::Error> {
-        self.validate_redaction_consistency()
+        let projection = self.boundary_projection();
+        projection
+            .validate_redaction_consistency()
             .map_err(|_| <T::Error as serde::ser::Error>::custom("invalid diagnostic redaction"))?;
         let mut state = serializer.serialize_struct("Diagnostic", 8)?;
-        state.serialize_field("code", self.code.as_str())?;
-        state.serialize_field("severity", diagnostic_severity_name(self.severity))?;
-        state.serialize_field("message", self.message.as_str())?;
-        state.serialize_field("spans", &DiagnosticSpans(&self.spans))?;
-        state.serialize_field("notes", &SafeTexts(&self.notes))?;
-        state.serialize_field("causes", &Diagnostics(&self.causes))?;
-        state.serialize_field("redacted", &self.redacted)?;
-        if let Some(reference) = self.reference {
+        state.serialize_field("code", projection.code.as_str())?;
+        state.serialize_field("severity", diagnostic_severity_name(projection.severity))?;
+        state.serialize_field("message", projection.message.as_str())?;
+        state.serialize_field("spans", &DiagnosticSpans(&projection.spans))?;
+        state.serialize_field("notes", &SafeTexts(&projection.notes))?;
+        state.serialize_field("causes", &Diagnostics(&projection.causes))?;
+        state.serialize_field("redacted", &projection.redacted)?;
+        if let Some(reference) = projection.reference {
             state.serialize_field("reference", &uuid_text(reference))?;
         }
         state.end()
@@ -1918,7 +1941,10 @@ mod tests {
             Value::decode(&bytes).unwrap().raw(),
             OvbRaw::Tag(60011, _)
         ));
-        assert_eq!(Diagnostic::decode_ovb(&bytes).unwrap(), diagnostic);
+        assert_eq!(
+            Diagnostic::decode_ovb(&bytes).unwrap(),
+            diagnostic.clone().redacted()
+        );
     }
     #[test]
     fn committed_and_cwd_snapshot_pins_round_trip_without_rebinding() {
