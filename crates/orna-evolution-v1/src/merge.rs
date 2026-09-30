@@ -11,7 +11,7 @@ use super::{
     CanonicalValue, Field, ObjectId, Schema, Table,
     VersionFence, validate_schema, SchemaSide,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::{collections::{BTreeMap, BTreeSet}, fmt};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SchemaMergeConflict {
@@ -471,4 +471,293 @@ pub fn merge_checkpoint_generation(
     } else {
         Err(CheckpointMergeConflict { base: base.cloned(), left: left.cloned(), right: right.cloned() })
     }
+}
+
+/// Stable checkpoint row identity copied into portable snapshot metadata.
+/// `consumer_identity` is its canonical identity encoding; `None` and an
+/// empty-string partition remain distinct natural keys.
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub struct CheckpointIdentity {
+    pub consumer_identity: Vec<u8>,
+    pub source_identity: String,
+    pub partition: Option<String>,
+}
+
+impl CheckpointIdentity {
+    pub fn new(
+        consumer_identity: Vec<u8>,
+        source_identity: impl Into<String>,
+        partition: Option<String>,
+    ) -> Self {
+        Self { consumer_identity, source_identity: source_identity.into(), partition }
+    }
+}
+
+impl fmt::Debug for CheckpointIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CheckpointIdentity")
+            .field("consumer_identity", &"<opaque>")
+            .field("source_identity", &self.source_identity)
+            .field("partition", &self.partition)
+            .finish()
+    }
+}
+
+/// Failure while constructing a portable, canonically encoded position.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CheckpointPositionError {
+    InvalidFormat,
+    InvalidCanonicalPayload,
+}
+
+impl fmt::Display for CheckpointPositionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidFormat => "checkpoint position format must be non-empty and versioned",
+            Self::InvalidCanonicalPayload => "checkpoint position payload is not canonical OVB-1",
+        })
+    }
+}
+
+impl std::error::Error for CheckpointPositionError {}
+
+/// A typed provider cursor. Payload bytes are a canonical OVB-1 value (usually
+/// a byte string); generic merge code compares the full value and format tuple
+/// only. It never sorts, decodes, or guesses cursor progress.
+#[derive(Clone, Eq, PartialEq)]
+pub struct CheckpointPosition {
+    format: String,
+    format_version: u32,
+    canonical_payload: Vec<u8>,
+}
+
+impl CheckpointPosition {
+    pub fn new(
+        format: impl Into<String>,
+        format_version: u32,
+        canonical_payload: Vec<u8>,
+    ) -> Result<Self, CheckpointPositionError> {
+        let format = format.into();
+        // The provider owns format compatibility and migration. This portable
+        // layer requires an explicit nonzero version and compares it exactly.
+        if format.is_empty() || format_version == 0 {
+            return Err(CheckpointPositionError::InvalidFormat);
+        }
+        CanonicalValue::decode(&canonical_payload)
+            .map_err(|_| CheckpointPositionError::InvalidCanonicalPayload)?;
+        Ok(Self { format, format_version, canonical_payload })
+    }
+
+    pub fn format(&self) -> &str {
+        &self.format
+    }
+
+    pub const fn format_version(&self) -> u32 {
+        self.format_version
+    }
+
+    pub fn canonical_payload(&self) -> &[u8] {
+        &self.canonical_payload
+    }
+}
+
+impl fmt::Debug for CheckpointPosition {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CheckpointPosition")
+            .field("format", &self.format)
+            .field("format_version", &self.format_version)
+            .field("canonical_payload", &"<opaque>")
+            .finish()
+    }
+}
+
+/// One selected snapshot's portable checkpoint relation, ordered by its
+/// natural composite identity rather than by provider position.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CheckpointSnapshot {
+    checkpoints: BTreeMap<CheckpointIdentity, CheckpointPosition>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CheckpointSnapshotError {
+    DuplicateIdentity,
+}
+
+impl fmt::Display for CheckpointSnapshotError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("checkpoint snapshot repeats a natural identity")
+    }
+}
+
+impl std::error::Error for CheckpointSnapshotError {}
+
+impl CheckpointSnapshot {
+    pub fn new(
+        checkpoints: impl IntoIterator<Item = (CheckpointIdentity, CheckpointPosition)>,
+    ) -> Result<Self, CheckpointSnapshotError> {
+        let mut indexed = BTreeMap::new();
+        for (identity, position) in checkpoints {
+            if indexed.insert(identity, position).is_some() {
+                return Err(CheckpointSnapshotError::DuplicateIdentity);
+            }
+        }
+        Ok(Self { checkpoints: indexed })
+    }
+
+    pub fn checkpoints(&self) -> &BTreeMap<CheckpointIdentity, CheckpointPosition> {
+        &self.checkpoints
+    }
+
+    pub fn get(&self, identity: &CheckpointIdentity) -> Option<&CheckpointPosition> {
+        self.checkpoints.get(identity)
+    }
+}
+
+/// Snapshot references attached to a user-facing `sys.CheckpointConflict`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckpointSnapshotRefs {
+    pub base: Vec<u8>,
+    pub left: Vec<u8>,
+    pub right: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CheckpointConflictReason {
+    DivergentPosition,
+    IncompatibleFormat,
+    DeleteUpdate,
+}
+
+impl CheckpointConflictReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DivergentPosition => "divergent_position",
+            Self::IncompatibleFormat => "incompatible_format",
+            Self::DeleteUpdate => "delete_update",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckpointSnapshotMergeConflict {
+    pub identity: CheckpointIdentity,
+    pub base: Option<CheckpointPosition>,
+    pub left: Option<CheckpointPosition>,
+    pub right: Option<CheckpointPosition>,
+    pub left_snapshot: Vec<u8>,
+    pub right_snapshot: Vec<u8>,
+    pub reason: CheckpointConflictReason,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckpointSnapshotMergeFailure {
+    /// At most the caller's conflict budget in detail records.
+    pub conflicts: Vec<CheckpointSnapshotMergeConflict>,
+    /// Exact if within budget; otherwise the first proven lower bound over it.
+    pub conflicts_lower_bound: usize,
+}
+
+fn checkpoint_conflict_reason(
+    base: Option<&CheckpointPosition>,
+    left: Option<&CheckpointPosition>,
+    right: Option<&CheckpointPosition>,
+) -> CheckpointConflictReason {
+    if base.is_some() && left.is_none() != right.is_none() {
+        return CheckpointConflictReason::DeleteUpdate;
+    }
+    let mut expected_format = None;
+    for position in [base, left, right].into_iter().flatten() {
+        let format = (position.format(), position.format_version());
+        if expected_format.is_some_and(|expected| expected != format) {
+            return CheckpointConflictReason::IncompatibleFormat;
+        }
+        expected_format = Some(format);
+    }
+    CheckpointConflictReason::DivergentPosition
+}
+
+/// Reconciles the complete checkpoint relation in three portable snapshots.
+/// Disjoint checkpoint identities merge independently; equal positions and a
+/// one-sided change are retained. Divergent cursors remain typed conflicts.
+pub fn merge_checkpoint_snapshots(
+    base: &CheckpointSnapshot,
+    left: &CheckpointSnapshot,
+    right: &CheckpointSnapshot,
+    snapshots: &CheckpointSnapshotRefs,
+) -> Result<CheckpointSnapshot, Vec<CheckpointSnapshotMergeConflict>> {
+    merge_checkpoint_snapshots_bounded(base, left, right, snapshots, usize::MAX)
+        .map_err(|failure| failure.conflicts)
+}
+
+/// Bounded snapshot reconciliation used by adapters that need to cap conflict
+/// materialization before projecting conflicts into system values.
+pub fn merge_checkpoint_snapshots_bounded(
+    base: &CheckpointSnapshot,
+    left: &CheckpointSnapshot,
+    right: &CheckpointSnapshot,
+    snapshots: &CheckpointSnapshotRefs,
+    max_conflicts: usize,
+) -> Result<CheckpointSnapshot, CheckpointSnapshotMergeFailure> {
+    let identities: BTreeSet<_> = base
+        .checkpoints
+        .keys()
+        .chain(left.checkpoints.keys())
+        .chain(right.checkpoints.keys())
+        .cloned()
+        .collect();
+    let mut merged = BTreeMap::new();
+    let mut conflicts = Vec::new();
+    let mut conflict_count = 0usize;
+    for identity in identities {
+        let base_position = base.checkpoints.get(&identity);
+        let left_position = left.checkpoints.get(&identity);
+        let right_position = right.checkpoints.get(&identity);
+        let result = if left_position == right_position {
+            Ok(left_position.cloned())
+        } else if left_position == base_position {
+            // A unilateral format change is explicit in the changed snapshot;
+            // validating its provider-specific migration remains adapter-owned.
+            Ok(right_position.cloned())
+        } else if right_position == base_position {
+            Ok(left_position.cloned())
+        } else {
+            Err(checkpoint_conflict_reason(base_position, left_position, right_position))
+        };
+        match result {
+            Ok(Some(position)) => {
+                merged.insert(identity, position);
+            }
+            Ok(None) => {}
+            Err(reason) => {
+                conflict_count = conflict_count.saturating_add(1);
+                if conflicts.len() < max_conflicts {
+                    conflicts.push(CheckpointSnapshotMergeConflict {
+                        identity,
+                        base: base_position.cloned(),
+                        left: left_position.cloned(),
+                        right: right_position.cloned(),
+                        left_snapshot: snapshots.left.clone(),
+                        right_snapshot: snapshots.right.clone(),
+                        reason,
+                    });
+                }
+                if conflict_count > max_conflicts {
+                    return Err(CheckpointSnapshotMergeFailure {
+                        conflicts,
+                        conflicts_lower_bound: conflict_count,
+                    });
+                }
+            }
+        }
+    }
+    if conflict_count != 0 {
+        conflicts.sort_by(|left, right| left.identity.cmp(&right.identity));
+        return Err(CheckpointSnapshotMergeFailure {
+            conflicts,
+            conflicts_lower_bound: conflict_count,
+        });
+    }
+    Ok(CheckpointSnapshot { checkpoints: merged })
 }
