@@ -1,0 +1,20 @@
+pub fn bad(flag: Bool): Int { case flag {
+1: 2 3 { value: 4 },
+true: 5,
+false: outer => { case outer {
+true: "outer {outer} remains",
+false: inner => { case inner {
+true: "middle {inner} remains",
+false: "closing {probe => { case probe {
+true: "probe {flag}",
+false: nested => { case nested {
+true: "nested {outer}",
+false: final => { case final {
+true: "leaf {flag} tail",
+false: "last {outer} end"
+} }
+} }
+} }}"
+} }
+} }
+} }
