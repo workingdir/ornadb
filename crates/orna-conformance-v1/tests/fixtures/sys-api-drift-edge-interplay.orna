@@ -1,0 +1,4 @@
+pub fn diff_change_area(entry: sys.DiffEntry): sys.ChangeArea = entry.change.area;
+pub fn diff_change_target(entry: sys.DiffEntry): sys.ChangeTarget = entry.change.target;
+pub fn diff_change_target_kind(entry: sys.DiffEntry): sys.ChangeTargetKind = entry.change.target.kind;
+pub fn diff_rows(from: sys.SnapshotRef, to: sys.SnapshotRef): Relation<sys.DiffEntry> = sys.diff(from, to);
