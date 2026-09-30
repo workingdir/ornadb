@@ -1234,6 +1234,222 @@ fn segmented_tombstone_and_delete_edit_conflicts_stop_before_the_tail() {
 }
 
 #[test]
+fn segmented_conflict_tombstone_conflict_stops_before_later_conflicts() {
+    let mut keys = [integer(10), integer(20), integer(30), integer(40)];
+    keys.sort_by_key(|key| key.encode().unwrap());
+    let [first_conflict_key, clean_tombstone_key, second_conflict_key, tail_conflict_key] = keys;
+    let first_boundary = clean_tombstone_key.encode().unwrap();
+    let second_boundary = second_conflict_key.encode().unwrap();
+    let third_boundary = tail_conflict_key.encode().unwrap();
+    let ranges = [
+        KeyRange::new(None, Some(first_boundary.clone())).unwrap(),
+        KeyRange::new(Some(first_boundary), Some(second_boundary.clone())).unwrap(),
+        KeyRange::new(Some(second_boundary), Some(third_boundary.clone())).unwrap(),
+        KeyRange::new(Some(third_boundary), None).unwrap(),
+    ];
+    let split_manifest = |table_digest: u8, segment_digests: [u8; 4], locators: [&[u8]; 4]| {
+        TableManifest {
+            digest: [table_digest; 32],
+            segments: (0..4)
+                .map(|index| RowSegmentManifest {
+                    locator: locators[index].to_vec(),
+                    range: ranges[index].clone(),
+                    digest: [segment_digests[index]; 32],
+                })
+                .collect(),
+        }
+    };
+    let fixture_row = |fixture: &str, key: &CanonicalValue| {
+        let mut row = parse_fixture(fixture, RowKeyKind::Explicit);
+        row.key = key.clone();
+        row
+    };
+    let build_inputs = || {
+        let mut source = FixtureRows::default();
+        // The first conflict is delete-on-left/edit-on-right.
+        source.add(
+            MergeSide::Base,
+            b"base-conflict",
+            vec![fixture_row(BASE, &first_conflict_key)],
+        );
+        source.add(MergeSide::Left, b"left-conflict", Vec::new());
+        source.add(
+            MergeSide::Right,
+            b"right-conflict",
+            vec![fixture_row(RIGHT, &first_conflict_key)],
+        );
+
+        // This clean delete is between conflicts and must not spend a slot.
+        source.add(
+            MergeSide::Base,
+            b"base-tombstone",
+            vec![fixture_row(BASE, &clean_tombstone_key)],
+        );
+        source.add(MergeSide::Left, b"left-tombstone", Vec::new());
+        source.add(MergeSide::Right, b"right-tombstone", Vec::new());
+
+        // Reverse the delete/edit orientation for the next conflict.
+        source.add(
+            MergeSide::Base,
+            b"base-middle-conflict",
+            vec![fixture_row(BASE, &second_conflict_key)],
+        );
+        source.add(
+            MergeSide::Left,
+            b"left-middle-conflict",
+            vec![fixture_row(LEFT, &second_conflict_key)],
+        );
+        source.add(MergeSide::Right, b"right-middle-conflict", Vec::new());
+
+        source.add(
+            MergeSide::Base,
+            b"base-tail-conflict",
+            vec![fixture_row(BASE, &tail_conflict_key)],
+        );
+        source.add(MergeSide::Left, b"left-tail-conflict", Vec::new());
+        source.add(
+            MergeSide::Right,
+            b"right-tail-conflict",
+            vec![fixture_row(CONFLICT, &tail_conflict_key)],
+        );
+
+        let base = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(
+                93,
+                [10, 11, 12, 13],
+                [
+                    b"base-conflict".as_slice(),
+                    b"base-tombstone".as_slice(),
+                    b"base-middle-conflict".as_slice(),
+                    b"base-tail-conflict".as_slice(),
+                ],
+            ),
+            None,
+        );
+        let left = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(
+                94,
+                [20, 21, 22, 23],
+                [
+                    b"left-conflict".as_slice(),
+                    b"left-tombstone".as_slice(),
+                    b"left-middle-conflict".as_slice(),
+                    b"left-tail-conflict".as_slice(),
+                ],
+            ),
+            None,
+        );
+        let right = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(
+                95,
+                [30, 31, 32, 33],
+                [
+                    b"right-conflict".as_slice(),
+                    b"right-tombstone".as_slice(),
+                    b"right-middle-conflict".as_slice(),
+                    b"right-tail-conflict".as_slice(),
+                ],
+            ),
+            None,
+        );
+        (base, left, right, source)
+    };
+
+    // ORNA-MERGE-005 requires bounded conflict evidence but leaves discovery
+    // order open. This proof records manifest order for the adapter: an early
+    // delete/edit conflict stops before the clean tombstone, while one detail
+    // slot carries traversal through that tombstone to the next conflict.
+    let segment_visits = [
+        [
+            (MergeSide::Base, b"base-conflict".to_vec()),
+            (MergeSide::Left, b"left-conflict".to_vec()),
+            (MergeSide::Right, b"right-conflict".to_vec()),
+        ],
+        [
+            (MergeSide::Base, b"base-tombstone".to_vec()),
+            (MergeSide::Left, b"left-tombstone".to_vec()),
+            (MergeSide::Right, b"right-tombstone".to_vec()),
+        ],
+        [
+            (MergeSide::Base, b"base-middle-conflict".to_vec()),
+            (MergeSide::Left, b"left-middle-conflict".to_vec()),
+            (MergeSide::Right, b"right-middle-conflict".to_vec()),
+        ],
+        [
+            (MergeSide::Base, b"base-tail-conflict".to_vec()),
+            (MergeSide::Left, b"left-tail-conflict".to_vec()),
+            (MergeSide::Right, b"right-tail-conflict".to_vec()),
+        ],
+    ];
+    for max_conflicts in 0..=3 {
+        let (base, left, right, mut source) = build_inputs();
+        let result = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 100, max_conflicts },
+        );
+        let reached_segments = match max_conflicts {
+            0 => 1,
+            1 => 3,
+            _ => 4,
+        };
+        let expected_rows = match max_conflicts {
+            0 => 2,
+            1 => 5,
+            _ => 7,
+        };
+        let expected_visits = segment_visits
+            .iter()
+            .take(reached_segments)
+            .flat_map(|visits| visits.iter().cloned())
+            .collect::<Vec<_>>();
+        assert_eq!(source.visited, expected_visits);
+
+        if max_conflicts < 3 {
+            let BranchMergeError::BudgetExceeded { report } = result.unwrap_err() else {
+                panic!("the first delete/edit conflict beyond budget stops later ranges")
+            };
+            assert_eq!(report.conflicts_lower_bound, max_conflicts + 1);
+            assert_eq!(report.rows_examined, expected_rows);
+            assert_eq!(report.affected_ranges.len(), reached_segments);
+            for range in ranges.iter().take(reached_segments) {
+                assert!(report.affected_ranges.contains(&(id(1), range.clone())));
+            }
+            assert!(report.affected_checkpoints.is_empty());
+        } else {
+            let BranchMergeError::Conflicts { conflicts, report } = result.unwrap_err() else {
+                panic!("all fixture conflicts fit exactly at the detail limit")
+            };
+            assert_eq!(report.conflicts_lower_bound, 3);
+            assert_eq!(report.rows_examined, expected_rows);
+            let conflict_keys = conflicts
+                .iter()
+                .filter_map(|conflict| match conflict {
+                    BranchMergeConflict::Row {
+                        conflict: orna_evolution_v1::RowMergeConflict::DeleteAndEdit { key, .. },
+                        ..
+                    } => Some(key.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                conflict_keys,
+                vec![
+                    first_conflict_key.clone(),
+                    second_conflict_key.clone(),
+                    tail_conflict_key.clone(),
+                ]
+            );
+        }
+    }
+}
+
+#[test]
 fn checkpoint_delete_update_budget_tail_reports_identity_for_either_deleted_side() {
     for delete_on_left in [true, false] {
         let (mut base, mut left, mut right, mut source) = row_checkpoint_conflict_inputs();
