@@ -946,6 +946,9 @@ fn disjoint_segment_edits_merge_with_positionless_checkpoint_agreement_and_delet
     let positionless_one_side_delete = CheckpointGeneration { generation: 11, position: None };
     let positionless_agreement_id = b"consumer/shared-add".to_vec();
     let positionless_agreement = CheckpointGeneration { generation: 9, position: None };
+    let positionless_reset_id = b"consumer/positionless-reset".to_vec();
+    let positionless_reset_base = CheckpointGeneration { generation: 10, position: Some(b"prior-token".to_vec()) };
+    let positionless_reset = CheckpointGeneration { generation: 11, position: None };
     let mut base = snapshot(
         schema(true, FieldType::Str),
         split_manifest(10, 1, 4, [b"base-shared", b"base-lower", b"base-upper"]),
@@ -958,12 +961,14 @@ fn disjoint_segment_edits_merge_with_positionless_checkpoint_agreement_and_delet
         positionless_one_side_delete_id.clone(),
         positionless_one_side_delete.clone(),
     );
+    base.checkpoints.insert(positionless_reset_id.clone(), positionless_reset_base);
     let mut left = snapshot(
         schema(true, FieldType::Str),
         split_manifest(11, 2, 5, [b"left-shared", b"left-lower", b"left-upper"]),
         Some(left_checkpoint.clone()),
     );
     left.checkpoints.insert(positionless_agreement_id.clone(), positionless_agreement.clone());
+    left.checkpoints.insert(positionless_reset_id.clone(), positionless_reset.clone());
     let mut right = snapshot(
         schema(true, FieldType::Str),
         split_manifest(12, 3, 6, [b"right-shared", b"right-lower", b"right-upper"]),
@@ -975,12 +980,14 @@ fn disjoint_segment_edits_merge_with_positionless_checkpoint_agreement_and_delet
         positionless_one_side_delete,
     );
     right.checkpoints.insert(positionless_agreement_id.clone(), positionless_agreement.clone());
+    right.checkpoints.insert(positionless_reset_id.clone(), positionless_reset.clone());
 
     // Equal digests reuse the untouched first segment; independent row edits,
-    // agreed positionless addition, and unilateral/shared deletes reconcile together.
+    // agreed positionless addition/reset, and unilateral/shared deletes reconcile together.
     // A present checkpoint with no opaque position stays distinct from deletion;
-    // deleting that present value still resolves when both sides agree or one
-    // side deletes while the other leaves it unchanged.
+    // deleting it resolves when both sides agree or one side leaves it unchanged.
+    // A reset may retain its generation while clearing the position: that remains
+    // a present checkpoint value, distinct from deleting the checkpoint altogether.
     let plan = merge_three_way_snapshots(&base, &left, &right, &mut source, budget()).unwrap();
     assert_eq!(plan.report.conflicts_lower_bound, 0);
     assert_eq!(plan.report.rows_examined, 6);
@@ -1001,6 +1008,7 @@ fn disjoint_segment_edits_merge_with_positionless_checkpoint_agreement_and_delet
     assert!(!plan.checkpoints.contains_key(positionless_joint_delete_id.as_slice()));
     assert!(!plan.checkpoints.contains_key(positionless_one_side_delete_id.as_slice()));
     assert_eq!(plan.checkpoints[positionless_agreement_id.as_slice()], positionless_agreement);
+    assert_eq!(plan.checkpoints[positionless_reset_id.as_slice()], positionless_reset);
 }
 
 #[test]
