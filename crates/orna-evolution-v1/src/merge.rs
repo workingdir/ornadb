@@ -374,6 +374,85 @@ pub enum RowMergeConflict {
     AutomaticKeyCollision { table: ObjectId, key: CanonicalValue },
 }
 
+/// Availability of one key in a snapshot supplied to a row merge.
+///
+/// `Absent` is a complete observation. Use `Pruned` when history needed to
+/// establish the row state is unavailable; treating that as `Absent` could
+/// manufacture a deletion tombstone.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RowSnapshotState<'a> {
+    Present(&'a KeyedRow),
+    Absent,
+    Pruned,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RowSnapshotSide {
+    Base,
+    Left,
+    Right,
+}
+
+/// Logical operation selected for a single key by three-way reconciliation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RowMergeOperation {
+    Upsert(KeyedRow),
+    /// A versioned deletion of a key visible in the common base. This
+    /// preserves the deletion effect without authorizing Git-history pruning.
+    Tombstone { table: ObjectId, key: CanonicalValue },
+    /// The key is absent from a complete base and both complete branches; no
+    /// deletion record is needed for a row that never existed in the base.
+    Absent,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RowSnapshotMergeError {
+    PrunedInput { sides: Vec<RowSnapshotSide> },
+    Conflict(RowMergeConflict),
+}
+
+/// Reconcile one key while retaining the distinction between known absence
+/// and unavailable history. Manifest digest equality can still bypass this
+/// function for an unchanged subtree; if a pruned side must be inspected, the
+/// caller gets an error rather than a fabricated delete.
+pub fn merge_keyed_row_states(
+    base: RowSnapshotState<'_>,
+    left: RowSnapshotState<'_>,
+    right: RowSnapshotState<'_>,
+) -> Result<RowMergeOperation, RowSnapshotMergeError> {
+    let mut pruned_sides = Vec::new();
+    for (side, state) in [
+        (RowSnapshotSide::Base, base),
+        (RowSnapshotSide::Left, left),
+        (RowSnapshotSide::Right, right),
+    ] {
+        if state == RowSnapshotState::Pruned {
+            pruned_sides.push(side);
+        }
+    }
+    if !pruned_sides.is_empty() {
+        return Err(RowSnapshotMergeError::PrunedInput { sides: pruned_sides });
+    }
+
+    let row = |state| match state {
+        RowSnapshotState::Present(row) => Some(row),
+        RowSnapshotState::Absent | RowSnapshotState::Pruned => None,
+    };
+    let base_row = row(base);
+    let merged = merge_keyed_row(base_row, row(left), row(right))
+        .map_err(RowSnapshotMergeError::Conflict)?;
+    match merged {
+        Some(row) => Ok(RowMergeOperation::Upsert(row)),
+        None => match base_row {
+            Some(row) => Ok(RowMergeOperation::Tombstone {
+                table: row.table,
+                key: row.key.clone(),
+            }),
+            None => Ok(RowMergeOperation::Absent),
+        },
+    }
+}
+
 /// Merge one logical key. This is a pure value operation; storage supplies
 /// rows in key order and owns resource limits and the no-partial-write rule.
 pub fn merge_keyed_row(
