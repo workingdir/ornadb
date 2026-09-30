@@ -518,6 +518,66 @@ fn conflict_budget_crossing_from_rows_into_checkpoints_has_a_precise_boundary() 
 }
 
 #[test]
+fn conflict_budget_tail_reports_prior_table_ranges_and_checkpoint_impact() {
+    let mut base_schema = schema(true, FieldType::Str);
+    let mut second_table = base_schema.tables[0].clone();
+    second_table.id = id(5);
+    second_table.name = "Company".into();
+    base_schema.tables.push(second_table);
+
+    let mut base_row_company = parse_fixture(BASE, RowKeyKind::Explicit);
+    base_row_company.table = id(5);
+    let mut left_row_company = parse_fixture(LEFT, RowKeyKind::Explicit);
+    left_row_company.table = id(5);
+    let mut right_row_company = parse_fixture(CONFLICT, RowKeyKind::Explicit);
+    right_row_company.table = id(5);
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"base", vec![parse_fixture(BASE, RowKeyKind::Explicit)]);
+    source.add(MergeSide::Left, b"left", vec![parse_fixture(LEFT, RowKeyKind::Explicit)]);
+    source.add(MergeSide::Right, b"right", vec![parse_fixture(CONFLICT, RowKeyKind::Explicit)]);
+    source.add(MergeSide::Base, b"base-company", vec![base_row_company]);
+    source.add(MergeSide::Left, b"left-company", vec![left_row_company]);
+    source.add(MergeSide::Right, b"right-company", vec![right_row_company]);
+
+    let checkpoint = |generation, token: &[u8]| CheckpointGeneration {
+        generation,
+        position: Some(token.to_vec()),
+    };
+    let mut base = snapshot(
+        base_schema.clone(),
+        manifest(1, 1, b"base"),
+        Some(checkpoint(4, b"base-token")),
+    );
+    let mut left = snapshot(
+        base_schema.clone(),
+        manifest(2, 2, b"left"),
+        Some(checkpoint(5, b"left-token")),
+    );
+    let mut right = snapshot(
+        base_schema,
+        manifest(3, 3, b"right"),
+        Some(checkpoint(6, b"right-token")),
+    );
+    base.tables.insert(id(5), manifest(10, 10, b"base-company"));
+    left.tables.insert(id(5), manifest(20, 20, b"left-company"));
+    right.tables.insert(id(5), manifest(30, 30, b"right-company"));
+
+    let exact_row_budget = BranchMergeBudget { max_rows_examined: 100, max_conflicts: 2 };
+    let error = merge_three_way_snapshots(&base, &left, &right, &mut source, exact_row_budget)
+        .unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("the checkpoint conflict is the first conflict beyond two row details")
+    };
+    assert_eq!(report.conflicts_lower_bound, 3);
+    assert_eq!(report.rows_examined, 6);
+    assert!(report.affected_tables.contains(&id(1)));
+    assert!(report.affected_tables.contains(&id(5)));
+    assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+    assert!(report.affected_ranges.contains(&(id(5), KeyRange::all())));
+    assert!(report.affected_checkpoints.contains(b"consumer/source".as_slice()));
+}
+
+#[test]
 fn schema_conflict_is_a_boundary_before_row_reads_and_checkpoint_resolution() {
     let base_checkpoint = CheckpointGeneration {
         generation: 4,
