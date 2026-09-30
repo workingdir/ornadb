@@ -7740,6 +7740,22 @@ fn infer(
                     effects,
                 };
             }
+            // Elapsed Duration arithmetic is distinct from calendar periods:
+            // it can shift an Instant or combine with another Duration.
+            let duration = Type::Named("std.DURATION".into());
+            let elapsed_result = match (op.as_str(), &left.ty, &right.ty) {
+                ("+", Type::Instant, right) if right == &duration => Some(Type::Instant),
+                ("+", left, Type::Instant) if left == &duration => Some(Type::Instant),
+                ("-", Type::Instant, right) if right == &duration => Some(Type::Instant),
+                ("-", Type::Instant, Type::Instant) => Some(duration.clone()),
+                ("+" | "-", left, right) if left == &duration && right == &duration => {
+                    Some(duration)
+                }
+                _ => None,
+            };
+            if let Some(ty) = elapsed_result {
+                return Inferred { ty, effects };
+            }
             if op == "-"
                 && left.ty == Type::Instant
                 && matches!(
