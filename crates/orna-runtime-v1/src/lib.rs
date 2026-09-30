@@ -21070,6 +21070,26 @@ mod tests {
             "last() returns the partial post-filter prefix after a nonmatching tail exhausts"
         );
 
+        // The reference is silent when take(2) naturally exhausts with one
+        // accepted row bracketed by rejected rows. Preserve that partial
+        // prefix through both the leading and trailing nonmatch.
+        let (last_returns_bracketed_single_match_short_take_two, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-short-bracketed-match.orna"
+                ),
+            );
+        assert_eq!(
+            last_returns_bracketed_single_match_short_take_two.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 4),
+            "last() returns the sole accepted row after take(2) exhausts between nonmatches"
+        );
+
         // A short post-filter take may contain several matches before its
         // final nonmatch exhausts the source. The reference leaves that
         // closure with last() implicit; retain the final available match.
