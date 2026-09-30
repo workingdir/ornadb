@@ -3668,6 +3668,103 @@ mod tests {
     }
 
     #[test]
+    fn nested_pin_prefix_reverse_detach_keeps_shorter_sibling_routes() {
+        let app_source = include_str!("../tests/fixtures/attached-incompatible-main.orna");
+        let shared_source = include_str!("../tests/fixtures/attached-equivalent-main.orna");
+        let (app_dir, app_repository, _) = repository(app_source);
+        let (shared_dir, shared_repository, shared_base_commit) = repository(shared_source);
+
+        let archive_copy_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!(
+                "archive {shared_base_commit}\narchive_copy_archive {shared_base_commit}\n"
+            ),
+        );
+        let app_commit = write_commit(
+            app_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!(
+                "archive {shared_base_commit}\narchive_copy {archive_copy_commit}\narchive_copy_archive {shared_base_commit}\n"
+            ),
+        );
+
+        let loader = ProjectLoader::default();
+        let app = PinnedDatabase::resolve(
+            "app",
+            app_repository.clone(),
+            &app_commit,
+            loader,
+        )
+        .unwrap();
+        let resolver = PackageResolver::new(
+            [
+                ("app".to_owned(), app_repository),
+                ("archive".to_owned(), shared_repository.clone()),
+                ("archive_copy".to_owned(), shared_repository.clone()),
+                ("archive_copy_archive".to_owned(), shared_repository),
+            ],
+            loader,
+        )
+        .unwrap();
+
+        let root_session = resolver.resolve_for_parent(app).unwrap();
+        let archive_copy = root_session.database("archive_copy").unwrap().clone();
+        let mut copy_closure = resolver.resolve_for_parent(archive_copy.clone()).unwrap();
+        let sibling_closure = resolver.resolve_for_parent(archive_copy).unwrap();
+        for closure in [&copy_closure, &sibling_closure] {
+            assert_eq!(closure.primary().pin().name(), "archive_copy");
+            assert_eq!(closure.attached().count(), 2);
+            assert_eq!(
+                closure
+                    .database("archive")
+                    .unwrap()
+                    .pin()
+                    .commit()
+                    .as_str(),
+                shared_base_commit
+            );
+            assert_eq!(
+                closure
+                    .database("archive_copy_archive")
+                    .unwrap()
+                    .pin()
+                    .commit()
+                    .as_str(),
+                shared_base_commit
+            );
+        }
+
+        // The reference fixes exact pins but is silent on reverse-prefix
+        // detach effects. V1 removes only the full longer alias in one closure;
+        // its shorter neighbor, a sibling closure, and the root stay pinned.
+        copy_closure
+            .detach_database("archive_copy_archive")
+            .unwrap();
+        assert!(copy_closure.database("archive_copy_archive").is_none());
+        assert!(copy_closure.database("archive").is_some());
+        assert!(sibling_closure.database("archive_copy_archive").is_some());
+        assert_eq!(
+            root_session
+                .database("archive_copy")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            archive_copy_commit
+        );
+        assert_eq!(
+            root_session
+                .database("archive_copy_archive")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            shared_base_commit
+        );
+    }
+
+    #[test]
     fn equivalent_units_interoperate_across_attachments_but_name_match_is_not_enough() {
         let primary_source = include_str!("fixtures/attached-primary-main.orna");
         let (_primary_dir, primary_repository, primary_commit) = repository(&primary_source);
