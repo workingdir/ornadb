@@ -50,6 +50,8 @@ const FIRST_REMAINDER_UNKNOWN_JOIN_EDGE_TAIL: &str =
     include_str!("fixtures/first_remainder_unknown_join_edge_tail.orna");
 const FIRST_REMAINDER_UNKNOWN_JOIN_CHAIN_EDGE_TAIL: &str =
     include_str!("fixtures/first_remainder_unknown_join_chain_edge_tail.orna");
+const FIRST_REMAINDER_UNKNOWN_CLOSURE_SUFFIX_TAIL: &str =
+    include_str!("fixtures/first_remainder_unknown_closure_suffix_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -5856,6 +5858,134 @@ fn explain_closes_first_remainder_at_max_across_unknown_join_chain() {
 
     let surface = serde_json::to_value(&first_remainder_over_max)
         .expect("first-remainder join-chain overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_preserves_first_remainder_max_closure_across_unknown_mutation_suffix() {
+    let parsed =
+        orna_syntax_v1::parse_module(FIRST_REMAINDER_UNKNOWN_CLOSURE_SUFFIX_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 4);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // 4-KiB heuristic, aligned source bytes contribute 2^52-1, while their
+    // first remainder contributes 2^52. A row-only delete closes the latter
+    // exactly at MAX; an unknown update after that closure must preserve both
+    // the exact boundary and the overflow caused by one additional row.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const ALIGNED_SOURCE_BYTES: u64 = u64::MAX - 4_095;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = ALIGNED_SOURCE_BYTES + 1;
+    let rows_to_close_first_remainder = u64::MAX - MAX_BYTE_BLOCKS;
+    let explain = |source_bytes, delete_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:first-remainder-unknown-closure-suffix-tail",
+            ),
+            source: obj("table:FirstRemainderUnknownClosureSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(source_bytes),
+                mutable_branch: None,
+            }),
+            joins: vec![QueryJoinDescription {
+                source: obj("table:FirstRemainderUnknownClosureRight"),
+                statistics: None,
+                predicate: None,
+            }],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:FirstRemainderUnknownClosureTarget"),
+                    kind: QueryMutationKind::Delete,
+                    estimated_affected_rows: Some(delete_rows),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(delete_rows),
+                },
+                QueryMutationDescription {
+                    table: obj("table:FirstRemainderUnknownClosureTarget"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+            ],
+            materialize_into: Some(obj("materialization:first-remainder-unknown-closure-suffix")),
+        })
+        .expect("first-remainder closure before unknown mutation suffix")
+    };
+
+    let aligned_below_max = explain(ALIGNED_SOURCE_BYTES, rows_to_close_first_remainder);
+    assert_eq!(aligned_below_max.plan().estimated_cost(), None);
+    assert_eq!(
+        aligned_below_max.root().details().get("estimated_cost_overflow"),
+        None
+    );
+
+    let first_remainder_at_max =
+        explain(FIRST_REMAINDER_SOURCE_BYTES, rows_to_close_first_remainder);
+    assert_eq!(first_remainder_at_max.plan().estimated_cost(), None);
+    assert_eq!(
+        first_remainder_at_max
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        None,
+        "the first remainder and delete closure equal MAX before the unknown update"
+    );
+
+    let first_remainder_over_max = explain(
+        FIRST_REMAINDER_SOURCE_BYTES,
+        rows_to_close_first_remainder + 1,
+    );
+    assert_eq!(first_remainder_over_max.plan().estimated_cost(), None);
+    assert_eq!(
+        first_remainder_over_max
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the first remainder crosses MAX and keeps its marker past the unknown update"
+    );
+    let nodes = first_remainder_over_max.nodes();
+    let delete_position = nodes
+        .iter()
+        .position(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned()))
+        })
+        .expect("row-only delete closing the first remainder");
+    let unknown_update_position = nodes
+        .iter()
+        .position(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("unknown update after the closure boundary");
+    let delete_node = &nodes[delete_position];
+    let unknown_update = &nodes[unknown_update_position];
+    assert_eq!(
+        unknown_update.inputs().first(),
+        Some(delete_node.reference()),
+        "the unknown update wraps the delete closure in the plan tree"
+    );
+    assert_eq!(unknown_update.estimated_rows(), None);
+    assert_eq!(unknown_update.estimated_bytes(), None);
+    assert_eq!(unknown_update.estimated_work(), None);
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&first_remainder_over_max)
+        .expect("first-remainder unknown-suffix overflow surface");
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
