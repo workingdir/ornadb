@@ -375,6 +375,19 @@ fn schema_type_graph_rejects_dangling_and_misaligned_inventory_edges() {
         "the published record-row edge remains in the generated type graph"
     );
 
+    let mut generic_record_row = generated.clone();
+    let history = generic_record_row["functions"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|function| function["name"] == "sys.history(ObjectRef)")
+        .unwrap();
+    history["signature"] = serde_json::json!(
+        "fn sys.history(object: sys.ObjectRef): Relation<sys.ValueMetadata <sys.Value>>"
+    );
+    build_support::validate_api_document(&generic_record_row)
+        .expect("applied record-generic row types allow parser whitespace before `<`");
+
     let mut enum_relation_result = generated.clone();
     let history = enum_relation_result["functions"]
         .as_array_mut()
