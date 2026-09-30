@@ -1022,23 +1022,38 @@ pub struct SystemDiagnostic {
     pub trace: Option<TraceRef>,
 }
 
+fn redact_system_diagnostic(diagnostic: &mut SystemDiagnostic) {
+    // SystemDiagnostic has no per-field secrecy classifier. At the
+    // explanation boundary, redact free-form payload text and typed data
+    // fail-closed; stable diagnostic codes/identity, source/object references,
+    // and the opaque trace reference remain correlation metadata, not payload.
+    diagnostic.message = "<redacted>".into();
+    for label in &mut diagnostic.labels {
+        label.message = "<redacted>".into();
+    }
+    diagnostic.help.fill("<redacted>".into());
+    diagnostic.data = None;
+    diagnostic.redacted = true;
+    for cause in &mut diagnostic.causes {
+        redact_system_diagnostic(cause);
+    }
+}
+
 /// Input envelope for the local `sys.explain` boundary.
 ///
-/// The envelope deliberately owns the complete canonical diagnostic instead of
-/// projecting it into the smaller live-protocol [`Diagnostic`]. In particular,
-/// row identity, source authority, labels, structured data, and trace
-/// authority remain available to the consumer. No renderer-facing text is
-/// derived or redacted by this adapter.
+/// The envelope retains diagnostic identity and authority fields while
+/// redacting free-form content before it reaches local explanation code.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SystemDiagnosticExplanationInput {
     diagnostic: SystemDiagnostic,
 }
 
 impl SystemDiagnosticExplanationInput {
-    /// Admit one canonical diagnostic without dropping fields at the local
-    /// explanation boundary.
-    pub fn new(diagnostic: SystemDiagnostic) -> Result<Self, SystemDiagnosticAdapterError> {
+    /// Admit one canonical diagnostic after validating and redacting its
+    /// renderer-facing fields.
+    pub fn new(mut diagnostic: SystemDiagnostic) -> Result<Self, SystemDiagnosticAdapterError> {
         validate_system_diagnostic(&diagnostic)?;
+        redact_system_diagnostic(&mut diagnostic);
         Ok(Self { diagnostic })
     }
 
@@ -1050,9 +1065,10 @@ impl SystemDiagnosticExplanationInput {
         self.diagnostic
     }
 
-    /// Attach the renderer-independent explanation fields returned by
-    /// `sys.explain`. Causes are copied from the admitted canonical row; the
-    /// canonical row itself remains intact in the result.
+    /// Attach renderer-independent, code-based explanation fields returned by
+    /// trusted local `sys.explain` logic. The diagnostic payload in the result
+    /// remains redacted while its stable identity and authority fields survive;
+    /// callers must not copy raw diagnostic text into the explanation fields.
     pub fn finish(
         self,
         summary: impl Into<String>,

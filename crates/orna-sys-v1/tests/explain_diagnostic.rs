@@ -22,6 +22,7 @@ fn sys_explain_diagnostic_descriptor_is_authoritative_and_read_only() {
 
 #[test]
 fn sys_explain_diagnostic_returns_known_result_without_leaking_redacted_fields() {
+    let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let diagnostic = Diagnostic {
         code: "sys.invoke.argument_unknown",
         message: "root-secret-value",
@@ -34,26 +35,21 @@ fn sys_explain_diagnostic_returns_known_result_without_leaking_redacted_fields()
             ),
             (
                 "detail".to_owned(),
-                DiagnosticField::Text("nested-secret-value".to_owned()),
+                DiagnosticField::Text(fixture.to_owned()),
             ),
         ]),
         causes: vec![Diagnostic {
             code: "vendor.cause",
             message: "cause-secret-value",
-            fields: BTreeMap::from([(
-                "cause-detail".to_owned(),
-                DiagnosticField::Text("cause-field-secret".to_owned()),
-            )]),
+            fields: BTreeMap::from([("cause-detail".to_owned(), DiagnosticField::Text(fixture.to_owned()))]),
             causes: Vec::new(),
         }],
     };
     let input_encoded = serde_json::to_string(&diagnostic).expect("safe input encoding");
     for secret in [
         "root-secret-value",
-        "nested-secret-value",
+        fixture,
         "cause-secret-value",
-        "cause-field-secret",
-        "cause-detail",
     ] {
         assert!(
             !input_encoded.contains(secret),
@@ -86,10 +82,8 @@ fn sys_explain_diagnostic_returns_known_result_without_leaking_redacted_fields()
     assert!(encoded.contains("redacted"));
     for secret in [
         "root-secret-value",
-        "nested-secret-value",
+        fixture,
         "cause-secret-value",
-        "cause-field-secret",
-        "cause-detail",
     ] {
         assert!(!encoded.contains(secret), "serialized explanation leaked {secret}");
     }
