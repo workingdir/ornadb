@@ -69,6 +69,27 @@ fn edge_interplay_fixture_closes_column_row_nullable_edges() {
 }
 
 #[test]
+fn edge_interplay_fixture_closes_nullable_column_filter_arms() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The frozen schema marks both fields nullable but does not define a relationship between
+    // them; preserve the Column row and type-check the null-key and default-expression arms
+    // independently within one disjunctive predicate.
+    assert!(
+        analysis.is_ok(),
+        "nullable Column filter arms must resolve on the same helper-returned row: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn runtime_publication_counters_do_not_leak_into_frozen_sys_types() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-internal-publication-metadata.orna",
