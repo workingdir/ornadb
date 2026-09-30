@@ -142,3 +142,9 @@ with the owner occupying the secondary blocker's release key. A nested closure
 moves the owner aside, releases both competitor moves, and then returns the owner
 to its original key. Its complete log documents the local adapter order where
 the reference is silent.
+
+`owner_blocks_primary_competitor_closure_retry_then_returns` covers the next
+release boundary: after the secondary blocker moves, the owner takes its key and
+blocks the primary blocker's retry. The owner moves aside in a nested closure,
+allowing both competitor moves to finish before it returns to its original key.
+The fixture documents this local mutation order where the reference is silent.
