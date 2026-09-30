@@ -10742,6 +10742,125 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
         )),
         Err(Error::Closed)
     ));
+
+    // Reuse the immediately preceding scope's query ID as an Eval target only
+    // after that query owner has closed. The two durable records must retain
+    // their own operation fingerprints and closure outcomes.
+    let ninth_subscribe = subscribe();
+    let mut ninth_issuer = Issuer(9, None);
+    let ninth_credential = block_on(host.create(
+        CreateRequest {
+            id: [9; 16],
+            origin: origin(),
+            expires_at: 100,
+            now: 18,
+            subscribe: &ninth_subscribe,
+        },
+        &mut ninth_issuer,
+    ))
+    .unwrap();
+    block_on(host.resume(ResumeRequest {
+        id: [9; 16],
+        origin: &origin(),
+        credential: &ninth_credential,
+        attachment: [14; 16],
+        now: 19,
+    }))
+    .unwrap();
+
+    let ninth_target_request = eval_with_context([9; 16], [91; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&ninth_target_request, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    let ninth_target_fingerprint = request_fingerprint(&ninth_target_request, [9; 16]);
+    let ninth_identity = RequestIdentity {
+        session_id: [9; 16],
+        request_id: [91; 16],
+    };
+    let runtime = open_durable_state(&repository);
+    let (_, capability) = block_on(runtime.reserve_request_with_admission(
+        ninth_identity,
+        ninth_target_fingerprint,
+    ))
+    .unwrap();
+    let capability = capability.expect("fresh owner-bound capability after query-scope closure");
+    block_on(runtime.start_request_with_owner_and_admission(
+        ninth_identity,
+        ninth_target_fingerprint,
+        lease,
+        capability,
+    ))
+    .unwrap();
+    drop(runtime);
+
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [7; 16],
+            request_id: [91; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == seventh_query_fingerprint
+    ));
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status(
+            ninth_identity,
+            ninth_target_fingerprint,
+        ))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Running
+                && status.fingerprint == ninth_target_fingerprint
+    ));
+
+    let mut ninth_deletion = RecordingDelete::default();
+    let mut ninth_children = RecordingChildren::default();
+    assert_eq!(
+        block_on(host.http_delete_with_children(
+            DeleteRequest {
+                id: [9; 16],
+                origin: &origin(),
+                credential: &ninth_credential,
+                now: 20,
+            },
+            &mut ninth_deletion,
+            &mut ninth_children,
+        ))
+        .status,
+        204
+    );
+    assert_eq!(ninth_children.requests, vec![ninth_identity]);
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status(
+            ninth_identity,
+            ninth_target_fingerprint,
+        ))
+        .unwrap(),
+        Some(status) if status.state == orna_runtime_v1::RequestState::Cancelled
+    ));
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [7; 16],
+            request_id: [91; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == seventh_query_fingerprint
+    ));
+    assert!(matches!(
+        block_on(host.dispatch_frame(
+            [14; 16],
+            2,
+            Frame::Binary(ninth_target_request),
+            &mut application,
+        )),
+        Err(Error::Closed)
+    ));
     assert_eq!(application.calls, 0);
     drop(host);
     remove_test_repository(&root);
