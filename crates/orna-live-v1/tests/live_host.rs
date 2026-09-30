@@ -4351,6 +4351,75 @@ fn durable_unknown_status_retry_survives_orphan_resolution() {
             *original_snapshot
         );
     }
+
+    // The query identity is bound to its complete target pair. Reusing a
+    // prior snapshot ID for a different target request is fenced as well.
+    for (index, (query_id, target, original_request, original_snapshot)) in [
+        ([38; 16], [50; 16], &unknown_status_request, &unknown_status),
+        ([39; 16], [51; 16], &orphan_status_request, &orphan_status),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let collision_request = Envelope {
+            request: Some(query_id),
+            watch: None,
+            message: Message::RequestStatus {
+                target,
+                fingerprint: event_fingerprint,
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap();
+        let sequence = 21 + index as u64 * 3;
+        let collision_output = block_on(recovered_transport.receive_with_application(
+            &mut recovered_socket,
+            sequence,
+            &masked_binary_payload(&collision_request),
+            &mut recovered_application,
+        ))
+        .unwrap();
+        let WebSocketOutput::Binary { payload, .. } = &collision_output[0] else {
+            panic!("a prior query ID cannot be rebound to another target");
+        };
+        let collision_diagnostic = Envelope::decode(payload, Limits::default().protocol).unwrap();
+        assert_eq!(collision_diagnostic.request, Some(query_id));
+        assert!(matches!(
+            &collision_diagnostic.message,
+            Message::Diagnostic { .. }
+        ));
+
+        let collision_retry = block_on(recovered_transport.receive_with_application(
+            &mut recovered_socket,
+            sequence + 1,
+            &masked_binary_payload(&collision_request),
+            &mut recovered_application,
+        ))
+        .unwrap();
+        let WebSocketOutput::Binary { payload, .. } = &collision_retry[0] else {
+            panic!("the changed-target retry replays its mismatch diagnostic");
+        };
+        assert_eq!(
+            Envelope::decode(payload, Limits::default().protocol).unwrap(),
+            collision_diagnostic
+        );
+
+        let original_retry = block_on(recovered_transport.receive_with_application(
+            &mut recovered_socket,
+            sequence + 2,
+            &masked_binary_payload(original_request),
+            &mut recovered_application,
+        ))
+        .unwrap();
+        let WebSocketOutput::Binary { payload, .. } = &original_retry[0] else {
+            panic!("the original snapshot survives a changed-target collision");
+        };
+        assert_eq!(
+            Envelope::decode(payload, Limits::default().protocol).unwrap(),
+            *original_snapshot
+        );
+    }
     assert_eq!(recovered_application.calls, 0);
 
     drop(recovered_transport);
