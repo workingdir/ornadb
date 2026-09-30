@@ -3794,8 +3794,8 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         assert!(!report.affected_checkpoints.contains(unchanged_delete_id.as_slice()));
         assert_eq!(source.visited.len(), 3);
 
-        // The same row/checkpoint deletion orientation without the divergent
-        // checkpoint proves the changed segment emits the tombstone itself.
+        // Without a divergent checkpoint tail, exact row capacity still
+        // closes the clean delete and materializes the tombstone.
         let (base, left, right, mut source, _, _, checkpoint_id, tail_id) = build_inputs(
             row_delete_on_left,
             checkpoint_delete_on_left,
@@ -3807,11 +3807,12 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
             &left,
             &right,
             &mut source,
-            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 0 },
+            BranchMergeBudget { max_rows_examined: 2, max_conflicts: 0 },
         )
         .unwrap();
         assert_eq!(plan.report.conflicts_lower_bound, 0);
         assert_eq!(plan.report.rows_examined, 2);
+        assert!(plan.report.affected_ranges.contains(&(id(1), high_range.clone())));
         assert_eq!(source.visited.len(), 3);
         assert!(!plan.checkpoints.contains_key(checkpoint_id.as_slice()));
         assert!(plan.checkpoints.contains_key(tail_id.as_slice()));
