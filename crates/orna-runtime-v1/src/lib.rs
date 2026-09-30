@@ -1885,6 +1885,14 @@ impl RuntimeQuerySession<'_> {
         self.snapshot.query_exact(table, key)
     }
 
+    /// Returns the exact row or the typed miss used by a required `lookup`
+    /// effect. An admitted table with no matching key is distinct from a
+    /// relation the activation did not admit.
+    pub fn lookup_exact(&self, table: &str, key: &[u8]) -> Result<&[u8], RuntimeQueryError> {
+        self.query_exact(table, key)?
+            .ok_or(RuntimeQueryError::RowNotFound)
+    }
+
     /// Adds one already validated mutation to this private session.
     ///
     /// A repeated key replaces the session's query view in order of staging,
@@ -1916,11 +1924,15 @@ impl RuntimeQuerySession<'_> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeQueryError {
     TableNotAdmitted,
+    RowNotFound,
 }
 
 impl fmt::Display for RuntimeQueryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("table was not admitted to this query session")
+        formatter.write_str(match self {
+            Self::TableNotAdmitted => "table was not admitted to this query session",
+            Self::RowNotFound => "exact query did not match a row",
+        })
     }
 }
 
@@ -18028,6 +18040,7 @@ mod tests {
 
     struct QuerySessionEffects<'session, 'snapshot> {
         session: &'session RuntimeQuerySession<'snapshot>,
+        lookups: usize,
     }
 
     impl orna_evaluator_v1::EffectHandler for QuerySessionEffects<'_, '_> {
@@ -18036,9 +18049,9 @@ mod tests {
             callee: &orna_syntax_v1::Expr,
             arguments: &[CanonicalValue],
         ) -> Result<Option<CanonicalValue>, orna_evaluator_v1::EvaluationError> {
-            let failure = || {
+            let failure = |code| {
                 orna_evaluator_v1::EvaluationError::redacted(
-                    SafeText::new("ORNA-EVAL-QUERY").expect("static diagnostic code"),
+                    SafeText::new(code).expect("static diagnostic code"),
                 )
             };
             let orna_syntax_v1::Expr::Field { base, name, .. } = callee else {
@@ -18050,21 +18063,57 @@ mod tests {
             if name != "lookup" {
                 return Ok(None);
             }
+            self.lookups += 1;
             let [key] = arguments else {
-                return Err(failure());
+                return Err(failure("ORNA-EVAL-TABLE-ARGUMENT"));
             };
-            let encoded_key = key.encode().map_err(|_| failure())?;
-            let Some(row) = self
-                .session
-                .query_exact(table, &encoded_key)
-                .map_err(|_| failure())?
-            else {
-                return Ok(None);
-            };
+            let encoded_key = key
+                .encode()
+                .map_err(|_| failure("ORNA-EVAL-TABLE-KEY"))?;
+            let row = self.session.lookup_exact(table, &encoded_key).map_err(|error| {
+                // The reference leaves runtime diagnostic spelling open; use
+                // the table layer's established missing-row code and keep an
+                // unadmitted relation distinct from a present-but-empty one.
+                failure(match error {
+                    RuntimeQueryError::TableNotAdmitted => "ORNA-EVAL-QUERY-TABLE",
+                    RuntimeQueryError::RowNotFound => "ORNA-EVAL-TABLE-MISSING",
+                })
+            })?;
             CanonicalValue::decode(row)
                 .map(Some)
-                .map_err(|_| failure())
+                .map_err(|_| failure("ORNA-EVAL-QUERY-ROW"))
         }
+    }
+
+    fn invoke_query_fixture(
+        session: &RuntimeQuerySession<'_>,
+        source: &str,
+    ) -> (
+        Result<CanonicalValue, orna_evaluator_v1::EvaluationError>,
+        usize,
+    ) {
+        let parsed = orna_syntax_v1::parse_expression(source);
+        assert!(parsed.is_ok(), "the in-crate query fixture must parse: {source}");
+        let functions = orna_evaluator_v1::Functions::from([(
+            "query".into(),
+            orna_evaluator_v1::PureFunction {
+                parameters: Vec::new(),
+                body: parsed.value,
+                environment: BTreeMap::new(),
+            },
+        )]);
+        let mut effects = QuerySessionEffects {
+            session,
+            lookups: 0,
+        };
+        let result = orna_evaluator_v1::invoke_named_with_effects(
+            "query",
+            &functions,
+            &BTreeMap::new(),
+            orna_evaluator_v1::Limits::default(),
+            &mut effects,
+        );
+        (result, effects.lookups)
     }
 
     #[tokio::test]
@@ -18131,30 +18180,27 @@ mod tests {
             Some(&replacement_bytes[..])
         );
 
-        let parsed = orna_syntax_v1::parse_expression(include_str!(
-            "../tests/fixtures/exact-query-session.orna"
-        ));
-        assert!(parsed.is_ok(), "the in-crate exact-query fixture must parse");
-        let functions = orna_evaluator_v1::Functions::from([(
-            "read_book".into(),
-            orna_evaluator_v1::PureFunction {
-                parameters: Vec::new(),
-                body: parsed.value,
-                environment: BTreeMap::new(),
-            },
-        )]);
-        let result = {
-            let mut effects = QuerySessionEffects { session: &session };
-            orna_evaluator_v1::invoke_named_with_effects(
-                "read_book",
-                &functions,
-                &BTreeMap::new(),
-                orna_evaluator_v1::Limits::default(),
-                &mut effects,
-            )
-            .unwrap()
-        };
+        let (result, lookup_calls) = invoke_query_fixture(
+            &session,
+            include_str!("../tests/fixtures/exact-query-session.orna"),
+        );
+        let result = result.expect("an exact query sees the staged replacement");
         assert_eq!(result, replacement);
+        assert_eq!(lookup_calls, 1);
+
+        let (repeated, lookup_calls) = invoke_query_fixture(
+            &session,
+            include_str!("../tests/fixtures/exact-query-repeat.orna"),
+        );
+        assert_eq!(
+            repeated.expect("repeated exact queries both resolve"),
+            CanonicalValue::new(OvbRaw::Array(vec![
+                replacement.raw().clone(),
+                replacement.raw().clone(),
+            ]))
+            .unwrap()
+        );
+        assert_eq!(lookup_calls, 2, "matching calls are evaluated independently");
 
         session
             .stage_mutation(
@@ -18162,6 +18208,41 @@ mod tests {
             )
             .unwrap();
         assert_eq!(session.query_exact("books", &key).unwrap(), None);
+        let (missing, lookup_calls) = invoke_query_fixture(
+            &session,
+            include_str!("../tests/fixtures/exact-query-missing.orna"),
+        );
+        assert_eq!(
+            missing.unwrap_err().code(),
+            "ORNA-EVAL-TABLE-MISSING",
+            "a staged delete is a failed required lookup"
+        );
+        assert_eq!(lookup_calls, 1);
+
+        let (recovered, lookup_calls) = invoke_query_fixture(
+            &session,
+            include_str!("../tests/fixtures/exact-query-missing-recovery.orna"),
+        );
+        assert_eq!(
+            recovered.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(lookup_calls, 1, "one failure reaches one recovery boundary");
+
+        let (unadmitted, lookup_calls) = invoke_query_fixture(
+            &session,
+            include_str!("../tests/fixtures/exact-query-unadmitted.orna"),
+        );
+        assert_eq!(unadmitted.unwrap_err().code(), "ORNA-EVAL-QUERY-TABLE");
+        assert_eq!(lookup_calls, 1);
+
+        let (invalid_arity, lookup_calls) = invoke_query_fixture(
+            &session,
+            include_str!("../tests/fixtures/exact-query-invalid-arity.orna"),
+        );
+        assert_eq!(invalid_arity.unwrap_err().code(), "ORNA-EVAL-TABLE-ARGUMENT");
+        assert_eq!(lookup_calls, 1);
+
         assert_eq!(
             snapshot.query_exact("books", &key).unwrap(),
             Some(&original_bytes[..])
