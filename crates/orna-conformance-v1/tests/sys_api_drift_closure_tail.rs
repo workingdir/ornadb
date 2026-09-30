@@ -52,14 +52,14 @@ fn default_argument_fixture_uses_published_schema_edges() {
 }
 
 #[test]
-fn edge_interplay_fixture_closes_recursive_multi_hop_flat_map_chains() {
+fn edge_interplay_fixture_closes_recursive_relation_row_chains() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
         EDGE_INTERPLAY,
     )]);
     assert!(
         analysis.is_ok(),
-        "nested DiffEntry and SourceMap projections plus recursive multi-hop SYS flat_map chains must resolve through the published schema: {:?}",
+        "nested DiffEntry and SourceMap projections plus repeated recursive SYS Function rows must resolve through the published schema: {:?}",
         analysis
             .diagnostics
             .iter()
