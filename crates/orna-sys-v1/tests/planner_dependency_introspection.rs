@@ -1597,6 +1597,108 @@ fn explain_mixed_partial_bounds_accumulate_through_unknown_join_tails() {
 }
 
 #[test]
+fn explain_partial_source_bounds_accumulate_through_unknown_join_and_mutation_tails() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain = |source_rows, source_bytes, mutation_rows, mutation_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-source-bound-tails"),
+            source: obj("table:large"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: source_rows,
+                estimated_bytes: source_bytes,
+                mutable_branch: None,
+            }),
+            joins: vec![QueryJoinDescription {
+                source: obj("table:unknown-right"),
+                statistics: None,
+                predicate: None,
+            }],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: mutation_rows,
+                    estimated_write_bytes: mutation_bytes,
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Delete,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+            ],
+            materialize_into: Some(obj("materialization:partial-source-bound")),
+        })
+        .expect("partial source bound through unknown plan tails")
+    };
+
+    // A one-field scan statistic is not an exact node cost, but rows and
+    // 4-KiB blocks are independent nonnegative lower bounds for aggregation.
+    let exact_rows = explain(Some(u64::MAX - 1), None, Some(1), None);
+    assert_eq!(exact_rows.plan().estimated_cost(), None);
+    assert_eq!(exact_rows.root().details().get("estimated_cost_overflow"), None);
+    let partial_row_scan = exact_rows
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj("table:large")))
+        .expect("scan with a known row lower bound");
+    assert_eq!(partial_row_scan.estimated_rows(), Some(u64::MAX - 1));
+    assert_eq!(partial_row_scan.estimated_bytes(), None);
+    assert_eq!(partial_row_scan.estimated_work(), None);
+    let partial_row_update = exact_rows
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned())))
+        .expect("mutation with a known row lower bound");
+    assert_eq!(partial_row_update.estimated_work(), None);
+    let exact_overflow = explain(Some(u64::MAX - 1), None, Some(2), None);
+    assert_eq!(
+        exact_overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the partial scan and mutation row bounds together exceed MAX"
+    );
+
+    let exact_bytes = explain(None, Some(4_096), Some(u64::MAX - 1), Some(0));
+    assert_eq!(exact_bytes.plan().estimated_cost(), None);
+    assert_eq!(exact_bytes.root().details().get("estimated_cost_overflow"), None);
+    let partial_byte_scan = exact_bytes
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj("table:large")))
+        .expect("scan with a known byte lower bound");
+    assert_eq!(partial_byte_scan.estimated_rows(), None);
+    assert_eq!(partial_byte_scan.estimated_bytes(), Some(4_096));
+    assert_eq!(partial_byte_scan.estimated_work(), None);
+    let exact_update = exact_bytes
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned())))
+        .expect("exact mutation contribution after the partial scan");
+    assert_eq!(exact_update.estimated_work(), Some(u64::MAX - 1));
+    let bytes_overflow = explain(None, Some(4_096), Some(u64::MAX), Some(0));
+    assert_eq!(
+        bytes_overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one known scan block overflows the MAX mutation contribution"
+    );
+    let surface = serde_json::to_value(&bytes_overflow).expect("partial source byte overflow");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
 fn explain_partial_bounds_survive_unknown_source_and_join_tails() {
     let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
