@@ -138,6 +138,33 @@ fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
         longer_alias_commit
     );
 
+    // Removing the prefix alias leaves the primary root and exact `main`
+    // route available to a newly admitted evaluator.
+    let mut without_archive = databases.clone();
+    without_archive.detach_database("main_archive").unwrap();
+    let remaining_modules = without_archive.module_inputs();
+    assert!(remaining_modules.iter().any(|module| {
+        module.logical_path == "main.orna" && module.source.contains("primary_value")
+    }));
+    assert!(remaining_modules.iter().any(|module| {
+        module.logical_path == "main/main.orna" && module.source.contains("= 42")
+    }));
+    assert!(!remaining_modules
+        .iter()
+        .any(|module| module.logical_path == "main_archive.orna"));
+    let mut main_only_session = AdmittedReplSession::from_attached_database_session(
+        &without_archive,
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(main_only_session.submit("use main;"), Ok(None));
+    assert_eq!(
+        main_only_session.submit("main.package_value()"),
+        Ok(Some(Value::int(42.into())))
+    );
+    assert!(main_only_session.submit("use main_archive;").is_err());
+    assert!(databases.database("main_archive").is_some());
+
     // An admitted REPL keeps the exact alias pins it was built from when the
     // mutable attachment session later detaches or replaces one of them.
     let historical_session = session.clone();
