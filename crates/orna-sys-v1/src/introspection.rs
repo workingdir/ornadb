@@ -1513,6 +1513,9 @@ fn build_plan(
             .iter()
             .map(|child| references[positions[*child]].clone())
             .collect();
+        // Work is reported as exact integer units. If a local estimate is
+        // unknown or the exact total overflows, omit only the plan total;
+        // known per-node contributions remain available in `details`.
         total_work = match (total_work, operator.work) {
             (Some(total), Some(work)) => total.checked_add(work),
             _ => None,
