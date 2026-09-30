@@ -11,6 +11,7 @@ pub fn transformed(rows: [Int]): [Int] =
 pub fn joined(rows: [Int]): [Int] =
     std.query.union(std.collection.distinct(rows), std.query.drop(rows, 1));
 use std.query as query_ops;
+use std.text as text_ops;
 
 pub fn duplicated(rows: [Int]): [Int] =
     std.collection.flat_map(rows, value => [value, value]);
@@ -45,3 +46,14 @@ pub fn relation_sum() =
 
 pub fn aliased_map(rows: [Int]): [Int] = query_ops.map(rows, value => value + 1);
 pub fn aliased_relation_count() = query_ops.count(Note | query_ops.filter(row => row.value > 0));
+
+pub fn trimmed(value: Str): Str = text_ops.trim(value);
+pub fn split_text(value: Str): [Str] = text_ops.split(value, ",");
+pub fn joined_text(values: [Str]): Str = text_ops.join(values, ",");
+pub fn starts(value: Str): Bool = text_ops.starts_with(value, "a");
+pub fn ends(value: Str): Bool = text_ops.ends_with(value, "z");
+pub fn contains_text(value: Str): Bool = text_ops.contains(value, "middle");
+pub fn replaced(value: Str): Str = text_ops.replace(value, "aa", "b");
+pub fn normalized(value: Str): Str = text_ops.normalise(value, "NFC");
+pub fn lowercased(value: Str): Str = text_ops.lower(value);
+pub fn uppercased(value: Str): Str = text_ops.upper(value);

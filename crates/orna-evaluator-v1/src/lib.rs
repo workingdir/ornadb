@@ -48,7 +48,7 @@ pub use repl::{ReplSession, parse_admitted_repl};
 /// crate verifies its pinned profile before either boundary admits an import.
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
-pub fn reference_standard_sources() -> [(String, String); 3] {
+pub fn reference_standard_sources() -> [(String, String); 4] {
     orna_standard::reference_standard_sources_v1()
 }
 
@@ -4352,6 +4352,48 @@ impl Context<'_, '_> {
         let root_collection =
             root_collection_name(callee).filter(|name| !scope.0.contains_key(*name));
         let resolved_function = self.resolve_function_name(callee, scope);
+        let native_math = native_standard_module_operation(
+            callee,
+            resolved_function.as_deref(),
+            scope,
+            !self.restrict_function_names,
+            function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
+            "math",
+            &["increment", "decrement", "is_zero", "min", "max", "clamp"],
+        );
+        let native_text = native_standard_module_operation(
+            callee,
+            resolved_function.as_deref(),
+            scope,
+            !self.restrict_function_names,
+            function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
+            "text",
+            &[
+                "trim",
+                "split",
+                "join",
+                "starts_with",
+                "ends_with",
+                "contains",
+                "replace",
+                "normalise",
+                "lower",
+                "upper",
+            ],
+        );
+        let qualified_math = (!scope.0.contains_key("std"))
+            .then(|| math_name(callee))
+            .flatten();
+        let qualified_text = (!scope.0.contains_key("std"))
+            .then(|| text_name(callee))
+            .flatten();
+        if self.restrict_function_names
+            && resolved_function.is_none()
+            && ((qualified_math.is_some() && native_math.is_none())
+                || (qualified_text.is_some() && native_text.is_none()))
+        {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        }
         let native_collection = is_native_collection_binding(
             callee,
             resolved_function.as_deref(),
@@ -4379,9 +4421,11 @@ impl Context<'_, '_> {
         // bodies normally.
         if !native_asof_join
             && !native_collection
-            && (math_name(callee).is_none()
+            && native_math.is_none()
+            && native_text.is_none()
+            && (qualified_math.is_none()
                 && bits_name(callee).is_none()
-                && text_name(callee).is_none()
+                && qualified_text.is_none()
                 && portable_collection_operation(callee, resolved_function.as_deref()).is_none()
                 && stats_name(callee).is_none()
                 && root_collection.is_none()
@@ -4531,9 +4575,17 @@ impl Context<'_, '_> {
             self.repl_bindings = previous_repl_bindings;
             return result;
         }
-        let math = math_name(callee);
+        let math = native_math.or_else(|| {
+            (!self.restrict_function_names)
+                .then_some(qualified_math)
+                .flatten()
+        });
         let bits = bits_name(callee);
-        let text = text_name(callee);
+        let text = native_text.or_else(|| {
+            (!self.restrict_function_names)
+                .then_some(qualified_text)
+                .flatten()
+        });
         let stats = stats_name(callee);
         let collection =
             portable_collection_operation(callee, resolved_function.as_deref()).or(root_collection);
@@ -4711,9 +4763,14 @@ impl Context<'_, '_> {
     fn text(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
         match (name, values.as_slice()) {
             ("trim", [Value::String(value)]) => {
+                // The bounded profile trims the Unicode White_Space set used
+                // by the runtime string implementation.
                 self.string(value.trim().to_owned()).map(Value::String)
             }
             ("split", [Value::String(value), Value::String(separator)]) => {
+                // This profile preserves leading/trailing empty fields. An
+                // empty separator iterates Unicode scalar values, as required
+                // by the portable std.text contract.
                 let count = if separator.is_empty() {
                     value.chars().count()
                 } else {
@@ -4762,14 +4819,19 @@ impl Context<'_, '_> {
                 Ok(Value::Bool(value.contains(needle)))
             }
             ("replace", [Value::String(value), Value::String(from), Value::String(to)]) => {
+                // `str::replace` is non-overlapping and left-to-right.
                 self.string(value.replace(from, to)).map(Value::String)
             }
             ("normalise", [Value::String(value), Value::String(form)]) => match form.as_str() {
+                // The reference leaves the form labels open; expose the two
+                // canonical forms directly and fail closed for other labels.
                 "NFC" => self.string(value.nfc().collect()).map(Value::String),
                 "NFD" => self.string(value.nfd().collect()).map(Value::String),
                 _ => Err(error("ORNA-EVAL-VALUE")),
             },
             ("lower", [Value::String(value)]) => {
+                // Case conversion is locale-independent and follows the
+                // runtime's Unicode mapping, not a process locale.
                 self.string(value.to_lowercase()).map(Value::String)
             }
             ("upper", [Value::String(value)]) => {
@@ -6506,6 +6568,13 @@ fn named_arguments(
             expected
                 .iter()
                 .position(|expected| *expected == name)
+                .or_else(|| match (function, name) {
+                    // `std.math.clamp`'s pinned source uses `lower`/`upper`;
+                    // the earlier evaluator surface also admitted `min`/`max`.
+                    ("clamp", "lower" | "min") => Some(1),
+                    ("clamp", "upper" | "max") => Some(2),
+                    _ => None,
+                })
                 .or_else(|| {
                     // Older bounded evaluator fixtures used `values` for
                     // finite lists. Keep that alias at runtime while the
@@ -6609,6 +6678,37 @@ fn is_native_collection_binding(
         None => allow_unresolved_qualified || source_export_available,
     }
 }
+
+fn native_standard_module_operation<'a>(
+    callee: &'a Expr,
+    resolved_function: Option<&'a str>,
+    scope: &Scope,
+    allow_unresolved_qualified: bool,
+    source_export_available: bool,
+    module: &str,
+    operations: &[&str],
+) -> Option<&'a str> {
+    let prefix = match module {
+        "math" => "std.math.",
+        "text" => "std.text.",
+        _ => return None,
+    };
+    if let Some(operation) = resolved_function.and_then(|name| name.strip_prefix(prefix)) {
+        return operations.contains(&operation).then_some(operation);
+    }
+    // A qualified fallback is admitted only when the pinned export was
+    // loaded (or by the intentionally unrestricted standalone evaluator).
+    // This keeps absent optional modules from receiving an implicit host
+    // implementation, while preserving lexical shadowing of the std root.
+    if scope.0.contains_key("std") {
+        return None;
+    }
+    let operation = standard_name(callee, module)?;
+    (operations.contains(&operation)
+        && (allow_unresolved_qualified || source_export_available))
+    .then_some(operation)
+}
+
 fn stats_name(expression: &Expr) -> Option<&str> {
     standard_name(expression, "stats")
 }
