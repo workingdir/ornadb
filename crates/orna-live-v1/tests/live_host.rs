@@ -9453,10 +9453,12 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     }
     .encode(Limits::default().protocol)
     .unwrap();
+    let closed_sibling_target_query_fingerprint =
+        request_fingerprint(&closed_sibling_target_query, [1; 16]);
     let closed_sibling_target_status = block_on(host.dispatch_frame(
         [6; 16],
         3,
-        Frame::Binary(closed_sibling_target_query),
+        Frame::Binary(closed_sibling_target_query.clone()),
         &mut application,
     ))
     .unwrap()
@@ -9470,6 +9472,18 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
             fingerprint: None,
             result: None,
         } if *target == [92; 16]
+    ));
+    // Preserve the session-relative Unknown observation under its own query
+    // identity even though the raw target ID has a cancelled row elsewhere.
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [1; 16],
+            request_id: [96; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == closed_sibling_target_query_fingerprint
     ));
     assert!(matches!(
         block_on(open_durable_state(&repository).request_status(
@@ -9540,6 +9554,16 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
             && *returned == first_fingerprint
             && result == &expected_result
     ));
+    let closed_sibling_target_retry = block_on(host.dispatch_frame(
+        [6; 16],
+        5,
+        Frame::Binary(closed_sibling_target_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the exact query keeps its session-relative Unknown snapshot");
+    assert_eq!(closed_sibling_target_retry, closed_sibling_target_status);
     assert!(matches!(
         block_on(open_durable_state(&repository).request_status(second_identity, second_fingerprint))
             .unwrap(),
@@ -9576,7 +9600,7 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
         request_fingerprint(&closed_target_id_query, [1; 16]);
     let closed_target_id_status = block_on(host.dispatch_frame(
         [6; 16],
-        5,
+        6,
         Frame::Binary(closed_target_id_query.clone()),
         &mut application,
     ))
@@ -9648,8 +9672,27 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     assert!(matches!(
         block_on(host.dispatch_frame(
             [6; 16],
-            6,
+            7,
             Frame::Binary(closed_target_id_query),
+            &mut application,
+        )),
+        Err(Error::Closed)
+    ));
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [1; 16],
+            request_id: [96; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == closed_sibling_target_query_fingerprint
+    ));
+    assert!(matches!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            8,
+            Frame::Binary(closed_sibling_target_query),
             &mut application,
         )),
         Err(Error::Closed)
