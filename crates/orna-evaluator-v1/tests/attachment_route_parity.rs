@@ -153,6 +153,19 @@ fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
         module.logical_path == "main_archive.orna" && module.source.contains("= 43")
     }));
     databases.detach_database("main").unwrap();
+    // A stale near-prefix request after pruning `main` must not remove the
+    // surviving, longer root alias.
+    assert!(matches!(
+        databases.detach_database("main_arch"),
+        Err(AttachmentError::AttachmentNotFound)
+    ));
+    let after_exact_detach = databases.module_inputs();
+    assert!(!after_exact_detach
+        .iter()
+        .any(|module| module.logical_path == "main/main.orna"));
+    assert!(after_exact_detach.iter().any(|module| {
+        module.logical_path == "main_archive.orna" && module.source.contains("= 43")
+    }));
     let mut detached_session =
         AdmittedReplSession::from_attached_database_session(&databases, Limits::default()).unwrap();
     assert!(detached_session.submit("use main;").is_err());
