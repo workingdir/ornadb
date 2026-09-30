@@ -60,6 +60,8 @@ const FIRST_REMAINDER_SCAN_MUTATION_TAIL: &str =
     include_str!("fixtures/first_remainder_scan_mutation_tail.orna");
 const FIRST_REMAINDER_SOURCE_SCAN_EDGE_TAIL: &str =
     include_str!("fixtures/first_remainder_source_scan_edge_tail.orna");
+const SOURCE_REMAINDER_MULTISCAN_CLOSURE_TAIL: &str =
+    include_str!("fixtures/source_remainder_multiscan_closure_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -6590,6 +6592,196 @@ fn explain_closes_source_remainder_with_second_scan_byte_at_max() {
 
     let surface = serde_json::to_value(&overflow)
         .expect("source and second-scan remainder overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_source_remainder_with_multiple_scan_tails_at_max() {
+    let parsed = orna_syntax_v1::parse_module(SOURCE_REMAINDER_MULTISCAN_CLOSURE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 6);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // per-scan 4-KiB heuristic, the source itself has a byte remainder and
+    // costs 2^52; each separate one-byte scan adds one. The row-only delete
+    // closes the subtotal exactly at MAX, with an unknown scan and mutation
+    // suffix after the closure.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const SOURCE_REMAINDER_BYTES: u64 = u64::MAX - 4_094;
+    let rows_to_close_source_and_two_scan_tails = u64::MAX - MAX_BYTE_BLOCKS - 2;
+    let explain = |second_tail_bytes, delete_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:source-remainder-multiscan-closure-tail",
+            ),
+            source: obj("table:SourceRemainderMultiscanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(SOURCE_REMAINDER_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderMultiscanFirst"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(1),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderMultiscanSecond"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(second_tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderMultiscanUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:SourceRemainderMultiscanTarget"),
+                    kind: QueryMutationKind::Delete,
+                    estimated_affected_rows: Some(delete_rows),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(delete_rows),
+                },
+                QueryMutationDescription {
+                    table: obj("table:SourceRemainderMultiscanTarget"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+            ],
+            materialize_into: Some(obj("materialization:source-remainder-multiscan-closure")),
+        })
+        .expect("source remainder and separate scan tails close through unknown tails")
+    };
+
+    let zero_second_tail = explain(
+        0,
+        rows_to_close_source_and_two_scan_tails,
+    );
+    assert_eq!(zero_second_tail.plan().estimated_cost(), None);
+    assert_eq!(
+        zero_second_tail.root().details().get("estimated_cost_overflow"),
+        None
+    );
+
+    let two_scan_remainders_at_max = explain(
+        1,
+        rows_to_close_source_and_two_scan_tails,
+    );
+    assert_eq!(two_scan_remainders_at_max.plan().estimated_cost(), None);
+    assert_eq!(
+        two_scan_remainders_at_max
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        None,
+        "both one-byte scan tails bring the source remainder closure to MAX"
+    );
+
+    let overflow = explain(
+        1,
+        rows_to_close_source_and_two_scan_tails + 1,
+    );
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one more delete row crosses MAX after all three scan bounds"
+    );
+    let nodes = overflow.nodes();
+    let source_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderMultiscanSource"))
+        })
+        .expect("source scan with its own byte remainder");
+    assert_eq!(source_scan.estimated_bytes(), Some(SOURCE_REMAINDER_BYTES));
+    assert_eq!(source_scan.estimated_work(), None);
+    let first_tail_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderMultiscanFirst"))
+        })
+        .expect("first separate one-byte scan");
+    assert_eq!(first_tail_scan.estimated_bytes(), Some(1));
+    assert_eq!(first_tail_scan.estimated_work(), None);
+    let second_tail_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderMultiscanSecond"))
+        })
+        .expect("second separate one-byte scan");
+    assert_eq!(second_tail_scan.estimated_bytes(), Some(1));
+    assert_eq!(second_tail_scan.estimated_work(), None);
+    let unknown_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderMultiscanUnknown"))
+        })
+        .expect("unknown scan after the rounded lower bounds");
+    assert_eq!(unknown_scan.estimated_work(), None);
+    let joins: Vec<_> = nodes
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Join)
+        .collect();
+    assert_eq!(joins.len(), 3);
+    assert!(joins.iter().all(|node| node.estimated_work().is_none()));
+    let delete_position = nodes
+        .iter()
+        .position(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned()))
+        })
+        .expect("one-row-over delete closure");
+    let update_position = nodes
+        .iter()
+        .position(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("unknown update suffix");
+    let delete = &nodes[delete_position];
+    assert_eq!(
+        delete.estimated_rows(),
+        Some(rows_to_close_source_and_two_scan_tails + 1)
+    );
+    assert_eq!(delete.estimated_work(), None);
+    assert_eq!(
+        nodes[update_position].inputs().first(),
+        Some(delete.reference()),
+        "the unknown update wraps the delete closure"
+    );
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow)
+        .expect("source remainder multi-scan overflow surface");
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
