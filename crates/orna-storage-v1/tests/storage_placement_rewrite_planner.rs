@@ -32,6 +32,10 @@ const ESCAPED_NESTED_PARENT_UPPER_ROW: &str =
     include_str!("fixtures/storage-placement-escaped-nested-parent-upper.orna");
 const ESCAPED_NESTED_PARENT_LOWER_ROW: &str =
     include_str!("fixtures/storage-placement-escaped-nested-parent-lower.orna");
+const ESCAPED_DEEP_PARENT_UPPER_ROW: &str =
+    include_str!("fixtures/storage-placement-escaped-deep-parent-upper.orna");
+const ESCAPED_DEEP_PARENT_LOWER_ROW: &str =
+    include_str!("fixtures/storage-placement-escaped-deep-parent-lower.orna");
 const REWRITE_TAIL_FIRST: &str = include_str!("fixtures/storage-rewrite-tail-first.orna");
 const REWRITE_TAIL_LAST: &str = include_str!("fixtures/storage-rewrite-tail-last.orna");
 const KEY_FIELD: Uuid = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
@@ -936,6 +940,91 @@ fn escaped_nested_parent_alias_at_component_boundary_falls_back() {
                 PlacementCandidate::insert(
                     lower_key,
                     ESCAPED_NESTED_PARENT_LOWER_ROW.len(),
+                    Some(lower_path),
+                ),
+            ],
+        ),
+        Err(StoragePlacementError::PathCollision)
+    );
+}
+
+#[test]
+fn escaped_parent_alias_at_third_key_depth_falls_back() {
+    let upper_components = text_key_components_from_fixture(ESCAPED_DEEP_PARENT_UPPER_ROW);
+    let lower_components = text_key_components_from_fixture(ESCAPED_DEEP_PARENT_LOWER_ROW);
+    let upper_path = editable_path_components(&upper_components).unwrap();
+    let lower_path = editable_path_components(&lower_components).unwrap();
+    let upper_parts = encoded_table_relative_path(&upper_path)
+        .split('/')
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let lower_parts = encoded_table_relative_path(&lower_path)
+        .split('/')
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(upper_parts.len(), 4);
+    assert_eq!(upper_parts[0], lower_parts[0]);
+    assert!(upper_parts[0].ends_with("~7e"));
+    assert_eq!(upper_parts[1], lower_parts[1]);
+    assert_eq!(upper_parts[2].len(), 200);
+    assert_ne!(upper_parts[2], lower_parts[2]);
+    assert!(upper_parts[2].ends_with("~7e"));
+    assert_eq!(
+        upper_parts[2].to_ascii_lowercase(),
+        lower_parts[2].to_ascii_lowercase()
+    );
+    assert_ne!(upper_parts[3], lower_parts[3]);
+
+    let profile = profile_for_str_key_arity(Uuid::from_u128(14), 4);
+    let upper_key = composite_text_key(&upper_components);
+    let lower_key = composite_text_key(&lower_components);
+    let automatic = plan_storage_placement(
+        &profile,
+        StoragePreference::Automatic,
+        1,
+        false,
+        vec![upper_path.clone()],
+        [
+            PlacementCandidate::update(
+                upper_key.clone(),
+                ESCAPED_DEEP_PARENT_UPPER_ROW.len(),
+                PhysicalPlacement::Editable,
+                Some(upper_path.clone()),
+            ),
+            PlacementCandidate::insert(
+                lower_key.clone(),
+                ESCAPED_DEEP_PARENT_LOWER_ROW.len(),
+                Some(lower_path.clone()),
+            ),
+        ],
+    )
+    .unwrap();
+    assert_eq!(automatic.new_row_placement(), PhysicalPlacement::Compact);
+    let existing = automatic
+        .decisions()
+        .iter()
+        .find(|decision| decision.key().encoded() == upper_key)
+        .unwrap();
+    assert_eq!(existing.placement(), PhysicalPlacement::Editable);
+    assert_eq!(existing.editable_path(), Some(&upper_path));
+
+    assert_eq!(
+        plan_storage_placement(
+            &profile,
+            StoragePreference::Editable,
+            1,
+            false,
+            vec![upper_path.clone()],
+            [
+                PlacementCandidate::update(
+                    composite_text_key(&upper_components),
+                    ESCAPED_DEEP_PARENT_UPPER_ROW.len(),
+                    PhysicalPlacement::Editable,
+                    Some(upper_path),
+                ),
+                PlacementCandidate::insert(
+                    lower_key,
+                    ESCAPED_DEEP_PARENT_LOWER_ROW.len(),
                     Some(lower_path),
                 ),
             ],
