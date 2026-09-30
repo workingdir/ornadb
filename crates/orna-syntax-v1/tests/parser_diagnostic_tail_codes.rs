@@ -2787,6 +2787,163 @@ fn recovered_case_closure_arm_edges_keep_each_suffix() {
     // but leaves recovery after malformed arm content unspecified. Preserve the
     // following closures and their arm suffixes as the pragmatic recovery.
 }
+
+#[test]
+fn recovered_final_case_arm_closure_tails_keep_suffix_edges() {
+    let source = include_str!("fixtures/malformed-case-arm-final-closure-tail-edges.orna");
+    let parsed = parse_module(source);
+
+    assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+    let diagnostic = &parsed.diagnostics[0];
+    assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+    assert_eq!(diagnostic.message, "expected `:` after case pattern");
+    let malformed_separator = source.find("{ value").expect("fixture has the malformed arm");
+    assert_eq!(diagnostic.span.start, malformed_separator);
+    assert_eq!(diagnostic.span.end, malformed_separator + 1);
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block {
+        statements, tail, ..
+    } = body
+    else {
+        panic!("expected a function block");
+    };
+    assert!(statements.is_empty(), "{statements:?}");
+    let Some(Expr::Control { arms, .. }) = tail.as_deref() else {
+        panic!("expected the case expression to remain the function tail");
+    };
+    assert_eq!(arms.len(), 3, "{arms:?}");
+    assert!(matches!(
+        &arms[0].pattern,
+        Pattern::Literal { text, .. } if text == "1"
+    ));
+    assert!(matches!(&arms[0].body, Expr::Literal { text, .. } if text == "2"));
+
+    fn suffix_parts(expression: &Expr) -> Vec<String> {
+        let Expr::InterpolatedString { segments, .. } = expression else {
+            panic!("expected an interpolated final-arm tail");
+        };
+        segments
+            .iter()
+            .map(|segment| match segment {
+                StringSegment::Text { text, .. } => format!("text:{text}"),
+                StringSegment::Expression {
+                    value: Expr::Literal { text, .. },
+                    ..
+                } => format!("expression:{text}"),
+                other => panic!("unexpected interpolation suffix segment: {other:?}"),
+            })
+            .collect()
+    }
+
+    let expected_suffixes: [[&[&str]; 2]; 2] = [
+        [
+            &[
+                "text:first ",
+                "expression:true",
+                "text: and ",
+                "expression:false",
+                "text: then ",
+                "expression:true",
+                "text: done",
+            ],
+            &[
+                "text:second ",
+                "expression:false",
+                "text: then ",
+                "expression:true",
+                "text: done",
+            ],
+        ],
+        [
+            &[
+                "text:third ",
+                "expression:true",
+                "text: then ",
+                "expression:false",
+                "text: done",
+            ],
+            &[
+                "text:final ",
+                "expression:false",
+                "text: and ",
+                "expression:true",
+                "text: done",
+            ],
+        ],
+    ];
+
+    for (closure_index, outer_arm) in arms.iter().skip(1).enumerate() {
+        let (outer_pattern, condition_text) =
+            [("true", "captured"), ("false", "false")][closure_index];
+        assert!(matches!(
+            &outer_arm.pattern,
+            Pattern::Literal { text, .. } if text == outer_pattern
+        ));
+        let Expr::Block {
+            statements,
+            tail: Some(closure_tail),
+            ..
+        } = &outer_arm.body
+        else {
+            panic!("outer case arm {closure_index} lost its block tail");
+        };
+        assert_eq!(statements.len(), 1, "{statements:?}");
+        let Expr::Lambda { body: lambda_body, .. } = closure_tail.as_ref() else {
+            panic!("outer case arm {closure_index} lost its closure tail");
+        };
+        let Expr::Block {
+            statements,
+            tail: Some(case_tail),
+            ..
+        } = lambda_body.as_ref()
+        else {
+            panic!("closure {closure_index} lost its final case");
+        };
+        assert!(statements.is_empty(), "{statements:?}");
+        let Expr::Control {
+            condition: Some(condition),
+            arms: nested_arms,
+            ..
+        } = case_tail.as_ref()
+        else {
+            panic!("closure {closure_index} tail is not a case");
+        };
+        assert!(matches!(
+            condition.as_ref(),
+            Expr::Name { text, .. } if text == condition_text
+        ) || matches!(
+            condition.as_ref(),
+            Expr::Literal { text, .. } if text == condition_text
+        ));
+        assert_eq!(nested_arms.len(), 2, "{nested_arms:?}");
+
+        for (nested_index, nested_arm) in nested_arms.iter().enumerate() {
+            let Expr::Block {
+                statements,
+                tail: Some(tail),
+                ..
+            } = &nested_arm.body
+            else {
+                panic!("nested case arm {nested_index} lost its block tail");
+            };
+            assert_eq!(statements.len(), 1, "{statements:?}");
+            let actual = suffix_parts(tail.as_ref());
+            let expected = expected_suffixes[closure_index][nested_index]
+                .iter()
+                .map(|part| (*part).to_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "closure {closure_index}, arm {nested_index}");
+        }
+    }
+
+    // The reference defines block-bodied closures, case arms, and optional
+    // commas; malformed-arm recovery is unspecified. Preserve closure tails at
+    // outer and inner final-arm boundaries as the pragmatic recovery.
+}
+
 #[test]
 fn semicolon_keeps_control_expression_as_a_statement() {
     let parsed = parse_module(include_str!("fixtures/semicolon-control-block-item.orna"));
