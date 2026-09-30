@@ -912,7 +912,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     let writer = state.acquire_lease([65; 16]).await.expect("acquire writer");
     let mut pins = Vec::new();
 
-    for generation in 1..=263_u64 {
+    for generation in 1..=264_u64 {
         let mut mutation_id = [0; 16];
         mutation_id[8..].copy_from_slice(&generation.to_be_bytes());
         // Delete the prefix while its extended neighbor remains stable, restore an
@@ -920,14 +920,17 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         // identical restoration twice, then retain the terminal delete after the
         // third restoration.
         let prefix_value = match generation {
-            256 | 259 | 261 | 263 => None,
+            256 | 259 | 261 | 263 | 264 => None,
             257 => Some(b"intermediate-prefix".to_vec()),
             _ => Some(b"original-prefix".to_vec()),
         };
-        let mut mutations = vec![
-            TableMutation::new(mutation_id, "records", vec![5], prefix_value)
-                .expect("valid prefix-row generation mutation"),
-        ];
+        let mut mutations = Vec::new();
+        if generation != 264 {
+            mutations.push(
+                TableMutation::new(mutation_id, "records", vec![5], prefix_value)
+                    .expect("valid prefix-row generation mutation"),
+            );
+        }
         if generation == 1 {
             let mut extension_mutation_id = mutation_id;
             extension_mutation_id[0] = 1;
@@ -940,10 +943,23 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                 )
                 .expect("valid stable extension-row mutation"),
             );
+        } else if generation == 264 {
+            // Change only the neighboring extension after the terminal prefix delete.
+            let mut extension_mutation_id = mutation_id;
+            extension_mutation_id[0] = 1;
+            mutations.push(
+                TableMutation::new(
+                    extension_mutation_id,
+                    "records",
+                    vec![5, 0],
+                    Some(b"post-delete-extension".to_vec()),
+                )
+                .expect("valid post-delete extension update"),
+            );
         }
         commit(&state, writer, &mutations, 57).await;
 
-        if matches!(generation, 255 | 256 | 257 | 258 | 259 | 260 | 261 | 262 | 263) {
+        if matches!(generation, 255 | 256 | 257 | 258 | 259 | 260 | 261 | 262 | 263 | 264) {
             let selected = state
                 .select_historical_snapshot(generation)
                 .await
@@ -958,7 +974,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
 
     assert_eq!(
         pins.iter().map(|(generation, _, _)| *generation).collect::<Vec<_>>(),
-        [255, 256, 257, 258, 259, 260, 261, 262, 263]
+        [255, 256, 257, 258, 259, 260, 261, 262, 263, 264]
     );
     assert!(pins.windows(2).all(|pair| {
         pair[0].2.capture().generation_digest() == pair[1].2.capture().generation_digest()
@@ -998,6 +1014,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             (vec![5, 0], b"stable-extension".to_vec()),
         ],
         263 => vec![(vec![5, 0], b"stable-extension".to_vec())],
+        264 => vec![(vec![5, 0], b"post-delete-extension".to_vec())],
         _ => unreachable!("only prefix restoration boundary generations are read"),
     };
     assert_eq!(expected_rows(255), expected_rows(258));
