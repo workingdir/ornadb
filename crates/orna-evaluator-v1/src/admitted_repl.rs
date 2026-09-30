@@ -10,10 +10,10 @@
 use orna_foundation_v1::{
     CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, SafeText,
 };
-use orna_project_v1::LoadedProject;
+use orna_project_v1::{AttachedDatabaseSession, LoadedProject};
 use orna_semantic_v1::{
     Analysis, Catalogue, EffectSummary, ModuleInput, ReplAdmission, ReplContext, SymbolKind, Type,
-    analyze_with_catalogue,
+    StandardDependencyProfile, analyze_with_catalogue,
 };
 use orna_syntax_v1::{Declaration, ReplInput, parse_module};
 
@@ -149,6 +149,7 @@ pub struct AdmittedReplSession {
     limits: Limits,
     semantic: ReplContext,
     runtime: ReplSession,
+    attached_databases: Option<AttachedDatabaseSession>,
 }
 
 impl AdmittedReplSession {
@@ -159,7 +160,44 @@ impl AdmittedReplSession {
             limits,
             semantic: ReplContext::empty(),
             runtime: ReplSession::new(limits),
+            attached_databases: None,
         }
+    }
+
+    /// Creates a typed REPL over one primary committed database plus its
+    /// exact, read-only attachments. Non-`std` modules are namespaced by the
+    /// attachment alias; an optional `std` attachment is admitted as ordinary
+    /// pinned source while core language and `sys` remain intrinsic.
+    pub fn from_attached_database_session(
+        databases: &AttachedDatabaseSession,
+        limits: Limits,
+    ) -> Result<Self, ReplError> {
+        let modules = databases.module_inputs();
+        let standard_sources = databases.standard_sources();
+        let catalogue = if standard_sources.is_empty() {
+            Catalogue::authoritative_core()
+        } else {
+            let snapshot = databases
+                .standard_snapshot()
+                .ok_or_else(|| ReplError::fixed("ORNA-REPL-STANDARD"))?;
+            let profile = StandardDependencyProfile::from_sources(
+                snapshot.as_str().to_owned(),
+                standard_sources.clone(),
+            )
+            .map_err(|_| ReplError::fixed("ORNA-REPL-STANDARD"))?;
+            Catalogue::authoritative_core()
+                .with_standard_sources(&profile, standard_sources.clone())
+                .map_err(|_| ReplError::fixed("ORNA-REPL-STANDARD"))?
+        };
+        let mut session = Self::from_catalogue(&modules, catalogue, standard_sources, limits)?;
+        session.attached_databases = Some(databases.clone());
+        Ok(session)
+    }
+
+    /// The committed database snapshots retained by this evaluator session,
+    /// when it was created from an [`AttachedDatabaseSession`].
+    pub fn attached_databases(&self) -> Option<&AttachedDatabaseSession> {
+        self.attached_databases.as_ref()
     }
 
     /// Starts a typed session with the verified reference standard modules.
@@ -207,6 +245,7 @@ impl AdmittedReplSession {
             limits,
             semantic: ReplContext::from_analysis(&analysis).map_err(semantic_error)?,
             runtime,
+            attached_databases: None,
         })
     }
 
@@ -253,6 +292,7 @@ impl AdmittedReplSession {
             limits,
             semantic,
             runtime,
+            attached_databases: None,
         })
     }
 
@@ -493,8 +533,8 @@ fn module_namespace(logical_path: &str) -> Option<String> {
     let mut components = logical_path.split('/').collect::<Vec<_>>();
     let file = components.pop()?;
     let stem = file.strip_suffix(".orna")?;
-    if components.is_empty() && stem == "main" {
-        return None;
+    if stem == "main" {
+        return (!components.is_empty()).then(|| components.join("."));
     }
     components.push(stem);
     Some(components.join("."))
@@ -510,7 +550,9 @@ fn semantic_error(diagnostics: Vec<orna_foundation_v1::Diagnostic>) -> ReplError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orna_project_v1::ProjectLoader;
+    use orna_project_v1::{
+        AttachedDatabaseSession, PinnedDatabase, ProjectLoader,
+    };
     use orna_repository_v1::Repository;
     use orna_semantic_v1::StandardDependencyProfile;
     use orna_value_v1::Value;
@@ -1234,6 +1276,110 @@ mod tests {
             session.submit(include_str!(
                 "fixtures/repl-inline-library-seeded-2-7f27f8c8.orna"
             )),
+            Ok(Some(Value::int(42.into())))
+        );
+    }
+
+    #[test]
+    fn pinned_attachments_are_available_to_typed_repl_sessions() {
+        fn git(directory: &std::path::Path, args: &[&str]) -> String {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(directory)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        }
+
+        fn pinned_repo(source: &str) -> (TempDir, Repository, String) {
+            let directory = tempfile::tempdir().unwrap();
+            fs::write(directory.path().join("main.orna"), source).unwrap();
+            git(directory.path(), &["init", "--quiet"]);
+            git(directory.path(), &["config", "user.name", "kierandrewett"]);
+            git(
+                directory.path(),
+                &["config", "user.email", "kieran@drewett.dev"],
+            );
+            git(directory.path(), &["config", "commit.gpgsign", "false"]);
+            git(directory.path(), &["add", "main.orna"]);
+            git(directory.path(), &["commit", "--quiet", "-m", "snapshot"]);
+            let commit = git(directory.path(), &["rev-parse", "HEAD"]);
+            let repository = Repository::discover(directory.path()).unwrap();
+            (directory, repository, commit)
+        }
+
+        let (_primary_dir, primary_repository, primary_commit) = pinned_repo(include_str!(
+            "fixtures/attached-primary-main.orna"
+        ));
+        let (_package_dir, package_repository, package_commit) = pinned_repo(include_str!(
+            "fixtures/attached-package-main.orna"
+        ));
+        let loader = ProjectLoader::default();
+        let primary = PinnedDatabase::resolve(
+            "app",
+            primary_repository,
+            &primary_commit,
+            loader,
+        )
+        .unwrap();
+        let package = PinnedDatabase::resolve(
+            "widgets",
+            package_repository.clone(),
+            &package_commit,
+            loader,
+        )
+        .unwrap();
+        let mut databases = AttachedDatabaseSession::new(primary.clone()).unwrap();
+        databases.attach_database(package).unwrap();
+
+        let mut session = AdmittedReplSession::from_attached_database_session(
+            &databases,
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            session.submit("use widgets;"),
+            Ok(None)
+        );
+        assert_eq!(
+            session.submit("widgets.answer()"),
+            Ok(Some(Value::int(42.into())))
+        );
+        assert_eq!(
+            session
+                .attached_databases()
+                .unwrap()
+                .database("widgets")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            package_commit
+        );
+
+        let std_package = PinnedDatabase::resolve(
+            "std",
+            package_repository,
+            &package_commit,
+            loader,
+        )
+        .unwrap();
+        let mut std_databases = AttachedDatabaseSession::new(primary).unwrap();
+        std_databases.attach_database(std_package).unwrap();
+        let mut std_session = AdmittedReplSession::from_attached_database_session(
+            &std_databases,
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(std_session.submit("use std;"), Ok(None));
+        assert_eq!(
+            std_session.submit("std.answer()"),
             Ok(Some(Value::int(42.into())))
         );
     }

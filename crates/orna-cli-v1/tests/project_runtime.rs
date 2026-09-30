@@ -14,16 +14,14 @@ use tempfile::TempDir;
 
 fn reference_project() -> TempDir {
     let directory = tempfile::tempdir().expect("reference project");
-    let reference = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../reference/Orna-1.0.0/examples/reference");
-    for name in [
-        "main.orna",
-        "library.orna",
-        "warehouse.orna",
-        "sensors.orna",
-        "values.orna",
+    for (name, source) in [
+        ("main.orna", include_str!("fixtures/reference-project/main.orna")),
+        ("library.orna", include_str!("fixtures/reference-project/library.orna")),
+        ("warehouse.orna", include_str!("fixtures/reference-project/warehouse.orna")),
+        ("sensors.orna", include_str!("fixtures/reference-project/sensors.orna")),
+        ("values.orna", include_str!("fixtures/reference-project/values.orna")),
     ] {
-        std::fs::copy(reference.join(name), directory.path().join(name)).expect("reference source");
+        std::fs::write(directory.path().join(name), source).expect("reference source");
     }
     directory
 }

@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-top-level-impl.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "ORNA091-E-IMPL-FOR",
+  "message_contains": "move the implementation inside its nominal target and omit `for Type`",
+  "status": "expected-not-executed"
+}

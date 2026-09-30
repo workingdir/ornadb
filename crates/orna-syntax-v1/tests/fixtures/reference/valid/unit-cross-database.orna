@@ -1,0 +1,1 @@
+pub fn compatible(a: Float<std.units.si.kWh>, b: Float<work.units.kWh>) = a + b;

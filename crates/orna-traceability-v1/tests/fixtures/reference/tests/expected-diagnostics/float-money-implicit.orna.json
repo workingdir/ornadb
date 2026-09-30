@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/float-money-implicit.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E5103",
+  "message_contains": "binary Float cannot enter an exact Money calculation implicitly",
+  "status": "expected-not-executed"
+}

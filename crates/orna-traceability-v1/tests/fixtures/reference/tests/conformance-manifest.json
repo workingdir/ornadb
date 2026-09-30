@@ -1,0 +1,2427 @@
+{
+  "version": "1.0.0",
+  "model": "ordinary valid, invalid and complete-project fixtures loaded by normal implementation test runners",
+  "fixture_environment": {
+    "core": "Orna 1.0.0 intrinsic environment",
+    "complete_project": "examples/reference",
+    "snippets": "Each snippet is parsed independently at its declared entry point; semantic support must be supplied explicitly before implementation execution."
+  },
+  "execution_status": "syntax/reference models executed only as recorded in evidence; Orna implementation execution not performed",
+  "fixtures": [
+    {
+      "id": "valid/affine-max.orna",
+      "kind": "valid",
+      "path": "examples/valid/affine-max.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/affine-mean.orna",
+      "kind": "valid",
+      "path": "examples/valid/affine-mean.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/affine-unit.orna",
+      "kind": "valid",
+      "path": "examples/valid/affine-unit.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/assignment-statement.orna",
+      "kind": "valid",
+      "path": "examples/valid/assignment-statement.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/associated-display.orna",
+      "kind": "valid",
+      "path": "examples/valid/associated-display.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/automatic-failure-propagation.orna",
+      "kind": "valid",
+      "path": "examples/valid/automatic-failure-propagation.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/blob-vs-information.orna",
+      "kind": "valid",
+      "path": "examples/valid/blob-vs-information.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/calendar-bucket.orna",
+      "kind": "valid",
+      "path": "examples/valid/calendar-bucket.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/case-record-and-block-arms.orna",
+      "kind": "valid",
+      "path": "examples/valid/case-record-and-block-arms.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/case.orna",
+      "kind": "valid",
+      "path": "examples/valid/case.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/coalesce-precedence.orna",
+      "kind": "valid",
+      "path": "examples/valid/coalesce-precedence.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/codec-json.orna",
+      "kind": "valid",
+      "path": "examples/valid/codec-json.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/codec-orna.orna",
+      "kind": "valid",
+      "path": "examples/valid/codec-orna.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/computed-and-defaulted-fields.orna",
+      "kind": "valid",
+      "path": "examples/valid/computed-and-defaulted-fields.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/computed-field.orna",
+      "kind": "valid",
+      "path": "examples/valid/computed-field.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/control-flow.orna",
+      "kind": "valid",
+      "path": "examples/valid/control-flow.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/cross-table-assertion.orna",
+      "kind": "valid",
+      "path": "examples/valid/cross-table-assertion.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/currency-locale-format.orna",
+      "kind": "valid",
+      "path": "examples/valid/currency-locale-format.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/currency.orna",
+      "kind": "valid",
+      "path": "examples/valid/currency.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/cwd-head.orna",
+      "kind": "valid",
+      "path": "examples/valid/cwd-head.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/decimal-division.orna",
+      "kind": "valid",
+      "path": "examples/valid/decimal-division.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/default-and-computed-fields.orna",
+      "kind": "valid",
+      "path": "examples/valid/default-and-computed-fields.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/dependency-query.orna",
+      "kind": "valid",
+      "path": "examples/valid/dependency-query.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/duration-format.orna",
+      "kind": "valid",
+      "path": "examples/valid/duration-format.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/effectful-expression.orna",
+      "kind": "valid",
+      "path": "examples/valid/effectful-expression.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/empty-record-lambda.orna",
+      "kind": "valid",
+      "path": "examples/valid/empty-record-lambda.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/enum.orna",
+      "kind": "valid",
+      "path": "examples/valid/enum.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/executable-assertion.orna",
+      "kind": "valid",
+      "path": "examples/valid/executable-assertion.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/explicit-rekey.orna",
+      "kind": "valid",
+      "path": "examples/valid/explicit-rekey.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/failure-natural-key.orna",
+      "kind": "valid",
+      "path": "examples/valid/failure-natural-key.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/finite-stream.orna",
+      "kind": "valid",
+      "path": "examples/valid/finite-stream.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/formatting-does-not-serialize.orna",
+      "kind": "valid",
+      "path": "examples/valid/formatting-does-not-serialize.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/function-block.orna",
+      "kind": "valid",
+      "path": "examples/valid/function-block.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/function-default.orna",
+      "kind": "valid",
+      "path": "examples/valid/function-default.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/function-expression.orna",
+      "kind": "valid",
+      "path": "examples/valid/function-expression.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/function-values-and-pipelines.orna",
+      "kind": "valid",
+      "path": "examples/valid/function-values-and-pipelines.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/generic-protocol.orna",
+      "kind": "valid",
+      "path": "examples/valid/generic-protocol.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/historical-program.orna",
+      "kind": "valid",
+      "path": "examples/valid/historical-program.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/historical-query.orna",
+      "kind": "valid",
+      "path": "examples/valid/historical-query.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/imports.orna",
+      "kind": "valid",
+      "path": "examples/valid/imports.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/inference-first.orna",
+      "kind": "valid",
+      "path": "examples/valid/inference-first.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/key-default-allocated-once.orna",
+      "kind": "valid",
+      "path": "examples/valid/key-default-allocated-once.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/lambda-empty-record.orna",
+      "kind": "valid",
+      "path": "examples/valid/lambda-empty-record.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/lambda.orna",
+      "kind": "valid",
+      "path": "examples/valid/lambda.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/live-page-fallback.orna",
+      "kind": "valid",
+      "path": "examples/valid/live-page-fallback.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/minimal-root.orna",
+      "kind": "valid",
+      "path": "examples/valid/minimal-root.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/money-rate.orna",
+      "kind": "valid",
+      "path": "examples/valid/money-rate.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/money-serialization.orna",
+      "kind": "valid",
+      "path": "examples/valid/money-serialization.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/nested-lambda.orna",
+      "kind": "valid",
+      "path": "examples/valid/nested-lambda.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/nominal-type-nested-impl.orna",
+      "kind": "valid",
+      "path": "examples/valid/nominal-type-nested-impl.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/numeric-literal-context.orna",
+      "kind": "valid",
+      "path": "examples/valid/numeric-literal-context.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/page.orna",
+      "kind": "valid",
+      "path": "examples/valid/page.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/parallel-function-values.orna",
+      "kind": "valid",
+      "path": "examples/valid/parallel-function-values.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/parallel-streams.orna",
+      "kind": "valid",
+      "path": "examples/valid/parallel-streams.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/parenthesized-lambda-stage.orna",
+      "kind": "valid",
+      "path": "examples/valid/parenthesized-lambda-stage.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/pipe-first-argument.orna",
+      "kind": "valid",
+      "path": "examples/valid/pipe-first-argument.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/pipeline-precedence.orna",
+      "kind": "valid",
+      "path": "examples/valid/pipeline-precedence.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/pipeline.orna",
+      "kind": "valid",
+      "path": "examples/valid/pipeline.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/presentation-watch.orna",
+      "kind": "valid",
+      "path": "examples/valid/presentation-watch.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/programmable-watch-expression.orna",
+      "kind": "valid",
+      "path": "examples/valid/programmable-watch-expression.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/question-coalesce-parenthesized.orna",
+      "kind": "valid",
+      "path": "examples/valid/question-coalesce-parenthesized.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/ranges.orna",
+      "kind": "valid",
+      "path": "examples/valid/ranges.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/record-pattern-shorthand.orna",
+      "kind": "valid",
+      "path": "examples/valid/record-pattern-shorthand.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/recovery-pipeline.orna",
+      "kind": "valid",
+      "path": "examples/valid/recovery-pipeline.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/refined-type-assertions.orna",
+      "kind": "valid",
+      "path": "examples/valid/refined-type-assertions.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/row-body.orna",
+      "kind": "valid",
+      "path": "examples/valid/row-body.orna",
+      "parse_as": "row_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "environment": "row-unit schema is defined by the fixture environment",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/secret-reference.orna",
+      "kind": "valid",
+      "path": "examples/valid/secret-reference.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/stream-admin-repl.orna",
+      "kind": "valid",
+      "path": "examples/valid/stream-admin-repl.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/sys-checkpoint.orna",
+      "kind": "valid",
+      "path": "examples/valid/sys-checkpoint.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/sys-definition-file.orna",
+      "kind": "valid",
+      "path": "examples/valid/sys-definition-file.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/sys-file-history.orna",
+      "kind": "valid",
+      "path": "examples/valid/sys-file-history.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/sys-run-history.orna",
+      "kind": "valid",
+      "path": "examples/valid/sys-run-history.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/sys-storage.orna",
+      "kind": "valid",
+      "path": "examples/valid/sys-storage.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/sys-table-query.orna",
+      "kind": "valid",
+      "path": "examples/valid/sys-table-query.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/table-assertions.orna",
+      "kind": "valid",
+      "path": "examples/valid/table-assertions.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/table-automatic-key.orna",
+      "kind": "valid",
+      "path": "examples/valid/table-automatic-key.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/table-composite-key.orna",
+      "kind": "valid",
+      "path": "examples/valid/table-composite-key.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/table-explicit-key.orna",
+      "kind": "valid",
+      "path": "examples/valid/table-explicit-key.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/table-key-default.orna",
+      "kind": "valid",
+      "path": "examples/valid/table-key-default.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/table-reference.orna",
+      "kind": "valid",
+      "path": "examples/valid/table-reference.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/transactional-scope.orna",
+      "kind": "valid",
+      "path": "examples/valid/transactional-scope.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/transparent-alias.orna",
+      "kind": "valid",
+      "path": "examples/valid/transparent-alias.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/unbounded-stream.orna",
+      "kind": "valid",
+      "path": "examples/valid/unbounded-stream.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/unit-cross-database.orna",
+      "kind": "valid",
+      "path": "examples/valid/unit-cross-database.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/unit-postfix.orna",
+      "kind": "valid",
+      "path": "examples/valid/unit-postfix.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/units.orna",
+      "kind": "valid",
+      "path": "examples/valid/units.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/affine-addition.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/affine-addition.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E5002",
+      "message_contains": "cannot add two absolute affine temperatures",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/affine-addition.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/affine-sum.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/affine-sum.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E5003",
+      "message_contains": "cannot sum absolute affine quantities",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/affine-sum.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/ambiguous-consumer.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/ambiguous-consumer.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E9101",
+      "message_contains": "same durable source consumed twice without distinct consumer identity",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/ambiguous-consumer.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/assert-effectful-table.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/assert-effectful-table.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA-A091-007",
+      "message_contains": "declaration assertion uses forbidden network effect",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/assert-effectful-table.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/assert-empty.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/assert-empty.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA-A091-011",
+      "message_contains": "assertion requires a proposition before `;`",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/assert-empty.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/assert-missing-semicolon.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/assert-missing-semicolon.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA-A091-005",
+      "message_contains": "assertion clause must end with `;`",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/assert-missing-semicolon.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/assert-owner-type-mismatch.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/assert-owner-type-mismatch.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA-A091-004",
+      "message_contains": "table assertion must be a predicate over Relation<User>",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/assert-owner-type-mismatch.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/assignment-expression.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/assignment-expression.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "E1301",
+      "message_contains": "assignment is a statement, not an expression",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/assignment-expression.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/calendar-bucket-no-zone.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/calendar-bucket-no-zone.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E6001",
+      "message_contains": "calendar bucketing of Instant requires a time zone",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/calendar-bucket-no-zone.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/comparison-chain.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/comparison-chain.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "E1302",
+      "message_contains": "comparison operators do not chain; write an explicit conjunction",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/comparison-chain.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/computed-field-effect.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/computed-field-effect.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E3012",
+      "message_contains": "computed field must be deterministic and row-local",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/computed-field-effect.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/computed-field-insert.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/computed-field-insert.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E3010",
+      "message_contains": "computed field `full_name` cannot be supplied during insert",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/computed-field-insert.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/computed-field-update.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/computed-field-update.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E3011",
+      "message_contains": "computed field `full_name` cannot be updated directly",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/computed-field-update.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/cross-database-write.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/cross-database-write.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E9001",
+      "message_contains": "cross-database writes are not atomic/supported",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/cross-database-write.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/currency-addition.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/currency-addition.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E5003",
+      "message_contains": "cannot add different currencies without conversion",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/currency-addition.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/currency-static-symbol.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/currency-static-symbol.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA091-E-CURRENCY-SYMBOL",
+      "message_contains": "currency symbols belong to locale-aware formatting, not Currency identity",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/currency-static-symbol.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/duplicate-key.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/duplicate-key.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "evaluate",
+      "diagnostic": "E3001",
+      "message_contains": "duplicate primary key",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass",
+        "evaluate": "fail"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/duplicate-key.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/effectful-display.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/effectful-display.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E7201",
+      "message_contains": "Display and Present implementations must be read-only",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/effectful-display.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/float-key.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/float-key.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E3003",
+      "message_contains": "Float is not a valid primary-key type",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/float-key.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/float-money-implicit.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/float-money-implicit.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E5103",
+      "message_contains": "binary Float cannot enter an exact Money calculation implicitly",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/float-money-implicit.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/implicit-conversion-chain.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/implicit-conversion-chain.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA091-E-CONVERSION-CHAIN",
+      "message_contains": "implicit conversion chains are not searched; name each conversion explicitly",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/implicit-conversion-chain.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/incompatible-dimensions.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/incompatible-dimensions.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E5001",
+      "message_contains": "cannot add Time and Energy",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/incompatible-dimensions.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/key-update.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/key-update.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E3002",
+      "message_contains": "primary keys are immutable through update",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/key-update.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-assert-else.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-assert-else.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA-A091-006",
+      "message_contains": "assert has no assertion-specific `else` arm",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-assert-else.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-assert-owner-pipe.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-assert-owner-pipe.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA-A091-002",
+      "message_contains": "remove the repeated table owner before the assertion predicate",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-assert-owner-pipe.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-assert-pipe-bang.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-assert-pipe-bang.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA-A091-010",
+      "message_contains": "`|!` is not assertion syntax; use `assert`",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-assert-pipe-bang.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-assert-self-pipe.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-assert-self-pipe.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA-A091-002",
+      "message_contains": "remove `self |`; the table already supplies its candidate relation",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-assert-self-pipe.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-checkpoint-reset-method.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-checkpoint-reset-method.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA100-E-SYS-ADMIN-METHOD",
+      "message_contains": "system rows are read-only; use `sys.admin.reset_checkpoint` with compare-and-set arguments",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-checkpoint-reset-method.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-colon-bound.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-colon-bound.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-BOUND-COLON",
+      "message_contains": "protocol bounds use `<T impl Protocol>`",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-colon-bound.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-constraints-block.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-constraints-block.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA-A091-010",
+      "message_contains": "`constraints` is not a declaration; use owner-local `assert`",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-constraints-block.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-currency-declaration.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-currency-declaration.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-CURRENCY",
+      "message_contains": "declare an ordinary nominal type with a nested Currency implementation",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-currency-declaration.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-empty-closure.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-empty-closure.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "E1012",
+      "message_contains": "`||` is logical OR, not an anonymous function",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-empty-closure.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-ensure.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-ensure.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA-A091-010",
+      "message_contains": "`ensure` is not an assertion alias; use `assert`",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-ensure.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-fact.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-fact.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA-A091-010",
+      "message_contains": "`fact` is not an assertion alias; use `assert`",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-fact.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-failure-replay-method.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-failure-replay-method.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA100-E-SYS-ADMIN-METHOD",
+      "message_contains": "system rows are read-only; use `sys.admin.replay_failure(failure.reference, ...)`",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-failure-replay-method.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-failure-resolve-method.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-failure-resolve-method.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA100-E-SYS-ADMIN-METHOD",
+      "message_contains": "system rows are read-only; use `sys.admin.resolve_failure(failure.reference, ...)`",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-failure-resolve-method.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-field-check.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-field-check.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-FIELD-CONSTRAINT",
+      "message_contains": "field `check` syntax was removed; use a table assertion",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-field-check.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-field-unique.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-field-unique.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-FIELD-CONSTRAINT",
+      "message_contains": "field `unique` syntax was removed; use all_unique in the table body",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-field-unique.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-ingest.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-ingest.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "E1004",
+      "message_contains": "`ingest` is not a declaration",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-ingest.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-log.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-log.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "E1001",
+      "message_contains": "`log` is not a declaration in Orna 1.0",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-log.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-match.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-match.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-MATCH",
+      "message_contains": "use `case` with colon-delimited arms",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-match.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-opaque.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-opaque.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-OPAQUE",
+      "message_contains": "use the unified `type` declaration",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-opaque.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-pipe-lambda.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-pipe-lambda.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "E1011",
+      "message_contains": "pipe-delimited anonymous functions are not valid; use `=>`",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-pipe-lambda.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-postfix-question.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-postfix-question.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-POSTFIX-QUESTION",
+      "message_contains": "remove postfix `?`; failure propagation is automatic",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-postfix-question.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-refined-where.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-refined-where.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA-A091-001",
+      "message_contains": "use a brace-delimited refined-type assertion block",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-refined-where.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-result.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-result.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA091-E-RESULT",
+      "message_contains": "Result/Ok/Err control plumbing was removed; return the success type directly",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-result.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-return-arrow.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-return-arrow.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-RETURN-ARROW",
+      "message_contains": "function return annotations use `: Type`",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-return-arrow.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-store.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-store.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "E1003",
+      "message_contains": "`store` is not a logical declaration",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-store.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-stream-retry-method.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-stream-retry-method.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA100-E-SYS-ADMIN-METHOD",
+      "message_contains": "system rows are read-only; use `sys.admin.retry_failure` on a `sys.FailureRef`",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-stream-retry-method.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-stream-skip-method.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-stream-skip-method.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA100-E-SYS-ADMIN-METHOD",
+      "message_contains": "system rows are read-only; use `sys.admin.skip_failure` on a `sys.FailureRef`",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-stream-skip-method.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-sys-runtime.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-sys-runtime.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "resolve",
+      "diagnostic": "ORNA100-E-SYS-RUNTIME",
+      "message_contains": "`sys.runtime` was renamed to `sys.rt`",
+      "expect": {
+        "parse": "pass",
+        "resolve": "fail",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-sys-runtime.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-sys-storage-call.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-sys-storage-call.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA100-E-SYS-STORAGE-CALL",
+      "message_contains": "`sys.storage` is a grouping namespace; use `sys.Storage` or `sys.admin` storage functions",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-sys-storage-call.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-top-level-impl.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-top-level-impl.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-IMPL-FOR",
+      "message_contains": "move the implementation inside its nominal target and omit `for Type`",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-top-level-impl.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-tryfrom.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-tryfrom.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "resolve",
+      "diagnostic": "ORNA091-E-TRYFROM",
+      "message_contains": "use From<Source>; From may fail in Orna",
+      "expect": {
+        "parse": "pass",
+        "resolve": "fail",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-tryfrom.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-var.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-var.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-VAR",
+      "message_contains": "use `let`; assignment may replace the local slot",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-var.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/legacy-view.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/legacy-view.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "E1002",
+      "message_contains": "`view` is replaced by an ordinary function",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/legacy-view.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/missing-required-field.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/missing-required-field.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E2002",
+      "message_contains": "missing required field `name`",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/missing-required-field.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/module-single-table-assertion.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/module-single-table-assertion.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA-A091-003",
+      "message_contains": "a one-table invariant belongs inside that table",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/module-single-table-assertion.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/module-zero-table-assertion.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/module-zero-table-assertion.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "ORNA-A091-012",
+      "message_contains": "module assertions must depend on at least two distinct tables",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/module-zero-table-assertion.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/money-float.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/money-float.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E5004",
+      "message_contains": "Money cannot be constructed from an inexact Float without explicit rounding",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/money-float.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/mutate-sys-commit.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/mutate-sys-commit.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E7001",
+      "message_contains": "sys.Commit is read-only",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/mutate-sys-commit.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/question-coalesce-adjacent.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/question-coalesce-adjacent.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-POSTFIX-QUESTION",
+      "message_contains": "standalone postfix `?` has no expression meaning in Orna 1.0",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/question-coalesce-adjacent.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/question-on-int.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/question-on-int.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-POSTFIX-QUESTION",
+      "message_contains": "postfix propagation `?` was removed; failures propagate automatically",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/question-on-int.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/range-key-overlap-magic.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/range-key-overlap-magic.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E3010",
+      "message_contains": "Range<T> is not a primary-key type in version 1.0",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/range-key-overlap-magic.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/record-punning.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/record-punning.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "E1013",
+      "message_contains": "record fields require `name: expression`",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/record-punning.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/rekey-auto-id.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/rekey-auto-id.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E3013",
+      "message_contains": "an automatic-key table cannot be explicitly re-keyed",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/rekey-auto-id.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/relation-equality.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/relation-equality.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E4107",
+      "message_contains": "relation equality is ambiguous; choose sequence or row-set comparison explicitly",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/relation-equality.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/reserved-std.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/reserved-std.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E1009",
+      "message_contains": "`std` is reserved",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/reserved-std.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/reserved-sys.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/reserved-sys.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E1008",
+      "message_contains": "`sys` is reserved",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/reserved-sys.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/row-declaration.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/row-declaration.orna",
+      "parse_as": "row_unit",
+      "failing_phase": "parse",
+      "diagnostic": "E8001",
+      "message_contains": "row unit must contain one record expression",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/row-declaration.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/secret-display.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/secret-display.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E7002",
+      "message_contains": "secret values cannot be displayed",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/secret-display.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/static-protocol-function.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/static-protocol-function.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "ORNA091-E-STATIC-FN",
+      "message_contains": "protocols use instance functions and static properties, not static functions",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/static-protocol-function.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/top-level-expression.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/top-level-expression.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "E1006",
+      "message_contains": "module top level accepts declarations only",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/top-level-expression.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/top-level-on.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/top-level-on.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "E1005",
+      "message_contains": "`on` is not a declaration",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/top-level-on.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/transaction-block.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/transaction-block.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "E1007",
+      "message_contains": "database writes are transactional by activation; `transaction` is not syntax",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/transaction-block.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/two-durable-sources.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/two-durable-sources.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E9102",
+      "message_contains": "a durable consumer function may own only one checkpointed source root",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/two-durable-sources.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/unknown-field.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/unknown-field.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E2003",
+      "message_contains": "unknown field `banana`",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/unknown-field.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/unparenthesized-lambda-stage.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/unparenthesized-lambda-stage.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "parse",
+      "diagnostic": "E1204",
+      "message_contains": "anonymous function must be parenthesized as a pipeline stage",
+      "expect": {
+        "parse": "fail",
+        "resolve": "not-run",
+        "typecheck": "not-run",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/unparenthesized-lambda-stage.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/unsafe-row-key-repeat.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/unsafe-row-key-repeat.orna",
+      "parse_as": "row_unit",
+      "failing_phase": "row-validation",
+      "diagnostic": "E3004",
+      "message_contains": "loose row body must not repeat path key",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/unsafe-row-key-repeat.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "invalid/wrong-field-type.orna",
+      "kind": "invalid",
+      "path": "examples/invalid/wrong-field-type.orna",
+      "parse_as": "module_unit",
+      "failing_phase": "typecheck",
+      "diagnostic": "E2001",
+      "message_contains": "expected Float<mph>, found Str",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "fail",
+        "evaluate": "not-run"
+      },
+      "expected_diagnostic": "tests/expected-diagnostics/wrong-field-type.orna.json",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "PROJECT-REFERENCE",
+      "kind": "project",
+      "path": "examples/reference",
+      "parse_as": "database_project",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass",
+        "load_rows": "pass"
+      },
+      "environment": "examples/reference/expectations.json",
+      "notes": "Every reachable module and loose row is loaded using the frozen 1.0 grammar, inferred signatures, nominal/currency model and assertion plans.",
+      "scope": "Complete offline reference database; source parse and independent state model only until a full Orna implementation executes it.",
+      "evidence_level": "planned implementation case; parsing check only where recorded"
+    }
+  ],
+  "counts": {
+    "valid": 86,
+    "invalid": 80,
+    "project": 1,
+    "total": 167
+  }
+}

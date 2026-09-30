@@ -22,6 +22,18 @@ use serde::{
 };
 use sha2::{Digest, Sha256};
 
+mod introspection;
+pub use introspection::{
+    Dependency, DependencyConfidence, DependencyGraph, DependencyGraphError, DependencyInput,
+    DependencyKind,
+    DefinitionRef, ExplainedPlan, ExplainError, ExpressionRef, FileRef, FunctionPlanDescription,
+    FunctionRef, MAX_DEPENDENCY_EDGES, MAX_DEPENDENCY_OBJECTS, MAX_PLAN_EXPRESSIONS,
+    MAX_PLAN_NODES, MAX_REFERENCE_BYTES, Plan, PlanDetail, PlanNode, PlanNodeKind, PlanNodeRef,
+    PlanNullOrder,
+    PlanOrdering, PlanSortDirection, QueryPlanDescription, SnapshotRef, SourceSpan, explain_function,
+    explain_query,
+};
+
 pub const CANONICAL_VALUE_CODEC_V1: &str = "OVB-1";
 
 macro_rules! identity {
@@ -526,6 +538,38 @@ pub const SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR: SystemFunctionDescriptor =
         purpose: "Return structured causal explanation.",
     };
 
+/// Exact `api/sys.json` descriptor for `sys.explain(Query)`.
+pub const SYS_EXPLAIN_QUERY_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
+    name: "sys.explain(Query)",
+    effect: SystemEffect::Read,
+    signature: "fn sys.explain<T>(query: Query<T>): sys.Plan",
+    purpose: "Return structured query plan.",
+};
+
+/// Exact `api/sys.json` descriptor for `sys.explain(FunctionRef)`.
+pub const SYS_EXPLAIN_FUNCTION_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
+    name: "sys.explain(FunctionRef)",
+    effect: SystemEffect::Read,
+    signature: "fn sys.explain(function: sys.FunctionRef): sys.Plan",
+    purpose: "Return structured function/effect plan.",
+};
+
+/// Exact `api/sys.json` descriptor for outgoing dependency traversal.
+pub const SYS_DEPENDENCIES_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
+    name: "sys.dependencies",
+    effect: SystemEffect::Read,
+    signature: "fn sys.dependencies(object: sys.ObjectRef, transitive: Bool = false, kinds: [sys.DependencyKind]? = null): Relation<sys.Dependency>",
+    purpose: "Traverse outgoing dependency edges.",
+};
+
+/// Exact `api/sys.json` descriptor for incoming dependency traversal.
+pub const SYS_DEPENDENTS_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
+    name: "sys.dependents",
+    effect: SystemEffect::Read,
+    signature: "fn sys.dependents(object: sys.ObjectRef, transitive: Bool = false, kinds: [sys.DependencyKind]? = null): Relation<sys.Dependency>",
+    purpose: "Traverse incoming dependency edges.",
+};
+
 /// Exact system-reference descriptor for `sys.admin.flush`.
 pub const SYS_ADMIN_FLUSH_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
     name: "sys.admin.flush",
@@ -817,7 +861,11 @@ pub const SYS_ADMIN_PLAN_CHECKOUT_STR_DESCRIPTOR: SystemFunctionDescriptor =
 pub fn system_function_descriptor(name: &str) -> Option<&'static SystemFunctionDescriptor> {
     match name {
         "sys.meta" => Some(&SYS_META_DESCRIPTOR),
+        "sys.explain(Query)" => Some(&SYS_EXPLAIN_QUERY_DESCRIPTOR),
+        "sys.explain(FunctionRef)" => Some(&SYS_EXPLAIN_FUNCTION_DESCRIPTOR),
         "sys.explain(Diagnostic)" => Some(&SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR),
+        "sys.dependencies" => Some(&SYS_DEPENDENCIES_DESCRIPTOR),
+        "sys.dependents" => Some(&SYS_DEPENDENTS_DESCRIPTOR),
         "sys.admin.flush" => Some(&SYS_ADMIN_FLUSH_DESCRIPTOR),
         "sys.admin.compact" => Some(&SYS_ADMIN_COMPACT_DESCRIPTOR),
         "sys.admin.set_storage_preference" => Some(&SYS_ADMIN_SET_STORAGE_PREFERENCE_DESCRIPTOR),
@@ -2913,6 +2961,21 @@ mod tests {
             system_function_descriptor("sys.meta"),
             Some(&SYS_META_DESCRIPTOR)
         );
+        for (name, expected) in [
+            (
+                "sys.explain(Query)",
+                &SYS_EXPLAIN_QUERY_DESCRIPTOR,
+            ),
+            (
+                "sys.explain(FunctionRef)",
+                &SYS_EXPLAIN_FUNCTION_DESCRIPTOR,
+            ),
+            ("sys.dependencies", &SYS_DEPENDENCIES_DESCRIPTOR),
+            ("sys.dependents", &SYS_DEPENDENTS_DESCRIPTOR),
+        ] {
+            assert_eq!(system_function_descriptor(name), Some(expected));
+            assert_eq!(expected.effect, SystemEffect::Read);
+        }
         assert_eq!(
             system_function_descriptor("sys.admin.flush"),
             Some(&SystemFunctionDescriptor {

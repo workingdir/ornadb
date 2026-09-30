@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-refined-where.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "ORNA-A091-001",
+  "message_contains": "use a brace-delimited refined-type assertion block",
+  "status": "expected-not-executed"
+}

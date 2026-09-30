@@ -369,20 +369,15 @@ fn loads_the_captured_standard_gitlink_and_keeps_historical_imports_pinned() {
 
 #[test]
 fn unchanged_reference_bundle_loads_and_reaches_v1_semantic_analysis() {
-    let reference = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .map(|directory| directory.join("reference/Orna-1.0.0/examples/reference"))
-        .find(|candidate| candidate.is_dir())
-        .expect("authoritative OrnaDB reference bundle exists above the crate");
     let directory = tempfile::tempdir().unwrap();
-    for name in [
-        "main.orna",
-        "library.orna",
-        "warehouse.orna",
-        "sensors.orna",
-        "values.orna",
+    for (name, source) in [
+        ("main.orna", include_str!("fixtures/reference-project/main.orna")),
+        ("library.orna", include_str!("fixtures/reference-project/library.orna")),
+        ("warehouse.orna", include_str!("fixtures/reference-project/warehouse.orna")),
+        ("sensors.orna", include_str!("fixtures/reference-project/sensors.orna")),
+        ("values.orna", include_str!("fixtures/reference-project/values.orna")),
     ] {
-        fs::copy(reference.join(name), directory.path().join(name)).unwrap();
+        fs::write(directory.path().join(name), source).unwrap();
     }
     assert!(
         Command::new("git")

@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-var.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "ORNA091-E-VAR",
+  "message_contains": "use `let`; assignment may replace the local slot",
+  "status": "expected-not-executed"
+}

@@ -1,0 +1,3 @@
+type UserId = Uuid;
+
+pub fn identity(id: UserId): UserId = id;
