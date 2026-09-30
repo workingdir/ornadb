@@ -264,7 +264,15 @@ impl PackageResolver {
                 repository,
                 commit,
                 self.loader,
-            )?;
+            )
+            .map_err(|error| match error {
+                // The normative contract fixes exact commit identity but not
+                // package-load diagnostics. Keep host paths and parser details
+                // out of resolver errors while distinguishing a present pin
+                // whose contents are not a loadable database.
+                AttachmentError::Project(_) => AttachmentError::PinnedPackageInvalid,
+                error => error,
+            })?;
             session.attach_database(database)?;
         }
         Ok(session)
@@ -522,6 +530,7 @@ pub enum AttachmentError {
     SystemDatabaseCannotAttach,
     RepositoryUnavailable,
     PinUnavailable,
+    PinnedPackageInvalid,
     DuplicateAttachment,
     AttachedSnapshotReadOnly,
     SystemDatabaseReadOnly,
@@ -544,6 +553,7 @@ impl fmt::Display for AttachmentError {
             Self::SystemDatabaseCannotAttach => "the system database is provided by the host",
             Self::RepositoryUnavailable => "pinned package repository is unavailable",
             Self::PinUnavailable => "pinned package commit is unavailable",
+            Self::PinnedPackageInvalid => "pinned package is not a loadable database",
             Self::DuplicateAttachment => "database attachment name is already in use",
             Self::AttachedSnapshotReadOnly => "attached database snapshots are read-only",
             Self::SystemDatabaseReadOnly => "the system database cannot be written",
