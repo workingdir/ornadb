@@ -2196,7 +2196,9 @@ impl RuntimeQuerySession<'_> {
     /// a runtime cursor shape, so this follows the evaluator's exclusive
     /// canonical-cursor contract and avoids empty continuation pages. Pages
     /// are capped at 1,024 rows as a pragmatic runtime bound; the evaluator
-    /// currently requests one row per page.
+    /// currently requests one row per page. Each continuation reads the
+    /// session's latest overlay: a newly staged key after the cursor is seen,
+    /// while a key at or before the cursor does not restart the scan.
     pub fn query_page(
         &self,
         table: &str,
@@ -19422,7 +19424,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage", "empty"])
+            .await
+            .unwrap();
         let mut session = snapshot.query_session();
         let replacement = query_test_row(7, "new", 7);
         let inserted = query_test_row(9, "new", 9);
@@ -19437,7 +19442,7 @@ mod tests {
             .unwrap();
 
         let first = session.query_page("sys.Storage", None, 1).unwrap();
-        assert_eq!(first.rows, vec![(query_test_key(7), replacement)]);
+        assert_eq!(first.rows, vec![(query_test_key(7), replacement.clone())]);
         assert_eq!(first.next, Some(query_test_key(7)));
         let second = session
             .query_page("sys.Storage", first.next.as_deref(), 1)
@@ -19447,6 +19452,21 @@ mod tests {
         assert_eq!(
             session.query_page("sys.Storage", None, 0),
             Err(RuntimeQueryError::InvalidPageSize)
+        );
+        assert_eq!(
+            session.query_page("sys.Storage", None, MAX_RUNTIME_QUERY_PAGE_ROWS + 1),
+            Err(RuntimeQueryError::InvalidPageSize)
+        );
+        assert_eq!(
+            session.query_page("empty", None, 1).unwrap(),
+            RuntimeQueryPage {
+                rows: Vec::new(),
+                next: None,
+            }
+        );
+        assert_eq!(
+            session.query_page("not-admitted", None, 1),
+            Err(RuntimeQueryError::TableNotAdmitted)
         );
 
         let (projected, lookups, scans) = invoke_query_fixture_with_counts(
@@ -19459,7 +19479,107 @@ mod tests {
         );
         assert_eq!(lookups, 4, "each projected callback re-runs both effects");
         assert_eq!(scans, 2, "the scan sees the updated row and staged insert only");
-        assert_eq!(snapshot.query_exact("sys.Storage", &query_test_key(7)).unwrap(), Some(&original[..]));
+
+        let (taken, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-project-take.orna"),
+        );
+        assert_eq!(
+            taken.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!((lookups, scans), (1, 1), "take stops projected effects at its boundary");
+
+        let behind_cursor = query_test_row(6, "behind", 6);
+        let beyond_cursor = query_test_row(10, "new", 10);
+        session
+            .stage_mutation(query_test_mutation(46, 6, Some(behind_cursor.clone())))
+            .unwrap();
+        session
+            .stage_mutation(query_test_mutation(47, 9, None))
+            .unwrap();
+        session
+            .stage_mutation(query_test_mutation(48, 10, Some(beyond_cursor.clone())))
+            .unwrap();
+        let continued = session
+            .query_page("sys.Storage", first.next.as_deref(), 1)
+            .unwrap();
+        assert_eq!(continued.rows, vec![(query_test_key(10), beyond_cursor.clone())]);
+        assert_eq!(continued.next, None);
+
+        let old_row_8 = query_test_row(8, "remove", 8);
+        assert_eq!(
+            state
+                .committed_table_row("sys.Storage", &query_test_key(7))
+                .await
+                .unwrap(),
+            Some(original.clone()),
+            "session writes remain private before commit"
+        );
+        assert_eq!(
+            state
+                .committed_table_row("sys.Storage", &query_test_key(8))
+                .await
+                .unwrap(),
+            Some(old_row_8)
+        );
+        assert_eq!(
+            snapshot
+                .query_exact("sys.Storage", &query_test_key(7))
+                .unwrap(),
+            Some(&original[..]),
+            "the captured snapshot stays pinned while the overlay advances"
+        );
+
+        state
+            .commit_table_activation(
+                lease,
+                snapshot.context(),
+                session.staged_mutations(),
+                digest(49),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .committed_table_row("sys.Storage", &query_test_key(7))
+                .await
+                .unwrap(),
+            Some(replacement)
+        );
+        assert_eq!(
+            state
+                .committed_table_row("sys.Storage", &query_test_key(8))
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            state
+                .committed_table_row("sys.Storage", &query_test_key(9))
+                .await
+                .unwrap(),
+            None,
+            "a later staged delete hides an earlier staged insert"
+        );
+        let fresh = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
+        let fresh_session = fresh.query_session();
+        assert_eq!(
+            fresh_session
+                .query_page("sys.Storage", None, MAX_RUNTIME_QUERY_PAGE_ROWS)
+                .unwrap()
+                .rows,
+            vec![
+                (query_test_key(6), behind_cursor),
+                (query_test_key(7), query_test_row(7, "new", 7)),
+                (query_test_key(10), query_test_row(10, "new", 10)),
+            ],
+            "a fresh activation sees committed rows and the old cursor does not leak"
+        );
     }
 
     #[tokio::test]
@@ -19472,7 +19592,10 @@ mod tests {
             .commit_table_activation(
                 lease,
                 &context,
-                &[query_test_mutation(40, 7, Some(query_test_row(7, "current", 99)))],
+                &[
+                    query_test_mutation(40, 7, Some(query_test_row(7, "current", 7))),
+                    query_test_mutation(41, 8, Some(query_test_row(8, "later", 99))),
+                ],
                 digest(41),
                 &NoFault,
             )
@@ -19489,10 +19612,10 @@ mod tests {
             missing.unwrap(),
             CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
         );
-        assert_eq!((lookups, scans), (1, 1));
+        assert_eq!((lookups, scans), (2, 2), "the later-page miss stops projection");
 
         session
-            .stage_mutation(TableMutation::new(id(42), "sys.Storage", query_test_key(8), Some(vec![0xff])).unwrap())
+            .stage_mutation(TableMutation::new(id(42), "sys.Storage", query_test_key(9), Some(vec![0xff])).unwrap())
             .unwrap();
         let (corrupt, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
@@ -19503,7 +19626,7 @@ mod tests {
             CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-ROW".into())).unwrap()
         );
         assert_eq!(lookups, 0);
-        assert_eq!(scans, 2, "the decode failure stops the following page");
+        assert_eq!(scans, 3, "the decode failure stops the following page");
     }
 
     #[tokio::test]
