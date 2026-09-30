@@ -93,3 +93,9 @@ owner back to its first key after the alternating cycle. It records the
 competitor taking that key, the owner moving aside, and both rows taking turns
 retrying into the released key. This full log uses the same adapter evaluation
 order because the reference does not specify caught-retry mutation sequencing.
+
+`original_owner_key_and_competitor_alternate_final_retry` isolates the final
+two-row snapshot from that cycle: the competitor takes the original owner key,
+the owner moves aside and retries, then the competitor moves back and the owner
+retries again. Its complete ten-mutation log documents the local evaluation
+order without adding a language-level guarantee.
