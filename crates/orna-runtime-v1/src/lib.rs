@@ -21090,6 +21090,26 @@ mod tests {
             "last() returns the sole accepted row after take(2) exhausts between nonmatches"
         );
 
+        // The reference is silent when the entire bracketed candidate tail
+        // is rejected before take(2) naturally exhausts. The empty last()
+        // result keeps its explicit coalesce fallback.
+        let (last_uses_fallback_after_bracketed_empty_short_take_two, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-short-bracketed-empty.orna"
+                ),
+            );
+        assert_eq!(
+            last_uses_fallback_after_bracketed_empty_short_take_two.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 4),
+            "last() uses its fallback after all bracketed candidates are rejected"
+        );
+
         // A short post-filter take may contain several matches before its
         // final nonmatch exhausts the source. The reference leaves that
         // closure with last() implicit; retain the final available match.
