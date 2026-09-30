@@ -900,6 +900,100 @@ mod tests {
     }
 
     #[test]
+    fn same_nested_alias_keeps_each_parent_snapshot_pin() {
+        let (source_dir, source_repository, child_commit) =
+            repository(include_str!("../tests/fixtures/attached-incompatible-main.orna"));
+        let direct_source = include_str!("../tests/fixtures/attached-equivalent-main.orna");
+        let direct_commit = write_commit(source_dir.path(), "main.orna", direct_source);
+        assert_eq!(
+            git(source_dir.path(), &["rev-parse", "HEAD"]),
+            direct_commit
+        );
+
+        let (archive_dir, archive_repository, _) =
+            repository(include_str!("../tests/fixtures/attached-equivalent-main.orna"));
+        let archive_commit = write_commit(
+            archive_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("source {child_commit}\n"),
+        );
+
+        let primary_source = direct_source.replace("42", "7");
+        let (primary_dir, primary_repository, _) = repository(&primary_source);
+        let parent_commit = write_commit(
+            primary_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive {archive_commit}\nsource {direct_commit}\n"),
+        );
+
+        let loader = ProjectLoader::default();
+        let primary = PinnedDatabase::resolve(
+            "app",
+            primary_repository,
+            &parent_commit,
+            loader,
+        )
+        .unwrap();
+        let resolver = PackageResolver::new(
+            [
+                ("archive".to_owned(), archive_repository),
+                ("source".to_owned(), source_repository),
+            ],
+            loader,
+        )
+        .unwrap();
+
+        let root_session = resolver.resolve_for_parent(primary).unwrap();
+        assert_eq!(
+            root_session
+                .database("source")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            direct_commit
+        );
+        assert!(root_session.units_structurally_equivalent(
+            "app", "meter", "source", "meter"
+        ));
+
+        // The reference does not define a flattened namespace for nested
+        // manifests. V1 resolves the same alias independently for each pinned
+        // parent, so the archive's `source` cannot replace the root's pin.
+        let archive = root_session.database("archive").unwrap().clone();
+        let nested_session = resolver.resolve_for_parent(archive).unwrap();
+        assert_eq!(
+            nested_session
+                .database("source")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            child_commit
+        );
+        assert_ne!(direct_commit, child_commit);
+        assert!(!nested_session.units_structurally_equivalent(
+            "archive",
+            "meter",
+            "source",
+            "meter"
+        ));
+
+        assert_eq!(
+            root_session
+                .database("source")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            direct_commit
+        );
+        assert!(root_session.units_structurally_equivalent(
+            "app", "meter", "source", "meter"
+        ));
+    }
+
+    #[test]
     fn equivalent_units_interoperate_across_attachments_but_name_match_is_not_enough() {
         let primary_source = include_str!("fixtures/attached-primary-main.orna");
         let (_primary_dir, primary_repository, primary_commit) = repository(&primary_source);
