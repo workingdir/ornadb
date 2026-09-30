@@ -195,3 +195,9 @@ at the same target after the first inserted blocker is deleted. The owner fails
 and retries through a second nested closure, which updates and deletes the new
 blocker before releasing the target. The ordered tail documents this repeated
 insert/retry behavior where the reference is silent.
+
+`owner_retry_closure_moves_inserted_reuse_target` covers the move-aside edge in
+the second inserted-target closure: the inserted blocker is re-keyed to a free
+key and updated there, then the owner's retry claims the vacated target. The
+inserted row remains addressable, and the asserted order documents local
+closure behavior where the reference is silent.
