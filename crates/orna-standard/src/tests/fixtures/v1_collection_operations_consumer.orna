@@ -1,0 +1,47 @@
+use std.collection;
+use std.query;
+
+pub fn transformed(rows: [Int]): [Int] =
+    rows
+    | std.collection.filter(predicate => predicate % 2 == 0)
+    | std.query.map(transform => transform + 10)
+    | std.collection.sort_by(key => -key)
+    | std.query.take(count: 2);
+
+pub fn joined(rows: [Int]): [Int] =
+    std.query.union(std.collection.distinct(rows), std.query.drop(rows, 1));
+use std.query as query_ops;
+
+pub fn duplicated(rows: [Int]): [Int] =
+    std.collection.flat_map(rows, value => [value, value]);
+
+pub fn first_value(rows: [Int]): Int? = std.query.first(rows);
+pub fn only_value(rows: [Int]): Int = std.collection.one(rows);
+pub fn total(rows: [Int]): Int = std.query.sum(rows);
+pub fn lowest(rows: [Int]): Int? = std.collection.min(rows);
+pub fn highest(rows: [Int]): Int? = std.query.max(rows);
+pub fn row_count(rows: [Int]): Int = std.collection.count(rows);
+pub fn all_positive(rows: [Int]): Bool = std.query.every(rows, value => value > 0);
+pub fn has_zero(rows: [Int]): Bool = std.collection.exists(rows, value => value == 0);
+
+pub table Note(id: Int) { value: Int, }
+
+pub fn relation_pipeline() =
+    Note
+    | std.query.filter(predicate => predicate.value > 0)
+    | std.collection.map(transform => transform.value)
+    | std.query.count();
+
+pub fn relation_direct() = std.collection.count(std.query.filter(Note, row => row.value > 0));
+pub fn relation_first() = std.query.first(Note);
+pub fn relation_one() = std.collection.one(Note, row => row.value > 0);
+pub fn relation_every() = std.query.every(Note, row => row.value > 0);
+pub fn relation_exists() = std.collection.exists(Note, row => row.value > 0);
+pub fn relation_distinct_count() = std.query.count(std.collection.distinct(Note));
+pub fn relation_slice_count() =
+    std.query.count(std.collection.union(std.query.take(Note, 2), std.collection.drop(Note, 1)));
+pub fn relation_sum() =
+    std.query.sum(Note | std.collection.map(row => row.value));
+
+pub fn aliased_map(rows: [Int]): [Int] = query_ops.map(rows, value => value + 1);
+pub fn aliased_relation_count() = query_ops.count(Note | query_ops.filter(row => row.value > 0));
