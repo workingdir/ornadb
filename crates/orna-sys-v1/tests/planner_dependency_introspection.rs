@@ -354,7 +354,7 @@ fn query_explain_returns_a_snapshot_pinned_scan_fallback_without_fabricated_stat
 fn explain_builds_a_deep_join_materialization_plan_from_mutable_branch_stats() {
     let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
-    assert_eq!(parsed.value.items.len(), 7);
+    assert_eq!(parsed.value.items.len(), 8);
     let query = QueryPlanDescription {
         snapshot: SnapshotRef::descriptive("snapshot:workspace-generation-7"),
         source: obj("table:Contact"),
@@ -379,6 +379,19 @@ fn explain_builds_a_deep_join_materialization_plan_from_mutable_branch_stats() {
             predicate: Some(orna_sys_v1::ExpressionRef::descriptive(
                 "expr:contact.id=tag.contact_id",
             )),
+        }, QueryJoinDescription {
+            source: obj("table:ContactBadge"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(40),
+                estimated_bytes: Some(1_600),
+                mutable_branch: Some(MutableBranchSnapshot {
+                    name: "branch:working".to_owned(),
+                    generation: 7,
+                }),
+            }),
+            predicate: Some(orna_sys_v1::ExpressionRef::descriptive(
+                "expr:contact.id=badge.contact_id",
+            )),
         }],
         predicate: Some(orna_sys_v1::ExpressionRef::descriptive("expr:contact.active")),
         projections: vec![orna_sys_v1::ExpressionRef::descriptive("expr:contact.name")],
@@ -398,14 +411,14 @@ fn explain_builds_a_deep_join_materialization_plan_from_mutable_branch_stats() {
                 estimated_table_rows_before: None,
             },
             QueryMutationDescription {
-                table: obj("table:Contact"),
+                table: obj("table:ContactTag"),
                 kind: QueryMutationKind::Update,
                 estimated_affected_rows: Some(2),
                 estimated_write_bytes: Some(96),
                 estimated_table_rows_before: None,
             },
             QueryMutationDescription {
-                table: obj("table:Contact"),
+                table: obj("table:ContactTag"),
                 kind: QueryMutationKind::Rekey,
                 estimated_affected_rows: Some(1),
                 estimated_write_bytes: Some(80),
@@ -431,7 +444,14 @@ fn explain_builds_a_deep_join_materialization_plan_from_mutable_branch_stats() {
         .find(|node| node.kind() == PlanNodeKind::Join)
         .expect("join operator");
     assert_eq!(join.inputs().len(), 2);
-    assert_eq!(join.estimated_rows(), Some(10_000));
+    assert_eq!(join.estimated_rows(), Some(40_000));
+    let join_estimates = explained
+        .nodes()
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Join)
+        .map(|node| node.estimated_rows())
+        .collect::<Vec<_>>();
+    assert_eq!(join_estimates, [Some(40_000), Some(10_000)]);
     assert_eq!(
         explained
             .nodes()
@@ -439,7 +459,7 @@ fn explain_builds_a_deep_join_materialization_plan_from_mutable_branch_stats() {
             .find(|node| node.kind() == PlanNodeKind::Filter)
             .unwrap()
             .estimated_rows(),
-        Some(5_000)
+        Some(20_000)
     );
     assert_eq!(
         explained
@@ -448,7 +468,7 @@ fn explain_builds_a_deep_join_materialization_plan_from_mutable_branch_stats() {
             .find(|node| node.kind() == PlanNodeKind::Aggregate)
             .unwrap()
             .estimated_rows(),
-        Some(2_500)
+        Some(10_000)
     );
     assert_eq!(
         explained
@@ -459,7 +479,7 @@ fn explain_builds_a_deep_join_materialization_plan_from_mutable_branch_stats() {
             .estimated_rows(),
         Some(30)
     );
-    let mutations = explained
+    let contact_mutations = explained
         .nodes()
         .iter()
         .filter(|node| {
@@ -467,11 +487,20 @@ fn explain_builds_a_deep_join_materialization_plan_from_mutable_branch_stats() {
                 && node.object() == Some(&obj("table:Contact"))
         })
         .collect::<Vec<_>>();
-    assert_eq!(mutations.len(), 4);
-    assert_eq!(mutations[0].estimated_rows(), Some(2));
-    assert_eq!(mutations[1].estimated_rows(), Some(1));
-    assert_eq!(mutations[2].estimated_rows(), Some(2));
-    assert_eq!(mutations[3].estimated_rows(), Some(5));
+    assert_eq!(contact_mutations.len(), 2);
+    assert_eq!(contact_mutations[0].estimated_rows(), Some(2));
+    assert_eq!(contact_mutations[1].estimated_rows(), Some(5));
+    let tag_mutations = explained
+        .nodes()
+        .iter()
+        .filter(|node| {
+            node.kind() == PlanNodeKind::Invoke
+                && node.object() == Some(&obj("table:ContactTag"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(tag_mutations.len(), 2);
+    assert_eq!(tag_mutations[0].estimated_rows(), Some(1));
+    assert_eq!(tag_mutations[1].estimated_rows(), Some(2));
     assert_eq!(explained.nodes()[0].inputs(), &[explained.nodes()[1].reference().clone()]);
     for position in 1..4 {
         assert_eq!(
@@ -523,6 +552,8 @@ fn explain_builds_a_deep_join_materialization_plan_from_mutable_branch_stats() {
         .expect("mutation tail");
     assert_eq!(delete_node["details"]["table_rows_before"], 1_005);
     assert_eq!(delete_node["details"]["table_rows_after"], 1_003);
+    assert_eq!(delete_node["details"]["estimated_work"], 3);
+    assert_eq!(rendered.as_array().unwrap()[0]["details"]["estimated_work"], 3);
     for kind in ["update", "rekey"] {
         let node = rendered
             .as_array()
@@ -530,9 +561,17 @@ fn explain_builds_a_deep_join_materialization_plan_from_mutable_branch_stats() {
             .iter()
             .find(|node| node["details"]["mutation"] == kind)
             .expect("cardinality-preserving mutation tail");
-        assert_eq!(node["details"]["table_rows_before"], 1_005);
-        assert_eq!(node["details"]["table_rows_after"], 1_005);
+        assert_eq!(node["details"]["table_rows_before"], 100);
+        assert_eq!(node["details"]["table_rows_after"], 100);
     }
+    let total_work = rendered
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|node| node["details"]["estimated_work"].as_u64())
+        .sum::<u64>();
+    let expected_cost = total_work.to_string();
+    assert_eq!(explained.plan().estimated_cost(), Some(expected_cost.as_str()));
 
     let mut next_generation = query.clone();
     next_generation.source_statistics.as_mut().unwrap().mutable_branch.as_mut().unwrap().generation = 8;
