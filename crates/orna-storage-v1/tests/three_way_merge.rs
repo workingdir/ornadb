@@ -6501,6 +6501,176 @@ fn row_reset_delete_update_order_closes_at_each_shared_conflict_budget() {
 }
 
 #[test]
+fn row_delete_edit_reset_delete_update_tail_closes_at_shared_budgets() {
+    let before_id = b"consumer/a-before-tombstone".to_vec();
+    let unchanged_id = b"consumer/b-unchanged".to_vec();
+    let reset_id = b"consumer/m-reset-versus-advance".to_vec();
+    let between_id = b"consumer/n-between-tombstone".to_vec();
+    let delete_update_id = b"consumer/z-delete-update-terminal".to_vec();
+    let trailing_id = b"consumer/zz-trailing-tombstone".to_vec();
+    let deleted_row = parse_fixture(BASE, RowKeyKind::Explicit);
+    let edited_row = parse_fixture(LEFT, RowKeyKind::Explicit);
+    let reset_fixture = parse_checkpoint_fixture(CHECKPOINT_RESET);
+    let advance_fixture = parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS_EDITED);
+    let updated_fixture = parse_checkpoint_fixture(CHECKPOINT_EDITED);
+
+    // ORNA-MERGE requires row and opaque-checkpoint conflicts, but leaves their
+    // shared traversal order open. This storage policy finishes row planning
+    // first, then visits stable checkpoint IDs; clean checkpoint tombstones are
+    // closure cases and do not consume conflict detail budget.
+    let build_inputs = |row_delete_left: bool, reset_left: bool, checkpoint_delete_left: bool| {
+        let mut source = FixtureRows::default();
+        source.add(MergeSide::Base, b"base", vec![deleted_row.clone()]);
+        source.add(
+            MergeSide::Left,
+            b"left",
+            if row_delete_left { Vec::new() } else { vec![edited_row.clone()] },
+        );
+        source.add(
+            MergeSide::Right,
+            b"right",
+            if row_delete_left { vec![edited_row.clone()] } else { Vec::new() },
+        );
+
+        let mut base = snapshot(schema(true, FieldType::Str), manifest(1, 10, b"base"), None);
+        let mut left = snapshot(schema(true, FieldType::Str), manifest(2, 11, b"left"), None);
+        let mut right = snapshot(schema(true, FieldType::Str), manifest(3, 12, b"right"), None);
+        for checkpoint_id in [&before_id, &between_id, &trailing_id] {
+            base.checkpoints.insert(
+                checkpoint_id.to_vec(),
+                parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS),
+            );
+        }
+        base.checkpoints.insert(
+            unchanged_id.clone(),
+            parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS),
+        );
+        for side in [&mut left, &mut right] {
+            side.checkpoints.insert(
+                unchanged_id.clone(),
+                parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS),
+            );
+        }
+
+        base.checkpoints.insert(
+            reset_id.clone(),
+            parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS),
+        );
+        if reset_left {
+            left.checkpoints.insert(reset_id.clone(), reset_fixture.clone());
+            right.checkpoints.insert(reset_id.clone(), advance_fixture.clone());
+        } else {
+            left.checkpoints.insert(reset_id.clone(), advance_fixture.clone());
+            right.checkpoints.insert(reset_id.clone(), reset_fixture.clone());
+        }
+
+        base.checkpoints.insert(
+            delete_update_id.clone(),
+            parse_checkpoint_fixture(CHECKPOINT_BASE),
+        );
+        if checkpoint_delete_left {
+            right.checkpoints.insert(delete_update_id.clone(), updated_fixture.clone());
+        } else {
+            left.checkpoints.insert(delete_update_id.clone(), updated_fixture.clone());
+        }
+        (base, left, right, source)
+    };
+    let expected_row = || BranchMergeConflict::Row {
+        range: KeyRange::all(),
+        conflict: orna_evolution_v1::RowMergeConflict::DeleteAndEdit {
+            table: id(1),
+            key: integer(1),
+        },
+    };
+    let expected_reset = |reset_left| BranchMergeConflict::CheckpointConflict {
+        id: reset_id.clone(),
+        conflict: orna_evolution_v1::CheckpointMergeConflict {
+            base: Some(parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS)),
+            left: Some(if reset_left { reset_fixture.clone() } else { advance_fixture.clone() }),
+            right: Some(if reset_left { advance_fixture.clone() } else { reset_fixture.clone() }),
+        },
+    };
+    let expected_delete_update = |checkpoint_delete_left| BranchMergeConflict::CheckpointConflict {
+        id: delete_update_id.clone(),
+        conflict: orna_evolution_v1::CheckpointMergeConflict {
+            base: Some(parse_checkpoint_fixture(CHECKPOINT_BASE)),
+            left: if checkpoint_delete_left { None } else { Some(updated_fixture.clone()) },
+            right: if checkpoint_delete_left { Some(updated_fixture.clone()) } else { None },
+        },
+    };
+
+    for row_delete_left in [true, false] {
+        for reset_left in [true, false] {
+            for checkpoint_delete_left in [true, false] {
+                for max_conflicts in 0..=2 {
+                    let (base, left, right, mut source) =
+                        build_inputs(row_delete_left, reset_left, checkpoint_delete_left);
+                    let error = merge_three_way_snapshots(
+                        &base,
+                        &left,
+                        &right,
+                        &mut source,
+                        BranchMergeBudget { max_rows_examined: 100, max_conflicts },
+                    )
+                    .unwrap_err();
+                    let BranchMergeError::BudgetExceeded { report } = error else {
+                        panic!("the next row or checkpoint conflict crosses this detail budget")
+                    };
+                    assert_eq!(report.conflicts_lower_bound, max_conflicts + 1);
+                    assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+                    let expected_ids = match max_conflicts {
+                        0 => Vec::new(),
+                        1 => vec![reset_id.clone()],
+                        _ => vec![reset_id.clone(), delete_update_id.clone()],
+                    };
+                    assert_eq!(report.affected_checkpoints.len(), expected_ids.len());
+                    for checkpoint_id in expected_ids {
+                        assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
+                    }
+                    assert!(!report.affected_checkpoints.contains(before_id.as_slice()));
+                    assert!(!report.affected_checkpoints.contains(unchanged_id.as_slice()));
+                    assert!(!report.affected_checkpoints.contains(between_id.as_slice()));
+                    assert!(!report.affected_checkpoints.contains(trailing_id.as_slice()));
+                    assert_eq!(source.visited.len(), 3);
+                }
+
+                let (base, left, right, mut source) =
+                    build_inputs(row_delete_left, reset_left, checkpoint_delete_left);
+                let error = merge_three_way_snapshots(
+                    &base,
+                    &left,
+                    &right,
+                    &mut source,
+                    BranchMergeBudget { max_rows_examined: 100, max_conflicts: 3 },
+                )
+                .unwrap_err();
+                let BranchMergeError::Conflicts { conflicts, report } = error else {
+                    panic!("the exact budget closes over the ordered row and checkpoint conflicts")
+                };
+                assert_eq!(
+                    conflicts,
+                    vec![
+                        expected_row(),
+                        expected_reset(reset_left),
+                        expected_delete_update(checkpoint_delete_left),
+                    ]
+                );
+                assert_eq!(report.conflicts_lower_bound, 3);
+                assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+                assert_eq!(report.affected_checkpoints.len(), 2);
+                assert!(report.affected_checkpoints.contains(reset_id.as_slice()));
+                assert!(report.affected_checkpoints.contains(delete_update_id.as_slice()));
+                assert!(!report.affected_checkpoints.contains(before_id.as_slice()));
+                assert!(!report.affected_checkpoints.contains(unchanged_id.as_slice()));
+                assert!(!report.affected_checkpoints.contains(between_id.as_slice()));
+                assert!(!report.affected_checkpoints.contains(trailing_id.as_slice()));
+                assert_eq!(source.visited.len(), 3);
+            }
+        }
+    }
+}
+
+#[test]
 fn schema_conflict_is_a_boundary_before_row_reads_and_checkpoint_resolution() {
     let base_checkpoint = CheckpointGeneration {
         generation: 4,
