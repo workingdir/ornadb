@@ -73,6 +73,32 @@ fn git_output(directory: &TempDir, arguments: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+fn git_output_at(directory: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(arguments)
+        .current_dir(directory)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {arguments:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+fn commit_directory(directory: &Path, message: &str) {
+    for (key, value) in [
+        ("user.email", "kieran@drewett.dev"),
+        ("user.name", "kierandrewett"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git_output_at(directory, &["config", key, value]);
+    }
+    git_output_at(directory, &["add", "-A"]);
+    git_output_at(directory, &["commit", "--quiet", "-m", message]);
+}
+
 #[test]
 fn loads_only_reachable_modules_in_deterministic_logical_order() {
     let (_directory, repository) = repository(&[
@@ -233,6 +259,111 @@ fn derives_standard_catalogue_only_from_the_pinned_profile_source_bundle() {
             .standard_catalogue([])
             .unwrap(),
         None
+    );
+}
+
+#[test]
+fn loads_the_captured_standard_gitlink_and_keeps_historical_imports_pinned() {
+    let (_directory, repository) = repository(&[(
+        "main.orna",
+        include_str!("fixtures/captured-standard-parent.orna"),
+    )]);
+    let module_path = repository.worktree().join("stdlib/std");
+    fs::create_dir_all(&module_path).unwrap();
+    orna_repository_v1::initialize_repository(&module_path).unwrap();
+    fs::write(
+        module_path.join("main.orna"),
+        include_str!("fixtures/captured-standard-main.orna"),
+    )
+    .unwrap();
+    fs::write(
+        module_path.join("collection.orna"),
+        include_str!("fixtures/captured-standard-collection-v1.orna"),
+    )
+    .unwrap();
+    fs::write(
+        module_path.join("unreachable.orna"),
+        include_str!("fixtures/unreachable-standard-module.orna"),
+    )
+    .unwrap();
+    commit_directory(&module_path, "standard v1");
+    let first_module_commit = git_output_at(&module_path, &["rev-parse", "HEAD"]);
+
+    fs::write(
+        repository.worktree().join(".gitmodules"),
+        "[submodule \"std\"]\n\tpath = stdlib/std\n\turl = https://example.invalid/ornadb-std.git\n",
+    )
+    .unwrap();
+    git_output_at(repository.worktree(), &["config", "user.email", "kieran@drewett.dev"]);
+    git_output_at(repository.worktree(), &["config", "user.name", "kierandrewett"]);
+    git_output_at(repository.worktree(), &["add", "main.orna", ".gitmodules"]);
+    let first_link = format!("160000,{first_module_commit},stdlib/std");
+    git_output_at(
+        repository.worktree(),
+        &["update-index", "--add", "--cacheinfo", &first_link],
+    );
+    git_output_at(repository.worktree(), &["commit", "--quiet", "-m", "capture std v1"]);
+    let first_parent_commit = repository.head().unwrap().unwrap();
+
+    fs::write(
+        module_path.join("collection.orna"),
+        include_str!("fixtures/captured-standard-collection-v2.orna"),
+    )
+    .unwrap();
+    commit_directory(&module_path, "standard v2");
+    let second_module_commit = git_output_at(&module_path, &["rev-parse", "HEAD"]);
+
+    let loader = ProjectLoader::default();
+    let current = loader.load(&repository).unwrap();
+    let historical = loader
+        .load_committed_snapshot(&repository, &first_parent_commit)
+        .unwrap();
+    for project in [&current, &historical] {
+        let profile = project.standard_profile().expect("captured std profile");
+        assert_eq!(profile.snapshot(), first_module_commit);
+        assert_eq!(
+            project
+                .standard_sources()
+                .iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>(),
+            ["std/collection.orna", "std/main.orna"]
+        );
+        let collection = project
+            .standard_sources()
+            .iter()
+            .find(|(path, _)| path == "std/collection.orna")
+            .unwrap();
+        assert_eq!(collection.1, include_str!("fixtures/captured-standard-collection-v1.orna"));
+        let catalogue = Catalogue::authoritative_core()
+            .with_standard_sources(profile, project.standard_sources().iter().cloned())
+            .unwrap();
+        let analysis = analyze_with_catalogue(project.modules(), &catalogue);
+        assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
+    }
+
+    let second_link = format!("160000,{second_module_commit},stdlib/std");
+    git_output_at(
+        repository.worktree(),
+        &["update-index", "--add", "--cacheinfo", &second_link],
+    );
+    git_output_at(repository.worktree(), &["commit", "--quiet", "-m", "capture std v2"]);
+    let second_parent_commit = repository.head().unwrap().unwrap();
+    let latest = loader
+        .load_committed_snapshot(&repository, &second_parent_commit)
+        .unwrap();
+    assert_eq!(
+        latest.standard_profile().unwrap().snapshot(),
+        second_module_commit
+    );
+    assert_eq!(
+        latest
+            .standard_sources()
+            .iter()
+            .find(|(path, _)| path == "std/collection.orna")
+            .unwrap()
+            .1,
+        include_str!("fixtures/captured-standard-collection-v2.orna")
     );
 }
 
