@@ -52,14 +52,14 @@ fn default_argument_fixture_uses_published_schema_edges() {
 }
 
 #[test]
-fn edge_interplay_fixture_closes_column_rows_across_helper_handoff() {
+fn edge_interplay_fixture_closes_column_row_nullable_edges() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
         EDGE_INTERPLAY,
     )]);
     assert!(
         analysis.is_ok(),
-        "nested SYS projections plus a Relation<Column> helper handoff and its computed-expression filter must resolve through the published schema: {:?}",
+        "nested SYS projections plus Column rows handed across helpers and composed nullable field predicates must resolve through the published schema: {:?}",
         analysis
             .diagnostics
             .iter()
