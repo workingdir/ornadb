@@ -11060,7 +11060,7 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     .expect("retargeting a reused query ID returns a mismatch diagnostic");
     assert_eq!(tenth_retargeted_mismatch.request, Some([91; 16]));
     assert!(matches!(
-        tenth_retargeted_mismatch.message,
+        &tenth_retargeted_mismatch.message,
         Message::Diagnostic { .. }
     ));
     let tenth_retargeted_retry = block_on(host.dispatch_frame(
@@ -11110,6 +11110,32 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     .response
     .expect("the successor scope preserves its Unknown snapshot after target start");
     assert_eq!(tenth_unknown_retry, tenth_unknown);
+
+    // The reference requires a mismatch when a request ID is reused for
+    // different input, but does not specify whether that rejection changes
+    // as the original query's target changes. Keep this diagnostic stable:
+    // replaying the same rejected retarget must not replace the saved query.
+    let tenth_retargeted_after_start = block_on(host.dispatch_frame(
+        [15; 16],
+        7,
+        Frame::Binary(tenth_retargeted_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a rejected retarget remains a mismatch after the target starts");
+    assert_eq!(tenth_retargeted_after_start, tenth_retargeted_mismatch);
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [10; 16],
+            request_id: [91; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == tenth_query_fingerprint
+    ));
+
     let tenth_fresh_request = Envelope {
         request: Some([97; 16]),
         watch: None,
@@ -11123,7 +11149,7 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     .unwrap();
     let tenth_fresh = block_on(host.dispatch_frame(
         [15; 16],
-        7,
+        8,
         Frame::Binary(tenth_fresh_request.clone()),
         &mut application,
     ))
