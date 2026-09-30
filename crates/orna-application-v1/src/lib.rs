@@ -3003,6 +3003,84 @@ mod tests {
     }
 
     #[test]
+    fn recovered_occupied_destination_rekey_can_claim_the_key_after_it_is_freed() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "table-rekey-recovered-occupied-key-tail.orna",
+                include_str!("../tests/fixtures/table-rekey-recovered-occupied-key-tail.orna"),
+                "main",
+            )
+            .expect("checked-in occupied-key fixture should be admitted");
+
+        let int = |value: i64| {
+            CanonicalValue::new(OvbRaw::Int(value.into())).expect("integer is canonical")
+        };
+        let row = |id: i64, text: &str, quantity: i64| {
+            CanonicalValue::new(OvbRaw::Map(vec![
+                (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
+                (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
+                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+            ]))
+            .expect("row is canonical")
+        };
+        let key = |value: i64| int(value).encode().expect("key is canonical");
+        let rows = BTreeMap::from([(
+            "Note".to_owned(),
+            vec![
+                (key(1), row(1, "first", 10).encode().unwrap()),
+                (key(2), row(2, "second", 20).encode().unwrap()),
+            ],
+        )]);
+        let tables = admitted_table_schemas(&application.module_header);
+        let mut handler =
+            SourceMutationEffectHandler::with_table_rows(tables, rows).expect("valid snapshot");
+
+        invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            &Environment::new(),
+            application.limits,
+            &mut handler,
+        )
+        .expect("recovery preserves the source row until the destination is freed");
+
+        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        assert_eq!(mutations.len(), 5);
+        assert_eq!(mutations[0].key(), key(1));
+        assert_eq!(mutations[0].rekey_to(), Some(key(3).as_slice()));
+        assert_eq!(
+            CanonicalValue::decode(mutations[0].value().unwrap()).unwrap(),
+            row(3, "first", 10)
+        );
+        assert_eq!(mutations[1].key(), key(3));
+        assert_eq!(mutations[1].rekey_to(), None);
+        assert_eq!(
+            CanonicalValue::decode(mutations[1].value().unwrap()).unwrap(),
+            row(3, "first", 15)
+        );
+        assert_eq!(mutations[2].key(), key(2));
+        assert_eq!(mutations[2].rekey_to(), Some(key(1).as_slice()));
+        assert_eq!(
+            CanonicalValue::decode(mutations[2].value().unwrap()).unwrap(),
+            row(1, "second", 20)
+        );
+        assert_eq!(mutations[3].key(), key(3));
+        assert_eq!(mutations[3].rekey_to(), Some(key(2).as_slice()));
+        assert_eq!(
+            CanonicalValue::decode(mutations[3].value().unwrap()).unwrap(),
+            row(2, "first", 15)
+        );
+        assert_eq!(mutations[4].key(), key(2));
+        assert_eq!(mutations[4].rekey_to(), None);
+        assert_eq!(
+            CanonicalValue::decode(mutations[4].value().unwrap()).unwrap(),
+            row(2, "first", 16)
+        );
+    }
+
+    #[test]
     fn failed_mutation_tail_does_not_return_earlier_effects_for_staging() {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
