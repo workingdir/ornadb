@@ -103,6 +103,12 @@ fn editable_path(key: &str) -> orna_storage_v1::LoosePath {
     orna_storage_v1::LoosePath::for_key("Placement", &[key.to_owned()]).unwrap()
 }
 
+fn existing_numeric_paths(count: usize) -> Vec<orna_storage_v1::LoosePath> {
+    (0..count)
+        .map(|index| editable_path(&(20_000 + index).to_string()))
+        .collect()
+}
+
 fn text_key(value: &str) -> Vec<u8> {
     CanonicalValue::new(OvbRaw::Text(value.to_owned()))
         .unwrap()
@@ -119,6 +125,7 @@ fn placement_preserves_existing_rows_and_applies_automatic_policy_to_inserts() {
         StoragePreference::Automatic,
         4,
         true,
+        vec![editable_path("1"), editable_path("5")],
         [
             PlacementCandidate::update(
                 key(1),
@@ -164,6 +171,7 @@ fn automatic_thresholds_and_explicit_editable_path_errors_are_checked_before_mut
         StoragePreference::Automatic,
         10_000,
         false,
+        existing_numeric_paths(10_000),
         [PlacementCandidate::insert(
             key(1),
             body.clone(),
@@ -178,6 +186,7 @@ fn automatic_thresholds_and_explicit_editable_path_errors_are_checked_before_mut
         StoragePreference::Automatic,
         0,
         false,
+        Vec::new(),
         [PlacementCandidate::insert(
             key(2),
             AUTOMATIC_EDITABLE_MAX_PUBLICATION_BYTES + 1,
@@ -193,6 +202,7 @@ fn automatic_thresholds_and_explicit_editable_path_errors_are_checked_before_mut
             StoragePreference::Editable,
             0,
             false,
+            Vec::new(),
             [PlacementCandidate::insert(key(3), body, None)],
         ),
         Err(StoragePlacementError::UnrepresentableEditableKey)
@@ -207,6 +217,7 @@ fn automatic_placement_keeps_inclusive_row_and_byte_limits() {
         StoragePreference::Automatic,
         9_999,
         false,
+        existing_numeric_paths(9_999),
         [PlacementCandidate::insert(
             key(11),
             EDITABLE_ROW.len(),
@@ -222,6 +233,7 @@ fn automatic_placement_keeps_inclusive_row_and_byte_limits() {
         StoragePreference::Automatic,
         0,
         false,
+        Vec::new(),
         [PlacementCandidate::insert(
             key(12),
             AUTOMATIC_EDITABLE_MAX_PUBLICATION_BYTES,
@@ -247,6 +259,7 @@ fn automatic_placement_falls_back_for_case_only_aliases_and_keeps_existing_rows(
         StoragePreference::Automatic,
         1,
         false,
+        vec![editable_path("Alice")],
         [
             PlacementCandidate::update(
                 upper_key.clone(),
@@ -286,6 +299,7 @@ fn automatic_placement_falls_back_for_case_only_aliases_and_keeps_existing_rows(
             StoragePreference::Editable,
             0,
             false,
+            Vec::new(),
             [
                 PlacementCandidate::insert(
                     upper_key,
@@ -316,6 +330,7 @@ fn automatic_placement_compacts_every_new_row_when_insert_paths_alias() {
         StoragePreference::Automatic,
         0,
         false,
+        Vec::new(),
         [
             PlacementCandidate::insert(
                 text_key("Alice"),
@@ -340,6 +355,113 @@ fn automatic_placement_compacts_every_new_row_when_insert_paths_alias() {
         .decisions()
         .iter()
         .all(|decision| decision.editable_path().is_none()));
+}
+
+#[test]
+fn automatic_placement_falls_back_for_an_alias_with_an_untouched_editable_row() {
+    let profile = profile_for_key_type(Uuid::from_u128(5), "Str");
+    let plan = plan_storage_placement(
+        &profile,
+        StoragePreference::Automatic,
+        1,
+        false,
+        vec![editable_path("Alice")],
+        [PlacementCandidate::insert(
+            text_key("alice"),
+            CASE_COLLISION_LOWER_ROW.len(),
+            Some(editable_path("alice")),
+        )],
+    )
+    .unwrap();
+
+    assert_eq!(plan.new_row_placement(), PhysicalPlacement::Compact);
+    assert_eq!(plan.reason(), PlacementReason::AutomaticUnrepresentablePath);
+    assert_eq!(plan.decisions()[0].placement(), PhysicalPlacement::Compact);
+}
+
+#[test]
+fn deleting_a_case_alias_source_frees_the_path_for_an_editable_reinsert() {
+    let profile = profile_for_key_type(Uuid::from_u128(6), "Str");
+    let upper_key = text_key("Alice");
+    let lower_key = text_key("alice");
+    let upper_path = editable_path("Alice");
+    let lower_path = editable_path("alice");
+    let plan = plan_storage_placement(
+        &profile,
+        StoragePreference::Automatic,
+        1,
+        false,
+        vec![upper_path.clone()],
+        [
+            PlacementCandidate::delete(
+                upper_key,
+                PhysicalPlacement::Editable,
+                Some(upper_path.clone()),
+            ),
+            PlacementCandidate::insert(
+                lower_key,
+                CASE_COLLISION_LOWER_ROW.len(),
+                Some(lower_path.clone()),
+            ),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(plan.new_row_placement(), PhysicalPlacement::Editable);
+    assert_eq!(plan.decisions()[0].action(), PlacementAction::Delete);
+    assert_eq!(plan.decisions()[0].placement(), PhysicalPlacement::Editable);
+    assert_eq!(plan.decisions()[1].action(), PlacementAction::Insert);
+    assert_eq!(plan.decisions()[1].placement(), PhysicalPlacement::Editable);
+
+    let old_row = LooseRow::new(CASE_COLLISION_UPPER_ROW.as_bytes().to_vec()).unwrap();
+    let mut initial = LooseProjection::default();
+    initial
+        .project(
+            &FrozenBatch::new(
+                MutationId::new("initial-case-row").unwrap(),
+                vec![LooseMutation {
+                    id: MutationId::new("initial-case-row-write").unwrap(),
+                    path: upper_path.clone(),
+                    expected: None,
+                    next: Some(old_row.clone()),
+                }],
+                1,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let delete = LooseMutation {
+        id: MutationId::new("delete-upper-case-row").unwrap(),
+        path: upper_path.clone(),
+        expected: Some(old_row.hash()),
+        next: None,
+    };
+    let insert = LooseMutation {
+        id: MutationId::new("insert-lower-case-row").unwrap(),
+        path: lower_path.clone(),
+        expected: None,
+        next: Some(LooseRow::new(CASE_COLLISION_LOWER_ROW.as_bytes().to_vec()).unwrap()),
+    };
+
+    for mutations in [
+        vec![delete.clone(), insert.clone()],
+        vec![insert.clone(), delete.clone()],
+    ] {
+        let mut projection = initial.clone();
+        projection
+            .project(
+                &FrozenBatch::new(
+                    MutationId::new("case-row-replacement").unwrap(),
+                    mutations,
+                    2,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(projection.entries().count(), 1);
+        assert!(projection.row(&lower_path).is_some());
+        assert!(projection.row(&upper_path).is_none());
+    }
 }
 
 #[test]

@@ -223,18 +223,28 @@ impl PlacementPlan {
 /// Chooses placement for an already validated programmatic mutation batch.
 ///
 /// Existing rows always keep their physical representation. The table layer
-/// passes an exact current row count and whether compact data is committed;
-/// direct valid loose-file edits do not use this automatic policy.
+/// passes an exact current row count, whether compact data is committed, and
+/// the complete current editable path set. The planner compares the resulting
+/// editable snapshot so automatic inserts can fall back when they collide
+/// with rows outside the mutation batch. Direct valid loose-file edits do not
+/// use this automatic policy.
 pub fn plan_storage_placement(
     profile: &CompactOvbProfile,
     preference: StoragePreference,
     current_row_count: usize,
     compact_data_exists: bool,
+    current_editable_paths: impl IntoIterator<Item = LoosePath>,
     candidates: impl IntoIterator<Item = PlacementCandidate>,
 ) -> Result<PlacementPlan, StoragePlacementError> {
     let candidates: Vec<_> = candidates.into_iter().collect();
     if candidates.is_empty() {
         return Err(StoragePlacementError::EmptyBatch);
+    }
+    let current_editable_paths: Vec<_> = current_editable_paths.into_iter().collect();
+    let mut remaining_editable_paths: BTreeSet<_> =
+        current_editable_paths.iter().cloned().collect();
+    if remaining_editable_paths.len() != current_editable_paths.len() {
+        return Err(StoragePlacementError::PathCollision);
     }
 
     let mut keyed = BTreeMap::new();
@@ -339,27 +349,34 @@ pub fn plan_storage_placement(
         });
     }
 
-    let requested_paths: Vec<_> = decisions
-        .iter()
-        .filter_map(|decision| decision.editable_path.as_ref())
-        .collect();
+    for decision in decisions.iter().filter(|decision| {
+        decision.action != PlacementAction::Insert
+            && decision.placement == PhysicalPlacement::Editable
+    }) {
+        let path = decision
+            .editable_path
+            .as_ref()
+            .ok_or(StoragePlacementError::UnrepresentableEditableKey)?;
+        if !remaining_editable_paths.remove(path) {
+            return Err(StoragePlacementError::ExistingEditablePathMissing);
+        }
+    }
+
+    let requested_paths = final_editable_paths(&remaining_editable_paths, &decisions, true);
     if placement_paths_collide(&requested_paths) {
         if preference == StoragePreference::Automatic
             && new_row_placement == PhysicalPlacement::Editable
         {
-            let existing_paths: Vec<_> = decisions
-                .iter()
-                .filter(|decision| decision.action != PlacementAction::Insert)
-                .filter_map(|decision| decision.editable_path.as_ref())
-                .collect();
+            let existing_paths = final_editable_paths(&remaining_editable_paths, &decisions, false);
             if placement_paths_collide(&existing_paths) {
                 return Err(StoragePlacementError::PathCollision);
             }
 
             // The reference requires every path to be valid for automatic
-            // editable placement but does not spell out batch path aliases.
-            // Treat a collectively colliding insert set as an automatic
-            // compact fallback; existing editable rows retain their placement.
+            // editable placement but does not spell out aliases against rows
+            // outside this batch. Preserve portable existing rows and move
+            // this batch's inserts to compact storage when they make the
+            // resulting editable snapshot unrepresentable.
             new_row_placement = PhysicalPlacement::Compact;
             reason = PlacementReason::AutomaticUnrepresentablePath;
             for decision in &mut decisions {
@@ -373,10 +390,7 @@ pub fn plan_storage_placement(
         }
     }
 
-    let remaining_paths: Vec<_> = decisions
-        .iter()
-        .filter_map(|decision| decision.editable_path.as_ref())
-        .collect();
+    let remaining_paths = final_editable_paths(&remaining_editable_paths, &decisions, true);
     if placement_paths_collide(&remaining_paths) {
         return Err(StoragePlacementError::PathCollision);
     }
@@ -388,6 +402,28 @@ pub fn plan_storage_placement(
         reason,
         decisions,
     })
+}
+
+fn final_editable_paths<'a>(
+    untouched_paths: &'a BTreeSet<LoosePath>,
+    decisions: &'a [PlacementDecision],
+    include_inserts: bool,
+) -> Vec<&'a LoosePath> {
+    let mut paths: Vec<_> = untouched_paths.iter().collect();
+    paths.extend(
+        decisions
+            .iter()
+            .filter(|decision| {
+                decision.placement == PhysicalPlacement::Editable
+                    && match decision.action {
+                        PlacementAction::Insert => include_inserts,
+                        PlacementAction::Update => true,
+                        PlacementAction::Delete => false,
+                    }
+            })
+            .filter_map(|decision| decision.editable_path.as_ref()),
+    );
+    paths
 }
 
 fn placement_paths_collide(paths: &[&LoosePath]) -> bool {
@@ -810,6 +846,7 @@ pub enum StoragePlacementError {
     EmptyRow,
     RowCountOverflow,
     SizeOverflow,
+    ExistingEditablePathMissing,
     UnrepresentableEditableKey,
     EditableRowTooLarge,
 }
@@ -825,6 +862,9 @@ impl std::fmt::Display for StoragePlacementError {
             Self::EmptyRow => "storage placement row body is empty",
             Self::RowCountOverflow => "storage placement row count overflowed",
             Self::SizeOverflow => "storage placement byte count overflowed",
+            Self::ExistingEditablePathMissing => {
+                "storage placement source row is absent from the editable path snapshot"
+            }
             Self::UnrepresentableEditableKey => "editable placement cannot represent the row key",
             Self::EditableRowTooLarge => "editable row exceeds the loose-row size limit",
         })
