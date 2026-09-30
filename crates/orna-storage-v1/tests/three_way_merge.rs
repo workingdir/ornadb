@@ -3589,6 +3589,164 @@ fn checkpoint_creation_orientations_survive_row_tombstones() {
 }
 
 #[test]
+fn divergent_checkpoint_creation_closes_conflict_tail_after_row_tombstone() {
+    let deleted_row = parse_fixture(BASE, RowKeyKind::Explicit);
+    let checkpoint_id = b"consumer/m-new-divergent".to_vec();
+    let tail_id = b"consumer/z-existing-conflict".to_vec();
+    let final_tail_id = b"consumer/zz-final-conflict".to_vec();
+    let tail_fixtures = (CHECKPOINT_TAIL_BASE, CHECKPOINT_TAIL_LEFT, CHECKPOINT_TAIL_RIGHT);
+
+    // ORNA-MERGE-011 requires divergent opaque checkpoints to conflict but
+    // does not spell out concurrent creation when the base has no entry.
+    // Treat unequal additions as divergent and walk them after the row phase,
+    // so a clean row tombstone contributes its range before checkpoint caps.
+    let build_inputs = |row_delete_on_left, left_fixture, right_fixture| {
+        let mut source = FixtureRows::default();
+        source.add(MergeSide::Base, b"base", vec![deleted_row.clone()]);
+        source.add(
+            MergeSide::Left,
+            b"left",
+            if row_delete_on_left { Vec::new() } else { vec![deleted_row.clone()] },
+        );
+        source.add(
+            MergeSide::Right,
+            b"right",
+            if row_delete_on_left { vec![deleted_row.clone()] } else { Vec::new() },
+        );
+
+        let mut base = snapshot(schema(true, FieldType::Str), manifest(1, 10, b"base"), None);
+        let mut left = snapshot(schema(true, FieldType::Str), manifest(2, 11, b"left"), None);
+        let mut right = snapshot(schema(true, FieldType::Str), manifest(3, 12, b"right"), None);
+        left.checkpoints.insert(checkpoint_id.clone(), parse_checkpoint_fixture(left_fixture));
+        right.checkpoints.insert(checkpoint_id.clone(), parse_checkpoint_fixture(right_fixture));
+        for tail in [&tail_id, &final_tail_id] {
+            base.checkpoints.insert(tail.clone(), parse_checkpoint_fixture(tail_fixtures.0));
+            left.checkpoints.insert(tail.clone(), parse_checkpoint_fixture(tail_fixtures.1));
+            right.checkpoints.insert(tail.clone(), parse_checkpoint_fixture(tail_fixtures.2));
+        }
+        (base, left, right, source)
+    };
+
+    // Cross the row-delete side with which divergent creation lands on the
+    // left, proving fixture orientation and conflict closure in each case.
+    for (row_delete_on_left, left_fixture, right_fixture) in [
+        (true, CHECKPOINT_BASE, CHECKPOINT_EDITED),
+        (true, CHECKPOINT_EDITED, CHECKPOINT_BASE),
+        (false, CHECKPOINT_BASE, CHECKPOINT_EDITED),
+        (false, CHECKPOINT_EDITED, CHECKPOINT_BASE),
+    ] {
+        let (base, left, right, mut source) =
+            build_inputs(row_delete_on_left, left_fixture, right_fixture);
+        let error = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 0 },
+        )
+        .unwrap_err();
+        let BranchMergeError::BudgetExceeded { report } = error else {
+            panic!("the first divergent creation follows the row tombstone")
+        };
+        assert_eq!(report.conflicts_lower_bound, 1);
+        assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+        assert_eq!(report.affected_checkpoints.len(), 1);
+        assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
+        assert_eq!(source.visited.len(), 3);
+
+        let (base, left, right, mut source) =
+            build_inputs(row_delete_on_left, left_fixture, right_fixture);
+        let error = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 1 },
+        )
+        .unwrap_err();
+        let BranchMergeError::BudgetExceeded { report } = error else {
+            panic!("the existing checkpoint conflict crosses the one-detail cap")
+        };
+        assert_eq!(report.conflicts_lower_bound, 2);
+        assert_eq!(report.affected_checkpoints.len(), 2);
+        assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
+        assert!(report.affected_checkpoints.contains(tail_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(final_tail_id.as_slice()));
+        assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+        assert_eq!(source.visited.len(), 3);
+
+        let (base, left, right, mut source) =
+            build_inputs(row_delete_on_left, left_fixture, right_fixture);
+        let error = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 2 },
+        )
+        .unwrap_err();
+        let BranchMergeError::BudgetExceeded { report } = error else {
+            panic!("the terminal fixture conflict crosses the two-detail cap")
+        };
+        assert_eq!(report.conflicts_lower_bound, 3);
+        assert_eq!(report.affected_checkpoints.len(), 3);
+        assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
+        assert!(report.affected_checkpoints.contains(tail_id.as_slice()));
+        assert!(report.affected_checkpoints.contains(final_tail_id.as_slice()));
+        assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+        assert_eq!(source.visited.len(), 3);
+
+        let (base, left, right, mut source) =
+            build_inputs(row_delete_on_left, left_fixture, right_fixture);
+        let error = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 3 },
+        )
+        .unwrap_err();
+        let BranchMergeError::Conflicts { conflicts, report } = error else {
+            panic!("all three fixture conflicts fit the exact detail cap")
+        };
+        let expected_left = parse_checkpoint_fixture(left_fixture);
+        let expected_right = parse_checkpoint_fixture(right_fixture);
+        assert_eq!(
+            conflicts,
+            vec![
+                BranchMergeConflict::CheckpointConflict {
+                    id: checkpoint_id.clone(),
+                    conflict: orna_evolution_v1::CheckpointMergeConflict {
+                        base: None,
+                        left: Some(expected_left),
+                        right: Some(expected_right),
+                    },
+                },
+                BranchMergeConflict::CheckpointConflict {
+                    id: tail_id.clone(),
+                    conflict: orna_evolution_v1::CheckpointMergeConflict {
+                        base: Some(parse_checkpoint_fixture(tail_fixtures.0)),
+                        left: Some(parse_checkpoint_fixture(tail_fixtures.1)),
+                        right: Some(parse_checkpoint_fixture(tail_fixtures.2)),
+                    },
+                },
+                BranchMergeConflict::CheckpointConflict {
+                    id: final_tail_id.clone(),
+                    conflict: orna_evolution_v1::CheckpointMergeConflict {
+                        base: Some(parse_checkpoint_fixture(tail_fixtures.0)),
+                        left: Some(parse_checkpoint_fixture(tail_fixtures.1)),
+                        right: Some(parse_checkpoint_fixture(tail_fixtures.2)),
+                    },
+                },
+            ]
+        );
+        assert_eq!(report.conflicts_lower_bound, 3);
+        assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+        assert_eq!(source.visited.len(), 3);
+    }
+}
+
+#[test]
 fn schema_conflict_is_a_boundary_before_row_reads_and_checkpoint_resolution() {
     let base_checkpoint = CheckpointGeneration {
         generation: 4,
