@@ -515,6 +515,111 @@ fn clone_from_tree_keeps_admission_at_root_only_at_projection() {
 }
 
 #[test]
+fn clone_from_cause_vector_size_changes_redact_or_drop_secret_tails() {
+    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture_credential = fixture.split('"').nth(1).unwrap();
+    let admitted_cause = |code: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .redacted_with_message(SafeText::new(fixture).unwrap())
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let untrusted_cause = |code: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+
+    let growing_source = Diagnostic::new(
+        SafeText::new("ORNA-E-GROW-SOURCE").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .redacted_with_message(SafeText::new("admitted growth root").unwrap())
+    .with_cause(admitted_cause("ORNA-E-GROW-CAUSE-A"))
+    .with_cause(admitted_cause("ORNA-E-GROW-CAUSE-B"));
+    let mut growing_destination = Diagnostic::new(
+        SafeText::new("ORNA-E-OLD-ROOT").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .with_cause(untrusted_cause("ORNA-E-OLD-CAUSE"));
+
+    // clone_from reuses the old child slot, then appends a second admitted
+    // child. Neither child's local admission may cross the cause boundary.
+    growing_destination.clone_from(&growing_source);
+    let growing_json = serde_json::to_vec(&growing_destination).unwrap();
+    let growing_projection = serde_json::to_value(&growing_destination).unwrap();
+    assert_eq!(growing_projection["message"], "admitted growth root");
+    assert_eq!(growing_projection["causes"].as_array().unwrap().len(), 2);
+    for cause in growing_projection["causes"].as_array().unwrap() {
+        assert_eq!(cause["message"], "<redacted>");
+        assert_eq!(cause["notes"][0], "<redacted>");
+        assert_eq!(cause["redacted"], true);
+    }
+    assert!(
+        !growing_json
+            .windows(fixture_credential.len())
+            .any(|window| window == fixture_credential.as_bytes())
+    );
+    let growing_wire = growing_destination.encode_ovb().unwrap();
+    assert!(
+        !growing_wire
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+    let growing_decoded =
+        serde_json::to_value(Diagnostic::decode_ovb(&growing_wire).unwrap()).unwrap();
+    assert_eq!(growing_decoded["message"], "<redacted>");
+    assert_eq!(growing_decoded["causes"].as_array().unwrap().len(), 2);
+
+    let shrinking_source = Diagnostic::new(
+        SafeText::new("ORNA-E-SHRINK-SOURCE").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .redacted_with_message(SafeText::new("admitted shrinking root").unwrap());
+    let mut shrinking_destination = shrinking_source
+        .clone()
+        .with_cause(admitted_cause("ORNA-E-STALE-CAUSE-A"))
+        .with_cause(admitted_cause("ORNA-E-STALE-CAUSE-B"))
+        .with_cause(admitted_cause("ORNA-E-STALE-CAUSE-C"));
+
+    // Replacing a longer cause vector must drop every stale admitted child.
+    shrinking_destination.clone_from(&shrinking_source);
+    let shrinking_json = serde_json::to_vec(&shrinking_destination).unwrap();
+    let shrinking_projection = serde_json::to_value(&shrinking_destination).unwrap();
+    assert_eq!(shrinking_projection["message"], "admitted shrinking root");
+    assert_eq!(shrinking_projection["causes"].as_array().unwrap().len(), 0);
+    assert!(
+        !shrinking_json
+            .windows(fixture_credential.len())
+            .any(|window| window == fixture_credential.as_bytes())
+    );
+    let shrinking_wire = shrinking_destination.encode_ovb().unwrap();
+    assert!(
+        !shrinking_wire
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+    let shrinking_decoded =
+        serde_json::to_value(Diagnostic::decode_ovb(&shrinking_wire).unwrap()).unwrap();
+    assert_eq!(shrinking_decoded["message"], "<redacted>");
+    assert_eq!(shrinking_decoded["causes"].as_array().unwrap().len(), 0);
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
