@@ -2076,6 +2076,57 @@ impl Context<'_, '_> {
             _ => Err(error("ORNA-EVAL-TYPE")),
         }
     }
+    fn numeric_decimal_postfix(
+        &self,
+        value: DecimalValue,
+        name: &str,
+    ) -> Result<Value, EvaluationError> {
+        let unit = name.rsplit('.').next().unwrap_or(name);
+        if unit == "decimal" {
+            return self.checked_decimal(value).map(Value::Decimal);
+        }
+        let seconds_per_unit = match unit {
+            "hour" | "hours" => 3_600u32,
+            "minute" | "minutes" | "min" => 60u32,
+            "second" | "seconds" | "s" => 1u32,
+            _ => return Err(error("ORNA-EVAL-TYPE")),
+        };
+        self.integer(value.coefficient.clone())?;
+        self.integer(value.exponent10.clone())?;
+
+        // Decimal elapsed units are accepted only when their exact value lands
+        // on the core Duration nanosecond grid. This avoids host rounding in
+        // all four pinned formatters while preserving their fractional output.
+        let numerator = value.coefficient * BigInt::from(seconds_per_unit);
+        let nanosecond_shift = value.exponent10 + BigInt::from(9u8);
+        let total_nanoseconds = if !nanosecond_shift.is_negative() {
+            let shift = nanosecond_shift
+                .to_u32()
+                .filter(|shift| *shift <= DEFAULT_INTEGER_DIGITS as u32)
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            numerator * BigInt::from(10u8).pow(shift)
+        } else {
+            let shift = (-nanosecond_shift)
+                .to_u32()
+                .filter(|shift| *shift <= DEFAULT_INTEGER_DIGITS as u32)
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            let divisor = BigInt::from(10u8).pow(shift);
+            let (quotient, remainder) = numerator.div_rem(&divisor);
+            if !remainder.is_zero() {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+            quotient
+        };
+        self.integer(total_nanoseconds.clone())?;
+        let (seconds, nanosecond) =
+            total_nanoseconds.div_mod_floor(&BigInt::from(1_000_000_000u32));
+        let nanosecond = nanosecond.to_u32().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        self.integer(seconds.clone())?;
+        Ok(Value::Duration {
+            seconds,
+            nanosecond,
+        })
+    }
     fn integer(&self, value: BigInt) -> Result<BigInt, EvaluationError> {
         if value.to_str_radix(10).len() > self.limits.max_integer_digits {
             Err(error("ORNA-EVAL-LIMIT"))
@@ -2236,6 +2287,7 @@ impl Context<'_, '_> {
                     }
                     Value::Error(failure) => self.error_field(&failure, name, depth + 1),
                     Value::Int(value) => self.numeric_postfix(value, name),
+                    Value::Decimal(value) => self.numeric_decimal_postfix(value, name),
                     _ if self.transfer.is_some() => Ok(Value::Null),
                     _ => Err(error("ORNA-EVAL-TYPE")),
                 }
