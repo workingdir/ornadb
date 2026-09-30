@@ -11815,13 +11815,18 @@ fn duplicate_closures_keep_same_deep_recovery_across_parent_replacements() {
     };
     let capture = |snapshot: Diagnostic| move || snapshot.clone();
 
-    let base_recovery = recover(&make_chain(
+    let base_wire = make_chain(
         "base generation",
         vec![
             admitted("ORNA-E-DUPLICATE-BASE-A", "base first deep tail payload"),
             admitted("ORNA-E-DUPLICATE-BASE-B", "base final deep tail payload"),
         ],
-    ));
+    )
+    .encode_ovb()
+    .unwrap();
+    let base_recovery = Diagnostic::decode_ovb(&base_wire).unwrap();
+    let duplicate_recovery = Diagnostic::decode_ovb(&base_wire).unwrap();
+    assert_eq!(base_recovery, duplicate_recovery);
     let replacement_recovery = recover(&make_chain(
         "replacement generation",
         vec![admitted(
@@ -11832,13 +11837,14 @@ fn duplicate_closures_keep_same_deep_recovery_across_parent_replacements() {
     let empty_recovery = recover(&make_chain("empty generation", vec![]));
 
     // ORNA-SECRET-002 defines recursive redaction but does not specify whether
-    // two closures capturing clones of one decoded deep tree retain duplicate
+    // two independent decodes of the same deep wire snapshot retain duplicate
     // generations independently while their receivers cross replacements.
     let capture_base = capture(base_recovery.clone());
+    let capture_duplicate_base = capture(duplicate_recovery.clone());
     let capture_replacement = capture(replacement_recovery.clone());
     let capture_empty = capture(empty_recovery.clone());
     let mut left = base_recovery.clone();
-    let mut right = base_recovery.clone();
+    let mut right = duplicate_recovery.clone();
     let capture_left_initial = capture(left.clone());
     let capture_right_initial = capture(right.clone());
 
@@ -11848,7 +11854,7 @@ fn duplicate_closures_keep_same_deep_recovery_across_parent_replacements() {
     let capture_right_replacement = capture(right.clone());
 
     left.clone_from(&capture_replacement());
-    right.clone_from(&capture_base());
+    right.clone_from(&capture_duplicate_base());
     let capture_left_replacement = capture(left.clone());
     let capture_right_restored = capture(right.clone());
 
@@ -11858,11 +11864,11 @@ fn duplicate_closures_keep_same_deep_recovery_across_parent_replacements() {
     let capture_right_empty = capture(right.clone());
 
     assert_eq!(capture_left_initial(), base_recovery);
-    assert_eq!(capture_right_initial(), base_recovery);
+    assert_eq!(capture_right_initial(), duplicate_recovery);
     assert_eq!(capture_left_empty(), empty_recovery);
     assert_eq!(capture_right_replacement(), replacement_recovery);
     assert_eq!(capture_left_replacement(), replacement_recovery);
-    assert_eq!(capture_right_restored(), base_recovery);
+    assert_eq!(capture_right_restored(), duplicate_recovery);
     assert_eq!(capture_left_restored(), base_recovery);
     assert_eq!(capture_right_empty(), empty_recovery);
 
