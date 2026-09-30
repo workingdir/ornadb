@@ -1426,8 +1426,8 @@ impl Diagnostic {
         // The wire `redacted` bit is descriptive, not trusted admission.
         // Keep a root message only when this object received local admission.
         // Admission is record-local: cause edges discard a child's trust mark
-        // whether the child or parent was admitted first, including causes
-        // reused by Clone::clone_from.
+        // whether the child or parent was admitted first, including nested
+        // cause slots reused, appended, or dropped by Clone::clone_from.
         let mut projection = if self.root_message_admitted {
             self.clone()
         } else {
