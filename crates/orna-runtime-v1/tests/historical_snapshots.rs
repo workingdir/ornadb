@@ -549,6 +549,7 @@ async fn retained_pins_cross_generation_encoding_boundaries() {
         // Exercise neighboring row images across the retained-pin boundary: key 2
         // changes as key 1 is deleted, then is deleted as key 1 is restored. Key 3
         // remains stable to prove row deletion doesn't shift a retained neighbor.
+        // Stable rows on both sides also cover compaction at either edge of the pair.
         let neighboring_value = match generation {
             256 => Some(b"neighbor-256".to_vec()),
             257 => None,
@@ -576,6 +577,17 @@ async fn retained_pins_cross_generation_encoding_boundaries() {
                     Some(b"tail-survivor".to_vec()),
                 )
                 .expect("valid stable-neighbor seed mutation"),
+            );
+            let mut leading_neighbor_mutation_id = mutation_id;
+            leading_neighbor_mutation_id[0] = 4;
+            mutations.push(
+                TableMutation::new(
+                    leading_neighbor_mutation_id,
+                    "records",
+                    vec![0],
+                    Some(b"head-survivor".to_vec()),
+                )
+                .expect("valid leading-neighbor seed mutation"),
             );
         } else if neighboring_value.is_some() || generation == 257 {
             let mut neighboring_row_mutation_id = mutation_id;
@@ -635,6 +647,7 @@ async fn retained_pins_cross_generation_encoding_boundaries() {
         .expect("read generation 257")
         .rows(),
         &[
+            (vec![0], b"head-survivor".to_vec()),
             (vec![1], b"after-256".to_vec()),
             (vec![3], b"tail-survivor".to_vec()),
         ]
@@ -648,11 +661,13 @@ async fn retained_pins_cross_generation_encoding_boundaries() {
         assert_eq!(&resolved, selected);
         let expected_rows = if *generation == 256 {
             vec![
+                (vec![0], b"head-survivor".to_vec()),
                 (vec![2], b"neighbor-256".to_vec()),
                 (vec![3], b"tail-survivor".to_vec()),
             ]
         } else {
             vec![
+                (vec![0], b"head-survivor".to_vec()),
                 (vec![1], b"steady".to_vec()),
                 (vec![2], b"survivor".to_vec()),
                 (vec![3], b"tail-survivor".to_vec()),
@@ -682,11 +697,13 @@ async fn retained_pins_cross_generation_encoding_boundaries() {
         assert_eq!(resolved.generation(), *generation);
         let expected_rows = if *generation == 256 {
             vec![
+                (vec![0], b"head-survivor".to_vec()),
                 (vec![2], b"neighbor-256".to_vec()),
                 (vec![3], b"tail-survivor".to_vec()),
             ]
         } else {
             vec![
+                (vec![0], b"head-survivor".to_vec()),
                 (vec![1], b"steady".to_vec()),
                 (vec![2], b"survivor".to_vec()),
                 (vec![3], b"tail-survivor".to_vec()),
