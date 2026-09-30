@@ -3227,6 +3227,76 @@ mod tests {
     }
 
     #[test]
+    fn nested_pin_primary_alias_collision_does_not_block_sibling_closure() {
+        let app_source = include_str!("../tests/fixtures/attached-incompatible-main.orna");
+        let archive_source = include_str!("../tests/fixtures/attached-equivalent-main.orna");
+        let mirror_source = include_str!("../tests/fixtures/attached-incompatible-main.orna");
+        let (app_dir, app_repository, _) = repository(app_source);
+        let (archive_dir, archive_repository, archive_base_commit) = repository(archive_source);
+        let (_mirror_dir, mirror_repository, mirror_commit) = repository(mirror_source);
+
+        let archive_closure_commit = write_commit(
+            archive_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive {archive_base_commit}\nmirror {mirror_commit}\n"),
+        );
+        let app_commit = write_commit(
+            app_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive {archive_closure_commit}\nmirror {mirror_commit}\n"),
+        );
+        assert!(archive_repository
+            .resolve_snapshot(&archive_base_commit)
+            .is_ok());
+        assert!(mirror_repository.resolve_snapshot(&mirror_commit).is_ok());
+
+        let loader = ProjectLoader::default();
+        let app = PinnedDatabase::resolve(
+            "app",
+            app_repository.clone(),
+            &app_commit,
+            loader,
+        )
+        .unwrap();
+        let resolver = PackageResolver::new(
+            [
+                ("app".to_owned(), app_repository),
+                ("archive".to_owned(), archive_repository),
+                ("mirror".to_owned(), mirror_repository),
+            ],
+            loader,
+        )
+        .unwrap();
+
+        let root_session = resolver.resolve_for_parent(app).unwrap();
+        assert_eq!(root_session.attached().count(), 2);
+        let archive = root_session.database("archive").unwrap().clone();
+        let mirror = root_session.database("mirror").unwrap().clone();
+        assert_eq!(archive.pin().commit().as_str(), archive_closure_commit);
+        assert_eq!(mirror.pin().commit().as_str(), mirror_commit);
+
+        // The reference fixes exact pins but leaves recursive name-collision
+        // behavior unspecified. V1 rejects the self-alias closure atomically;
+        // the valid sibling alias still resolves in its own parent session.
+        assert!(matches!(
+            resolver.resolve_for_parent(archive),
+            Err(AttachmentError::DuplicateAttachment)
+        ));
+        let mirror_closure = resolver.resolve_for_parent(mirror).unwrap();
+        assert_eq!(mirror_closure.primary().pin().name(), "mirror");
+        assert_eq!(mirror_closure.primary().pin().commit().as_str(), mirror_commit);
+        assert_eq!(mirror_closure.attached().count(), 0);
+        assert_eq!(
+            root_session.database("archive").unwrap().pin().commit().as_str(),
+            archive_closure_commit
+        );
+        assert_eq!(
+            root_session.database("mirror").unwrap().pin().commit().as_str(),
+            mirror_commit
+        );
+    }
+
+    #[test]
     fn equivalent_units_interoperate_across_attachments_but_name_match_is_not_enough() {
         let primary_source = include_str!("fixtures/attached-primary-main.orna");
         let (_primary_dir, primary_repository, primary_commit) = repository(&primary_source);
