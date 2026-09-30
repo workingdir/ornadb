@@ -1300,6 +1300,135 @@ fn segmented_zero_conflict_budget_reaches_checkpoint_tail_after_fixture_merges()
 }
 
 #[test]
+fn segmented_zero_budget_delete_update_checkpoint_keeps_first_identity() {
+    let candidate_a = integer(10);
+    let candidate_b = integer(20);
+    let (low_key, high_key) = if candidate_a.encode().unwrap() < candidate_b.encode().unwrap() {
+        (candidate_a, candidate_b)
+    } else {
+        (candidate_b, candidate_a)
+    };
+    let boundary = high_key.encode().unwrap();
+    let low_range = KeyRange::new(None, Some(boundary.clone())).unwrap();
+    let high_range = KeyRange::new(Some(boundary), None).unwrap();
+    let split_manifest = |digest, low_digest, high_digest, low_locator: &[u8], high_locator: &[u8]| {
+        TableManifest {
+            digest: [digest; 32],
+            segments: vec![
+                RowSegmentManifest {
+                    locator: low_locator.to_vec(),
+                    range: low_range.clone(),
+                    digest: [low_digest; 32],
+                },
+                RowSegmentManifest {
+                    locator: high_locator.to_vec(),
+                    range: high_range.clone(),
+                    digest: [high_digest; 32],
+                },
+            ],
+        }
+    };
+    let fixture_row = |fixture: &str, key: CanonicalValue| {
+        let mut row = parse_fixture(fixture, RowKeyKind::Explicit);
+        row.key = key;
+        row
+    };
+
+    for delete_on_left in [true, false] {
+        let mut source = FixtureRows::default();
+        for (side, locator_prefix, fixture) in [
+            (MergeSide::Base, b"base".as_slice(), BASE),
+            (MergeSide::Left, b"left".as_slice(), LEFT),
+            (MergeSide::Right, b"right".as_slice(), RIGHT),
+        ] {
+            let low_locator = [locator_prefix, b"-low"].concat();
+            let high_locator = [locator_prefix, b"-high"].concat();
+            source.add(side, &low_locator, vec![fixture_row(fixture, low_key.clone())]);
+            source.add(side, &high_locator, vec![fixture_row(fixture, high_key.clone())]);
+        }
+
+        let mut base = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(40, 1, 4, b"base-low", b"base-high"),
+            None,
+        );
+        let mut left = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(41, 2, 5, b"left-low", b"left-high"),
+            None,
+        );
+        let mut right = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(42, 3, 6, b"right-low", b"right-high"),
+            None,
+        );
+
+        let agreed_delete_id = b"consumer/a-agreed-delete".to_vec();
+        base.checkpoints.insert(
+            agreed_delete_id.clone(),
+            CheckpointGeneration { generation: 2, position: None },
+        );
+
+        let delete_against_unchanged_id = b"consumer/b-delete-against-unchanged".to_vec();
+        let retained_checkpoint = CheckpointGeneration { generation: 3, position: None };
+        base.checkpoints.insert(
+            delete_against_unchanged_id.clone(),
+            retained_checkpoint.clone(),
+        );
+        let unchanged_side = if delete_on_left { &mut right } else { &mut left };
+        unchanged_side
+            .checkpoints
+            .insert(delete_against_unchanged_id.clone(), retained_checkpoint);
+
+        let first_conflict_id = b"consumer/m-positionless-delete-update".to_vec();
+        base.checkpoints.insert(
+            first_conflict_id.clone(),
+            CheckpointGeneration { generation: 4, position: None },
+        );
+        let update_side = if delete_on_left { &mut right } else { &mut left };
+        update_side.checkpoints.insert(
+            first_conflict_id.clone(),
+            CheckpointGeneration { generation: 5, position: None },
+        );
+
+        let later_conflict_id = b"consumer/z-unvisited".to_vec();
+        for (snapshot, generation) in [(&mut base, 7), (&mut left, 8), (&mut right, 9)] {
+            snapshot.checkpoints.insert(
+                later_conflict_id.clone(),
+                CheckpointGeneration { generation, position: None },
+            );
+        }
+
+        // MERGE-011 treats a deleted checkpoint and an independently advanced
+        // positionless checkpoint as divergent state. Storage finishes each
+        // fixture range first, then retains the stable checkpoint ID as the
+        // only impact when zero budget stops at that delete/update tail.
+        let error = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 0 },
+        )
+        .unwrap_err();
+        let BranchMergeError::BudgetExceeded { report } = error else {
+            panic!("the first positionless delete/update checkpoint exceeds zero budget")
+        };
+        assert_eq!(report.conflicts_lower_bound, 1);
+        assert_eq!(report.rows_examined, 6);
+        assert!(report.affected_ranges.contains(&(id(1), low_range.clone())));
+        assert!(report.affected_ranges.contains(&(id(1), high_range.clone())));
+        assert!(report.affected_checkpoints.contains(first_conflict_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(agreed_delete_id.as_slice()));
+        assert!(!report
+            .affected_checkpoints
+            .contains(delete_against_unchanged_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(later_conflict_id.as_slice()));
+        assert_eq!(source.visited.len(), 6);
+    }
+}
+
+#[test]
 fn segmented_checkpoint_delete_update_impacts_cross_the_shared_budget_boundary() {
     let candidate_a = integer(10);
     let candidate_b = integer(20);
