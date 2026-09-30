@@ -5,7 +5,10 @@
 //! this module is therefore a runtime-owned, snapshot-pinned executable view
 //! over one admitted sys.Function, never a second declaration identity.
 
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use libsql::{TransactionBehavior, params};
 use num_bigint::BigInt;
@@ -633,7 +636,7 @@ impl RuntimeState {
         let ended_ms = now_ms()?;
         let mut rows = tx
             .query(
-                "SELECT invocation_id FROM sys_invocation_observation
+                "SELECT invocation_id, parent_invocation_id FROM sys_invocation_observation
                  WHERE status IN (?1, ?2)
                    AND (owner_id <> ?3 OR owner_epoch <> ?4)
                  ORDER BY invocation_id",
@@ -646,15 +649,53 @@ impl RuntimeState {
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let mut ids = Vec::new();
+        let mut parents = BTreeMap::new();
         while let Some(row) = rows
             .next()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?
         {
-            ids.push(fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?);
+            let id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+            let parent = row
+                .get::<Option<Vec<u8>>>(1)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?
+                .map(fixed::<16>)
+                .transpose()?;
+            parents.insert(id, parent);
         }
         drop(rows);
+
+        // Task termination publishes children before their parent. Sort the
+        // orphan tail deepest-first so takeover history preserves that order.
+        let mut remaining_children = parents
+            .keys()
+            .map(|id| (*id, 0_usize))
+            .collect::<BTreeMap<_, _>>();
+        for parent in parents.values().flatten() {
+            if let Some(children) = remaining_children.get_mut(parent) {
+                *children += 1;
+            }
+        }
+        let mut ready = remaining_children
+            .iter()
+            .filter_map(|(id, children)| (*children == 0).then_some(*id))
+            .collect::<BTreeSet<_>>();
+        let mut ids = Vec::with_capacity(parents.len());
+        while let Some(id) = ready.iter().next().copied() {
+            ready.remove(&id);
+            ids.push(id);
+            if let Some(Some(parent_id)) = parents.get(&id) {
+                if let Some(children) = remaining_children.get_mut(parent_id) {
+                    *children -= 1;
+                    if *children == 0 {
+                        ready.insert(*parent_id);
+                    }
+                }
+            }
+        }
+        if ids.len() != parents.len() {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
         let mut changed = 0_u64;
         for id in ids {
             let updated = tx
