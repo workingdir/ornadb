@@ -3029,16 +3029,23 @@ impl LiveHost {
                     .filter(|watch| self.watches.contains(&(session, *watch)))
             })
         };
+        // Event diagnostics stay scoped to their source watch for every
+        // portable rejection code. Admitted work can rely on its ticket after
+        // closure; admission failures can correlate only a currently owned
+        // watch, avoiding a foreign-handle leak.
+        let event_watch = matches!(envelope.message, Message::Event { .. })
+            .then_some(known_watch)
+            .flatten();
         let (code, watch) = match error {
-            Error::RequestMismatch => (Error::RequestMismatch.code(), None),
-            Error::UnsupportedOperation => ("wire.unsupported", None),
-            Error::AdminBusy => (Error::AdminBusy.code(), None),
+            Error::RequestMismatch => (Error::RequestMismatch.code(), event_watch),
+            Error::UnsupportedOperation => ("wire.unsupported", event_watch),
+            Error::AdminBusy => (Error::AdminBusy.code(), event_watch),
             // A denied event admitted on a live watch is an action-handle
             // rejection; a pre-admission event without a live watch
             // (including resync) is an unknown handle. Attachment-boundary
             // denials stay outside this protocol diagnostic path.
             Error::Denied if matches!(envelope.message, Message::Event { .. }) => {
-                if let Some(watch) = known_watch {
+                if let Some(watch) = event_watch {
                     ("wire.stale_action", Some(watch))
                 } else {
                     ("wire.unknown_handle", None)
@@ -9387,7 +9394,7 @@ mod tests {
         let ApplicationPreparation::Work(event_ticket) = event_work else {
             panic!("the watched Event must be admitted as application work");
         };
-        let event_completion = event_ticket.reject(Error::Denied);
+        let event_completion = event_ticket.reject(Error::UnsupportedOperation);
         host.watches.remove(&([1; 16], watch));
 
         let mut issuer = FixedIssuer(None);
@@ -9416,9 +9423,13 @@ mod tests {
         let event_response = event_first
             .response
             .as_ref()
-            .expect("denied Event is retained as a diagnostic");
+            .expect("rejected Event is retained as a diagnostic");
         assert_eq!(event_response.request, Some([41; 16]));
         assert_eq!(event_response.watch, Some(watch));
+        assert_eq!(
+            event_response,
+            &portable_diagnostic([41; 16], Some(watch), "wire.unsupported").unwrap()
+        );
 
         // Durable terminal replay likewise preserves the admission-time watch
         // after the live handle has been closed.
@@ -9457,6 +9468,21 @@ mod tests {
                 outcome: FrameOutcome::Accepted,
                 response: Some(
                     portable_diagnostic([42; 16], None, "wire.unknown_handle").unwrap()
+                ),
+            })
+        );
+        assert_eq!(
+            host.operational_error_outcome(
+                Some([1; 16]),
+                &envelope,
+                Error::UnsupportedOperation,
+                false,
+            )
+            .unwrap(),
+            Some(DispatchOutcome {
+                outcome: FrameOutcome::Accepted,
+                response: Some(
+                    portable_diagnostic([42; 16], None, "wire.unsupported").unwrap()
                 ),
             })
         );
