@@ -3297,6 +3297,79 @@ mod tests {
     }
 
     #[test]
+    fn nested_pin_shared_repository_sibling_closure_survives_primary_alias_collision() {
+        let app_source = include_str!("../tests/fixtures/attached-incompatible-main.orna");
+        let shared_source = include_str!("../tests/fixtures/attached-equivalent-main.orna");
+        let (app_dir, app_repository, _) = repository(app_source);
+        let (shared_dir, shared_repository, shared_base_commit) = repository(shared_source);
+
+        let shared_closure_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive {shared_base_commit}\n"),
+        );
+        let app_commit = write_commit(
+            app_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive {shared_closure_commit}\nmirror {shared_closure_commit}\n"),
+        );
+
+        let loader = ProjectLoader::default();
+        let app = PinnedDatabase::resolve(
+            "app",
+            app_repository.clone(),
+            &app_commit,
+            loader,
+        )
+        .unwrap();
+        let resolver = PackageResolver::new(
+            [
+                ("app".to_owned(), app_repository),
+                ("archive".to_owned(), shared_repository.clone()),
+                ("mirror".to_owned(), shared_repository),
+            ],
+            loader,
+        )
+        .unwrap();
+
+        let root_session = resolver.resolve_for_parent(app).unwrap();
+        let archive = root_session.database("archive").unwrap().clone();
+        let mirror = root_session.database("mirror").unwrap().clone();
+        assert_eq!(archive.pin().commit(), mirror.pin().commit());
+        assert_eq!(archive.pin().commit().as_str(), shared_closure_commit);
+        assert_ne!(archive.pin(), mirror.pin());
+
+        // The reference fixes the shared exact snapshot but does not define
+        // nested alias collisions. V1 rejects the alias matching the primary,
+        // while that same manifest edge is valid under the sibling's name.
+        assert!(matches!(
+            resolver.resolve_for_parent(archive),
+            Err(AttachmentError::DuplicateAttachment)
+        ));
+        let mirror_closure = resolver.resolve_for_parent(mirror).unwrap();
+        assert_eq!(mirror_closure.primary().pin().name(), "mirror");
+        assert_eq!(
+            mirror_closure.primary().pin().commit().as_str(),
+            shared_closure_commit
+        );
+        assert_eq!(mirror_closure.attached().count(), 1);
+        let archive_child = mirror_closure.database("archive").unwrap();
+        assert_eq!(archive_child.pin().commit().as_str(), shared_base_commit);
+        assert_ne!(archive_child.pin(), mirror_closure.primary().pin());
+        assert!(mirror_closure.units_structurally_equivalent(
+            "mirror", "meter", "archive", "meter"
+        ));
+        assert_eq!(
+            root_session.database("archive").unwrap().pin().commit().as_str(),
+            shared_closure_commit
+        );
+        assert_eq!(
+            root_session.database("mirror").unwrap().pin().commit().as_str(),
+            shared_closure_commit
+        );
+    }
+
+    #[test]
     fn equivalent_units_interoperate_across_attachments_but_name_match_is_not_enough() {
         let primary_source = include_str!("fixtures/attached-primary-main.orna");
         let (_primary_dir, primary_repository, primary_commit) = repository(&primary_source);
