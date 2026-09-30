@@ -58,6 +58,8 @@ const FIRST_REMAINDER_SCAN_CLOSURE_EDGE_TAIL: &str =
     include_str!("fixtures/first_remainder_scan_closure_edge_tail.orna");
 const FIRST_REMAINDER_SCAN_MUTATION_TAIL: &str =
     include_str!("fixtures/first_remainder_scan_mutation_tail.orna");
+const FIRST_REMAINDER_SOURCE_SCAN_EDGE_TAIL: &str =
+    include_str!("fixtures/first_remainder_source_scan_edge_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -6437,6 +6439,157 @@ fn explain_preserves_first_scan_remainder_closure_through_unknown_mutation_tail(
 
     let surface = serde_json::to_value(&first_remainder_over_max)
         .expect("first-remainder scan and mutation tail overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_source_remainder_with_second_scan_byte_at_max() {
+    let parsed = orna_syntax_v1::parse_module(FIRST_REMAINDER_SOURCE_SCAN_EDGE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // per-scan 4-KiB heuristic, the source itself has a one-byte remainder
+    // and contributes 2^52; a separate one-byte scan adds one more. The
+    // row-only delete closes that subtotal exactly at MAX, while zero bytes
+    // stay below it and one additional row exceeds it through unknown tails.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let rows_to_close_both_scans = u64::MAX - MAX_BYTE_BLOCKS - 1;
+    let explain = |tail_bytes, delete_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:first-remainder-source-scan-edge-tail",
+            ),
+            source: obj("table:FirstRemainderSourceScanEdgeSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:FirstRemainderSourceScanEdgeTail"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:FirstRemainderSourceScanEdgeUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:FirstRemainderSourceScanEdgeTarget"),
+                    kind: QueryMutationKind::Delete,
+                    estimated_affected_rows: Some(delete_rows),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(delete_rows),
+                },
+                QueryMutationDescription {
+                    table: obj("table:FirstRemainderSourceScanEdgeTarget"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+            ],
+            materialize_into: Some(obj("materialization:first-remainder-source-scan-edge")),
+        })
+        .expect("source and second-scan remainder closure through unknown tails")
+    };
+
+    let zero_tail = explain(0, rows_to_close_both_scans);
+    assert_eq!(zero_tail.plan().estimated_cost(), None);
+    assert_eq!(zero_tail.root().details().get("estimated_cost_overflow"), None);
+
+    let second_scan_remainder_at_max = explain(1, rows_to_close_both_scans);
+    assert_eq!(second_scan_remainder_at_max.plan().estimated_cost(), None);
+    assert_eq!(
+        second_scan_remainder_at_max
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        None,
+        "the first remainder in the second scan closes exactly at MAX"
+    );
+
+    let overflow = explain(1, rows_to_close_both_scans + 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one additional delete row crosses MAX after both scan remainders"
+    );
+    let nodes = overflow.nodes();
+    let source_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:FirstRemainderSourceScanEdgeSource"))
+        })
+        .expect("near-MAX source scan with a byte remainder");
+    assert_eq!(source_scan.estimated_bytes(), Some(FIRST_REMAINDER_SOURCE_BYTES));
+    let remainder_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:FirstRemainderSourceScanEdgeTail"))
+        })
+        .expect("separate one-byte scan remainder");
+    assert_eq!(remainder_scan.estimated_bytes(), Some(1));
+    let unknown_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:FirstRemainderSourceScanEdgeUnknown"))
+        })
+        .expect("unknown scan tail");
+    assert_eq!(unknown_scan.estimated_work(), None);
+    let delete_position = nodes
+        .iter()
+        .position(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned()))
+        })
+        .expect("one-row-over delete closure");
+    let update_position = nodes
+        .iter()
+        .position(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("unknown update suffix");
+    let delete = &nodes[delete_position];
+    assert_eq!(
+        delete.estimated_rows(),
+        Some(rows_to_close_both_scans + 1)
+    );
+    assert_eq!(
+        nodes[update_position].inputs().first(),
+        Some(delete.reference()),
+        "the unknown update wraps the known delete closure"
+    );
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow)
+        .expect("source and second-scan remainder overflow surface");
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
