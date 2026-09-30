@@ -4459,6 +4459,95 @@ fn recovered_nested_final_case_closures_keep_closure_tails() {
 }
 
 #[test]
+fn recovered_final_closure_tail_chain_keeps_each_case_arm() {
+    let source = include_str!("fixtures/malformed-case-arm-final-closure-tail-chain.orna");
+    let parsed = parse_module(source);
+
+    assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+    let diagnostic = &parsed.diagnostics[0];
+    assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+    assert_eq!(diagnostic.message, "expected `:` after case pattern");
+    let malformed_separator = source.find("{ value").expect("fixture has malformed arm");
+    assert_eq!(diagnostic.span.start, malformed_separator);
+    assert_eq!(diagnostic.span.end, malformed_separator + 1);
+
+    fn final_arm_body<'a>(
+        expression: &'a Expr,
+        condition_name: &str,
+        first_arm_name: &str,
+    ) -> &'a Expr {
+        let Expr::Lambda { body, .. } = expression else {
+            panic!("expected a closure tail, got {expression:?}");
+        };
+        let Expr::Block { tail: Some(tail), .. } = body.as_ref() else {
+            panic!("closure lost its case tail");
+        };
+        let Expr::Control {
+            condition: Some(condition),
+            arms,
+            ..
+        } = tail.as_ref()
+        else {
+            panic!("closure tail is not a case expression");
+        };
+        assert!(matches!(condition.as_ref(), Expr::Name { text, .. } if text == condition_name));
+        assert_eq!(arms.len(), 2, "{arms:?}");
+        assert!(matches!(
+            &arms[0].body,
+            Expr::Name { text, .. } if text == first_arm_name
+        ));
+        &arms[1].body
+    }
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block { tail: Some(tail), .. } = body else {
+        panic!("expected the function body tail");
+    };
+    let Expr::Control { arms, .. } = tail.as_ref() else {
+        panic!("expected the outer case to remain the function tail");
+    };
+    let probe_arm = final_arm_body(&arms[2].body, "outer", "flag");
+    let inner_tail = final_arm_body(probe_arm, "inner", "outer");
+    let Expr::InterpolatedString { segments, .. } = inner_tail else {
+        panic!("nested final closure lost its interpolated tail");
+    };
+    let [
+        StringSegment::Text { text: prefix, .. },
+        StringSegment::Expression { value: probe, .. },
+    ] = segments.as_slice()
+    else {
+        panic!("final nested string lost its closure at the tail: {segments:?}");
+    };
+    assert_eq!(prefix, "tail ");
+
+    let nested_tail = final_arm_body(probe, "probe", "flag");
+    let deeper_tail = final_arm_body(nested_tail, "nested", "outer");
+    let last_tail = final_arm_body(deeper_tail, "deeper", "flag");
+    let deepest_tail = final_arm_body(last_tail, "last", "outer");
+    let Expr::InterpolatedString {
+        segments: final_segments,
+        ..
+    } = deepest_tail
+    else {
+        panic!("deepest final closure lost its string tail");
+    };
+    assert!(matches!(
+        final_segments.as_slice(),
+        [
+            StringSegment::Text { text: final_prefix, .. },
+            StringSegment::Expression { value: Expr::Name { text: name, .. }, .. },
+            StringSegment::Text { text: suffix, .. }
+        ] if final_prefix == "final " && name == "flag" && suffix == " done"
+    ));
+
+    // The reference permits closures and case expressions in interpolation,
+    // but does not specify malformed-arm recovery. Retain each final closure
+    // tail, the final interpolation boundary, and the deepest string suffix.
+}
+
+#[test]
 fn semicolon_keeps_control_expression_as_a_statement() {
     let parsed = parse_module(include_str!("fixtures/semicolon-control-block-item.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
