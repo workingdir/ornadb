@@ -1275,6 +1275,8 @@ fn map_compact_runtime_error(error: RuntimeError) -> Error {
         | RuntimeError::InvocationStateConflict
         | RuntimeError::InvocationChildrenActive
         | RuntimeError::InvocationOwnerInvalid
+        | RuntimeError::InvocationTailInvalid
+        | RuntimeError::InvocationTailLimit
         | RuntimeError::AdminInvocationConflict
         | RuntimeError::ConflictingPublicationIntent
         | RuntimeError::ConflictingPublicationCommit
