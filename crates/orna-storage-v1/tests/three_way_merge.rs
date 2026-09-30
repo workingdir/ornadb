@@ -1358,7 +1358,7 @@ fn segmented_zero_conflict_budget_reaches_checkpoint_tail_after_fixture_merges()
 }
 
 #[test]
-fn segmented_zero_budget_delete_update_checkpoint_keeps_first_identity() {
+fn segmented_zero_budget_stops_at_first_of_opposite_delete_updates() {
     let candidate_a = integer(10);
     let candidate_b = integer(20);
     let (low_key, high_key) = if candidate_a.encode().unwrap() < candidate_b.encode().unwrap() {
@@ -1449,6 +1449,17 @@ fn segmented_zero_budget_delete_update_checkpoint_keeps_first_identity() {
             CheckpointGeneration { generation: 5, position: None },
         );
 
+        let opposite_conflict_id = b"consumer/n-opposite-delete-update".to_vec();
+        base.checkpoints.insert(
+            opposite_conflict_id.clone(),
+            CheckpointGeneration { generation: 6, position: None },
+        );
+        let opposite_update_side = if delete_on_left { &mut left } else { &mut right };
+        opposite_update_side.checkpoints.insert(
+            opposite_conflict_id.clone(),
+            CheckpointGeneration { generation: 7, position: None },
+        );
+
         let later_conflict_id = b"consumer/z-unvisited".to_vec();
         for (snapshot, generation) in [(&mut base, 7), (&mut left, 8), (&mut right, 9)] {
             snapshot.checkpoints.insert(
@@ -1457,10 +1468,11 @@ fn segmented_zero_budget_delete_update_checkpoint_keeps_first_identity() {
             );
         }
 
-        // MERGE-011 treats a deleted checkpoint and an independently advanced
-        // positionless checkpoint as divergent state. Storage finishes each
-        // fixture range first, then retains the stable checkpoint ID as the
-        // only impact when zero budget stops at that delete/update tail.
+        // MERGE-011 treats deletion and an independently advanced positionless
+        // checkpoint as divergent state. These two ordered IDs delete on
+        // opposite branches. Storage finishes the fixture ranges first, then
+        // zero budget retains only the first ID and leaves the opposite tail
+        // unvisited.
         let error = merge_three_way_snapshots(
             &base,
             &left,
@@ -1477,6 +1489,8 @@ fn segmented_zero_budget_delete_update_checkpoint_keeps_first_identity() {
         assert!(report.affected_ranges.contains(&(id(1), low_range.clone())));
         assert!(report.affected_ranges.contains(&(id(1), high_range.clone())));
         assert!(report.affected_checkpoints.contains(first_conflict_id.as_slice()));
+        assert_eq!(report.affected_checkpoints.len(), 1);
+        assert!(!report.affected_checkpoints.contains(opposite_conflict_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(agreed_delete_id.as_slice()));
         assert!(!report
             .affected_checkpoints
