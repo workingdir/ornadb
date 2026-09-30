@@ -177,3 +177,9 @@ owner target through two successive reuses: the primary blocker and then the
 secondary blocker each take the freed key and are deleted in nested closures
 before the owner retry succeeds. The complete local mutation order is asserted
 because the reference is silent on this closure interplay.
+
+`owner_retry_survives_inserted_reuse_after_repeated_target_deletes` extends that
+sequence with an inserted row taking the same target after both rekeyed rows
+have been deleted. The inserted row is updated and deleted before the owner
+retry succeeds; its ordered effects document local adapter behavior where the
+reference is silent.
