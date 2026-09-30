@@ -765,6 +765,97 @@ fn recovered_interpolated_if_keeps_each_branch_control_statement_and_tail() {
 }
 
 #[test]
+fn recovered_interpolated_else_if_chain_keeps_branch_local_tails() {
+    let source = include_str!("fixtures/malformed-case-arm-max-depth-interpolated-else-if-tails.orna");
+    let parsed = parse_module(source);
+
+    assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+    let diagnostic = &parsed.diagnostics[0];
+    assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+    assert_eq!(diagnostic.message, "expected pattern");
+    let invalid_pattern = source.find("\"layer").expect("fixture has a string pattern");
+    assert_eq!(diagnostic.span.start, invalid_pattern);
+    assert_eq!(diagnostic.span.end, invalid_pattern + 1);
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block { statements, tail, .. } = body else {
+        panic!("expected a function block");
+    };
+    assert!(statements.is_empty(), "{statements:?}");
+    let Some(Expr::Control {
+        arms: outer_arms, ..
+    }) = tail.as_deref()
+    else {
+        panic!("expected the outer case to remain the function tail");
+    };
+    assert_eq!(outer_arms.len(), 1, "{outer_arms:?}");
+
+    let Expr::Control {
+        condition: Some(scrutinee),
+        arms: recovered_arms,
+        ..
+    } = &outer_arms[0].body
+    else {
+        panic!("expected a nested case in the recovered arm");
+    };
+    assert_eq!(recovered_arms.len(), 2, "{recovered_arms:?}");
+
+    let Expr::InterpolatedString { segments, .. } = scrutinee.as_ref() else {
+        panic!("expected an interpolated nested-case scrutinee");
+    };
+    let [StringSegment::Text { text, .. }, StringSegment::Expression { value, .. }] =
+        segments.as_slice()
+    else {
+        panic!("expected one interpolation after the string prefix: {segments:?}");
+    };
+    assert_eq!(text, "branches ");
+
+    let Expr::Control {
+        body: Some(then_body),
+        alternate: Some(else_if),
+        ..
+    } = value
+    else {
+        panic!("expected an if with an else-if branch");
+    };
+    let Expr::Control {
+        body: Some(else_if_body),
+        alternate: Some(else_body),
+        ..
+    } = else_if.as_ref()
+    else {
+        panic!("expected the else-if to retain its final else branch");
+    };
+
+    let assert_branch_tail = |branch: &Expr, expected: &str| {
+        let Expr::Block {
+            statements,
+            tail: Some(tail),
+            ..
+        } = branch
+        else {
+            panic!("expected an if branch block with a final tail");
+        };
+        assert!(matches!(
+            statements.as_slice(),
+            [Statement::Control {
+                value: Expr::Control { arms, .. },
+                ..
+            }] if arms.len() == 2
+        ));
+        assert!(matches!(
+            tail.as_ref(),
+            Expr::Literal { text, .. } if text == expected
+        ));
+    };
+    assert_branch_tail(then_body.as_ref(), "7");
+    assert_branch_tail(else_if_body.as_ref(), "8");
+    assert_branch_tail(else_body.as_ref(), "9");
+}
+
+#[test]
 fn semicolon_keeps_control_expression_as_a_statement() {
     let parsed = parse_module(include_str!("fixtures/semicolon-control-block-item.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
