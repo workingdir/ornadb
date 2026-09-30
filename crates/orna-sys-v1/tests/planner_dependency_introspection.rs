@@ -1378,6 +1378,129 @@ fn explain_mixed_partial_write_bounds_survive_multiple_unknown_tails() {
 }
 
 #[test]
+fn explain_mixed_bound_overflow_state_survives_unknown_suffix() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_with_final_rows = |final_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:mixed-bound-unknown-suffix"),
+            source: obj("table:large"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 3),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Insert,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Delete,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: Some(4_096),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Rekey,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Insert,
+                    estimated_affected_rows: Some(final_rows),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+            ],
+            materialize_into: Some(obj("materialization:mixed-bound-suffix")),
+        })
+        .expect("mixed partial bounds followed by unknown mutations")
+    };
+
+    // Treat unknown suffixes as adding no provable work while retaining the
+    // lower-bound state already established by known nonnegative components.
+    let exact = explain_with_final_rows(1);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let exact_surface = serde_json::to_value(&exact).expect("exact mixed-bound suffix");
+    assert!(exact_surface["plan"].get("estimated_cost").is_none());
+
+    let overflow = explain_with_final_rows(2);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the known partial bounds prove overflow before the final unknown update"
+    );
+    let partial_insert = overflow
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("insert".to_owned()))
+                && node.estimated_rows() == Some(2)
+        })
+        .expect("row-bounded final insert before the unknown suffix");
+    assert_eq!(partial_insert.estimated_bytes(), None);
+    assert_eq!(partial_insert.estimated_work(), None);
+    let partial_delete = overflow
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned())))
+        .expect("byte-bounded delete between unknown tails");
+    assert_eq!(partial_delete.estimated_rows(), None);
+    assert_eq!(partial_delete.estimated_bytes(), Some(4_096));
+    assert_eq!(partial_delete.estimated_work(), None);
+    assert_eq!(
+        overflow
+            .nodes()
+            .iter()
+            .filter(|node| {
+                node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+                    && node.estimated_rows().is_none()
+                    && node.estimated_bytes().is_none()
+            })
+            .count(),
+        2,
+        "both the middle unknown update and the suffix update remain unknown"
+    );
+    let surface = serde_json::to_value(&overflow).expect("overflow through unknown suffix");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
 fn explain_cost_overflow_survives_unknown_intermediate_estimates() {
     let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
