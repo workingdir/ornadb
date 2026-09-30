@@ -70,6 +70,8 @@ const SOURCE_REMAINDER_MIXED_SCAN_BOUNDS_TAIL: &str =
     include_str!("fixtures/source_remainder_mixed_scan_bounds_tail.orna");
 const SOURCE_REMAINDER_UNKNOWN_SCAN_EDGE_TAIL: &str =
     include_str!("fixtures/source_remainder_unknown_scan_edge_tail.orna");
+const SOURCE_REMAINDER_AFTER_UNKNOWN_TAIL: &str =
+    include_str!("fixtures/source_remainder_after_unknown_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -7298,6 +7300,115 @@ fn explain_closes_source_remainder_after_unknown_scan_edge() {
 
     let surface = serde_json::to_value(&byte_overflow)
         .expect("source remainder unknown-scan edge overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_source_remainder_after_unknown_source_scan() {
+    let parsed = orna_syntax_v1::parse_module(SOURCE_REMAINDER_AFTER_UNKNOWN_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 3);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the existing
+    // pragmatic 4-KiB-per-scan lower bound, the later first-remainder byte
+    // scan contributes 2^52 units. A rows-only scan after it closes that
+    // bound exactly at MAX, even though the query's initial source scan is
+    // unknown; one fewer row stays below and one more row overflows.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_BYTES: u64 = u64::MAX - 4_094;
+    let rows_to_close_remainder = u64::MAX - MAX_BYTE_BLOCKS;
+    let explain = |row_bound| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:source-remainder-after-unknown-source",
+            ),
+            source: obj("table:SourceRemainderAfterUnknownSource"),
+            source_statistics: None,
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderAfterUnknownBytes"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(FIRST_REMAINDER_BYTES),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderAfterUnknownRows"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(row_bound),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:source-remainder-after-unknown")),
+        })
+        .expect("source remainder and row bound after unknown source scan")
+    };
+
+    let one_below = explain(rows_to_close_remainder - 1);
+    assert_eq!(one_below.plan().estimated_cost(), None);
+    assert_eq!(one_below.root().details().get("estimated_cost_overflow"), None);
+
+    let exact = explain(rows_to_close_remainder);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None,
+        "the later source remainder and rows-only scan close at MAX"
+    );
+
+    let overflow = explain(rows_to_close_remainder + 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one additional later row crosses MAX after the remainder scan"
+    );
+    let nodes = overflow.nodes();
+    let scan_position = |name: &str| {
+        nodes
+            .iter()
+            .position(|node| {
+                node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(name))
+            })
+            .expect("fixture scan appears in explained plan")
+    };
+    let unknown_scan_position = scan_position("table:SourceRemainderAfterUnknownSource");
+    let remainder_scan_position = scan_position("table:SourceRemainderAfterUnknownBytes");
+    let rows_scan_position = scan_position("table:SourceRemainderAfterUnknownRows");
+    assert!(unknown_scan_position < remainder_scan_position);
+    assert!(remainder_scan_position < rows_scan_position);
+    assert_eq!(nodes[unknown_scan_position].estimated_work(), None);
+    assert_eq!(nodes[remainder_scan_position].estimated_bytes(), Some(FIRST_REMAINDER_BYTES));
+    assert_eq!(nodes[remainder_scan_position].estimated_work(), None);
+    assert_eq!(
+        nodes[rows_scan_position].estimated_rows(),
+        Some(rows_to_close_remainder + 1)
+    );
+    assert_eq!(nodes[rows_scan_position].estimated_bytes(), None);
+    assert_eq!(nodes[rows_scan_position].estimated_work(), None);
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow)
+        .expect("source remainder after unknown scan overflow surface");
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
