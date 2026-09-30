@@ -1,0 +1,4 @@
+pub table FirstRemainderUnknownJoinSource(id: Int) { value: Int, }
+pub table FirstRemainderUnknownJoinRight(id: Int) { value: Int, }
+pub table FirstRemainderUnknownJoinTarget(id: Int) { value: Int, }
+pub fn update_first_remainder_unknown_join() = FirstRemainderUnknownJoinTarget.update(1, { value: 2 });
