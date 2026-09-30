@@ -1,0 +1,10 @@
+pub table Contact(id: Str) {
+    first: Str,
+    last: Str,
+    country: Str = "GB",
+    full_name: Str => "{first} {last}",
+}
+
+pub fn names() =
+    Contact
+    | map(Contact.full_name);

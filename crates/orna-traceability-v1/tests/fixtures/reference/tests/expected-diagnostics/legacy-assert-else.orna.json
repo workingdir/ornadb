@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-assert-else.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "ORNA-A091-006",
+  "message_contains": "assert has no assertion-specific `else` arm",
+  "status": "expected-not-executed"
+}

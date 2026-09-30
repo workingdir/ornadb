@@ -1,0 +1,2990 @@
+{
+  "version": "1.0.0",
+  "scenarios": [
+    {
+      "id": "ACTIVATION-001",
+      "title": "One activation observes one captured context",
+      "given": [
+        "a page action calls the same query twice while another process commits data"
+      ],
+      "when": [
+        "the action evaluates"
+      ],
+      "then": [
+        "both calls use one captured CWD generation and snapshot context",
+        "`now()` is identical throughout the activation",
+        "the action still observes its own writes"
+      ],
+      "requirements": [
+        "ORNA-TXN-005",
+        "ORNA-TXN-006"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "AFFINE-AGG-001",
+      "title": "Affine aggregates follow the explicit matrix",
+      "given": [
+        "absolute Celsius readings"
+      ],
+      "when": [
+        "evaluate mean, min, max, sum and difference"
+      ],
+      "then": [
+        "mean/min/max return absolute temperatures",
+        "sum is rejected",
+        "difference returns a delta temperature"
+      ],
+      "requirements": [
+        "ORNA-UNIT-005",
+        "ORNA-UNIT-007"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "ARROW-001",
+      "title": "Direct braced arrow bodies classify identically",
+      "given": [
+        "anonymous-function and case-arm bodies containing record-shaped, statement-shaped and empty braces"
+      ],
+      "when": [
+        "parse them"
+      ],
+      "then": [
+        "record-shaped bodies are records, statement-shaped and empty direct braces are blocks, parenthesised empty braces are records"
+      ],
+      "requirements": [
+        "ORNA-ARROW-001",
+        "ORNA-ARROW-002",
+        "ORNA-ARROW-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "ASSERT-CHECKOUT-091",
+      "title": "Checkout and reset reject invalid target snapshots",
+      "given": [
+        "a target snapshot invalid under its own assertion definitions"
+      ],
+      "when": [
+        "checkout or reset to the target"
+      ],
+      "then": [
+        "target definitions and data are validated together",
+        "activation of the invalid snapshot is refused without partial CWD projection"
+      ],
+      "requirements": [
+        "ORNA-ASSERT-044",
+        "ORNA-ASSERT-049"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "ASSERT-CHECKPOINT-091",
+      "title": "Assertion failure leaves a coupled stream checkpoint unchanged",
+      "given": [
+        "a replayable stream delivery writes rows that violate an assertion"
+      ],
+      "when": [
+        "commit the item activation"
+      ],
+      "then": [
+        "rows roll back",
+        "the checkpoint does not advance",
+        "the delivery remains replayable"
+      ],
+      "requirements": [
+        "ORNA-ASSERT-047",
+        "ORNA-CP-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "ASSERT-COMMIT-091",
+      "title": "Commit validates unpublished candidate state",
+      "given": [
+        "a transaction whose final table relation violates an assertion"
+      ],
+      "when": [
+        "attempt activation commit"
+      ],
+      "then": [
+        "validation occurs before visibility",
+        "the transaction aborts",
+        "no invalid state is observable"
+      ],
+      "requirements": [
+        "ORNA-ASSERT-041",
+        "ORNA-ASSERT-042"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "ASSERT-CROSSTABLE-091",
+      "title": "Only genuine cross-table invariants use module scope",
+      "given": [
+        "one module assertion depending on Customer and Invoice, one depending only on User, and one constant assertion"
+      ],
+      "when": [
+        "resolve dependencies"
+      ],
+      "then": [
+        "the two-table assertion is accepted",
+        "the one-table assertion receives ORNA-A091-003",
+        "the zero-table assertion receives ORNA-A091-012"
+      ],
+      "requirements": [
+        "ORNA-ASSERT-021",
+        "ORNA-ASSERT-022",
+        "ORNA-ASSERT-023",
+        "ORNA-ASSERT-024",
+        "ORNA-ASSERT-030"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "ASSERT-DIAGNOSTIC-091",
+      "title": "Assertion diagnostics are deterministic and secret-safe",
+      "given": [
+        "several failing witness candidates including secret fields"
+      ],
+      "when": [
+        "repeat validation of the same candidate snapshot"
+      ],
+      "then": [
+        "the same safe witness and owner/span are selected",
+        "secret values are redacted",
+        "presentation does not affect semantics"
+      ],
+      "requirements": [
+        "ORNA-ASSERT-051",
+        "ORNA-ASSERT-052",
+        "ORNA-ASSERT-053",
+        "ORNA-ASSERT-054",
+        "ORNA-ASSERT-060"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "ASSERT-MERGE-091",
+      "title": "Merge cannot bypass assertions",
+      "given": [
+        "two individually valid branches whose combined candidate violates a table or cross-table assertion"
+      ],
+      "when": [
+        "perform semantic merge"
+      ],
+      "then": [
+        "the candidate merge is rejected",
+        "ordinary CWD remains unchanged",
+        "no invalid merge commit is produced"
+      ],
+      "requirements": [
+        "ORNA-ASSERT-043"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "ASSERT-PUBLISH-091",
+      "title": "Compact publication validates before branch ref movement",
+      "given": [
+        "pending Turso rows whose candidate relation violates an assertion"
+      ],
+      "when": [
+        "run PUB-1"
+      ],
+      "then": [
+        "validation fails before compare-and-swap ref update",
+        "the pending tail remains recoverable",
+        "no invalid commit is published"
+      ],
+      "requirements": [
+        "ORNA-ASSERT-046",
+        "ORNA-PUB-006"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "ASSERT-REFINE-091",
+      "title": "Refined assertions elaborate against the candidate base value",
+      "given": [
+        "Port has assertions >= 1 and <= 65535"
+      ],
+      "when": [
+        "construct Port from 8080, 0 and 70000"
+      ],
+      "then": [
+        "8080 succeeds",
+        "invalid values fail in source order",
+        "no source-visible global self is introduced"
+      ],
+      "requirements": [
+        "ORNA-REFINE-001",
+        "ORNA-REFINE-002",
+        "ORNA-REFINE-003",
+        "ORNA-ASSERT-033"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "ASSERT-REWRITE-091",
+      "title": "Storage rewrites preserve logical assertion validity",
+      "given": [
+        "a valid logical table and a requested editable/compact representation move"
+      ],
+      "when": [
+        "rewrite physical storage"
+      ],
+      "then": [
+        "assertions evaluate over the unchanged logical relation",
+        "a representation-specific bypass is impossible",
+        "logical diff remains empty"
+      ],
+      "requirements": [
+        "ORNA-ASSERT-045",
+        "ORNA-ASSERT-050",
+        "ORNA-STORAGE-004"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "ASSERT-SYS-091",
+      "title": "Assertions and inferred failures are introspectable",
+      "given": [
+        "refined, table and cross-table assertions plus a failable function"
+      ],
+      "when": [
+        "query sys.Assertion, sys.Dependency and sys.Function"
+      ],
+      "then": [
+        "owners, scope, expression, source order and dependencies are visible",
+        "the function exposes its success return and inferred failure metadata separately"
+      ],
+      "requirements": [
+        "ORNA-ASSERT-059",
+        "ORNA-INFER-005",
+        "ORNA-FN-010"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "ASSERT-TABLE-CANDIDATE-091",
+      "title": "Table assertions see the complete candidate relation",
+      "given": [
+        "User asserts all_unique(username) and one committed row"
+      ],
+      "when": [
+        "one transaction inserts two rows that conflict only with each other"
+      ],
+      "then": [
+        "both pending rows are visible to validation",
+        "the complete transaction rolls back",
+        "committed User is unchanged"
+      ],
+      "requirements": [
+        "ORNA-ASSERT-004",
+        "ORNA-ASSERT-005",
+        "ORNA-ASSERT-013",
+        "ORNA-ASSERT-014",
+        "ORNA-ASSERT-015"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "ASSERT-TABLE-OWNER-091",
+      "title": "Table assertion source omits the redundant owner pipeline",
+      "given": [
+        "a table-local all_unique proposition"
+      ],
+      "when": [
+        "parse canonical, self-piped and table-name-piped forms"
+      ],
+      "then": [
+        "`assert all_unique(...)` is accepted",
+        "both explicit-owner forms receive ORNA-A091-002 with a safe mechanical fix"
+      ],
+      "requirements": [
+        "ORNA-ASSERT-003",
+        "ORNA-ASSERT-016",
+        "ORNA-ASSERT-017",
+        "ORNA-ASSERT-055",
+        "ORNA-ASSERT-056"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "AUTOID-REFS-001",
+      "title": "Orna-aware transport synchronizes allocator refs",
+      "given": [
+        "a repository with `refs/orna/ids/...` ahead of its remote"
+      ],
+      "when": [
+        "use Orna-aware push and then clone/pull elsewhere"
+      ],
+      "then": [
+        "internal allocator refs are transferred",
+        "allocator ref publication precedes dependent branch publication",
+        "plain Git use is diagnosed when continuity is unknown"
+      ],
+      "requirements": [
+        "ORNA-REMOTE-003",
+        "ORNA-REMOTE-004",
+        "ORNA-REMOTE-005"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "CALL-001",
+      "title": "Read-only call reuse never violates read-your-writes",
+      "given": [
+        "a deterministic count call, then a table insert, then the same count call in one activation"
+      ],
+      "when": [
+        "the evaluator considers reuse"
+      ],
+      "then": [
+        "the second call sees the inserted row and the first cached value is not reused"
+      ],
+      "requirements": [
+        "ORNA-CALL-001",
+        "ORNA-CALL-002",
+        "ORNA-TXN-005"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "CANCELLATION-091",
+      "title": "Cancellation is not broad failure recovery",
+      "given": [
+        "a cancelled structured child and a broad `|?` handler"
+      ],
+      "when": [
+        "propagate cancellation"
+      ],
+      "then": [
+        "the ordinary error handler does not swallow cancellation",
+        "activation resources are released and transaction behavior follows cancellation rules"
+      ],
+      "requirements": [
+        "ORNA-ERR-004",
+        "ORNA-ERR-005",
+        "ORNA-CANCEL-001"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "CASE-091",
+      "title": "Case uses patterns, guards and colon bodies",
+      "given": [
+        "a closed enum with payload and payload-free variants"
+      ],
+      "when": [
+        "evaluate exhaustive case expressions with a guard and record/block bodies"
+      ],
+      "then": [
+        "arms are tried in source order",
+        "the first matching true-guard arm is selected",
+        "body types unify",
+        "legacy match/arrow arms are rejected"
+      ],
+      "requirements": [
+        "ORNA-CASE-001",
+        "ORNA-CASE-002",
+        "ORNA-CASE-003",
+        "ORNA-CASE-004",
+        "ORNA-CASE-005",
+        "ORNA-CASE-006"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "CFLOW-001",
+      "title": "Control flow has deterministic expression semantics",
+      "given": [
+        "a block containing let, reassignment, for, if and case"
+      ],
+      "when": [
+        "evaluate it repeatedly in reference and optimized evaluators"
+      ],
+      "then": [
+        "subexpressions execute left-to-right",
+        "branch and block values match exactly"
+      ],
+      "requirements": [
+        "ORNA-CFLOW-001",
+        "ORNA-CFLOW-002",
+        "ORNA-CFLOW-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "COMPACT-GENERATION-001",
+      "title": "Publication generation is allocated from the committed base manifest",
+      "given": [
+        "a table manifest with next_generation N and a frozen publication batch"
+      ],
+      "when": [
+        "publish successfully and when branch compare-and-swap loses"
+      ],
+      "then": [
+        "all files in the successful batch use generation N",
+        "the failed attempt reloads current HEAD and does not force its stale generation",
+        "pending mutations are collapsed to one final mutation per key"
+      ],
+      "requirements": [
+        "ORNA-COMPACT-014",
+        "ORNA-COMPACT-015",
+        "ORNA-COMPACT-019"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "COMPACT-MERGE-GENERATION-001",
+      "title": "Concurrent branch generations do not choose merge winners",
+      "given": [
+        "two branches that independently use the same numeric generation"
+      ],
+      "when": [
+        "merge disjoint changes, identical same-key changes and different same-key changes"
+      ],
+      "then": [
+        "disjoint changes coexist",
+        "identical changes coalesce",
+        "different same-key changes conflict",
+        "the merged next_generation exceeds every retained generation"
+      ],
+      "requirements": [
+        "ORNA-COMPACT-016"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "COMPACT-SCHEMA-PROJECTION-001",
+      "title": "Older compact files project through current schema by stable field identity",
+      "given": [
+        "a compact file written before an optional field, rename and computed field were introduced"
+      ],
+      "when": [
+        "read it through the newer compatible snapshot"
+      ],
+      "then": [
+        "renamed fields retain identity",
+        "the optional field is null or uses its frozen introduction fallback",
+        "the computed field is evaluated and not loaded"
+      ],
+      "requirements": [
+        "ORNA-COMPACT-018",
+        "ORNA-SCHEMA-003",
+        "ORNA-SCHEMA-004",
+        "ORNA-SCHEMA-007"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "CONCUR-001",
+      "title": "Parallel children have structured deterministic lifetime",
+      "given": [
+        "two child closures started through std.concurrent.parallel"
+      ],
+      "when": [
+        "one child fails"
+      ],
+      "then": [
+        "siblings are cancelled and awaited",
+        "no child outlives the parent",
+        "result/error ordering follows input order"
+      ],
+      "requirements": [
+        "ORNA-CONCUR-001",
+        "ORNA-CONCUR-002",
+        "ORNA-CONCUR-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "CONSUMER-CROSSCLONE-001",
+      "title": "Independent-clone duplicate consumers have no guaranteed early diagnostic",
+      "given": [
+        "the same durable consumer is started in two independent writable clones"
+      ],
+      "when": [
+        "the clones have not synchronized"
+      ],
+      "then": [
+        "base Orna does not claim it can detect the duplicate before processing",
+        "later checkpoint divergence may conflict but cannot undo duplicate external effects"
+      ],
+      "requirements": [
+        "ORNA-CONSUMER-007",
+        "ORNA-CONSUMER-009"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "CONVERT-FAILURE-091",
+      "title": "From may fail through the ordinary failure channel",
+      "given": [
+        "a target-owned From<Str> validates its source"
+      ],
+      "when": [
+        "convert valid and invalid input"
+      ],
+      "then": [
+        "valid input constructs the target",
+        "invalid input preserves the cause and propagates unless recovered",
+        "no TryFrom protocol is required"
+      ],
+      "requirements": [
+        "ORNA-CONVERT-004",
+        "ORNA-CONVERT-005",
+        "ORNA-CONVERT-010"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "CONVERT-MULTISOURCE-091",
+      "title": "One target accepts several explicit source conversions",
+      "given": [
+        "EmailAddress has From<Str> and From<EmailHeader> nested implementations"
+      ],
+      "when": [
+        "invoke EmailAddress.from with each source type"
+      ],
+      "then": [
+        "exactly one source-specific implementation is selected in each case",
+        "selection does not depend on source order"
+      ],
+      "requirements": [
+        "ORNA-CONVERT-001",
+        "ORNA-CONVERT-002",
+        "ORNA-CONVERT-003",
+        "ORNA-GENERIC-013",
+        "ORNA-GENERIC-014"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "CONVERT-NOCHAIN-091",
+      "title": "Conversion lookup never invents an implicit chain",
+      "given": [
+        "A can convert to B and B can convert to C"
+      ],
+      "when": [
+        "use A where C is expected without naming conversions"
+      ],
+      "then": [
+        "the program is rejected with ORNA091-E-CONVERSION-CHAIN",
+        "explicitly named A-to-B and B-to-C calls remain available"
+      ],
+      "requirements": [
+        "ORNA-CONVERT-006",
+        "ORNA-CONVERT-007",
+        "ORNA-CONVERT-008"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "CP-001",
+      "title": "Rows and checkpoint are atomic",
+      "given": [
+        "checkpoint is 41",
+        "source delivers item 42"
+      ],
+      "when": [
+        "handler inserts Email and succeeds"
+      ],
+      "then": [
+        "Email row and checkpoint 42 commit together"
+      ],
+      "requirements": [
+        "ORNA-CP-001",
+        "ORNA-CP-006"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "CP-002",
+      "title": "Failed item repeats safely",
+      "given": [
+        "checkpoint is 41",
+        "source delivers item 42"
+      ],
+      "when": [
+        "handler inserts then errors"
+      ],
+      "then": [
+        "insert rolls back",
+        "checkpoint remains 41",
+        "item 42 may retry"
+      ],
+      "requirements": [
+        "ORNA-CP-006"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "CP-003",
+      "title": "Ordered batch stops at first failure",
+      "given": [
+        "items 1..5; item 3 fails"
+      ],
+      "when": [
+        "process batch"
+      ],
+      "then": [
+        "checkpoint advances through 2 only",
+        "4 and 5 are not considered committed"
+      ],
+      "requirements": [
+        "ORNA-CP-007"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "CP-004",
+      "title": "Checkpoint is snapshot-queryable",
+      "given": [
+        "CWD checkpoint is 50",
+        "HEAD watermark is 45"
+      ],
+      "when": [
+        "query sys.Checkpoint",
+        "query sys.Checkpoint.as_of(HEAD)"
+      ],
+      "then": [
+        "CWD returns 50",
+        "HEAD returns 45"
+      ],
+      "requirements": [
+        "ORNA-CP-003",
+        "ORNA-CP-004"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "CURRENCY-FORMAT-091",
+      "title": "Locale owns currency symbols and placement",
+      "given": [
+        "the same Money<GBP> value and two locale/format contexts"
+      ],
+      "when": [
+        "format, compare, hash and encode it"
+      ],
+      "then": [
+        "display text may differ by context",
+        "equality, storage, hashing and canonical encoding remain identical",
+        "Currency has no universal symbol property"
+      ],
+      "requirements": [
+        "ORNA-MONEY-006",
+        "ORNA-MONEY-007",
+        "ORNA-MONEY-009",
+        "ORNA-PRES-004"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "CURRENCY-PROTOCOL-091",
+      "title": "Currency is an ordinary nominal protocol implementation",
+      "given": [
+        "GBP implements Currency with static code and minor_digits"
+      ],
+      "when": [
+        "typecheck 12.34.GBP and inspect sys.Currency"
+      ],
+      "then": [
+        "the literal is exact Money<GBP>",
+        "the catalogue derives code and precision from the implementation",
+        "no special currency declaration exists"
+      ],
+      "requirements": [
+        "ORNA-MONEY-004",
+        "ORNA-MONEY-008",
+        "ORNA-MONEY-010",
+        "ORNA-GENERIC-009"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "EVAL-001",
+      "title": "Remote source executes only through explicit evaluation",
+      "given": [
+        "a trusted programmable client and ordinary text containing valid Orna source"
+      ],
+      "when": [
+        "the text is sent as an ordinary event value and then as an explicit eval request"
+      ],
+      "then": [
+        "the ordinary event remains data",
+        "the eval request uses the same parser, resolver, type checker and activation semantics as the local REPL"
+      ],
+      "requirements": [
+        "ORNA-EVAL-001",
+        "ORNA-EVAL-002",
+        "ORNA-EVAL-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "EVAL-002",
+      "title": "A watched expression is read-only and clock-aware",
+      "given": [
+        "one read-only expression with a clock dependency and one expression that mutates a table"
+      ],
+      "when": [
+        "each is submitted through watch"
+      ],
+      "then": [
+        "the read-only watch is reevaluated at dependency boundaries",
+        "the mutating watch is rejected before any write"
+      ],
+      "requirements": [
+        "ORNA-EVAL-004",
+        "ORNA-EVAL-005",
+        "ORNA-EVAL-006"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "EVAL-003",
+      "title": "Lost mutating-eval response does not repeat database writes",
+      "given": [
+        "a mutating eval request with a stable request identity"
+      ],
+      "when": [
+        "the activation commits but the reply is lost and the request is repeated"
+      ],
+      "then": [
+        "the recorded outcome is returned",
+        "the database mutation is not executed twice",
+        "a reused identity with a different fingerprint is rejected"
+      ],
+      "requirements": [
+        "ORNA-EVAL-007",
+        "ORNA-EVAL-008",
+        "ORNA-EVAL-009",
+        "ORNA-EVAL-010",
+        "ORNA-EVAL-011"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "EXT-001",
+      "title": "Portable extension needs no handwritten Orna manifest",
+      "given": [
+        "a Git-pinned WebAssembly Component with a versioned WIT world"
+      ],
+      "when": [
+        "Orna loads the enabled extension"
+      ],
+      "then": [
+        "imports and exports are derived from WIT",
+        "no separate Orna permissions manifest is required"
+      ],
+      "requirements": [
+        "ORNA-EXT-001",
+        "ORNA-EXT-002"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "FAIL-001",
+      "title": "Retry does not grow durable table",
+      "given": [
+        "same item fails 10,000 times"
+      ],
+      "when": [
+        "inspect current failure state"
+      ],
+      "then": [
+        "one coalesced blocked state records attempts 10000",
+        "no 10000 durable Failure rows"
+      ],
+      "requirements": [
+        "ORNA-FAIL-001"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "FAIL-002",
+      "title": "Explicit skip preserves evidence",
+      "given": [
+        "replayable item is permanently malformed"
+      ],
+      "when": [
+        "operator skips item"
+      ],
+      "then": [
+        "sys.Failure durable row exists",
+        "checkpoint advances",
+        "later items proceed"
+      ],
+      "requirements": [
+        "ORNA-FAIL-003",
+        "ORNA-FAIL-004"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "FAIL-003",
+      "title": "Non-replayable skip preserves payload",
+      "given": [
+        "ephemeral item fails"
+      ],
+      "when": [
+        "operator skips item"
+      ],
+      "then": [
+        "payload is durably stored before checkpoint advances"
+      ],
+      "requirements": [
+        "ORNA-FAIL-004"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "FAIL-004",
+      "title": "Replay does not rewind live source",
+      "given": [
+        "failure at old position is skipped; stream later reaches 100"
+      ],
+      "when": [
+        "replay failure"
+      ],
+      "then": [
+        "current code processes preserved item",
+        "live checkpoint remains 100",
+        "failure becomes resolved on success"
+      ],
+      "requirements": [
+        "ORNA-FAIL-005"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "FAIL-005",
+      "title": "Failure identity is natural rather than synthetic",
+      "given": [
+        "a skipped delivery with a consumer, source, partition, position format and position"
+      ],
+      "when": [
+        "query sys.Failure and render the row"
+      ],
+      "then": [
+        "the composite source identity is the primary key",
+        "no separate opaque or synthetic failure ID is required"
+      ],
+      "requirements": [
+        "ORNA-FAIL-004",
+        "ORNA-FAIL-005"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "FAIL-006",
+      "title": "Advanced stream recovery uses typed sys values, not a command hierarchy",
+      "given": [
+        "a blocked live stream and a durable skipped delivery"
+      ],
+      "when": [
+        "inspect sys.rt.streams and sys.Failure",
+        "invoke sys.admin.retry_failure, skip_failure, replay_failure and resolve_failure with typed references and expected versions"
+      ],
+      "then": [
+        "operations follow the specified atomic semantics",
+        "the factory CLI exposes no stream/checkpoint/failure command groups"
+      ],
+      "requirements": [
+        "ORNA-FAIL-001",
+        "ORNA-FAIL-002",
+        "ORNA-FAIL-003",
+        "ORNA-CLI-006"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "FAILURE-PROPAGATE-091",
+      "title": "Failure automatically skips remaining expression work",
+      "given": [
+        "decode fails before an insert call in the same expression flow"
+      ],
+      "when": [
+        "evaluate without a recovery boundary"
+      ],
+      "then": [
+        "insert is not invoked",
+        "the original error and causal span leave the function",
+        "no postfix operator is required"
+      ],
+      "requirements": [
+        "ORNA-ERR-001",
+        "ORNA-ERR-002",
+        "ORNA-ERR-008",
+        "ORNA-FAILURE-001"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "FAILURE-ROLLBACK-091",
+      "title": "Unhandled failure rolls back activation writes",
+      "given": [
+        "a writing activation performs one valid write and later fails"
+      ],
+      "when": [
+        "the failure reaches the activation boundary"
+      ],
+      "then": [
+        "all Orna-controlled writes roll back",
+        "external effects already completed are reported honestly"
+      ],
+      "requirements": [
+        "ORNA-ERR-006",
+        "ORNA-ERR-007",
+        "ORNA-TXN-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "FIELD-001",
+      "title": "Defaulted and computed fields have different lifecycles",
+      "given": [
+        "a stored default `country: Str = \"GB\"` and computed selector `full_name: Str => \"{first} {last}\"`"
+      ],
+      "when": [
+        "insert without country, then update last"
+      ],
+      "then": [
+        "country is selected once and stored",
+        "full_name changes when observed after the update",
+        "full_name cannot be inserted or updated directly"
+      ],
+      "requirements": [
+        "ORNA-FIELD-001",
+        "ORNA-FIELD-002",
+        "ORNA-FIELD-005",
+        "ORNA-FIELD-006"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "FIELD-002",
+      "title": "Field-introduction fallback is frozen",
+      "given": [
+        "existing rows and a new stored field with constant default `\"GB\"`"
+      ],
+      "when": [
+        "commit the field and later change its insertion default to `\"US\"`"
+      ],
+      "then": [
+        "pre-existing rows continue to read the frozen `\"GB\"` fallback",
+        "new inserts after the edit receive `\"US\"`",
+        "no retroactive row diff appears"
+      ],
+      "requirements": [
+        "ORNA-FIELD-003",
+        "ORNA-SCHEMA-004",
+        "ORNA-SCHEMA-005"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "FLOAT-STATS-001",
+      "title": "Compact Float statistics never cause false-negative pruning",
+      "given": [
+        "compact Float pages containing finite values, signed zeros and NaNs"
+      ],
+      "when": [
+        "write/read statistics and evaluate predicates including NaN-sensitive predicates"
+      ],
+      "then": [
+        "IEEE_754_TOTAL_ORDER and exact nan_count are emitted",
+        "missing or inconsistent nan_count disables unsafe pruning",
+        "optimized results equal reference scanning"
+      ],
+      "requirements": [
+        "ORNA-COMPACT-017",
+        "ORNA-FLOAT-002"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "FLOAT-TOTAL-001",
+      "title": "Float equality and total ordering remain distinct",
+      "given": [
+        "negative and positive zero, infinities, finite values, signaling and quiet NaNs"
+      ],
+      "when": [
+        "compare for ordinary equality and sort by the normative Float order"
+      ],
+      "then": [
+        "ordinary equality treats both zeros as equal and NaN as unequal",
+        "sorting follows IEEE 754 totalOrder and distinguishes signed zero"
+      ],
+      "requirements": [
+        "ORNA-FLOAT-001",
+        "ORNA-FLOAT-002",
+        "ORNA-FLOAT-006"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "GENERIC-BOUND-091",
+      "title": "Impl-shaped bounds select static protocol operations",
+      "given": [
+        "a generic function with `<T impl Display + Order>`"
+      ],
+      "when": [
+        "typecheck calls with satisfying, missing and overlapping implementations"
+      ],
+      "then": [
+        "the satisfying call resolves statically",
+        "missing/overlapping cases fail",
+        "colon bounds receive ORNA091-E-BOUND-COLON"
+      ],
+      "requirements": [
+        "ORNA-GENERIC-002",
+        "ORNA-GENERIC-005",
+        "ORNA-GENERIC-006",
+        "ORNA-GENERIC-014"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "GIT-001",
+      "title": "Partial clone hydrates only required segment",
+      "given": [
+        "clone lacks large promised blobs",
+        "manifest identifies 3 of 1000 segments"
+      ],
+      "when": [
+        "query a narrow key/time range"
+      ],
+      "then": [
+        "planner fetches only required promised objects plus dependencies"
+      ],
+      "requirements": [
+        "ORNA-GIT-005",
+        "ORNA-GIT-006"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "GIT-002",
+      "title": "No rolling history",
+      "given": [
+        "old rows remain logically present in HEAD"
+      ],
+      "when": [
+        "query full table without date filter"
+      ],
+      "then": [
+        "old and new rows are visible"
+      ],
+      "requirements": [
+        "ORNA-GIT-009"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "HIST-001",
+      "title": "Current code over historical data differs from whole historical program",
+      "given": [
+        "energy.daily changes between two commits",
+        "the data at the older commit is unchanged"
+      ],
+      "when": [
+        "evaluate current energy.daily over energy.Reading.as_of(old)",
+        "evaluate sys.database.as_of(old).energy.daily()"
+      ],
+      "then": [
+        "the first uses current code",
+        "the second uses the complete historical program and pins"
+      ],
+      "requirements": [
+        "ORNA-HIST-001",
+        "ORNA-HIST-002",
+        "ORNA-HIST-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "IMPL-NESTED-091",
+      "title": "Protocol implementation ownership is lexical",
+      "given": [
+        "a nominal type with nested Display and From implementations"
+      ],
+      "when": [
+        "resolve implementation ownership before and after semantic rename"
+      ],
+      "then": [
+        "the enclosing nominal type is the target",
+        "private representation access works",
+        "rename preserves stable ownership",
+        "top-level impl-for is rejected"
+      ],
+      "requirements": [
+        "ORNA-GENERIC-003",
+        "ORNA-GENERIC-007",
+        "ORNA-GENERIC-012",
+        "ORNA-IMPL-002",
+        "ORNA-IMPL-005",
+        "ORNA-IMPL-006"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "IMPORT-001",
+      "title": "Wildcard imports are deterministic everywhere",
+      "given": [
+        "two wildcard imports exporting the same otherwise-unresolved name"
+      ],
+      "when": [
+        "resolve the module or the same input in the REPL"
+      ],
+      "then": [
+        "both environments report the same ambiguity",
+        "import order never selects a winner",
+        "an explicit import resolves it"
+      ],
+      "requirements": [
+        "ORNA-IMPORT-007"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "INFER-DIAGNOSTIC-091",
+      "title": "Underconstrained inference requests a local annotation",
+      "given": [
+        "one recursively underconstrained declaration component"
+      ],
+      "when": [
+        "solve its constraints"
+      ],
+      "then": [
+        "the diagnostic shows conflicting/unsolved constraints",
+        "it identifies the smallest useful annotation site rather than requiring annotations everywhere"
+      ],
+      "requirements": [
+        "ORNA-INFER-007",
+        "ORNA-INFER-011"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "INFER-METADATA-091",
+      "title": "Inferred public signatures are complete metadata",
+      "given": [
+        "a public function whose annotations are omitted but inferable"
+      ],
+      "when": [
+        "query sys.Function and produce a semantic diff"
+      ],
+      "then": [
+        "the complete inferred signature and failure set are exposed",
+        "an annotation-only edit is distinguished from a signature change"
+      ],
+      "requirements": [
+        "ORNA-INFER-004",
+        "ORNA-INFER-005",
+        "ORNA-INFER-013",
+        "ORNA-FN-010"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "INFER-PRINCIPAL-091",
+      "title": "Inference finds one principal static signature",
+      "given": [
+        "an unannotated ordinary function whose operators and calls fully constrain it"
+      ],
+      "when": [
+        "infer the function twice from the same resolved snapshot"
+      ],
+      "then": [
+        "both runs produce the same principal signature",
+        "no dynamic Any fallback is introduced"
+      ],
+      "requirements": [
+        "ORNA-INFER-001",
+        "ORNA-INFER-002",
+        "ORNA-INFER-006",
+        "ORNA-INFER-010"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "KEY-001",
+      "title": "Automatic IDs do not reuse deletion",
+      "given": [
+        "Note allocates 1,2,3"
+      ],
+      "when": [
+        "delete 3",
+        "insert another Note"
+      ],
+      "then": [
+        "new ID is 4"
+      ],
+      "requirements": [
+        "ORNA-AUTOID-002",
+        "ORNA-AUTOID-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "KEY-002",
+      "title": "Automatic IDs survive reset",
+      "given": [
+        "allocator reached 10",
+        "branch resets to commit where rows ended at 7"
+      ],
+      "when": [
+        "insert row"
+      ],
+      "then": [
+        "new ID is 11"
+      ],
+      "requirements": [
+        "ORNA-AUTOID-002",
+        "ORNA-AUTOID-004"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "KEY-003",
+      "title": "Key default is evaluated once",
+      "given": [
+        "Contact key default uses slug(name)",
+        "Alice Smith inserted as alice-smith"
+      ],
+      "when": [
+        "update name to Alice Jones"
+      ],
+      "then": [
+        "key remains alice-smith"
+      ],
+      "requirements": [
+        "ORNA-KEYDEF-001",
+        "ORNA-KEYDEF-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "KEY-004",
+      "title": "Generated key conflict is explicit",
+      "given": [
+        "two branches both allocate alice-smith for different rows"
+      ],
+      "when": [
+        "merge branches"
+      ],
+      "then": [
+        "row conflict is reported",
+        "neither row is silently renamed"
+      ],
+      "requirements": [
+        "ORNA-KEYDEF-004",
+        "ORNA-MERGE-010"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "KEY-005",
+      "title": "Independent clones report automatic-ID collision honestly",
+      "given": [
+        "two disconnected clones share the same last automatic Note ID",
+        "each clone inserts a different next Note"
+      ],
+      "when": [
+        "the histories are merged"
+      ],
+      "then": [
+        "neither row is silently renumbered",
+        "a typed row conflict is produced"
+      ],
+      "requirements": [
+        "ORNA-AUTOID-006",
+        "ORNA-MERGE-010"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "LET-REBIND-091",
+      "title": "Let slots rebind without mutable value identity",
+      "given": [
+        "a let slot whose value is captured before reassignment"
+      ],
+      "when": [
+        "assign a replacement value to the slot"
+      ],
+      "then": [
+        "the slot observes the replacement",
+        "the captured value is unchanged",
+        "`var` receives ORNA091-E-VAR"
+      ],
+      "requirements": [
+        "ORNA-VALUE-006",
+        "ORNA-VALUE-007",
+        "ORNA-CFLOW-005",
+        "ORNA-CFLOW-006",
+        "ORNA-CFLOW-011"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "LEX-QUESTION-001",
+      "title": "Question-mark tokens are unambiguous in 1.0",
+      "given": [
+        "optional type `T?`, coalescing `a ?? b`, recovery `a |? h`, and legacy postfix `call()?`"
+      ],
+      "when": [
+        "lex and parse each source"
+      ],
+      "then": [
+        "T?, ?? and |? are indivisible in their defined contexts",
+        "legacy postfix propagation receives ORNA091-E-POSTFIX-QUESTION",
+        "no token is interpreted as stream skip"
+      ],
+      "requirements": [
+        "ORNA-LEX-009",
+        "ORNA-TYPE-001",
+        "ORNA-ERR-008",
+        "ORNA-PIPE-008"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "LIVE-001",
+      "title": "Keyed row update sends contextual delta",
+      "given": [
+        "page shows Contact relation keyed by id"
+      ],
+      "when": [
+        "Alice email changes"
+      ],
+      "then": [
+        "delta targets Alice/email rather than replacing unrelated rows"
+      ],
+      "requirements": [
+        "ORNA-LIVE-001",
+        "ORNA-LIVE-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "LIVE-002",
+      "title": "Unkeyed value still updates",
+      "given": [
+        "page contains opaque/unkeyed custom value"
+      ],
+      "when": [
+        "value changes"
+      ],
+      "then": [
+        "nearest stable subtree is replaced"
+      ],
+      "requirements": [
+        "ORNA-LIVE-002"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "LIVE-003",
+      "title": "Missing revision resynchronizes",
+      "given": [
+        "client has revision 4",
+        "server delta expects base 5"
+      ],
+      "when": [
+        "client detects mismatch"
+      ],
+      "then": [
+        "full snapshot/resync occurs"
+      ],
+      "requirements": [
+        "ORNA-LIVE-004"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "LIVE-004",
+      "title": "Subtree replacement is universal live-update fallback",
+      "given": [
+        "a Present value without stable fine-grained child identity"
+      ],
+      "when": [
+        "its dependency changes"
+      ],
+      "then": [
+        "the server replaces the nearest valid subtree",
+        "the client reaches the same final value as a fresh snapshot"
+      ],
+      "requirements": [
+        "ORNA-LIVE-002",
+        "ORNA-LIVE-004",
+        "ORNA-WIRE-001",
+        "ORNA-WIRE-002"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "LIVE-FALLBACK-001",
+      "title": "Every watched value has a correct replacement fallback",
+      "given": [
+        "a watched custom Present value with no fine-grained delta implementation"
+      ],
+      "when": [
+        "one dependency changes"
+      ],
+      "then": [
+        "the whole watched expression is re-evaluated",
+        "the nearest presentation subtree is replaced",
+        "the client cannot become stale merely because a specialized delta is absent"
+      ],
+      "requirements": [
+        "ORNA-LIVE-001",
+        "ORNA-LIVE-002",
+        "ORNA-LIVE-004"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "MERGE-001",
+      "title": "Independent optional columns merge",
+      "given": [
+        "base Contact has name",
+        "ours adds email?",
+        "theirs adds phone?"
+      ],
+      "when": [
+        "merge"
+      ],
+      "then": [
+        "schema contains name,email?,phone?"
+      ],
+      "requirements": [
+        "ORNA-MERGE-006"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "MERGE-002",
+      "title": "Conflicting type changes stop merge",
+      "given": [
+        "ours changes age to Int",
+        "theirs changes age to Decimal"
+      ],
+      "when": [
+        "merge"
+      ],
+      "then": [
+        "sys.Conflict contains schema conflict",
+        "no partial commit"
+      ],
+      "requirements": [
+        "ORNA-MERGE-007"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "MERGE-003",
+      "title": "Independent row fields merge",
+      "given": [
+        "ours changes email",
+        "theirs changes phone"
+      ],
+      "when": [
+        "merge"
+      ],
+      "then": [
+        "both changes present"
+      ],
+      "requirements": [
+        "ORNA-MERGE-008"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "MERGE-004",
+      "title": "Same field conflict",
+      "given": [
+        "ours and theirs change email differently"
+      ],
+      "when": [
+        "merge"
+      ],
+      "then": [
+        "row conflict is reported"
+      ],
+      "requirements": [
+        "ORNA-MERGE-009"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "MERGE-PRUNE-001",
+      "title": "Segmented merge prunes equal regions and respects budgets",
+      "given": [
+        "base, ours and theirs share most manifest subtrees but overlap in a small key range"
+      ],
+      "when": [
+        "perform semantic merge with a conflict budget"
+      ],
+      "then": [
+        "equal digests are reused without row decoding",
+        "only changed/overlapping ranges descend",
+        "budget overflow leaves ordinary CWD unchanged with a bounded diagnostic"
+      ],
+      "requirements": [
+        "ORNA-MERGE-003",
+        "ORNA-MERGE-004",
+        "ORNA-MERGE-005"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "MIGRATE-SURFACE-091",
+      "title": "Removed surface receives targeted migration diagnostics",
+      "given": [
+        "the negative fixtures for arrows, var, match, Result, postfix question, currency, impl-for, colon bounds, TryFrom, opaque, field constraints and assertion aliases"
+      ],
+      "when": [
+        "parse, resolve or typecheck each fixture"
+      ],
+      "then": [
+        "each fails in its reviewed phase with its named primary diagnostic",
+        "anonymous-function arrows and optional type suffixes are not rewritten"
+      ],
+      "requirements": [
+        "ORNA-CONF-005",
+        "ORNA-MIGRATE-001",
+        "ORNA-MIGRATE-003",
+        "ORNA-MIGRATE-004"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "MODULE-001",
+      "title": "Only reachable modules load",
+      "given": [
+        "root main.orna imports contacts",
+        "unused.orna declares a conflicting table but is not imported"
+      ],
+      "when": [
+        "open database"
+      ],
+      "then": [
+        "contacts declarations load",
+        "unused declarations do not load"
+      ],
+      "requirements": [
+        "ORNA-REPO-002",
+        "ORNA-REPO-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "MODULE-002",
+      "title": "Import has no effects",
+      "given": [
+        "google.orna contains a sync function"
+      ],
+      "when": [
+        "import google module"
+      ],
+      "then": [
+        "no network connection starts",
+        "no checkpoint changes"
+      ],
+      "requirements": [
+        "ORNA-IMPORT-006"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "MONEY-001",
+      "title": "Money is exact",
+      "given": [
+        "amounts 0.1.GBP and 0.2.GBP"
+      ],
+      "when": [
+        "add"
+      ],
+      "then": [
+        "exact result is 0.3.GBP"
+      ],
+      "requirements": [
+        "ORNA-MONEY-001"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "MONEY-002",
+      "title": "Currency conversion requires date",
+      "given": [
+        "GBP and EUR have no fixed ratio"
+      ],
+      "when": [
+        "attempt conversion without on"
+      ],
+      "then": [
+        "diagnostic requests effective date/instant"
+      ],
+      "requirements": [
+        "ORNA-MONEY-005"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "NOMINAL-PRIVATE-091",
+      "title": "Nominal representation is private by default",
+      "given": [
+        "a nominal type with one private field and one public field"
+      ],
+      "when": [
+        "access and construct it from its owner and an unrelated module"
+      ],
+      "then": [
+        "nested implementations can access both fields",
+        "unrelated source can access only the public representation",
+        "values remain immutable"
+      ],
+      "requirements": [
+        "ORNA-NOMINAL-005",
+        "ORNA-NOMINAL-006",
+        "ORNA-NOMINAL-007",
+        "ORNA-NOMINAL-008"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "NS-PORTABLE-001",
+      "title": "Module path portability is host-independent",
+      "given": [
+        "two sibling module or namespace paths with equal pinned-Unicode NFKC casefold keys"
+      ],
+      "when": [
+        "load or merge the repository on different hosts"
+      ],
+      "then": [
+        "all hosts reject the same collision"
+      ],
+      "requirements": [
+        "ORNA-NS-008"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "NUM-001",
+      "title": "Decimal division never silently rounds",
+      "given": [
+        "exact finite division 1/8",
+        "non-terminating division 1/3"
+      ],
+      "when": [
+        "use the Decimal division operator"
+      ],
+      "then": [
+        "1/8 is exact",
+        "1/3 returns InexactDivision",
+        "an explicit scale and rounding method can produce an approximation"
+      ],
+      "requirements": [
+        "ORNA-NUM-003",
+        "ORNA-NUM-004",
+        "ORNA-NUM-005"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "OBJECT-001",
+      "title": "Semantic rename preserves identity",
+      "given": [
+        "a function has a stable ObjectId and a checkpoint/dependency history"
+      ],
+      "when": [
+        "rename it through orna mv"
+      ],
+      "then": [
+        "the ObjectId is unchanged",
+        "references and checkpoint continuity follow the renamed function"
+      ],
+      "requirements": [
+        "ORNA-OBJECT-001",
+        "ORNA-OBJECT-002",
+        "ORNA-OBJECT-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "ORDER-001",
+      "title": "Storage rewrites preserve canonical relation order",
+      "given": [
+        "a table is stored once as loose rows and once as segmented rows"
+      ],
+      "when": [
+        "scan without an explicit sort"
+      ],
+      "then": [
+        "both results are in the same ascending primary-key order"
+      ],
+      "requirements": [
+        "ORNA-ORDER-001",
+        "ORNA-ORDER-002",
+        "ORNA-ORDER-004"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "PATH-CASE-001",
+      "title": "Editable path collisions are host-independent",
+      "given": [
+        "two editable sibling keys Alice and alice"
+      ],
+      "when": [
+        "insert, load, re-key or merge on case-sensitive and case-insensitive hosts"
+      ],
+      "then": [
+        "every host reports the same path collision before overwrite",
+        "no host silently accepts or suffixes either path"
+      ],
+      "requirements": [
+        "ORNA-PATH-006"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "PATH-EMPTY-001",
+      "title": "Empty editable key has one canonical two-digit encoding",
+      "given": [
+        "an empty Str primary-key component"
+      ],
+      "when": [
+        "encode and decode it",
+        "attempt obsolete or embedded empty sentinels"
+      ],
+      "then": [
+        "the complete component is ~ff",
+        "round trip succeeds",
+        "~e, x~ff and ~ffx are rejected"
+      ],
+      "requirements": [
+        "ORNA-PATH-002",
+        "ORNA-PATH-003",
+        "ORNA-PATH-011"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "PIPE-001",
+      "title": "Pipeline inserts the left value as first argument",
+      "given": [
+        "`value | between(10, 20)`"
+      ],
+      "when": [
+        "lower pipeline application"
+      ],
+      "then": [
+        "the call is exactly `between(value, 10, 20)`",
+        "no special pipe-function declaration is required"
+      ],
+      "requirements": [
+        "ORNA-PIPE-001",
+        "ORNA-PIPE-002",
+        "ORNA-PIPE-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "PIPE-002",
+      "title": "Pipeline precedence is stable",
+      "given": [
+        "`1 + 2 | square`, `values | count > 0`, and `(values | count) + 1`"
+      ],
+      "when": [
+        "parse and evaluate"
+      ],
+      "then": [
+        "arithmetic binds above the pipe",
+        "comparison binds below the pipe",
+        "parentheses allow arithmetic on a pipeline result"
+      ],
+      "requirements": [
+        "ORNA-OP-001",
+        "ORNA-PIPE-002",
+        "ORNA-PIPE-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "PRES-001",
+      "title": "Display override does not alter encoding",
+      "given": [
+        "duration has compact default",
+        "Orna codec output captured"
+      ],
+      "when": [
+        "set clock display in REPL"
+      ],
+      "then": [
+        "display changes",
+        "codec output is byte-identical"
+      ],
+      "requirements": [
+        "ORNA-PRES-004",
+        "ORNA-PRES-005"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "PRES-002",
+      "title": "Unknown rich node has fallback",
+      "given": [
+        "renderer receives custom widget it does not know"
+      ],
+      "when": [
+        "render value"
+      ],
+      "then": [
+        "renderer shows Inspect-compatible structure instead of failing"
+      ],
+      "requirements": [
+        "ORNA-PRES-007"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "PROFILE-001",
+      "title": "Loose and segmented interfaces match",
+      "given": [
+        "Contact is loose",
+        "Reading is segmented"
+      ],
+      "when": [
+        "run filter/sort/take on both"
+      ],
+      "then": [
+        "same relation operators and semantics apply"
+      ],
+      "requirements": [
+        "ORNA-STORAGE-001",
+        "ORNA-STORAGE-002"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "PROJECT-001",
+      "title": "Reference life database loads rows against schemas",
+      "given": [
+        "the complete examples/life project with reference std and connector stubs"
+      ],
+      "when": [
+        "parse reachable modules, resolve/typecheck, reconstruct loose keys, load every row"
+      ],
+      "then": [
+        "all rows match table fields, key types, units and exact Money requirements"
+      ],
+      "requirements": [
+        "ORNA-TEST-003",
+        "ORNA-ROW-002",
+        "ORNA-ROW-003",
+        "ORNA-MONEY-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "PROJECT-LIFE-001",
+      "title": "Complete life project loads rows against schemas",
+      "given": [
+        "the bundled examples/life database"
+      ],
+      "when": [
+        "parse reachable modules, resolve/typecheck, discover and load loose rows"
+      ],
+      "then": [
+        "every row key and body validates against its table schema and units"
+      ],
+      "requirements": [
+        "ORNA-ATTACH-001",
+        "ORNA-ATTACH-002",
+        "ORNA-ATTACH-003",
+        "ORNA-CORE-001",
+        "ORNA-CORE-002",
+        "ORNA-CORE-003",
+        "ORNA-IMPORT-001",
+        "ORNA-IMPORT-002",
+        "ORNA-IMPORT-003",
+        "ORNA-IMPORT-004",
+        "ORNA-IMPORT-005",
+        "ORNA-IMPORT-006",
+        "ORNA-IMPORT-007",
+        "ORNA-KEY-001",
+        "ORNA-KEY-002",
+        "ORNA-KEY-003",
+        "ORNA-KEY-004",
+        "ORNA-KEY-005",
+        "ORNA-KEY-006",
+        "ORNA-MODULE-001",
+        "ORNA-MONEY-001",
+        "ORNA-MONEY-002",
+        "ORNA-MONEY-003",
+        "ORNA-MONEY-004",
+        "ORNA-MONEY-005",
+        "ORNA-MONEY-006",
+        "ORNA-MONEY-007",
+        "ORNA-NS-001",
+        "ORNA-NS-002",
+        "ORNA-NS-003",
+        "ORNA-NS-004",
+        "ORNA-NS-005",
+        "ORNA-NS-006",
+        "ORNA-NS-007",
+        "ORNA-NS-008",
+        "ORNA-PACKAGE-001",
+        "ORNA-PACKAGE-002",
+        "ORNA-PACKAGE-003",
+        "ORNA-PROJECT-001",
+        "ORNA-PROJECT-002",
+        "ORNA-PROJECT-003",
+        "ORNA-PROJECT-004",
+        "ORNA-REPO-001",
+        "ORNA-REPO-002",
+        "ORNA-REPO-003",
+        "ORNA-REPO-004",
+        "ORNA-ROW-001",
+        "ORNA-ROW-002",
+        "ORNA-ROW-003",
+        "ORNA-ROW-004",
+        "ORNA-ROW-005",
+        "ORNA-ROW-006",
+        "ORNA-SOURCE-001",
+        "ORNA-SOURCE-002",
+        "ORNA-SOURCE-003",
+        "ORNA-TABLE-001",
+        "ORNA-UNIT-001",
+        "ORNA-UNIT-002",
+        "ORNA-UNIT-003",
+        "ORNA-UNIT-004",
+        "ORNA-UNIT-005",
+        "ORNA-UNIT-006",
+        "ORNA-UNIT-007",
+        "ORNA-UNIT-008"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "PUB-001",
+      "title": "Crash before ref update",
+      "given": [
+        "frozen batch exists in Turso"
+      ],
+      "when": [
+        "publisher writes Git objects then crashes before update-ref"
+      ],
+      "then": [
+        "branch unchanged",
+        "pending rows intact",
+        "orphan objects may exist"
+      ],
+      "requirements": [
+        "ORNA-PUB-005",
+        "ORNA-PUB-006"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "PUB-002",
+      "title": "Crash after ref update",
+      "given": [
+        "publisher advances branch then crashes before Turso cleanup"
+      ],
+      "when": [
+        "restart Orna"
+      ],
+      "then": [
+        "batch ID is found in commit",
+        "Turso cleanup completes",
+        "rows are not duplicated"
+      ],
+      "requirements": [
+        "ORNA-PUB-007",
+        "ORNA-PUB-008"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "PUB-003",
+      "title": "Concurrent human commit is not overwritten",
+      "given": [
+        "publisher builds from HEAD A",
+        "human commit advances branch to B"
+      ],
+      "when": [
+        "publisher compare-and-swap expects A"
+      ],
+      "then": [
+        "ref update fails",
+        "publisher rebuilds/retries from B",
+        "B is preserved"
+      ],
+      "requirements": [
+        "ORNA-PUB-009"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "PUB-004",
+      "title": "Automatic commit excludes human work",
+      "given": [
+        "staged module edit and unstaged contact edit exist",
+        "telemetry batch is ready"
+      ],
+      "when": [
+        "automatic publication runs"
+      ],
+      "then": [
+        "new commit contains only managed data paths",
+        "human index/worktree changes remain"
+      ],
+      "requirements": [
+        "ORNA-PUB-010",
+        "ORNA-PUB-011"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "PUB-005",
+      "title": "Representation move emits no row delta",
+      "given": [
+        "rows are queryable in Turso tail"
+      ],
+      "when": [
+        "publisher moves them into segment and cleans tail"
+      ],
+      "then": [
+        "same query returns same rows once",
+        "page watchers receive no logical insertion duplicate"
+      ],
+      "requirements": [
+        "ORNA-PUB-008"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "PUB-006",
+      "title": "Publication never absorbs staged human edits",
+      "given": [
+        "human source changes are staged",
+        "runtime telemetry is ready to publish"
+      ],
+      "when": [
+        "automatic publication advances the branch"
+      ],
+      "then": [
+        "the machine commit contains only Orna-managed data paths",
+        "the human index and worktree intent remain intact"
+      ],
+      "requirements": [
+        "ORNA-PUB-007",
+        "ORNA-PUB-008",
+        "ORNA-PUB-009"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "RECOVERY-FAILURE-091",
+      "title": "Recovery handles one reaching failure",
+      "given": [
+        "a failing expression to the left of `|?`"
+      ],
+      "when": [
+        "the handler returns a compatible fallback"
+      ],
+      "then": [
+        "the handler receives the error exactly once",
+        "evaluation resumes with the fallback",
+        "earlier stages are not rerun"
+      ],
+      "requirements": [
+        "ORNA-PIPE-008",
+        "ORNA-PIPE-009",
+        "ORNA-ERR-011",
+        "ORNA-ERR-012",
+        "ORNA-FAILURE-008"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "RECOVERY-REFAIL-091",
+      "title": "A recovery handler may re-emit or replace failure",
+      "given": [
+        "a handler that calls fail with the received or a wrapped error"
+      ],
+      "when": [
+        "evaluate the recovery stage"
+      ],
+      "then": [
+        "the handler failure propagates normally",
+        "the selected causal chain is preserved"
+      ],
+      "requirements": [
+        "ORNA-PIPE-010",
+        "ORNA-ERR-003",
+        "ORNA-FAILURE-006"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "RECOVERY-SUCCESS-091",
+      "title": "Recovery stage is skipped on success",
+      "given": [
+        "a successful value to the left of `|?` and a handler with an observable effect"
+      ],
+      "when": [
+        "evaluate the pipeline"
+      ],
+      "then": [
+        "the handler is not evaluated",
+        "the original successful value reaches the next stage"
+      ],
+      "requirements": [
+        "ORNA-PIPE-008",
+        "ORNA-PIPE-009",
+        "ORNA-ERR-011"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "REF-001",
+      "title": "Stored reference traverses the same snapshot",
+      "given": [
+        "Vehicle.owner refers to contacts.Contact"
+      ],
+      "when": [
+        "read vehicle.owner.key and vehicle.owner.name from a historical context"
+      ],
+      "then": [
+        "the key is available without embedding the target row",
+        "name lookup uses the same snapshot and is explainable as lookup/join"
+      ],
+      "requirements": [
+        "ORNA-REF-001",
+        "ORNA-REF-002"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "REPL-001",
+      "title": "Typed safe preview",
+      "given": [
+        "user types 1+2 without submit"
+      ],
+      "when": [
+        "preview evaluator runs"
+      ],
+      "then": [
+        "ghost preview shows 3 : Int"
+      ],
+      "requirements": [
+        "ORNA-REPL-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "REPL-002",
+      "title": "Effectful preview is suppressed",
+      "given": [
+        "user types Contact.insert(...)"
+      ],
+      "when": [
+        "preview system analyses expression"
+      ],
+      "then": [
+        "no insertion occurs",
+        "type/effect hint may appear"
+      ],
+      "requirements": [
+        "ORNA-REPL-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "REPL-003",
+      "title": "Relation preview is bounded",
+      "given": [
+        "relation has 100 million rows"
+      ],
+      "when": [
+        "preview or submit in REPL"
+      ],
+      "then": [
+        "only estimate/window is requested",
+        "full enumeration not required"
+      ],
+      "requirements": [
+        "ORNA-REPL-004"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "ROW-001",
+      "title": "Path supplies key",
+      "given": [
+        "Contact key type is Str",
+        "Contact/alice-smith.orna has only non-key fields"
+      ],
+      "when": [
+        "load row"
+      ],
+      "then": [
+        "logical row id is alice-smith"
+      ],
+      "requirements": [
+        "ORNA-ROW-001",
+        "ORNA-ROW-002"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "ROW-002",
+      "title": "Filesystem edit equals update",
+      "given": [
+        "a valid loose row exists"
+      ],
+      "when": [
+        "edit its email field directly",
+        "open Orna status/query"
+      ],
+      "then": [
+        "row appears modified in CWD",
+        "query returns new email"
+      ],
+      "requirements": [
+        "ORNA-ROW-006"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SEC-001",
+      "title": "Trusted server is local by default",
+      "given": [
+        "a default orna serve invocation"
+      ],
+      "when": [
+        "the listener starts"
+      ],
+      "then": [
+        "it binds to loopback",
+        "remote exposure requires an explicit operator network boundary",
+        "no Orna grants database is created"
+      ],
+      "requirements": [
+        "ORNA-SERVE-004",
+        "ORNA-SERVE-006",
+        "ORNA-TRUST-001",
+        "ORNA-TRUST-002"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SECRET-001",
+      "title": "Clone without SOPS key remains useful",
+      "given": [
+        "repository contains encrypted SOPS secrets",
+        "machine lacks age identity"
+      ],
+      "when": [
+        "open REPL and query historical tables"
+      ],
+      "then": [
+        "queries work",
+        "sys.Secret reports unavailable",
+        "dependent stream run fails clearly"
+      ],
+      "requirements": [
+        "ORNA-SOPS-002",
+        "ORNA-SECRET-004"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SERVER-001",
+      "title": "Serve does not run ingestion",
+      "given": [
+        "root main() starts stream sync"
+      ],
+      "when": [
+        "run orna serve"
+      ],
+      "then": [
+        "Git/pages/queries start",
+        "main() is not invoked"
+      ],
+      "requirements": [
+        "ORNA-SERVE-002"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SERVER-002",
+      "title": "Different clones have independent CWD",
+      "given": [
+        "two clones share HEAD but have different local edits"
+      ],
+      "when": [
+        "serve both"
+      ],
+      "then": [
+        "each page/query endpoint reflects its own CWD and identifies it"
+      ],
+      "requirements": [
+        "ORNA-SERVE-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "STATE-001",
+      "title": "CWD overlays HEAD",
+      "given": [
+        "HEAD has one Contact row",
+        "CWD inserts Bob without commit"
+      ],
+      "when": [
+        "query Contact",
+        "query Contact.as_of(HEAD)"
+      ],
+      "then": [
+        "CWD query returns two rows",
+        "HEAD query returns one row"
+      ],
+      "requirements": [
+        "ORNA-STATE-002",
+        "ORNA-STATE-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "STATE-002",
+      "title": "Wall clock is not snapshot selector",
+      "given": [
+        "current wall clock differs from commit time"
+      ],
+      "when": [
+        "evaluate now()",
+        "evaluate Contact.as_of(HEAD)"
+      ],
+      "then": [
+        "now() returns wall-clock instant",
+        "as_of selects committed state"
+      ],
+      "requirements": [
+        "ORNA-STATE-005"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "STORAGE-DISJOINT-001",
+      "title": "Editable and compact placement is checked at every state boundary",
+      "given": [
+        "an exact key that exists in compact storage and an editable row candidate with the same key"
+      ],
+      "when": [
+        "insert, discover, checkout, re-key, rewrite, publish, verify or merge"
+      ],
+      "then": [
+        "the implementation performs exact key lookup",
+        "neither representation overwrites the other",
+        "the operation reports a typed conflict and preserves CWD as specified"
+      ],
+      "requirements": [
+        "ORNA-STORAGE-013",
+        "ORNA-STORAGE-014",
+        "ORNA-STORAGE-015"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "STREAM-001",
+      "title": "Finite stream exits",
+      "given": [
+        "CSV stream has 100 rows"
+      ],
+      "when": [
+        "run import function"
+      ],
+      "then": [
+        "100 item activations complete",
+        "program exits"
+      ],
+      "requirements": [
+        "ORNA-STREAM-001",
+        "ORNA-TXN-004"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "STREAM-002",
+      "title": "Unbounded stream stays active",
+      "given": [
+        "connector remains open"
+      ],
+      "when": [
+        "run sync function"
+      ],
+      "then": [
+        "program remains active until cancelled or source ends"
+      ],
+      "requirements": [
+        "ORNA-STREAM-002"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SYNTAX-ARROW-001",
+      "title": "Arrow lambdas do not collide with pipeline or logical OR",
+      "given": [
+        "source containing `value => value + 1`, `a | f` and `a || b`"
+      ],
+      "when": [
+        "lex and parse the source"
+      ],
+      "then": [
+        "`=>` forms the anonymous function",
+        "`|` forms pipeline application",
+        "`||` forms logical OR",
+        "no token is contextually split into closure delimiters"
+      ],
+      "requirements": [
+        "ORNA-LAMBDA-001",
+        "ORNA-LAMBDA-004",
+        "ORNA-PIPE-001",
+        "ORNA-CFLOW-008"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SYNTAX-RECORD-001",
+      "title": "Record and block bodies are deterministic",
+      "given": [
+        "`x => { value: x }`, `x => { let y = x; y }`, `() => {}` and `() => ({})`"
+      ],
+      "when": [
+        "parse each anonymous function"
+      ],
+      "then": [
+        "the first and fourth bodies are records",
+        "the second and third bodies are blocks",
+        "record punning is rejected"
+      ],
+      "requirements": [
+        "ORNA-RECORD-001",
+        "ORNA-RECORD-002",
+        "ORNA-RECORD-003",
+        "ORNA-RECORD-004",
+        "ORNA-LAMBDA-005"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SYNTAX-RETURN-091",
+      "title": "Colon return annotations replace arrows",
+      "given": [
+        "one inferred function and one explicitly annotated function"
+      ],
+      "when": [
+        "parse, infer and expose their signatures"
+      ],
+      "then": [
+        "`: Type` is accepted",
+        "the inferred and explicit signatures agree",
+        "`-> Type` receives ORNA091-E-RETURN-ARROW"
+      ],
+      "requirements": [
+        "ORNA-FN-006",
+        "ORNA-FN-007",
+        "ORNA-INFER-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SYS-001",
+      "title": "Historical run query is valid",
+      "given": [
+        "HEAD contains run record observed running"
+      ],
+      "when": [
+        "query sys.Run.as_of(HEAD)"
+      ],
+      "then": [
+        "row is returned with status_at_snapshot running and live false"
+      ],
+      "requirements": [
+        "ORNA-SYS-002",
+        "ORNA-SYS-004"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SYS-002",
+      "title": "Definition file is typed",
+      "given": [
+        "function definition exists"
+      ],
+      "when": [
+        "read function.definition.file"
+      ],
+      "then": [
+        "value is sys.File reference, not path string"
+      ],
+      "requirements": [
+        "ORNA-SYS-001"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SYS-AWAIT-TIMEOUT-100",
+      "title": "Await timeout never implies cancellation",
+      "given": [
+        "one running invocation and a shorter caller timeout"
+      ],
+      "when": [
+        "await, inspect, await again and then explicitly cancel"
+      ],
+      "then": [
+        "the first await raises sys.invoke.await_timeout",
+        "the target continues",
+        "a later await observes its terminal result or explicit cancellation",
+        "durable runs require sys.admin.cancel_run"
+      ],
+      "requirements": [
+        "ORNA-SYS-081",
+        "ORNA-SYS-082",
+        "ORNA-SYS-083",
+        "ORNA-SYS-107"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SYS-CHECKPOINT-CAS-100",
+      "title": "Checkpoint administration is compare-and-set and atomic",
+      "given": [
+        "a replayable source checkpoint, pending item writes and one stale administrator"
+      ],
+      "when": [
+        "commit success, inject item failure and attempt a stale reset"
+      ],
+      "then": [
+        "success commits writes and position together",
+        "failure commits neither",
+        "stale reset raises sys.checkpoint.conflict",
+        "retry/skip preserve stable delivery identity and audit correlation"
+      ],
+      "requirements": [
+        "ORNA-SYS-061",
+        "ORNA-SYS-062",
+        "ORNA-SYS-063",
+        "ORNA-SYS-064",
+        "ORNA-SYS-065",
+        "ORNA-SYS-108"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SYS-FAILURE-ADMIN-100",
+      "title": "Failure administration preserves stable delivery identity",
+      "given": [
+        "separate fixtures for an open failed delivery and a preserved skipped delivery, each with a version"
+      ],
+      "when": [
+        "retry and fail repeatedly, then retry successfully in the first fixture",
+        "replay and resolve the skipped fixture",
+        "attempt each mutation with a stale failure version"
+      ],
+      "then": [
+        "one durable record per delivery regardless of attempt count",
+        "failed retry returns the same row to open with updated version",
+        "successful retry commits writes and checkpoint together",
+        "replay never moves the live checkpoint",
+        "stale versions fail before effects"
+      ],
+      "requirements": [
+        "ORNA-SYS-121",
+        "ORNA-SYS-122",
+        "ORNA-SYS-123",
+        "ORNA-SYS-124",
+        "ORNA-SYS-127"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SYS-GROUPED-RELATION-100",
+      "title": "Canonical and grouped system relation views are identical",
+      "given": [
+        "a canonical PascalCase relation and its lowercase grouped handle"
+      ],
+      "when": [
+        "query both in one stable snapshot"
+      ],
+      "then": [
+        "row type, key, ordering and contents agree",
+        "they are not independently cached catalogues"
+      ],
+      "requirements": [
+        "ORNA-SYS-009",
+        "ORNA-SYS-110"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SYS-INVOKE-RESULT-TYPE-100",
+      "title": "Erased and typed invocation have closed result semantics",
+      "given": [
+        "a function returning Contact, an explicit as: Contact witness, an incompatible as: Invoice witness and an erased reflective call"
+      ],
+      "when": [
+        "invoke and start through both overload families"
+      ],
+      "then": [
+        "the erased calls return sys.Value or InvocationHandle<sys.Value> with exact originating type identity",
+        "the matching typed calls return Contact-shaped outcomes",
+        "the incompatible witness raises sys.invoke.return_type before effects",
+        "InvocationResult contains exactly one terminal value/failure outcome",
+        "no conversion chain is attempted"
+      ],
+      "requirements": [
+        "ORNA-SYS-077",
+        "ORNA-SYS-078",
+        "ORNA-SYS-079",
+        "ORNA-SYS-080",
+        "ORNA-SYS-132",
+        "ORNA-SYS-133",
+        "ORNA-SYS-140"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SYS-INVOKE-TYPED-100",
+      "title": "Reflective invocation cannot bypass static rules",
+      "given": [
+        "a typed FunctionRef, correct and incorrect ArgumentMaps, and a forbidden effect"
+      ],
+      "when": [
+        "invoke through sys.invoke"
+      ],
+      "then": [
+        "correct arguments execute in the selected transaction",
+        "missing, unknown and wrong-typed arguments raise stable failures",
+        "visibility/effect restrictions remain enforced",
+        "ordinary strings are never evaluated"
+      ],
+      "requirements": [
+        "ORNA-SYS-077",
+        "ORNA-SYS-078",
+        "ORNA-SYS-079",
+        "ORNA-SYS-080"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SYS-REDACTION-100",
+      "title": "Redaction happens before presentation and encoding",
+      "given": [
+        "secret, path and argument values with redaction metadata"
+      ],
+      "when": [
+        "Inspect, Display, Present, encode, trace and source them"
+      ],
+      "then": [
+        "all consumers receive already-redacted system values",
+        "no plaintext or low-entropy hash leaks",
+        "denied detail raises sys.redaction.denied where required"
+      ],
+      "requirements": [
+        "ORNA-SYS-099",
+        "ORNA-SYS-100",
+        "ORNA-SYS-101",
+        "ORNA-SYS-102",
+        "ORNA-SYS-109"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SYS-ROW-REF-100",
+      "title": "Every system row has one typed reference",
+      "given": [
+        "canonical rows with scalar and composite natural keys at live and historical observations"
+      ],
+      "when": [
+        "obtain `.reference`, serialize descriptive forms and dereference in matching and changed contexts"
+      ],
+      "then": [
+        "reference type matches the row",
+        "natural keys are preserved without synthetic IDs",
+        "historical references remain pinned",
+        "foreign live generations fail",
+        "references do not bypass redaction or administration"
+      ],
+      "requirements": [
+        "ORNA-SYS-111",
+        "ORNA-SYS-112",
+        "ORNA-SYS-113",
+        "ORNA-SYS-114",
+        "ORNA-SYS-125"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SYS-RT-RENAME-100",
+      "title": "The runtime root is sys.rt",
+      "given": [
+        "active source, removed `sys.runtime` source and runtime-info access"
+      ],
+      "when": [
+        "resolve valid and invalid spellings and inspect the diagnostic"
+      ],
+      "then": [
+        "`sys.rt` and `sys.rt.info()` resolve",
+        "`sys.runtime` and `sys.runtime_info` receive ORNA100-E-SYS-RUNTIME",
+        "no alias is installed"
+      ],
+      "requirements": [
+        "ORNA-SYS-005",
+        "ORNA-SYS-105"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SYS-SNAPSHOT-OVERLOADS-100",
+      "title": "Snapshot selectors are explicit and pinned",
+      "given": [
+        "snapshot, commit, branch, tag, Git OID and string revision-expression selectors, plus a branch that moves after resolution"
+      ],
+      "when": [
+        "call each sys.snapshot overload and the matching checkout/create-branch overloads, then move the source branch"
+      ],
+      "then": [
+        "each selector resolves through its documented overload",
+        "every returned SnapshotRef remains pinned",
+        "the later branch movement does not change an existing result",
+        "no SnapshotLike pseudo-type or implicit selector coercion exists"
+      ],
+      "requirements": [
+        "ORNA-SYS-019",
+        "ORNA-SYS-035",
+        "ORNA-SYS-106",
+        "ORNA-SYS-136",
+        "ORNA-SYS-139"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SYS-SNAPSHOT-PIN-100",
+      "title": "System references remain snapshot-pinned",
+      "given": [
+        "an object reference resolved at an old committed snapshot and a newer CWD revision"
+      ],
+      "when": [
+        "describe, source and traverse dependencies from the old reference"
+      ],
+      "then": [
+        "all results use the reference snapshot",
+        "no field silently resolves against the newer CWD",
+        "unavailable retained data raises its stable failure"
+      ],
+      "requirements": [
+        "ORNA-SYS-011",
+        "ORNA-SYS-019",
+        "ORNA-SYS-106"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SYS-SOURCE-HISTORY-100",
+      "title": "Source and history overloads preserve exact reference context",
+      "given": [
+        "current, renamed, historical, redacted and partially cloned object and file references"
+      ],
+      "when": [
+        "call both sys.source and sys.history overloads"
+      ],
+      "then": [
+        "object history follows semantic identity",
+        "file history follows retained file versions",
+        "source uses the pinned definition/file",
+        "missing and redacted detail raise stable failures without jumping to CWD"
+      ],
+      "requirements": [
+        "ORNA-SYS-011",
+        "ORNA-SYS-019",
+        "ORNA-SYS-035",
+        "ORNA-SYS-052",
+        "ORNA-SYS-128"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SYS-STORAGE-ADMIN-100",
+      "title": "Storage preference and rewrite are explicit and logically transparent",
+      "given": [
+        "an editable/compact/hybrid table, an unrepresentable path key and one concurrent generation change"
+      ],
+      "when": [
+        "set preference and attempt rewrites through sys.admin"
+      ],
+      "then": [
+        "preference changes future placement only",
+        "successful rewrite has an empty semantic row diff",
+        "unrepresentable editable output fails before publication",
+        "stale generation retains the prior authoritative representation",
+        "sys.storage is never callable"
+      ],
+      "requirements": [
+        "ORNA-SYS-115",
+        "ORNA-SYS-116",
+        "ORNA-SYS-117",
+        "ORNA-SYS-118",
+        "ORNA-SYS-119",
+        "ORNA-SYS-120",
+        "ORNA-SYS-126"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "SYS-SUPPORT-TYPES-100",
+      "title": "The portable sys type graph is closed and exact",
+      "given": [
+        "the generated sys inventory, every relation field, every function signature and representative reflective values"
+      ],
+      "when": [
+        "resolve all type names, canonicalize ArgumentMaps and attempt ordinary inference through sys.Value"
+      ],
+      "then": [
+        "every name resolves to a core or enumerated system type",
+        "duplicate argument names are rejected",
+        "argument ordering is deterministic",
+        "sys.Value preserves originating type identity",
+        "ordinary inference never falls back to sys.Value",
+        "singleton views are immutable"
+      ],
+      "requirements": [
+        "ORNA-SYS-129",
+        "ORNA-SYS-130",
+        "ORNA-SYS-131",
+        "ORNA-SYS-134",
+        "ORNA-SYS-135",
+        "ORNA-SYS-137",
+        "ORNA-SYS-138",
+        "ORNA-SYS-141"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "TIME-001",
+      "title": "DST day is calendar-aware",
+      "given": [
+        "Europe/London spring transition day"
+      ],
+      "when": [
+        "bucket Instants by 1.day with zone"
+      ],
+      "then": [
+        "day contains 23 hours rather than forced 86400 seconds"
+      ],
+      "requirements": [
+        "ORNA-TIME-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "TXN-001",
+      "title": "Activation rolls back nested writes",
+      "given": [
+        "parent calls child; child inserts Note"
+      ],
+      "when": [
+        "parent later propagates error"
+      ],
+      "then": [
+        "child insert is rolled back"
+      ],
+      "requirements": [
+        "ORNA-TXN-001",
+        "ORNA-TXN-002",
+        "ORNA-TXN-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "TXN-002",
+      "title": "Successful activation commits together",
+      "given": [
+        "activation inserts Order, Payment, Audit"
+      ],
+      "when": [
+        "activation returns success"
+      ],
+      "then": [
+        "all three appear together in CWD"
+      ],
+      "requirements": [
+        "ORNA-TXN-001"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "TXN-003",
+      "title": "External effect is not undone",
+      "given": [
+        "activation inserts Note, sends HTTP, then errors"
+      ],
+      "when": [
+        "error escapes"
+      ],
+      "then": [
+        "Note insert rolls back",
+        "HTTP send is not claimed to be reversed"
+      ],
+      "requirements": [
+        "ORNA-TXN-005"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "UNIT-001",
+      "title": "Dimensions survive aggregation",
+      "given": [
+        "Reading.energy is Float<kWh>"
+      ],
+      "when": [
+        "map energy and sum"
+      ],
+      "then": [
+        "result type remains energy quantity compatible with kWh"
+      ],
+      "requirements": [
+        "ORNA-UNIT-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    },
+    {
+      "id": "UNIT-002",
+      "title": "Cross-database units compare structurally",
+      "given": [
+        "two attached DBs define same name differently"
+      ],
+      "when": [
+        "attempt addition"
+      ],
+      "then": [
+        "compatible only when reduced dimensions/scale/affine behavior match"
+      ],
+      "requirements": [
+        "ORNA-UNIT-001",
+        "ORNA-UNIT-002"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine"
+    }
+  ],
+  "count": 144,
+  "execution_status": "Authored scenarios; selected separate models executed as listed in evidence/contract-models.json."
+}

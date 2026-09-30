@@ -1,0 +1,12 @@
+pub table Customer(id: Uuid) {
+    name: Str,
+}
+
+pub table Invoice(id: Uuid) {
+    customer_id: Uuid,
+    total: Money<GBP>,
+}
+
+assert every(Invoice, invoice =>
+    exists(Customer, customer => customer.id == invoice.customer_id)
+);

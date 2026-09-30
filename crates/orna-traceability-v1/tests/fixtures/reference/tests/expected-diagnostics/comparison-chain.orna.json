@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/comparison-chain.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "E1302",
+  "message_contains": "comparison operators do not chain; write an explicit conjunction",
+  "status": "expected-not-executed"
+}

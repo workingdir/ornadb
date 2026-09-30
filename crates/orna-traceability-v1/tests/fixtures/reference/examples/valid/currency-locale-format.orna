@@ -1,0 +1,2 @@
+pub fn receipt_total(total: Money<GBP>, locale: Locale): Str =
+    total | std.money.format(locale: locale);

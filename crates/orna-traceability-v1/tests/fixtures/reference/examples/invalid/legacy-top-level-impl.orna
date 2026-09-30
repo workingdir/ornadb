@@ -1,0 +1,1 @@
+pub impl Display for Contact { fn display(self, context): Str = self.name; }

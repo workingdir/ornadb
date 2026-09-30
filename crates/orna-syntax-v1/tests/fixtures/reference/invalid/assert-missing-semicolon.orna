@@ -1,0 +1,1 @@
+pub fn bad(value: Int) { assert value > 0 }
