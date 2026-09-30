@@ -9277,6 +9277,150 @@ fn delete_cancels_durable_session_work_before_returning_success() {
 }
 
 #[test]
+fn closed_session_request_id_remains_available_for_sibling_status_query() {
+    let (root, repository) = durable_repository();
+    // The reference scopes request IDs by session but does not spell out how
+    // closing one session affects a sibling query reusing its request bytes.
+    let first_target_request = eval_with_context([1; 16], [91; 16], [2; 16], None);
+    let first_fingerprint = request_fingerprint(&first_target_request, [1; 16]);
+    let second_target_request = eval_with_context([2; 16], [92; 16], [2; 16], None);
+    let second_fingerprint = request_fingerprint(&second_target_request, [2; 16]);
+    let first_identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [91; 16],
+    };
+    let second_identity = RequestIdentity {
+        session_id: [2; 16],
+        request_id: [92; 16],
+    };
+    let owner = [93; 16];
+    let runtime = open_durable_state(&repository);
+    let lease = block_on(runtime.acquire_lease(owner)).unwrap();
+    for (identity, fingerprint) in [
+        (first_identity, first_fingerprint),
+        (second_identity, second_fingerprint),
+    ] {
+        let (_, capability) =
+            block_on(runtime.reserve_request_with_admission(identity, fingerprint)).unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
+        block_on(runtime.start_request_with_owner_and_admission(
+            identity,
+            fingerprint,
+            lease,
+            capability,
+        ))
+        .unwrap();
+    }
+    drop(runtime);
+
+    let mut host = durable_host_with_owner(open_durable_state(&repository), owner);
+    let mut first_issuer = Issuer(1, None);
+    let first_credential = create(&mut host, &mut first_issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &first_credential,
+        attachment: [6; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let second_subscribe = subscribe();
+    let mut second_issuer = Issuer(2, None);
+    let second_credential = block_on(host.create(
+        CreateRequest {
+            id: [2; 16],
+            origin: origin(),
+            expires_at: 100,
+            now: 0,
+            subscribe: &second_subscribe,
+        },
+        &mut second_issuer,
+    ))
+    .unwrap();
+    block_on(host.resume(ResumeRequest {
+        id: [2; 16],
+        origin: &origin(),
+        credential: &second_credential,
+        attachment: [7; 16],
+        now: 1,
+    }))
+    .unwrap();
+
+    let mut deletion = RecordingDelete::default();
+    let mut children = RecordingChildren::default();
+    assert_eq!(
+        block_on(host.http_delete_with_children(
+            DeleteRequest {
+                id: [2; 16],
+                origin: &origin(),
+                credential: &second_credential,
+                now: 1,
+            },
+            &mut deletion,
+            &mut children,
+        ))
+        .status,
+        204
+    );
+    assert_eq!(children.requests, vec![second_identity]);
+
+    let mut application = UnitApplication::default();
+    let sibling_status_request = Envelope {
+        // This ID was the deleted session's request ID, but is unused in the
+        // sibling and therefore remains available there.
+        request: Some([92; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint: first_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let sibling_status = block_on(host.dispatch_frame(
+        [6; 16],
+        2,
+        Frame::Binary(sibling_status_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the sibling may use a request ID released by another session");
+    assert!(matches!(
+        &sibling_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Running,
+            fingerprint: Some(returned),
+            result: None,
+        } if *target == [91; 16] && *returned == first_fingerprint
+    ));
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status(first_identity, first_fingerprint))
+            .unwrap(),
+        Some(status) if status.state == orna_runtime_v1::RequestState::Running
+    ));
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status(second_identity, second_fingerprint))
+            .unwrap(),
+        Some(status) if status.state == orna_runtime_v1::RequestState::Cancelled
+    ));
+    assert!(matches!(
+        block_on(host.dispatch_frame(
+            [7; 16],
+            2,
+            Frame::Binary(sibling_status_request),
+            &mut application,
+        )),
+        Err(Error::Closed)
+    ));
+    assert_eq!(application.calls, 0);
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn delete_enumerates_reserved_durable_work_before_joining_children() {
     let (root, repository) = durable_repository();
     let runtime = open_durable_state(&repository);
