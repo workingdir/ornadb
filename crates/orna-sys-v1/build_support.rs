@@ -1015,25 +1015,7 @@ fn validate_function_default(
 
     let actual_type = match default {
         "true" | "false" => "Bool".to_owned(),
-        _ => {
-            if let Some((enum_name, variant)) = default.rsplit_once('.')
-                && let Some(variants) = api["enums"].get(enum_name).and_then(Value::as_array)
-            {
-                if !variants
-                    .iter()
-                    .any(|candidate| candidate.as_str() == Some(variant))
-                {
-                    return Err(format!(
-                        "function `{function}` default for `{parameter}` references unknown `{enum_name}.{variant}`"
-                    ));
-                }
-                enum_name.to_owned()
-            } else {
-                resolve_singleton_default_type(api, names, default).map_err(|error| {
-                    format!("function `{function}` default for `{parameter}` {error}")
-                })?
-            }
-        }
+        _ => resolve_function_default_type(api, names, function, parameter, default)?,
     };
 
     if actual_type != parameter_type {
@@ -1044,11 +1026,43 @@ fn validate_function_default(
     Ok(())
 }
 
+fn resolve_function_default_type(
+    api: &Value,
+    names: &ApiTypeNames,
+    function: &str,
+    parameter: &str,
+    path: &str,
+) -> Result<String, String> {
+    if let Some(actual_type) = resolve_singleton_default_type(api, names, path).map_err(|error| {
+        format!("function `{function}` default for `{parameter}` {error}")
+    })? {
+        return Ok(actual_type);
+    }
+
+    if let Some((enum_name, variant)) = path.rsplit_once('.')
+        && let Some(variants) = api["enums"].get(enum_name).and_then(Value::as_array)
+    {
+        if !variants
+            .iter()
+            .any(|candidate| candidate.as_str() == Some(variant))
+        {
+            return Err(format!(
+                "function `{function}` default for `{parameter}` references unknown `{enum_name}.{variant}`"
+            ));
+        }
+        return Ok(enum_name.to_owned());
+    }
+
+    Err(format!(
+        "function `{function}` default for `{parameter}` does not resolve to an enum variant or singleton path `{path}`"
+    ))
+}
+
 fn resolve_singleton_default_type(
     api: &Value,
     names: &ApiTypeNames,
     path: &str,
-) -> Result<String, String> {
+) -> Result<Option<String>, String> {
     let singleton = api["singletons"]
         .as_array()
         .into_iter()
@@ -1060,7 +1074,7 @@ fn resolve_singleton_default_type(
         })
         .max_by_key(|(name, _)| name.len());
     let Some((singleton_name, singleton)) = singleton else {
-        return Err(format!("does not resolve to an enum variant or singleton path `{path}`"));
+        return Ok(None);
     };
 
     let mut actual_type = singleton["type"]
@@ -1090,7 +1104,7 @@ fn resolve_singleton_default_type(
                 .to_owned();
         }
     }
-    Ok(actual_type)
+    Ok(Some(actual_type))
 }
 
 fn valid_function_label(label: &str, signature: &SignatureIdentity) -> bool {
