@@ -1431,6 +1431,8 @@ impl Diagnostic {
         // cause slots reused, appended, or dropped by Clone::clone_from.
         // Re-admitting a cloned root remains local if it is later composed as
         // a cause; the containing diagnostic does not inherit that authority.
+        // Building that projection does not consume or revoke an admitted
+        // sibling clone that is serialized at its own root.
         let mut projection = if self.root_message_admitted {
             self.clone()
         } else {
