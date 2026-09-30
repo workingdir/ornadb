@@ -164,6 +164,10 @@ fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
     );
     assert!(main_only_session.submit("use main_archive;").is_err());
     assert!(databases.database("main_archive").is_some());
+    assert_eq!(
+        session.submit("main_archive.package_value()"),
+        Ok(Some(Value::int(43.into())))
+    );
 
     // An admitted REPL keeps the exact alias pins it was built from when the
     // mutable attachment session later detaches or replaces one of them.
