@@ -1,0 +1,4 @@
+sys.Storage
+    | project(storage => sys.Storage.lookup(storage.id).title)
+    | take(1)
+    | count()
