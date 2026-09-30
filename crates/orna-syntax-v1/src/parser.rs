@@ -5072,6 +5072,10 @@ impl Parser {
             // Interpolation boundaries are dedicated tokens, not braces.
             match &self.current().kind {
                 TokenKind::InterpolationStart => {
+                    // Keep malformed delimiters local to this expression so
+                    // they cannot hide the enclosing case-arm boundary. A
+                    // nested string interpolation restores its parent's depth
+                    // when it ends.
                     interpolation_delimiters.push(delimiters);
                     delimiters = (0, 0, 0);
                 }
