@@ -21,7 +21,13 @@ use orna_semantic_v1::{Catalogue, ModuleInput, StandardCatalogueError, StandardD
 use orna_syntax_v1::{Declaration, parse_module};
 use unicode_normalization::UnicodeNormalization;
 
+mod attachments;
 mod unicode16;
+
+pub use attachments::{
+    AttachedDatabaseSession, AttachedRelationSource, AttachmentError, PACKAGE_PIN_MANIFEST_PATH,
+    PackagePin, PackagePinManifest, PackagePinSpec, PackageResolver, PinnedDatabase,
+};
 
 /// Bounded resource limits applied before source contents are read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
