@@ -20085,6 +20085,18 @@ mod tests {
         );
         assert_eq!((lookups, scans), (0, 0), "admitted zero-take union does no query work");
 
+        // A later missing source in a nested union must remain visible after
+        // earlier nested sources pass admission, even though take(0) skips them.
+        let (nested_union_zero, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-take-zero-nested-union.orna"),
+        );
+        assert_eq!(
+            nested_union_zero.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 0), "admitted nested union does no query work");
+
         let storage_only = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
         let storage_only = storage_only.query_session();
         let (missing_right, lookups, scans) = invoke_query_fixture_with_counts(
@@ -20096,6 +20108,20 @@ mod tests {
             CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
         );
         assert_eq!((lookups, scans), (0, 0), "unadmitted right source fails before scanning");
+
+        let (missing_nested_tail, lookups, scans) = invoke_query_fixture_with_counts(
+            &storage_only,
+            include_str!("../tests/fixtures/query-session-take-zero-nested-union.orna"),
+        );
+        assert_eq!(
+            missing_nested_tail.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (0, 0),
+            "a missing nested-union tail remains visible without row work"
+        );
 
         let maintenance_only = state
             .begin_table_activation(&["sys.MaintenanceJob"])
@@ -20111,6 +20137,20 @@ mod tests {
             CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
         );
         assert_eq!((lookups, scans), (0, 0), "unadmitted left source fails before scanning");
+
+        let (missing_nested_head, lookups, scans) = invoke_query_fixture_with_counts(
+            &maintenance_only,
+            include_str!("../tests/fixtures/query-session-take-zero-nested-union.orna"),
+        );
+        assert_eq!(
+            missing_nested_head.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (0, 0),
+            "a missing nested-union head remains visible without row work"
+        );
 
         let (missing, lookups, scans) = invoke_query_fixture_with_counts(
             &session,

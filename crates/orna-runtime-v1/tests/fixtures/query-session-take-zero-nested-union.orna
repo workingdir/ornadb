@@ -1,0 +1,7 @@
+sys.Storage
+    | union(sys.Storage | take(1))
+    | union(sys.MaintenanceJob | take(1))
+    | sort_by(row => row.id)
+    | take(0)
+    | count()
+    |? (failure => failure.code)
