@@ -21090,6 +21090,26 @@ mod tests {
             "last() returns the last of two available matches after the short take's nonmatching tail"
         );
 
+        // The reference is silent when a short post-filter take has already
+        // collected multiple matches before its next predicate fails. Since
+        // the requested prefix is still incomplete, preserve that failure
+        // rather than returning the partial last() value.
+        let (last_surfaces_failure_after_multirow_short_post_filter_take, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-short-multiple-matches-failing-tail.orna"
+                ),
+            );
+        let predicate_failure =
+            last_surfaces_failure_after_multirow_short_post_filter_take.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (3, 6),
+            "last() propagates the third predicate failure after two matches leave the take short"
+        );
+
         // The reference is silent when the bounded tail continues past a
         // nonmatch to a predicate failure, with another match after that
         // failure. Preserve the error instead of allowing last() to evaluate
