@@ -3831,7 +3831,7 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         assert_eq!(plan.report.conflicts_lower_bound, 0);
         assert_eq!(plan.report.rows_examined, 2);
         assert!(plan.report.affected_ranges.contains(&(id(1), tombstone_range.clone())));
-        assert!(!plan.report.affected_ranges.contains(&(id(1), suffix_range)));
+        assert!(!plan.report.affected_ranges.contains(&(id(1), suffix_range.clone())));
         assert_eq!(source.visited.len(), 3);
         assert!(source.visited.iter().all(|(_, locator)| locator.ends_with(b"upper")));
         assert!(!plan.checkpoints.contains_key(checkpoint_id.as_slice()));
@@ -3845,6 +3845,73 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         assert!(rows.is_empty());
         assert_eq!(tombstones, &[high_key.clone()]);
         assert!(matches!(segments[2], MergedSegment::Reuse { from: MergeSide::Left, .. }));
+
+        // A changed but empty suffix still closes after the exact tombstone
+        // budget: empty scans consume no row units and checkpoint resolution
+        // continues. The reference does not prescribe this storage policy.
+        let (mut base, mut left, mut right, mut source, _, _, checkpoint_id, tail_id) = build_inputs(
+            row_delete_on_left,
+            checkpoint_delete_on_left,
+            false,
+            regular_checkpoint_fixtures,
+        );
+        let mut ordered_keys = [integer(10), integer(20), integer(30)];
+        ordered_keys.sort_by_key(|key| key.encode().unwrap());
+        let suffix_boundary = ordered_keys[2].encode().unwrap();
+        let tombstone_range = KeyRange::new(high_range.start.clone(), Some(suffix_boundary.clone())).unwrap();
+        let suffix_range = KeyRange::new(Some(suffix_boundary), None).unwrap();
+        for (snapshot, locator, digest) in [
+            (&mut base, b"base-empty-suffix".as_slice(), 90),
+            (&mut left, b"left-empty-suffix".as_slice(), 91),
+            (&mut right, b"right-empty-suffix".as_slice(), 92),
+        ] {
+            let manifest = snapshot.tables.get_mut(&id(1)).unwrap();
+            manifest.segments[1].range = tombstone_range.clone();
+            manifest.segments.push(RowSegmentManifest {
+                locator: locator.to_vec(),
+                range: suffix_range.clone(),
+                digest: [digest; 32],
+            });
+        }
+        source.add(MergeSide::Base, b"base-empty-suffix", Vec::new());
+        source.add(MergeSide::Left, b"left-empty-suffix", Vec::new());
+        source.add(MergeSide::Right, b"right-empty-suffix", Vec::new());
+        let plan = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 2, max_conflicts: 0 },
+        )
+        .unwrap();
+        assert_eq!(plan.report.rows_examined, 2);
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        assert!(plan.report.affected_ranges.contains(&(id(1), tombstone_range)));
+        assert!(plan.report.affected_ranges.contains(&(id(1), suffix_range)));
+        assert_eq!(source.visited.len(), 6);
+        assert_eq!(
+            &source.visited[3..],
+            &[
+                (MergeSide::Base, b"base-empty-suffix".to_vec()),
+                (MergeSide::Left, b"left-empty-suffix".to_vec()),
+                (MergeSide::Right, b"right-empty-suffix".to_vec()),
+            ]
+        );
+        assert!(!plan.checkpoints.contains_key(checkpoint_id.as_slice()));
+        assert!(plan.checkpoints.contains_key(tail_id.as_slice()));
+        let segments = &plan.tables[&id(1)].segments;
+        assert_eq!(segments.len(), 3);
+        assert!(matches!(segments[0], MergedSegment::Reuse { from: MergeSide::Left, .. }));
+        let MergedSegment::Rows { rows, tombstones, .. } = &segments[1] else {
+            panic!("the upper segment deletion must materialize a tombstone")
+        };
+        assert!(rows.is_empty());
+        assert_eq!(tombstones, &[high_key.clone()]);
+        let MergedSegment::Rows { rows, tombstones, .. } = &segments[2] else {
+            panic!("the changed empty suffix must be scanned after tombstone closure")
+        };
+        assert!(rows.is_empty());
+        assert!(tombstones.is_empty());
 
         // With enough detail budget, the fixture-backed m and z conflicts
         // retain their full base/left/right values after the row tombstone.
