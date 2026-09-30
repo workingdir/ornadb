@@ -958,6 +958,69 @@ mod tests {
     }
 
     #[test]
+    fn composed_debug_inspect_and_trace_projections_keep_wrapper_tails_opaque() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let tagged = |number, payload| Raw::Tag(number, Box::new(payload));
+        let diagnostic = tagged(
+            60011,
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Text(fixture.into())),
+                (Raw::Int(1.into()), Raw::Int(3.into())),
+                (Raw::Int(2.into()), Raw::Text(fixture.into())),
+                (Raw::Int(3.into()), Raw::Array(vec![])),
+                (Raw::Int(4.into()), Raw::Array(vec![Raw::Text(fixture.into())])),
+                (Raw::Int(5.into()), Raw::Array(vec![])),
+                (Raw::Int(6.into()), Raw::Bool(false)),
+            ]),
+        );
+        let sys_value = tagged(
+            60026,
+            Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".into())]),
+                Raw::Text(fixture.into()),
+            ]),
+        );
+        let present = tagged(
+            60012,
+            Raw::Array(vec![
+                Raw::Text("value".into()),
+                Raw::Null,
+                Raw::Map(vec![(
+                    Raw::Text("diagnostic".into()),
+                    Raw::Array(vec![diagnostic.clone(), sys_value.clone()]),
+                )]),
+                Raw::Array(vec![]),
+            ]),
+        );
+        let error = tagged(
+            60016,
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Text("ORNA-E-TEST".into())),
+                (Raw::Int(1.into()), Raw::Text(fixture.into())),
+                (Raw::Int(2.into()), Raw::Array(vec![])),
+                (
+                    Raw::Int(3.into()),
+                    Raw::Map(vec![(
+                        Raw::Text("credential".into()),
+                        Raw::Text(fixture.into()),
+                    )]),
+                ),
+            ]),
+        );
+        let raw = Raw::Array(vec![diagnostic, present, error, sys_value]);
+        let value = CanonicalValue::new(raw.clone()).expect("composed wrappers are canonical");
+
+        let debug = format!("{raw:?} {value:?}");
+        let display = inspect(&value);
+        let trace = value.redacted_for_trace().unwrap().encode().unwrap();
+        assert!(!debug.contains(fixture), "{debug}");
+        assert!(!display.contains(fixture), "{display}");
+        assert!(!trace
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
+    }
+
+    #[test]
     fn inspect_renders_canonical_uuid_text_without_affecting_ovb() {
         let value = CanonicalValue::uuid([
             0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,

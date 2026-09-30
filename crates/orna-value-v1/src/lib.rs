@@ -137,11 +137,19 @@ impl Value {
         encode_raw(&self.0)
     }
     /// Returns a transport/trace-safe projection with every nested Error
-    /// payload redacted. Canonical values remain lossless for local recovery;
-    /// callers crossing an unprivileged observability boundary must opt into
-    /// this projection because OVB has no field-level secrecy classifier.
+    /// payload redacted and generic protected wrappers hidden. Canonical values
+    /// remain lossless for local recovery; callers crossing an unprivileged
+    /// observability boundary must opt into this projection because OVB has no
+    /// field-level secrecy classifier for those wrappers.
     pub fn redacted_for_trace(&self) -> Result<Self> {
-        Self::new(redact_error_trace_values(&self.0, 0)?)
+        Self::new(redact_trace_values(&self.0, 0, true)?)
+    }
+    /// Redacts Error values while retaining surrounding registered wrappers.
+    /// Typed protocol decoders use this only before they apply their own
+    /// wrapper-aware projection; generic trace output must use
+    /// [`Self::redacted_for_trace`] instead.
+    pub fn redacted_error_values_for_trace(&self) -> Result<Self> {
+        Self::new(redact_trace_values(&self.0, 0, false)?)
     }
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         let mut r = Reader::new(bytes);
@@ -1157,9 +1165,16 @@ impl ErrorValue {
     }
 }
 
-fn redact_error_trace_values(raw: &Raw, depth: usize) -> Result<Raw> {
+fn redact_trace_values(raw: &Raw, depth: usize, hide_wrappers: bool) -> Result<Raw> {
     if depth > MAX_DEPTH {
         return Err(Error::Limit);
+    }
+    if hide_wrappers && matches!(raw, Raw::Tag(0 | 60011 | 60012 | 60026, _)) {
+        // ORNA-SECRET-002 requires these values to stay opaque in traces. The
+        // generic OVB layer has no per-field disclosure classifier, so replace
+        // the entire wrapper with ordinary text instead of forging a typed
+        // wrapper whose redacted bit or shape could imply privileged approval.
+        return Ok(Raw::Text("<redacted>".into()));
     }
     Ok(match raw {
         Raw::Tag(60016, _) => ErrorValue::from_value(Value::new(raw.clone())?)?
@@ -1169,7 +1184,7 @@ fn redact_error_trace_values(raw: &Raw, depth: usize) -> Result<Raw> {
         Raw::Array(values) => Raw::Array(
             values
                 .iter()
-                .map(|value| redact_error_trace_values(value, depth + 1))
+                .map(|value| redact_trace_values(value, depth + 1, hide_wrappers))
                 .collect::<Result<_>>()?,
         ),
         Raw::Map(entries) => {
@@ -1177,11 +1192,21 @@ fn redact_error_trace_values(raw: &Raw, depth: usize) -> Result<Raw> {
                 .iter()
                 .map(|(key, value)| {
                     Ok((
-                        redact_error_trace_values(key, depth + 1)?,
-                        redact_error_trace_values(value, depth + 1)?,
+                        redact_trace_values(key, depth + 1, hide_wrappers)?,
+                        redact_trace_values(value, depth + 1, hide_wrappers)?,
                     ))
                 })
                 .collect::<Result<Vec<_>>>()?;
+            if entries
+                .iter()
+                .zip(&redacted)
+                .any(|((key, _), (safe_key, _))| key != safe_key)
+            {
+                // Hiding a typed map key can collapse distinct keys and make
+                // the projected map non-canonical. Hide the containing map
+                // as a whole rather than emit an invalid or ambiguous trace.
+                return Ok(Raw::Text("<redacted>".into()));
+            }
             redacted.sort_by(|(left, _), (right, _)| {
                 encode_raw(left)
                     .expect("validated map keys remain encodable")
@@ -1191,7 +1216,7 @@ fn redact_error_trace_values(raw: &Raw, depth: usize) -> Result<Raw> {
         }
         Raw::Tag(tag, value) => Raw::Tag(
             *tag,
-            Box::new(redact_error_trace_values(value, depth + 1)?),
+            Box::new(redact_trace_values(value, depth + 1, hide_wrappers)?),
         ),
         value => value.clone(),
     })
@@ -1209,7 +1234,7 @@ fn raw_debug_value(raw: &Raw, depth: usize, errors_redacted: bool) -> Result<Raw
         return Ok(RawDebugValue::Text("<redacted>".into()));
     }
     if !errors_redacted && matches!(raw, Raw::Tag(60016, _)) {
-        let safe = redact_error_trace_values(raw, depth)?;
+        let safe = redact_trace_values(raw, depth, true)?;
         return raw_debug_value(&safe, depth, true);
     }
 
@@ -4156,6 +4181,67 @@ mod tests {
             assert!(debug.contains("<redacted>"));
             assert!(!debug.contains(fixture));
         }
+    }
+
+    #[test]
+    fn generic_trace_projection_hides_nested_wrappers_and_protected_map_keys() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let diagnostic = tag(
+            60011,
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Text("ORNA-E-TEST".into())),
+                (Raw::Int(1.into()), Raw::Int(3.into())),
+                (Raw::Int(2.into()), Raw::Text(fixture.into())),
+                (Raw::Int(3.into()), Raw::Array(vec![])),
+                (Raw::Int(4.into()), Raw::Array(vec![Raw::Text(fixture.into())])),
+                (Raw::Int(5.into()), Raw::Array(vec![])),
+                (Raw::Int(6.into()), Raw::Bool(false)),
+            ]),
+        );
+        let present = tag(
+            60012,
+            Raw::Array(vec![
+                Raw::Text("value".into()),
+                Raw::Null,
+                Raw::Map(vec![(
+                    Raw::Text("credential".into()),
+                    Raw::Text(fixture.into()),
+                )]),
+                Raw::Array(vec![]),
+            ]),
+        );
+        let sys_value = tag(
+            60026,
+            Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".into())]),
+                Raw::Text(fixture.into()),
+            ]),
+        );
+        let value = Value::new(Raw::Array(vec![diagnostic.clone(), present, sys_value]))
+            .expect("generic wrapper fixture is canonical");
+
+        let trace_bytes = value.redacted_for_trace().unwrap().encode().unwrap();
+        assert!(!trace_bytes
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
+        assert_eq!(
+            Value::decode(&trace_bytes).unwrap().raw(),
+            &Raw::Array(vec![
+                Raw::Text("<redacted>".into()),
+                Raw::Text("<redacted>".into()),
+                Raw::Text("<redacted>".into()),
+            ])
+        );
+
+        let keyed = Value::new(Raw::Map(vec![(
+            diagnostic,
+            Raw::Text(fixture.into()),
+        )]))
+        .expect("a typed wrapper can be a canonical map key");
+        assert_eq!(
+            keyed.redacted_for_trace().unwrap().raw(),
+            &Raw::Text("<redacted>".into())
+        );
     }
 
     #[test]
