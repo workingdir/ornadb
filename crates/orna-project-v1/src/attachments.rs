@@ -994,6 +994,127 @@ mod tests {
     }
 
     #[test]
+    fn nested_pin_chain_keeps_repeated_archive_alias_at_each_commit() {
+        let equivalent_source = include_str!("../tests/fixtures/attached-equivalent-main.orna");
+        let archive_later_source = equivalent_source.replace("42", "99");
+        let (archive_dir, archive_repository, archive_later_commit) =
+            repository(&archive_later_source);
+
+        let (source_dir, source_repository, _) =
+            repository(include_str!("../tests/fixtures/attached-incompatible-main.orna"));
+        let source_commit = write_commit(
+            source_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive {archive_later_commit}\n"),
+        );
+
+        write_commit(archive_dir.path(), "main.orna", equivalent_source);
+        let archive_parent_commit = write_commit(
+            archive_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("source {source_commit}\n"),
+        );
+
+        let primary_source = equivalent_source.replace("42", "7");
+        let (primary_dir, primary_repository, _) = repository(&primary_source);
+        let parent_commit = write_commit(
+            primary_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive {archive_parent_commit}\n"),
+        );
+
+        let loader = ProjectLoader::default();
+        let primary = PinnedDatabase::resolve(
+            "app",
+            primary_repository,
+            &parent_commit,
+            loader,
+        )
+        .unwrap();
+        let resolver = PackageResolver::new(
+            [
+                ("archive".to_owned(), archive_repository),
+                ("source".to_owned(), source_repository),
+            ],
+            loader,
+        )
+        .unwrap();
+
+        let root_session = resolver.resolve_for_parent(primary).unwrap();
+        assert_eq!(
+            root_session
+                .database("archive")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            archive_parent_commit
+        );
+        assert!(root_session.database("source").is_none());
+        assert!(root_session.units_structurally_equivalent(
+            "app", "meter", "archive", "meter"
+        ));
+
+        // The reference fixes each selected parent's exact pins but is silent
+        // on recursive pin closure. V1 follows one manifest edge per session;
+        // repeated aliases at later depths keep the commit selected there.
+        let archive = root_session.database("archive").unwrap().clone();
+        let archive_session = resolver.resolve_for_parent(archive).unwrap();
+        assert_eq!(
+            archive_session.primary().pin().commit().as_str(),
+            archive_parent_commit
+        );
+        assert_eq!(
+            archive_session
+                .database("source")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            source_commit
+        );
+        assert!(!archive_session.units_structurally_equivalent(
+            "archive",
+            "meter",
+            "source",
+            "meter"
+        ));
+
+        let source = archive_session.database("source").unwrap().clone();
+        let source_session = resolver.resolve_for_parent(source).unwrap();
+        assert_eq!(
+            source_session.primary().pin().commit().as_str(),
+            source_commit
+        );
+        assert_eq!(
+            source_session
+                .database("archive")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            archive_later_commit
+        );
+        assert_ne!(archive_parent_commit, archive_later_commit);
+        assert!(!source_session.units_structurally_equivalent(
+            "source",
+            "meter",
+            "archive",
+            "meter"
+        ));
+
+        assert_eq!(
+            root_session
+                .database("archive")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            archive_parent_commit
+        );
+    }
+
+    #[test]
     fn equivalent_units_interoperate_across_attachments_but_name_match_is_not_enough() {
         let primary_source = include_str!("fixtures/attached-primary-main.orna");
         let (_primary_dir, primary_repository, primary_commit) = repository(&primary_source);
