@@ -2748,6 +2748,57 @@ mod tests {
     }
 
     #[test]
+    fn rekey_survives_a_recovered_failed_update_and_later_mutation() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "table-rekey-recovery-tail.orna",
+                include_str!("../tests/fixtures/table-rekey-recovery-tail.orna"),
+                "main",
+            )
+            .expect("checked-in recovery fixture should be admitted");
+
+        let int = |value: i64| {
+            CanonicalValue::new(OvbRaw::Int(value.into())).expect("integer is canonical")
+        };
+        let row = |id: i64, text: &str, quantity: i64| {
+            CanonicalValue::new(OvbRaw::Map(vec![
+                (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
+                (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
+                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+            ]))
+            .expect("captured row is canonical")
+        };
+        let key = int(1).encode().expect("key is canonical");
+        let rows = BTreeMap::from([(
+            "Note".to_owned(),
+            vec![(key, row(1, "original", 3).encode().unwrap())],
+        )]);
+        let tables = admitted_table_schemas(&application.module_header);
+        let mut handler =
+            SourceMutationEffectHandler::with_table_rows(tables, rows).expect("valid snapshot");
+
+        invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            &Environment::new(),
+            application.limits,
+            &mut handler,
+        )
+        .expect("the failed update is recovered and the moved row remains addressable");
+
+        let mutations = handler.into_mutations().expect("valid mutation log");
+        assert_eq!(mutations.len(), 2);
+        assert_eq!(mutations[0].key(), int(1).encode().unwrap());
+        assert_eq!(mutations[0].rekey_to(), Some(int(2).encode().unwrap().as_slice()));
+        assert_eq!(mutations[1].key(), int(2).encode().unwrap());
+        assert_eq!(mutations[1].rekey_to(), None);
+        let updated = CanonicalValue::decode(mutations[1].value().unwrap()).unwrap();
+        assert_eq!(updated, row(2, "original", 9));
+    }
+
+    #[test]
     fn failed_mutation_tail_does_not_return_earlier_effects_for_staging() {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());

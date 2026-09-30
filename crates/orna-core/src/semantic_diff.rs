@@ -118,6 +118,83 @@ pub struct RowRekey {
     new_key: Vec<u8>,
 }
 
+/// One ordered row identity event retained by an activation.
+///
+/// Re-key events alone cannot distinguish a row that moved and was deleted
+/// from a replacement inserted under one of its former keys. Adapters that
+/// have the complete mutation log should attach inserts and deletes too.
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub struct RowMutationIntent {
+    kind: RowMutationKind,
+}
+
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+enum RowMutationKind {
+    Insert { table: TypeId, key: Vec<u8> },
+    Delete { table: TypeId, key: Vec<u8> },
+    Rekey(RowRekey),
+}
+
+impl RowMutationIntent {
+    /// Creates an insert identity event from a canonical logical key.
+    pub fn insert(
+        table: TypeId,
+        key: &CanonicalValue,
+    ) -> Result<Self, SemanticSnapshotError> {
+        Ok(Self {
+            kind: RowMutationKind::Insert {
+                table,
+                key: key
+                    .encode()
+                    .map_err(SemanticSnapshotError::ValueEncoding)?,
+            },
+        })
+    }
+
+    /// Creates a delete identity event from a canonical logical key.
+    pub fn delete(
+        table: TypeId,
+        key: &CanonicalValue,
+    ) -> Result<Self, SemanticSnapshotError> {
+        Ok(Self {
+            kind: RowMutationKind::Delete {
+                table,
+                key: key
+                    .encode()
+                    .map_err(SemanticSnapshotError::ValueEncoding)?,
+            },
+        })
+    }
+
+    /// Wraps an explicit row re-key event.
+    pub const fn rekey(rekey: RowRekey) -> Self {
+        Self {
+            kind: RowMutationKind::Rekey(rekey),
+        }
+    }
+}
+
+impl fmt::Debug for RowMutationIntent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.kind {
+            RowMutationKind::Insert { table, .. } => formatter
+                .debug_struct("RowMutationIntent::Insert")
+                .field("table", table)
+                .field("key", &"<redacted>")
+                .finish(),
+            RowMutationKind::Delete { table, .. } => formatter
+                .debug_struct("RowMutationIntent::Delete")
+                .field("table", table)
+                .field("key", &"<redacted>")
+                .finish(),
+            RowMutationKind::Rekey(rekey) => formatter
+                .debug_tuple("RowMutationIntent::Rekey")
+                .field(rekey)
+                .finish(),
+        }
+    }
+}
+
 impl RowRekey {
     /// Creates a re-key intent from canonical logical key values.
     pub fn new(
@@ -216,10 +293,9 @@ pub struct SemanticSnapshot {
     results: BTreeMap<(FunctionId, [u8; 32]), [u8; 32]>,
     dependencies: BTreeSet<DependencyEdge>,
     compact_storage: Option<CompactStorageObservation>,
-    // Re-key intents are an ordered activation log. Keeping source order is
-    // necessary when a freed key is reused by a different row in that same
-    // activation.
-    rekeys: Vec<RowRekey>,
+    // Mutation intents are an ordered activation log. Inserts and deletes are
+    // needed alongside re-keys to disambiguate reuse of a row's former key.
+    row_mutations: Vec<RowMutationIntent>,
 }
 
 impl SemanticSnapshot {
@@ -257,7 +333,7 @@ impl SemanticSnapshot {
             results: result_map,
             dependencies,
             compact_storage,
-            rekeys: Vec::new(),
+            row_mutations: Vec::new(),
         })
     }
 
@@ -266,9 +342,20 @@ impl SemanticSnapshot {
         mut self,
         rekeys: impl IntoIterator<Item = RowRekey>,
     ) -> Result<Self, SemanticSnapshotError> {
-        for rekey in rekeys {
-            self.rekeys.push(rekey);
-        }
+        self.row_mutations.extend(
+            rekeys.into_iter().map(RowMutationIntent::rekey),
+        );
+        Ok(self)
+    }
+
+    /// Attaches the ordered row mutation identity events from a candidate
+    /// activation. Include inserts and deletes when keys can be reused after a
+    /// re-key so the diff can report replacement identities explicitly.
+    pub fn with_row_mutations(
+        mut self,
+        mutations: impl IntoIterator<Item = RowMutationIntent>,
+    ) -> Result<Self, SemanticSnapshotError> {
+        self.row_mutations.extend(mutations);
         Ok(self)
     }
 }
@@ -276,9 +363,9 @@ impl SemanticSnapshot {
 /// Whether a keyed row was added, removed, updated, or explicitly re-keyed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RowChangeKind {
-    /// The key appears only in the candidate snapshot.
+    /// A new row identity was inserted at this key.
     Added,
-    /// The key appears only in the base snapshot.
+    /// A base row identity was removed from this key.
     Removed,
     /// The key appears in both snapshots with different canonical values.
     Updated,
@@ -472,7 +559,7 @@ pub fn semantic_snapshot_diff(
     candidate: &SemanticSnapshot,
 ) -> SemanticDiffReport {
     let catalogue = catalogue_diff(&base.catalogue, &candidate.catalogue);
-    let rows = diff_rows(&base.rows, &candidate.rows, &candidate.rekeys);
+    let rows = diff_rows(&base.rows, &candidate.rows, &candidate.row_mutations);
     let results = diff_results(&base.results, &candidate.results);
     let dependencies = diff_dependencies(&base.dependencies, &candidate.dependencies);
     let logical_changes_present = !catalogue.is_empty()
@@ -514,44 +601,96 @@ pub fn semantic_snapshot_diff(
 fn diff_rows(
     base: &BTreeMap<(TypeId, Vec<u8>), [u8; 32]>,
     candidate: &BTreeMap<(TypeId, Vec<u8>), [u8; 32]>,
-    rekeys: &[RowRekey],
+    mutations: &[RowMutationIntent],
 ) -> Vec<RowChange> {
-    // Carry each base row's stable identity through the ordered activation
-    // log. A key can be reused only after its previous row has moved, so an
-    // unordered edge graph would incorrectly collapse e.g. 2→3, then 1→2.
+    #[derive(Clone)]
+    enum Identity {
+        Base(Vec<u8>),
+        Inserted,
+    }
+
+    // Carry identities through the complete activation log. A key becomes
+    // available after either a re-key or delete, and later insertions may
+    // legitimately create a different row identity at that same key.
     let mut current_identity = base
         .keys()
         .cloned()
-        .map(|identity| (identity.clone(), identity))
+        .map(|key| (key.clone(), Identity::Base(key.1)))
         .collect::<BTreeMap<_, _>>();
-    for rekey in rekeys {
-        let old = (rekey.table, rekey.old_key.clone());
-        let new = (rekey.table, rekey.new_key.clone());
-        if current_identity.contains_key(&new) {
-            // A stale or invalid intent cannot displace another live row.
-            // The ordinary keyed diff below remains the conservative result.
-            continue;
-        }
-        if let Some(origin) = current_identity.remove(&old) {
-            current_identity.insert(new, origin);
+    let mut deleted_base = BTreeSet::new();
+    for mutation in mutations {
+        match &mutation.kind {
+            RowMutationKind::Insert { table, key } => {
+                let identity = (*table, key.clone());
+                if let std::collections::btree_map::Entry::Vacant(slot) =
+                    current_identity.entry(identity)
+                {
+                    slot.insert(Identity::Inserted);
+                }
+            }
+            RowMutationKind::Delete { table, key } => {
+                if let Some(Identity::Base(origin)) = current_identity.remove(&(*table, key.clone()))
+                {
+                    deleted_base.insert((*table, origin));
+                }
+            }
+            RowMutationKind::Rekey(rekey) => {
+                let old = (rekey.table, rekey.old_key.clone());
+                let new = (rekey.table, rekey.new_key.clone());
+                if current_identity.contains_key(&new) {
+                    // A stale or invalid intent cannot displace another live
+                    // row. Keep the ordinary keyed diff conservative.
+                    continue;
+                }
+                if let Some(identity) = current_identity.remove(&old) {
+                    current_identity.insert(new, identity);
+                }
+            }
         }
     }
 
     let mut consumed = BTreeSet::new();
     let mut changes = Vec::new();
-    for (current, origin) in current_identity {
-        if origin != current && candidate.contains_key(&current) {
-            // The activation ledger is explicit evidence of continuity, even
-            // when an earlier move frees a key that another row then occupies.
-            // A terminal delete has no candidate row and stays a removal.
-            consumed.insert(origin.clone());
-            consumed.insert(current.clone());
-            changes.push(RowChange {
-                table: current.0,
-                key: current.1,
-                previous_key: Some(origin.1),
-                kind: RowChangeKind::Rekeyed,
-            });
+    for (table, origin) in deleted_base {
+        changes.push(RowChange {
+            table,
+            key: origin.clone(),
+            previous_key: None,
+            kind: RowChangeKind::Removed,
+        });
+        if !candidate.contains_key(&(table, origin.clone())) {
+            consumed.insert((table, origin));
+        }
+    }
+    for (current, identity) in current_identity {
+        if !candidate.contains_key(&current) {
+            continue;
+        }
+        match identity {
+            Identity::Base(origin) if origin != current.1 => {
+                // Explicit activation intent is evidence of continuity, even
+                // when the old key has been reused by a separate insertion.
+                consumed.insert(current.clone());
+                changes.push(RowChange {
+                    table: current.0,
+                    key: current.1.clone(),
+                    previous_key: Some(origin.clone()),
+                    kind: RowChangeKind::Rekeyed,
+                });
+                if !candidate.contains_key(&(current.0, origin.clone())) {
+                    consumed.insert((current.0, origin));
+                }
+            }
+            Identity::Base(_) => {}
+            Identity::Inserted => {
+                consumed.insert(current.clone());
+                changes.push(RowChange {
+                    table: current.0,
+                    key: current.1,
+                    previous_key: None,
+                    kind: RowChangeKind::Added,
+                });
+            }
         }
     }
     let keys = base
@@ -581,7 +720,15 @@ fn diff_rows(
         })
         .collect::<Vec<_>>();
     changes.extend(ordinary);
-    changes.sort_by(|left, right| (left.table, &left.key).cmp(&(right.table, &right.key)));
+    changes.sort_by(|left, right| {
+        let rank = |kind| match kind {
+            RowChangeKind::Removed => 0,
+            RowChangeKind::Added => 1,
+            RowChangeKind::Updated => 2,
+            RowChangeKind::Rekeyed => 3,
+        };
+        (left.table, &left.key, rank(left.kind)).cmp(&(right.table, &right.key, rank(right.kind)))
+    });
     changes
 }
 

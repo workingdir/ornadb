@@ -6,8 +6,8 @@ use orna_core::{
     },
     semantic_diff::{
         CompactStorageObservation, DependencyChangeKind, DependencyEdge, KeyedRow,
-        ResultChangeKind, ResultObservation, RowChangeKind, RowRekey, SemanticEntityId,
-        SemanticSnapshot, semantic_snapshot_diff,
+        ResultChangeKind, ResultObservation, RowChangeKind, RowMutationIntent, RowRekey,
+        SemanticEntityId, SemanticSnapshot, semantic_snapshot_diff,
     },
     types::{ResolvedType, StandardScalar},
 };
@@ -17,6 +17,8 @@ use orna_value_v1::{Raw, Value};
 const BASE_SOURCE: &str = include_str!("fixtures/semantic-diff/base.orna");
 const CANDIDATE_SOURCE: &str = include_str!("fixtures/semantic-diff/candidate.orna");
 const ADDED_SCHEMA_SOURCE: &str = include_str!("fixtures/semantic-diff/archive.orna");
+const REKEY_DELETE_REINSERT_SOURCE: &str =
+    include_str!("fixtures/semantic-diff/rekey-delete-reinsert.orna");
 
 const TABLE: TypeId = TypeId::from_bytes([0x21; 16]);
 const STATUS_FIELD: FieldId = FieldId::from_bytes([0x23; 16]);
@@ -322,6 +324,78 @@ fn semantic_diff_tracks_rekey_identity_when_a_freed_destination_is_reused_again(
     assert_eq!(report.rows()[1].kind(), RowChangeKind::Rekeyed);
     assert_eq!(report.rows()[1].previous_key_bytes(), Some(integer(1).encode().unwrap().as_slice()));
     assert_eq!(report.rows()[1].key_bytes(), integer(3).encode().unwrap());
+}
+
+#[test]
+fn semantic_diff_reports_insert_at_a_rekeyed_rows_former_key() {
+    let base = SemanticSnapshot::new(
+        catalogue(1, false),
+        [KeyedRow::new(TABLE, &integer(1), &text("original")).unwrap()],
+        [],
+        [],
+        None,
+    )
+    .unwrap();
+    let candidate = SemanticSnapshot::new(
+        catalogue(1, false),
+        [
+            KeyedRow::new(TABLE, &integer(1), &text("replacement")).unwrap(),
+            KeyedRow::new(TABLE, &integer(2), &text("original")).unwrap(),
+        ],
+        [],
+        [],
+        None,
+    )
+    .unwrap()
+    .with_row_mutations([
+        RowMutationIntent::rekey(RowRekey::new(TABLE, &integer(1), &integer(2)).unwrap()),
+        RowMutationIntent::insert(TABLE, &integer(1)).unwrap(),
+    ])
+    .unwrap();
+
+    let report = semantic_snapshot_diff(&base, &candidate);
+
+    assert_eq!(report.rows().len(), 2);
+    assert_eq!(report.rows()[0].kind(), RowChangeKind::Added);
+    assert_eq!(report.rows()[0].key_bytes(), integer(1).encode().unwrap());
+    assert_eq!(report.rows()[1].kind(), RowChangeKind::Rekeyed);
+    assert_eq!(report.rows()[1].previous_key_bytes(), Some(integer(1).encode().unwrap().as_slice()));
+    assert_eq!(report.rows()[1].key_bytes(), integer(2).encode().unwrap());
+}
+
+#[test]
+fn semantic_diff_drops_rekey_continuity_when_the_row_is_deleted_before_reinsert() {
+    assert!(parse_module(REKEY_DELETE_REINSERT_SOURCE).is_ok());
+    let base = SemanticSnapshot::new(
+        catalogue(1, false),
+        [KeyedRow::new(TABLE, &integer(1), &text("original")).unwrap()],
+        [],
+        [],
+        None,
+    )
+    .unwrap();
+    let candidate = SemanticSnapshot::new(
+        catalogue(1, false),
+        [KeyedRow::new(TABLE, &integer(1), &text("replacement")).unwrap()],
+        [],
+        [],
+        None,
+    )
+    .unwrap()
+    .with_row_mutations([
+        RowMutationIntent::rekey(RowRekey::new(TABLE, &integer(1), &integer(2)).unwrap()),
+        RowMutationIntent::delete(TABLE, &integer(2)).unwrap(),
+        RowMutationIntent::insert(TABLE, &integer(1)).unwrap(),
+    ])
+    .unwrap();
+
+    let report = semantic_snapshot_diff(&base, &candidate);
+
+    assert_eq!(report.rows().len(), 2);
+    assert_eq!(report.rows()[0].kind(), RowChangeKind::Removed);
+    assert_eq!(report.rows()[0].key_bytes(), integer(1).encode().unwrap());
+    assert_eq!(report.rows()[1].kind(), RowChangeKind::Added);
+    assert_eq!(report.rows()[1].key_bytes(), integer(1).encode().unwrap());
 }
 
 #[test]
