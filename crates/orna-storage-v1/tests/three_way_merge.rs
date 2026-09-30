@@ -3683,8 +3683,51 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         assert_eq!(source.visited.len(), 3);
         assert!(source.visited.iter().all(|(_, locator)| locator.ends_with(b"upper")));
 
-        // One retained checkpoint detail fits; the later fixture conflict
-        // crosses the shared tail after the clean row tombstone has resolved.
+        // ORNA-MERGE-005 leaves resource-budget precedence open. One row
+        // below the fixture tombstone stops before checkpoint resolution;
+        // exact row capacity completes the tombstone before the zero-detail
+        // checkpoint conflict crosses the conflict budget.
+        let (base, left, right, mut source, _, _, _, _) =
+            build_inputs(row_delete_on_left, checkpoint_delete_on_left, true, regular_checkpoint_fixtures);
+        let error = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 1, max_conflicts: 0 },
+        )
+        .unwrap_err();
+        let BranchMergeError::BudgetExceeded { report } = error else {
+            panic!("the second fixture row crosses the one-row boundary")
+        };
+        assert_eq!(report.rows_examined, 2);
+        assert_eq!(report.conflicts_lower_bound, 0);
+        assert!(report.affected_ranges.contains(&(id(1), high_range.clone())));
+        assert!(report.affected_checkpoints.is_empty());
+        assert_eq!(source.visited.len(), if row_delete_on_left { 3 } else { 2 });
+
+        let (base, left, right, mut source, _, _, checkpoint_id, _) =
+            build_inputs(row_delete_on_left, checkpoint_delete_on_left, true, regular_checkpoint_fixtures);
+        let error = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 2, max_conflicts: 0 },
+        )
+        .unwrap_err();
+        let BranchMergeError::BudgetExceeded { report } = error else {
+            panic!("the checkpoint conflict crosses after exact row-budget tombstone closure")
+        };
+        assert_eq!(report.rows_examined, 2);
+        assert_eq!(report.conflicts_lower_bound, 1);
+        assert!(report.affected_ranges.contains(&(id(1), high_range.clone())));
+        assert_eq!(report.affected_checkpoints.len(), 1);
+        assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
+        assert_eq!(source.visited.len(), 3);
+
+        // At exact row capacity, one checkpoint detail fits; the later fixture
+        // conflict crosses after the clean row tombstone has resolved.
         let (base, left, right, mut source, agreed_delete_id, unchanged_delete_id, checkpoint_id, tail_id) =
             build_inputs(row_delete_on_left, checkpoint_delete_on_left, true, regular_checkpoint_fixtures);
         let error = merge_three_way_snapshots(
@@ -3692,7 +3735,7 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
             &left,
             &right,
             &mut source,
-            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 1 },
+            BranchMergeBudget { max_rows_examined: 2, max_conflicts: 1 },
         )
         .unwrap_err();
         let BranchMergeError::BudgetExceeded { report } = error else {
@@ -3723,7 +3766,7 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
             &left,
             &right,
             &mut source,
-            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 1 },
+            BranchMergeBudget { max_rows_examined: 2, max_conflicts: 1 },
         )
         .unwrap_err();
         let BranchMergeError::Conflicts { conflicts, report } = error else {
