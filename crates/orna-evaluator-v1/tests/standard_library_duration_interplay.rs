@@ -51,6 +51,22 @@ fn pinned_duration_formatters_preserve_exact_fractional_elapsed_values() {
             include_str!("fixtures/stdlib-time-duration-large-clock-6ev0.orna"),
             "2501999792983:36:33",
         ),
+        (
+            include_str!("fixtures/stdlib-time-duration-chain-compact-y40kw.orna"),
+            "0.000000001s",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-chain-clock-y40kw.orna"),
+            "00:00:00.000000001",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-chain-words-y40kw.orna"),
+            "0.000000001 seconds",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-chain-iso-y40kw.orna"),
+            "PT0.000000001S",
+        ),
     ] {
         let result = session.submit(source);
         assert_eq!(
