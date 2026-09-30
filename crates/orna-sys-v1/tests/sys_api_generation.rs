@@ -199,6 +199,33 @@ fn annotation_metadata_and_generated_inventory_fail_closed() {
     let generated: Value = serde_json::from_str(&orna_sys_v1::system_api_json()).unwrap();
     build_support::validate_api_document(&generated).expect("generated API inventory is valid");
 
+    let mut unknown_top_level = generated.clone();
+    unknown_top_level["legacy_api"] = serde_json::json!({});
+    assert!(
+        build_support::validate_api_document(&unknown_top_level)
+            .unwrap_err()
+            .contains("exactly the published top-level fields"),
+        "unknown schema fields must fail closed"
+    );
+
+    let mut missing_version = generated.clone();
+    missing_version.as_object_mut().unwrap().remove("sys_version");
+    assert!(
+        build_support::validate_api_document(&missing_version)
+            .unwrap_err()
+            .contains("exactly the published top-level fields"),
+        "missing schema fields must fail closed"
+    );
+
+    let mut blank_source = generated.clone();
+    blank_source["source_of_truth"] = serde_json::json!("  ");
+    assert!(
+        build_support::validate_api_document(&blank_source)
+            .unwrap_err()
+            .contains("`source_of_truth` must be a nonblank string"),
+        "the generator's provenance field must remain populated"
+    );
+
     let mut wrong_effect = generated.clone();
     let invoke = wrong_effect["functions"]
         .as_array_mut()
