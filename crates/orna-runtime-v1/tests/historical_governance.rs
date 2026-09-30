@@ -143,6 +143,7 @@ async fn governance_reads_and_row_attestations_follow_immutable_checkpoint_cuts(
     assert_eq!(admin_one.rows()[0].observed_generation, 0);
     assert_eq!(admin_one.rows()[0].function, "sys.admin.pause_stream");
     assert_eq!(admin_one.rows()[1].function, "sys.admin.reset_checkpoint");
+    assert_eq!(admin_one.snapshot_id(), generation_one.snapshot_id());
     assert_eq!(resets_one.rows().len(), 1);
     assert_eq!(resets_one.rows()[0].observed_generation, Some(0));
     assert_eq!(resets_one.rows()[0].reason, "operator rewind");
@@ -166,6 +167,7 @@ async fn governance_reads_and_row_attestations_follow_immutable_checkpoint_cuts(
     assert_eq!(attestation_one.table_count(), 1);
     assert_eq!(generation_one.generation(), 1);
     assert_eq!(attestation_one.generation(), 1);
+    assert_eq!(attestation_one.snapshot_id(), generation_one.snapshot_id());
     assert_eq!(attestation_one.capture(), generation_one.capture());
     assert_eq!(attestation_one.admin_audit_sequence(), 2);
     assert_eq!(attestation_one.checkpoint_reset_audit_sequence(), 1);
