@@ -1,0 +1,23 @@
+pub fn bad(flag: Bool): Int { case flag {
+1: 2 3 { value: 4 },
+true: 5,
+false: outer => { case outer {
+true: flag,
+false: inner => { case inner {
+true: outer,
+false: "tail {probe => { case probe {
+true: flag,
+false: nested => { case nested {
+true: outer,
+false: deeper => { case deeper {
+true: flag,
+false: last => { case last {
+true: outer,
+false: "final {flag} done"
+} }
+} }
+} }
+} }}"
+} }
+} }
+} }
