@@ -183,7 +183,9 @@ pub fn merge_three_way_snapshots<R: BranchRowSource>(
     let mut conflicts = Vec::new();
     // Resolution has a stable phase boundary: schema must be settled before
     // row data is read; after that, row conflicts are collected before
-    // checkpoint conflicts. MERGE-1 requires an isolated complete result but
+    // checkpoint conflicts. A schema conflict ends planning even if it leaves
+    // budget unused, because lower phases cannot be resolved against a
+    // candidate schema. MERGE-1 requires an isolated complete result but
     // leaves diagnostic ordering open, so this order is the deterministic
     // policy used here.
     let schema = match merge_schema_bounded(&base.schema, &left.schema, &right.schema, budget.max_conflicts) {
@@ -198,6 +200,16 @@ pub fn merge_three_way_snapshots<R: BranchRowSource>(
                 } else {
                     report.affected_tables.extend(affected);
                 }
+            }
+            if schema_failure.conflicts_lower_bound > schema_failure.conflicts.len() {
+                // The budget can truncate away the only detail naming a
+                // conflicted table (including a zero-detail budget). When
+                // that happens, report every candidate table conservatively;
+                // the reference requires affected-table evidence but does
+                // not define a summary shape for omitted schema details.
+                report.affected_tables.extend(base.schema.tables.iter().map(|table| table.id));
+                report.affected_tables.extend(left.schema.tables.iter().map(|table| table.id));
+                report.affected_tables.extend(right.schema.tables.iter().map(|table| table.id));
             }
             if schema_failure.conflicts_lower_bound > budget.max_conflicts {
                 report.conflicts_lower_bound = schema_failure.conflicts_lower_bound;
