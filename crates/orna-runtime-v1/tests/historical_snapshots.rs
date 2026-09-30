@@ -520,3 +520,80 @@ async fn as_of_pins_stay_exact_across_generation_encoding_boundaries() {
     assert!(Snapshot::cwd([32; 16], initial.capture().runtime_id(), BigInt::from(-1))
         .is_err());
 }
+
+#[tokio::test]
+async fn retained_pins_cross_the_small_integer_generation_boundary() {
+    let (_directory, repository) = repository();
+    let identity = RuntimeIdentity {
+        database_id: [42; 16],
+        repository_id: [43; 16],
+    };
+    let state = RuntimeState::open(&repository, identity, [44; 32])
+        .await
+        .expect("open runtime");
+    let writer = state.acquire_lease([45; 16]).await.expect("acquire writer");
+    let mut pins = Vec::new();
+
+    for generation in 1..=24_u64 {
+        commit(
+            &state,
+            writer,
+            &[table_mutation(generation as u8, 1, Some(b"steady"))],
+            55,
+        )
+        .await;
+        if matches!(generation, 23 | 24) {
+            let selected = state
+                .select_historical_snapshot(generation)
+                .await
+                .expect("select retained generation around integer boundary");
+            let descriptor = selected.capture().snapshot().clone();
+            let encoded = descriptor.encode().expect("encode retained boundary pin");
+            let decoded = Snapshot::decode_bytes(&encoded).expect("decode retained boundary pin");
+            assert_eq!(decoded, descriptor);
+            pins.push((generation, decoded, selected));
+        }
+    }
+
+    assert_eq!(pins.len(), 2);
+    assert_eq!(
+        pins[0].2.capture().generation_digest(),
+        pins[1].2.capture().generation_digest(),
+        "the neighboring generations deliberately share a payload digest"
+    );
+    assert_ne!(
+        pins[0].2.snapshot_id(),
+        pins[1].2.snapshot_id(),
+        "snapshot identity follows the generation coordinate at the 23/24 boundary"
+    );
+
+    for (generation, descriptor, selected) in &pins {
+        let resolved = state
+            .resolve_historical_snapshot(descriptor)
+            .await
+            .expect("resolve exact boundary pin after later generation");
+        assert_eq!(&resolved, selected);
+        assert_eq!(
+            state
+                .read_table_at(&resolved, "records")
+                .await
+                .expect("read exact boundary generation")
+                .rows(),
+            &[(vec![1], b"steady".to_vec())],
+            "generation {generation} resolves to its retained row image"
+        );
+    }
+
+    drop(state);
+    let reopened = RuntimeState::open(&repository, identity, [44; 32])
+        .await
+        .expect("reopen runtime");
+    for (generation, descriptor, selected) in &pins {
+        let resolved = reopened
+            .resolve_historical_snapshot(descriptor)
+            .await
+            .expect("resolve boundary pin after reopen");
+        assert_eq!(resolved, *selected);
+        assert_eq!(resolved.generation(), *generation);
+    }
+}
