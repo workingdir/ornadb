@@ -8457,7 +8457,7 @@ mod tests {
         .expect("competitor retries after two successive moves of the inserted target");
 
         let mutations = handler.into_mutations().expect("valid ordered mutation log");
-        assert_eq!(mutations.len(), 56);
+        assert_eq!(mutations.len(), 63);
 
         let expected_tail = [
             (8, None, true, Some(row(8, "replacement target", 80))),
@@ -8493,6 +8493,13 @@ mod tests {
             (10, None, false, Some(row(10, "second replacement target", 97))),
             (12, Some(11), false, Some(row(11, "second source", 49))),
             (11, None, false, Some(row(11, "second source", 50))),
+            (11, None, false, Some(row(11, "second source", 51))),
+            (11, Some(13), false, Some(row(13, "second source", 51))),
+            (13, None, false, Some(row(13, "second source", 52))),
+            (10, Some(11), false, Some(row(11, "second replacement target", 97))),
+            (11, None, false, Some(row(11, "second replacement target", 98))),
+            (13, Some(10), false, Some(row(10, "second source", 52))),
+            (10, None, false, Some(row(10, "second source", 53))),
             (8, Some(2), false, Some(row(2, "original destination", 36))),
             (2, None, false, Some(row(2, "original destination", 38))),
         ];
