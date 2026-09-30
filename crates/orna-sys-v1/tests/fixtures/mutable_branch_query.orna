@@ -1,5 +1,6 @@
 pub table Contact(id: Int) { active: Bool, name: Str, }
 pub table ContactTag(contact_id: Int) { tag: Str, }
+pub table ContactBadge(contact_id: Int) { badge: Str, }
 pub fn active_contacts() = Contact | filter(contact => contact.active);
 pub fn insert_contact() = Contact.insert({ id: 41, active: true, name: "Ada" });
 pub fn update_contact() = Contact.update(41, { active: false });
