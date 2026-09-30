@@ -4,6 +4,8 @@ pub fn diff_change_target_kind(entry: sys.DiffEntry): sys.ChangeTargetKind = ent
 pub fn diff_rows(from: sys.SnapshotRef, to: sys.SnapshotRef): Relation<sys.DiffEntry> = sys.diff(from, to);
 pub fn dependency_rows(object: sys.ObjectRef): Relation<sys.Dependency> = sys.dependencies(object);
 pub fn source_map_rows(document: sys.SourceDocument): Relation<sys.SourceMapEntry> = document.maps;
+pub fn generated_source_byte_offsets(document: sys.SourceDocument): Relation<Int> = document.maps | map(entry => entry.generated.start_byte);
+pub fn original_source_names(document: sys.SourceDocument): Relation<Str?> = document.maps | map(entry => entry.original_name);
 pub fn metadata_rows(rows: Relation<sys.ValueMetadata<sys.Value>>): Relation<sys.ValueMetadata<sys.Value>> = rows;
 pub fn generic_metadata_rows<T>(rows: Relation<sys.ValueMetadata<T>>): Relation<sys.ValueMetadata<T>> = rows;
 pub fn metadata_protocols<T>(metadata: sys.ValueMetadata<T>): Relation<sys.Protocol> = metadata.protocols;
