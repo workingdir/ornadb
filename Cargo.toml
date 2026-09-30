@@ -23,6 +23,7 @@ members = [
     "crates/orna-serving-v1",
     "crates/orna-security-v1",
     "crates/orna-semantic-v1",
+    "crates/orna-sys-macros",
     "crates/orna-standard",
     "crates/orna-storage-v1",
     "crates/orna-stream-v1",

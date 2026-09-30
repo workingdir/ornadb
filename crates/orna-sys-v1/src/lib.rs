@@ -4,7 +4,7 @@
 //!
 //! Resolution and durable transaction ownership stay with the evaluator and
 //! runtime that own those concerns. The portable `sys` declaration schema is
-//! owned by the macros in [`system_api`]. The local supervisor below only
+//! collected from annotated descriptor methods in [`system_api`]. The local supervisor below only
 //! provides a bounded execution and await seam for admitted work.
 
 use std::{
@@ -595,11 +595,11 @@ pub enum SystemEffect {
 mod system_api;
 pub use system_api::*;
 
-/// Compatibility name for callers predating the macro-generated API catalog.
+/// Compatibility name for callers predating the attribute-collected API catalog.
 pub const SYS_EXPLAIN_FUNCTION_DESCRIPTOR: SystemFunctionDescriptor =
     SYS_EXPLAIN_FUNCTION_REF_DESCRIPTOR;
 
-/// Returns the macro-declared descriptor for a portable system function.
+/// Returns the generated descriptor for a portable system function.
 ///
 /// The descriptor is static declaration metadata. It does not grant
 /// invocation or administrative authority.
