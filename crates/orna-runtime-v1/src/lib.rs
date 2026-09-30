@@ -21110,6 +21110,27 @@ mod tests {
             "last() retains both matches across an interleaved nonmatch on short exhaustion"
         );
 
+        // The reference specifies take's bound but leaves its interaction
+        // with an interleaved outer filter and last() implicit. Once two
+        // accepted rows fill take(2), do not open the trailing rejected
+        // branch or lose the final match.
+        let (last_closes_before_interleaved_trailing_nonmatch, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-closes-before-interleaved-trailing-nonmatch.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_before_interleaved_trailing_nonmatch.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 4),
+            "last() closes after two matches and leaves the trailing nonmatch branch unopened"
+        );
+
         // Natural exhaustion may follow another rejected row after the
         // interleaved matches. Keep the last accepted value through both
         // rejections instead of treating the final one as a lost boundary.
