@@ -48,7 +48,7 @@ pub use repl::{ReplSession, parse_admitted_repl};
 /// crate verifies its pinned profile before either boundary admits an import.
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
-pub fn reference_standard_sources() -> [(String, String); 5] {
+pub fn reference_standard_sources() -> [(String, String); 6] {
     orna_standard::reference_standard_sources_v1()
 }
 
@@ -4398,6 +4398,15 @@ impl Context<'_, '_> {
                 "shift_right",
             ],
         );
+        let native_stats = native_standard_module_operation(
+            callee,
+            resolved_function.as_deref(),
+            scope,
+            !self.restrict_function_names,
+            function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
+            "stats",
+            &["mean", "median", "percentile"],
+        );
         let qualified_math = (!scope.0.contains_key("std"))
             .then(|| math_name(callee))
             .flatten();
@@ -4407,11 +4416,15 @@ impl Context<'_, '_> {
         let qualified_bits = (!scope.0.contains_key("std"))
             .then(|| bits_name(callee))
             .flatten();
+        let qualified_stats = (!scope.0.contains_key("std"))
+            .then(|| stats_name(callee))
+            .flatten();
         if self.restrict_function_names
             && resolved_function.is_none()
             && ((qualified_math.is_some() && native_math.is_none())
                 || (qualified_text.is_some() && native_text.is_none())
-                || (qualified_bits.is_some() && native_bits.is_none()))
+                || (qualified_bits.is_some() && native_bits.is_none())
+                || (qualified_stats.is_some() && native_stats.is_none()))
         {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
@@ -4447,11 +4460,12 @@ impl Context<'_, '_> {
             && native_math.is_none()
             && native_text.is_none()
             && native_bits.is_none()
+            && native_stats.is_none()
             && (qualified_math.is_none()
                 && qualified_bits.is_none()
                 && qualified_text.is_none()
+                && qualified_stats.is_none()
                 && portable_collection_operation(callee, resolved_function.as_deref()).is_none()
-                && stats_name(callee).is_none()
                 && root_collection.is_none()
                 || resolved_function.is_some())
         {
@@ -4614,7 +4628,11 @@ impl Context<'_, '_> {
                 .then_some(qualified_text)
                 .flatten()
         });
-        let stats = stats_name(callee);
+        let stats = native_stats.or_else(|| {
+            (!self.restrict_function_names)
+                .then_some(qualified_stats)
+                .flatten()
+        });
         let collection =
             portable_collection_operation(callee, resolved_function.as_deref()).or(root_collection);
         let name = math
@@ -4658,7 +4676,15 @@ impl Context<'_, '_> {
         } else if text.is_some() {
             self.text(name, values)
         } else if stats.is_some() {
-            self.stats(name, values)
+            let value = self.stats(name, values)?;
+            if self.restrict_function_names && !matches!(value, Value::Null) {
+                // The admitted std.stats signatures expose nullable results;
+                // keep successful aggregates in `Some` while the standalone
+                // evaluator's legacy intrinsic surface remains unwrapped.
+                Ok(Value::Option(Some(Box::new(value))))
+            } else {
+                Ok(value)
+            }
         } else {
             self.collection(name, values, depth)
         }
@@ -6736,6 +6762,7 @@ fn native_standard_module_operation<'a>(
         "math" => "std.math.",
         "text" => "std.text.",
         "bits" => "std.bits.",
+        "stats" => "std.stats.",
         _ => return None,
     };
     if let Some(operation) = resolved_function.and_then(|name| name.strip_prefix(prefix)) {
