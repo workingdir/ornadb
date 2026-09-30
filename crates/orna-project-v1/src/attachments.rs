@@ -2463,6 +2463,115 @@ mod tests {
     }
 
     #[test]
+    fn nested_pin_closure_uses_each_alias_revision_for_unit_equivalence() {
+        let app_source = include_str!("../tests/fixtures/attached-incompatible-main.orna");
+        let compatible_source = include_str!("../tests/fixtures/attached-equivalent-main.orna");
+        let incompatible_source = include_str!("../tests/fixtures/attached-incompatible-main.orna");
+        let (app_dir, app_repository, _) = repository(app_source);
+        let (package_dir, package_repository, _) = repository(compatible_source);
+        let (_leaf_dir, leaf_repository, leaf_commit) = repository(compatible_source);
+
+        write_commit(package_dir.path(), "main.orna", incompatible_source);
+        let mirror_commit = write_commit(
+            package_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("leaf {leaf_commit}\n# incompatible mirror revision\n"),
+        );
+        write_commit(package_dir.path(), "main.orna", compatible_source);
+        let backup_commit = write_commit(
+            package_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("leaf {leaf_commit}\n# compatible backup revision\n"),
+        );
+        let app_commit = write_commit(
+            app_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("backup {backup_commit}\nmirror {mirror_commit}\n"),
+        );
+
+        let loader = ProjectLoader::default();
+        let app = PinnedDatabase::resolve(
+            "app",
+            app_repository.clone(),
+            &app_commit,
+            loader,
+        )
+        .unwrap();
+        let resolver = PackageResolver::new(
+            [
+                ("app".to_owned(), app_repository),
+                ("backup".to_owned(), package_repository.clone()),
+                ("mirror".to_owned(), package_repository),
+                ("leaf".to_owned(), leaf_repository),
+            ],
+            loader,
+        )
+        .unwrap();
+
+        let root_session = resolver.resolve_for_parent(app).unwrap();
+        let backup = root_session.database("backup").unwrap();
+        let mirror = root_session.database("mirror").unwrap();
+        assert_eq!(backup.pin().commit().as_str(), backup_commit);
+        assert_eq!(mirror.pin().commit().as_str(), mirror_commit);
+        assert_ne!(backup.pin().commit(), mirror.pin().commit());
+        assert!(!root_session.units_structurally_equivalent(
+            "backup",
+            "meter",
+            "mirror",
+            "meter"
+        ));
+
+        // ORNA-PACKAGE-002 fixes each selected revision, and ORNA-UNIT-002
+        // checks structural compatibility. The reference does not specify
+        // shared-repository aliases in nested closures; V1 checks each pinned
+        // alias revision against the same exact leaf independently.
+        let backup_closure = resolver.resolve_for_parent(backup.clone()).unwrap();
+        let mirror_closure = resolver.resolve_for_parent(mirror.clone()).unwrap();
+        assert_eq!(backup_closure.primary().pin().name(), "backup");
+        assert_eq!(mirror_closure.primary().pin().name(), "mirror");
+        assert_eq!(
+            backup_closure.primary().pin().commit().as_str(),
+            backup_commit
+        );
+        assert_eq!(
+            mirror_closure.primary().pin().commit().as_str(),
+            mirror_commit
+        );
+        let backup_leaf = backup_closure.database("leaf").unwrap();
+        let mirror_leaf = mirror_closure.database("leaf").unwrap();
+        assert_eq!(backup_leaf.pin(), mirror_leaf.pin());
+        assert_eq!(backup_leaf.pin().commit().as_str(), leaf_commit);
+        assert!(backup_closure.units_structurally_equivalent(
+            "backup",
+            "meter",
+            "leaf",
+            "meter"
+        ));
+        assert!(!mirror_closure.units_structurally_equivalent(
+            "mirror",
+            "meter",
+            "leaf",
+            "meter"
+        ));
+        assert_eq!(
+            root_session
+                .database("backup")
+                .unwrap()
+                .pin()
+                .commit(),
+            backup.pin().commit()
+        );
+        assert_eq!(
+            root_session
+                .database("mirror")
+                .unwrap()
+                .pin()
+                .commit(),
+            mirror.pin().commit()
+        );
+    }
+
+    #[test]
     fn equivalent_units_interoperate_across_attachments_but_name_match_is_not_enough() {
         let primary_source = include_str!("fixtures/attached-primary-main.orna");
         let (_primary_dir, primary_repository, primary_commit) = repository(&primary_source);
