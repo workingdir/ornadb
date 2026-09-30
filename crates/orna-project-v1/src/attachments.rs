@@ -339,7 +339,9 @@ impl AttachedDatabaseSession {
     /// The primary and implementation-provided `sys` facility are not
     /// detachable. The reference does not define live detach timing; v1 drops
     /// the alias immediately, so callers must revalidate module admission
-    /// before the next evaluation. In-flight clones retain their original pins.
+    /// before the next evaluation. A detached alias is unavailable as both a
+    /// read and write target; reattaching it admits only the new read-only pin.
+    /// In-flight clones retain their original aliases and exact pins.
     pub fn detach_database(&mut self, name: &str) -> Result<(), AttachmentError> {
         let name = checked_name(name.to_owned())?;
         if name == self.primary.pin.name {
