@@ -7259,6 +7259,8 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
         b"consumer/zy-agreed-reset-full-base-after".to_vec();
     let trailing_delete_id = b"consumer/zz-agreed-delete".to_vec();
     let full_base_reset_tail_id = b"consumer/zzz-full-base-reset-tail".to_vec();
+    let one_sided_full_base_reset_tail_id =
+        b"consumer/zzzz-one-sided-full-base-reset-tail".to_vec();
     let deleted_row = parse_fixture(BASE, RowKeyKind::Explicit);
     let edited_row = parse_fixture(LEFT, RowKeyKind::Explicit);
     let full_checkpoint = parse_checkpoint_fixture(CHECKPOINT_BASE);
@@ -7272,6 +7274,8 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
     // including convergent resets from full generation/position bases in the
     // middle and after the terminal conflict. The final full-base reset also
     // follows a clean tombstone, proving tail closure keeps it out of impacts.
+    // A final one-sided full-base reset likewise resolves without adding an
+    // impact or consuming conflict detail.
     let build_inputs = |row_delete_left: bool, checkpoint_delete_left: bool, reset_left: bool| {
         let mut source = FixtureRows::default();
         source.add(MergeSide::Base, b"base", vec![deleted_row.clone()]);
@@ -7346,6 +7350,18 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
             full_checkpoint.clone(),
         );
         base.checkpoints.insert(full_base_reset_tail_id.clone(), full_checkpoint.clone());
+        base.checkpoints.insert(
+            one_sided_full_base_reset_tail_id.clone(),
+            full_checkpoint.clone(),
+        );
+        left.checkpoints.insert(
+            one_sided_full_base_reset_tail_id.clone(),
+            reset_fixture.clone(),
+        );
+        right.checkpoints.insert(
+            one_sided_full_base_reset_tail_id.clone(),
+            full_checkpoint.clone(),
+        );
 
         base.checkpoints.insert(delete_reset_id.clone(), full_checkpoint.clone());
         if checkpoint_delete_left {
@@ -7430,6 +7446,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
                     assert!(!report.affected_checkpoints.contains(agreed_reset_before_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(trailing_delete_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(full_base_reset_tail_id.as_slice()));
+                    assert!(!report.affected_checkpoints.contains(one_sided_full_base_reset_tail_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(agreed_reset_after_id.as_slice()));
                     assert_eq!(source.visited.len(), 3);
                 }
@@ -7471,6 +7488,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
                 assert!(!report.affected_checkpoints.contains(agreed_reset_before_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(trailing_delete_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(full_base_reset_tail_id.as_slice()));
+                assert!(!report.affected_checkpoints.contains(one_sided_full_base_reset_tail_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(agreed_reset_after_id.as_slice()));
                 assert_eq!(source.visited.len(), 3);
             }
