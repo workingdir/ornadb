@@ -3040,6 +3040,153 @@ fn pre_resize_parent_vector_clone_from_keeps_secret_admission_local() {
 }
 
 #[test]
+fn pre_resize_parent_vector_empty_round_trip_keeps_snapshots_isolated() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let original = vec![
+        admitted("ORNA-E-EMPTY-PARENT-OLD-A", "old parent a admission")
+            .with_cause(admitted("ORNA-E-EMPTY-OLD-A-CHILD", "old child a admission")),
+        admitted("ORNA-E-EMPTY-PARENT-OLD-B", "old parent b admission")
+            .with_cause(admitted("ORNA-E-EMPTY-OLD-B-CHILD-A", "old child b a admission"))
+            .with_cause(admitted("ORNA-E-EMPTY-OLD-B-CHILD-B", "old child b b admission")),
+    ];
+    let mut destination = original.clone();
+    let before_empty = destination.clone();
+    let before_projection = serde_json::to_value(&before_empty).unwrap();
+    let before_wires = before_empty
+        .iter()
+        .map(|diagnostic| diagnostic.encode_ovb().unwrap())
+        .collect::<Vec<_>>();
+
+    // Clear the parent vector, then repopulate it. Earlier values are owned
+    // snapshots; reusing the vector allocation cannot transfer their local
+    // root-message admission to the replacement parents.
+    let empty: Vec<Diagnostic> = Vec::new();
+    destination.clone_from(&empty);
+    assert!(destination.is_empty());
+    let replacement = vec![
+        admitted("ORNA-E-EMPTY-PARENT-NEW-A", "new parent a admission")
+            .with_cause(admitted("ORNA-E-EMPTY-NEW-A-CHILD-A", "new child a a admission"))
+            .with_cause(admitted("ORNA-E-EMPTY-NEW-A-CHILD-B", "new child a b admission")),
+        admitted("ORNA-E-EMPTY-PARENT-NEW-B", "new parent b admission")
+            .with_cause(admitted("ORNA-E-EMPTY-NEW-B-CHILD", "new child b admission")),
+    ];
+    destination.clone_from(&replacement);
+
+    assert_eq!(destination, replacement);
+    assert_eq!(serde_json::to_value(&before_empty).unwrap(), before_projection);
+    assert_eq!(
+        before_empty
+            .iter()
+            .map(|diagnostic| diagnostic.encode_ovb().unwrap())
+            .collect::<Vec<_>>(),
+        before_wires
+    );
+    let retained_projection = serde_json::to_value(&before_empty).unwrap();
+    assert_eq!(retained_projection[0]["message"], "old parent a admission");
+    assert_eq!(retained_projection[0]["causes"][0]["message"], "<redacted>");
+    assert_eq!(retained_projection[1]["message"], "old parent b admission");
+    assert_eq!(retained_projection[1]["causes"].as_array().unwrap().len(), 2);
+
+    let outer = admitted("ORNA-E-EMPTY-PARENT-OUTER", "outer parent admission")
+        .with_cause(before_empty[0].clone())
+        .with_cause(before_empty[1].clone())
+        .with_cause(destination[0].clone())
+        .with_cause(destination[1].clone());
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["message"], "outer parent admission");
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 4);
+    for (cause, expected_children) in causes.iter().zip([1, 2, 2, 1]) {
+        assert_eq!(cause["message"], "<redacted>");
+        assert_eq!(cause["causes"].as_array().unwrap().len(), expected_children);
+        for child in cause["causes"].as_array().unwrap() {
+            assert_eq!(child["message"], "<redacted>");
+        }
+    }
+
+    let envelope = serde_json::json!({
+        "outer": outer,
+        "before_empty": before_empty,
+        "after_repopulation": destination,
+    });
+    let json = serde_json::to_vec(&envelope).unwrap();
+    for message in [
+        b"outer parent admission".as_slice(),
+        b"old parent a admission".as_slice(),
+        b"old parent b admission".as_slice(),
+        b"new parent a admission".as_slice(),
+        b"new parent b admission".as_slice(),
+    ] {
+        assert_eq!(
+            json.windows(message.len())
+                .filter(|window| *window == message)
+                .count(),
+            1
+        );
+    }
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            b"old child a admission".as_slice(),
+            b"old child b a admission".as_slice(),
+            b"old child b b admission".as_slice(),
+            b"new child a a admission".as_slice(),
+            b"new child a b admission".as_slice(),
+            b"new child b admission".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+
+    let wire = outer.encode_ovb().unwrap();
+    assert!(
+        wire.windows(b"outer parent admission".len())
+            .any(|window| window == b"outer parent admission")
+    );
+    for disclosure in [
+        fixture.as_bytes(),
+        b"old parent a admission".as_slice(),
+        b"old child b b admission".as_slice(),
+        b"new parent a admission".as_slice(),
+        b"new child b admission".as_slice(),
+    ]
+    .into_iter()
+    .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
+    {
+        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    assert_eq!(
+        decoded["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cause| cause["causes"].as_array().unwrap().len())
+            .collect::<Vec<_>>(),
+        [1, 2, 2, 1]
+    );
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
