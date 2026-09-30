@@ -250,3 +250,8 @@ The final extension reverses the ownership again: the inserted row moves out
 of the competitor's target, the competitor retries into it, and the inserted
 row takes the competitor's vacated source key. This additional repeated reuse
 step is a pragmatic local ordering where the reference is silent.
+
+The handoff also returns to a destination used by an earlier nested move: the
+inserted row moves into that released key while the competitor retries, then
+the inserted row claims the competitor's freed source. The fixture pins this
+reused-destination retry order where the reference is silent.
