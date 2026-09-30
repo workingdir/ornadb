@@ -715,6 +715,18 @@ fn zero_budget_checkpoint_delete_update_tail_reports_first_identity() {
             snapshot.checkpoints.insert(clean_id.clone(), clean.clone());
         }
 
+        let agreed_delete_id = b"consumer/b-agreed-delete".to_vec();
+        base.checkpoints.insert(
+            agreed_delete_id.clone(),
+            CheckpointGeneration { generation: 2, position: None },
+        );
+
+        let unchanged_delete_id = b"consumer/c-delete-against-unchanged".to_vec();
+        let unchanged_value = CheckpointGeneration { generation: 3, position: None };
+        base.checkpoints.insert(unchanged_delete_id.clone(), unchanged_value.clone());
+        let unchanged_side = if delete_on_left { &mut right } else { &mut left };
+        unchanged_side.checkpoints.insert(unchanged_delete_id.clone(), unchanged_value);
+
         let first_conflict_id = b"consumer/m-positionless-delete-update".to_vec();
         base.checkpoints.insert(
             first_conflict_id.clone(),
@@ -734,9 +746,9 @@ fn zero_budget_checkpoint_delete_update_tail_reports_first_identity() {
             );
         }
 
-        // Positionless values remain present checkpoint state. After clean
-        // fixture row reconciliation, bytewise checkpoint order reports the
-        // first delete/update impact at zero budget and leaves the later tail unseen.
+        // Positionless values remain present checkpoint state. Agreed and
+        // unchanged-side deletes resolve cleanly before bytewise traversal
+        // reports the first divergent delete/update at zero budget.
         let error = merge_three_way_snapshots(
             &base,
             &left,
@@ -753,6 +765,8 @@ fn zero_budget_checkpoint_delete_update_tail_reports_first_identity() {
         assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
         assert!(report.affected_checkpoints.contains(first_conflict_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(clean_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(agreed_delete_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(unchanged_delete_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(later_conflict_id.as_slice()));
         assert_eq!(source.visited.len(), 3);
     }
