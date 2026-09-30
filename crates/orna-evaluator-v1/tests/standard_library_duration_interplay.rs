@@ -180,3 +180,55 @@ fn duration_clock_format_keeps_fractional_minute_and_sign_boundaries() {
         );
     }
 }
+
+#[test]
+fn clock_output_bound_keeps_elapsed_hours_and_fractional_tail() {
+    let limits = Limits {
+        max_string_bytes: 129,
+        max_integer_digits: 125,
+        ..Limits::default()
+    };
+    let mut session = AdmittedReplSession::with_reference_standard(limits).unwrap();
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna")),
+        Ok(None)
+    );
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-time-duration-clock-24-hours-h4ei4.orna")),
+        Ok(Some(text("24:00:00")))
+    );
+    let source = include_str!("fixtures/stdlib-time-duration-clock-max-hours-h4ei4.orna");
+    let result = session.submit(source);
+    let expected = format!("1{}:00:00.000000001", "0".repeat(112));
+    assert_eq!(
+        result,
+        Ok(Some(text(&expected))),
+        "{source}; diagnostic={}",
+        result.as_ref().err().map_or("none", |error| error.code())
+    );
+    assert_eq!(
+        session
+            .submit(include_str!("fixtures/stdlib-time-duration-clock-calendar-period-h4ei4.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-S021-TYPE"
+    );
+
+    let limits = Limits {
+        max_string_bytes: 128,
+        max_integer_digits: 125,
+        ..Limits::default()
+    };
+    let mut bounded = AdmittedReplSession::with_reference_standard(limits).unwrap();
+    assert_eq!(
+        bounded.submit(include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna")),
+        Ok(None)
+    );
+    assert_eq!(
+        bounded
+            .submit(include_str!("fixtures/stdlib-time-duration-clock-max-hours-h4ei4.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-LIMIT"
+    );
+}
