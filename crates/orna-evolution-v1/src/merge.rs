@@ -429,6 +429,10 @@ pub fn merge_keyed_row_states(
     left: RowSnapshotState<'_>,
     right: RowSnapshotState<'_>,
 ) -> Result<RowMergeOperation, RowSnapshotMergeError> {
+    // Conflict sequencing is conservative: unavailable history wins first,
+    // then key identity is checked before interpreting deletion or field
+    // edits. The reference requires typed conflicts but does not order them;
+    // this avoids reporting actionable edits for an unknown or wrong key.
     let mut pruned_sides = Vec::new();
     // Keep diagnostics stable in merge-argument order even when callers
     // discovered unavailable ranges in a different physical order.
@@ -806,6 +810,10 @@ fn checkpoint_conflict_reason(
     left: Option<&CheckpointPosition>,
     right: Option<&CheckpointPosition>,
 ) -> CheckpointConflictReason {
+    // A delete-versus-update is the primary intent conflict even when the
+    // surviving edit also changes cursor format. Keep that diagnosis stable;
+    // format compatibility is considered only when both branches retain a
+    // checkpoint value.
     if base.is_some() && left.is_none() != right.is_none() {
         return CheckpointConflictReason::DeleteUpdate;
     }

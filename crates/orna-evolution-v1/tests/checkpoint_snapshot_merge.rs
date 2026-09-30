@@ -183,3 +183,69 @@ fn conflict_budget_returns_only_a_bounded_prefix_and_position_requires_portable_
 
     let _fixture_is_a_real_position = position("cursor", 2, MIGRATED);
 }
+
+#[test]
+fn conflict_order_and_delete_update_reason_are_stable_under_snapshot_order() {
+    let east = identity("orders", Some("east"));
+    let west = identity("orders", Some("west"));
+    let base_position = position("cursor", 1, BASE);
+    let left_position = position("cursor", 1, LEFT);
+    let right_position = position("cursor", 1, RIGHT);
+
+    let base = snapshot([
+        (west.clone(), base_position.clone()),
+        (east.clone(), base_position.clone()),
+    ]);
+    let left = snapshot([
+        (west.clone(), left_position.clone()),
+        (east.clone(), left_position.clone()),
+    ]);
+    let right = snapshot([
+        (east.clone(), right_position.clone()),
+        (west.clone(), right_position.clone()),
+    ]);
+    let conflicts = merge_checkpoint_snapshots(&base, &left, &right, &refs()).unwrap_err();
+    assert_eq!(conflicts.len(), 2);
+    assert_eq!(conflicts[0].identity, east);
+    assert_eq!(conflicts[1].identity, west);
+
+    // Reversing insertion order in all portable snapshots preserves the
+    // bounded, identity-sorted diagnostic sequence.
+    let reordered_base = snapshot([
+        (east.clone(), base_position.clone()),
+        (west.clone(), base_position.clone()),
+    ]);
+    let reordered_left = snapshot([
+        (east.clone(), left_position.clone()),
+        (west.clone(), left_position.clone()),
+    ]);
+    let reordered_right = snapshot([
+        (west.clone(), right_position.clone()),
+        (east.clone(), right_position.clone()),
+    ]);
+    let reordered = merge_checkpoint_snapshots(
+        &reordered_base,
+        &reordered_left,
+        &reordered_right,
+        &refs(),
+    )
+    .unwrap_err();
+    assert_eq!(reordered, conflicts);
+
+    // When a deleted checkpoint competes with a changed-format cursor, report
+    // the higher-level delete/update conflict whichever branch carries it.
+    let changed_format = position("cursor-v2", 2, RIGHT);
+    let deletion = snapshot([]);
+    let edited = snapshot([(east.clone(), changed_format.clone())]);
+    let base_one = snapshot([(east.clone(), base_position)]);
+    let delete_left = merge_checkpoint_snapshots(&base_one, &deletion, &edited, &refs())
+        .unwrap_err();
+    let delete_right = merge_checkpoint_snapshots(&base_one, &edited, &deletion, &refs())
+        .unwrap_err();
+    assert_eq!(delete_left[0].reason, CheckpointConflictReason::DeleteUpdate);
+    assert_eq!(delete_right[0].reason, CheckpointConflictReason::DeleteUpdate);
+    assert_eq!(delete_left[0].left, None);
+    assert_eq!(delete_left[0].right, Some(changed_format.clone()));
+    assert_eq!(delete_right[0].left, Some(changed_format));
+    assert_eq!(delete_right[0].right, None);
+}
