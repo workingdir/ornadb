@@ -64,6 +64,8 @@ const SOURCE_REMAINDER_MULTISCAN_CLOSURE_TAIL: &str =
     include_str!("fixtures/source_remainder_multiscan_closure_tail.orna");
 const SOURCE_REMAINDER_SCAN_BOUNDARY_TAIL: &str =
     include_str!("fixtures/source_remainder_scan_boundary_tail.orna");
+const SOURCE_REMAINDER_SCAN_BOUND_CLOSURE_TAIL: &str =
+    include_str!("fixtures/source_remainder_scan_bound_closure_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -6902,5 +6904,131 @@ fn explain_closes_source_remainder_across_scan_rounding_boundary() {
         node.details().get("estimated_work_overflow").is_none()
             && node.actual_rows().is_none()
             && node.actual_bytes().is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_source_remainder_with_partial_scan_bound() {
+    let parsed = orna_syntax_v1::parse_module(SOURCE_REMAINDER_SCAN_BOUND_CLOSURE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 3);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Following the documented
+    // pragmatic 4-KiB-per-scan lower bound, aligned source bytes contribute
+    // 2^52-1 and the first remainder byte contributes 2^52. A separate
+    // rows-only scan bound closes the combined known lower bound at MAX; one
+    // additional row exceeds MAX even with an unknown final scan.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const ALIGNED_SOURCE_BYTES: u64 = u64::MAX - 4_095;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = ALIGNED_SOURCE_BYTES + 1;
+    let rows_to_close_source_remainder = u64::MAX - MAX_BYTE_BLOCKS;
+    let explain = |source_bytes, row_bound| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:source-remainder-partial-scan-bound-closure",
+            ),
+            source: obj("table:SourceRemainderBoundSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(source_bytes),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderBoundRows"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(row_bound),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderBoundUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:source-remainder-partial-scan-bound")),
+        })
+        .expect("source byte remainder and separate partial scan bound")
+    };
+
+    let aligned = explain(ALIGNED_SOURCE_BYTES, rows_to_close_source_remainder);
+    assert_eq!(aligned.plan().estimated_cost(), None);
+    assert_eq!(aligned.root().details().get("estimated_cost_overflow"), None);
+
+    let exact = explain(FIRST_REMAINDER_SOURCE_BYTES, rows_to_close_source_remainder);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None,
+        "the source's first byte remainder closes the partial scan bounds at MAX"
+    );
+
+    let overflow = explain(
+        FIRST_REMAINDER_SOURCE_BYTES,
+        rows_to_close_source_remainder + 1,
+    );
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one additional row crosses MAX after the source remainder"
+    );
+    let nodes = overflow.nodes();
+    let source_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderBoundSource"))
+        })
+        .expect("near-MAX source scan with its first remainder byte");
+    assert_eq!(source_scan.estimated_rows(), None);
+    assert_eq!(source_scan.estimated_bytes(), Some(FIRST_REMAINDER_SOURCE_BYTES));
+    assert_eq!(source_scan.estimated_work(), None);
+    let rows_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderBoundRows"))
+        })
+        .expect("separate rows-only partial scan bound");
+    assert_eq!(
+        rows_scan.estimated_rows(),
+        Some(rows_to_close_source_remainder + 1)
+    );
+    assert_eq!(rows_scan.estimated_bytes(), None);
+    assert_eq!(rows_scan.estimated_work(), None);
+    let unknown_scan_position = nodes
+        .iter()
+        .position(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderBoundUnknown"))
+        })
+        .expect("unknown final scan after the closure bound");
+    let rows_scan_position = nodes
+        .iter()
+        .position(|node| node.reference() == rows_scan.reference())
+        .expect("rows-only scan position");
+    assert!(unknown_scan_position > rows_scan_position);
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow)
+        .expect("source remainder partial-scan-bound overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
     }));
 }
