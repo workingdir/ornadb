@@ -21009,6 +21009,25 @@ mod tests {
             "last() returns the post-filter boundary match without evaluating the failing tail"
         );
 
+        // The reference leaves failure while filling a post-filter take
+        // bound implicit. With take(2), one match is not enough to close the
+        // prefix, so last() continues in order and propagates the next
+        // predicate failure instead of returning that partial tail.
+        let (last_surfaces_failure_before_post_filter_bound, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-needs-failing-tail.orna"
+                ),
+            );
+        let predicate_failure = last_surfaces_failure_before_post_filter_bound.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (3, 4),
+            "last() continues after one post-filter match until the second-row predicate fails"
+        );
+
         // The reference is silent when the bounded tail continues past a
         // nonmatch to a predicate failure, with another match after that
         // failure. Preserve the error instead of allowing last() to evaluate
