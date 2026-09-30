@@ -48,7 +48,7 @@ pub use repl::{ReplSession, parse_admitted_repl};
 /// crate verifies its pinned profile before either boundary admits an import.
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
-pub fn reference_standard_sources() -> [(String, String); 2] {
+pub fn reference_standard_sources() -> [(String, String); 3] {
     orna_standard::reference_standard_sources_v1()
 }
 
@@ -3202,8 +3202,21 @@ impl Context<'_, '_> {
         scope: &mut Scope,
         depth: usize,
     ) -> Option<Result<Value, EvaluationError>> {
-        let name = root_collection_name(callee)?;
-        if scope.0.contains_key(name) || self.resolve_function_name(callee, scope).is_some() {
+        let resolved = self.resolve_function_name(callee, scope);
+        let native_export = is_native_collection_binding(
+            callee,
+            resolved.as_deref(),
+            scope,
+            !self.restrict_function_names,
+            function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
+        )
+            || resolved.as_deref() == Some("std.collection.asof_join");
+        let name = root_collection_name(callee).or_else(|| {
+            native_export
+                .then(|| portable_collection_operation(callee, resolved.as_deref()))
+                .flatten()
+        })?;
+        if scope.0.contains_key(name) || (resolved.is_some() && !native_export) {
             return None;
         }
         let pipeline_relation = matches!(input, Some(Value::Relation(_)));
@@ -4339,29 +4352,37 @@ impl Context<'_, '_> {
         let root_collection =
             root_collection_name(callee).filter(|name| !scope.0.contains_key(*name));
         let resolved_function = self.resolve_function_name(callee, scope);
+        let native_collection = is_native_collection_binding(
+            callee,
+            resolved_function.as_deref(),
+            scope,
+            !self.restrict_function_names,
+            function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
+        );
         let native_asof_join = resolved_function.as_deref() == Some("std.collection.asof_join")
-            || (collection_name(callee) == Some("asof_join")
+            || (portable_collection_name(callee) == Some("asof_join")
                 && !self.restrict_function_names
                 && !scope.0.contains_key("std")
                 && resolved_function.is_none());
-        if collection_name(callee).is_some()
+        if portable_collection_operation(callee, resolved_function.as_deref()).is_some()
             && self.restrict_function_names
             && resolved_function.is_none()
             && !native_asof_join
+            && !native_collection
         {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
-        // `std.collection.asof_join` is a source-declared evaluator binding:
-        // once that function resolves from the admitted module (or the
-        // standalone evaluator sees the explicit qualified path), execute
-        // the bounded native implementation below instead of the fail-closed
-        // source stub. Other standard-source functions still execute their
-        // pinned bodies before any legacy native fallback.
+        // The portable std.collection/std.query exports and asof_join are
+        // source-declared evaluator bindings. Once the exact pinned export is
+        // available, execute its bounded intrinsic instead of the fail-closed
+        // source stub. Other standard-source functions execute their pinned
+        // bodies normally.
         if !native_asof_join
+            && !native_collection
             && (math_name(callee).is_none()
                 && bits_name(callee).is_none()
                 && text_name(callee).is_none()
-                && collection_name(callee).is_none()
+                && portable_collection_operation(callee, resolved_function.as_deref()).is_none()
                 && stats_name(callee).is_none()
                 && root_collection.is_none()
                 || resolved_function.is_some())
@@ -4514,7 +4535,8 @@ impl Context<'_, '_> {
         let bits = bits_name(callee);
         let text = text_name(callee);
         let stats = stats_name(callee);
-        let collection = collection_name(callee).or(root_collection);
+        let collection =
+            portable_collection_operation(callee, resolved_function.as_deref()).or(root_collection);
         let name = math
             .or(bits)
             .or(text)
@@ -5660,33 +5682,33 @@ impl Context<'_, '_> {
             }
             return Ok(candidate.map_or(Value::Null, |value| Value::Option(Some(Box::new(value)))));
         }
-        let mut candidate = None;
+        let mut candidate: Option<Value> = None;
         for value in values {
             self.step()?;
-            let Value::Int(value) = value else {
-                // Mixed numeric kinds, Decimal, Money and affine aggregation
-                // fail closed rather than receiving incidental host ordering.
-                return Err(error("ORNA-EVAL-UNSUPPORTED"));
-            };
-            let replace = candidate.as_ref().is_none_or(|current: &BigInt| {
-                if name == "min" {
-                    value < current
-                } else {
-                    value > current
+            lawful_sort_key(value)?;
+            let replace = match candidate.as_ref() {
+                None => true,
+                Some(current) => {
+                    let ordering = compare_sort_keys(value, current)?;
+                    if name == "min" {
+                        ordering.is_lt()
+                    } else {
+                        ordering.is_gt()
+                    }
                 }
-            });
+            };
             if replace {
                 // Strict comparison above deliberately retains the first
                 // equal candidate, preserving observable input order.
                 candidate = Some(value.clone());
             }
         }
-        Ok(candidate.map_or(Value::Null, |value| {
-            Value::Option(Some(Box::new(Value::Int(value))))
-        }))
+        Ok(candidate.map_or(Value::Null, |value| Value::Option(Some(Box::new(value)))))
     }
     fn first(&self, values: &[Value]) -> Result<Value, EvaluationError> {
-        Ok(values.first().cloned().unwrap_or(Value::Null))
+        Ok(values.first().cloned().map_or(Value::Null, |value| {
+            Value::Option(Some(Box::new(value)))
+        }))
     }
     fn last(&self, values: &[Value]) -> Result<Value, EvaluationError> {
         Ok(Value::Option(
@@ -6430,7 +6452,8 @@ fn named_arguments(
         "replace" => &["value", "from", "to"],
         "normalise" => &["value", "form"],
         "chunk" => &["values", "size"],
-        "flatten" | "distinct" | "unique" | "pairs" | "count" => &["values"],
+        "flatten" | "unique" | "pairs" => &["values"],
+        "distinct" | "count" => &["rows"],
         "last" => &["rows"],
         "sum" => &["rows"],
         "mean" | "median" => match values.len() {
@@ -6451,12 +6474,12 @@ fn named_arguments(
         },
         "every" | "exists" => &["rows", "predicate"],
         "union" => &["left", "right"],
-        "take" => &["values", "count"],
-        "drop" => &["values", "count"],
-        "map" | "flat_map" => &["values", "transform"],
+        "take" | "drop" => &["rows", "count"],
+        "map" | "flat_map" => &["rows", "transform"],
         "sort_by" => &["rows", "key"],
         "rank" => &["values", "key"],
-        "filter" | "partition" | "split_when" => &["values", "predicate"],
+        "filter" => &["rows", "predicate"],
+        "partition" | "split_when" => &["values", "predicate"],
         "group_by" => &["values", "key"],
         "asof_join" => &["left", "right", "time", "by"],
         "zip" | "zip_exact" => &["left", "right"],
@@ -6480,7 +6503,16 @@ fn named_arguments(
             .and_then(|argument| argument.name.as_deref());
         let position = if let Some(name) = name {
             named_started = true;
-            expected.iter().position(|expected| *expected == name)
+            expected
+                .iter()
+                .position(|expected| *expected == name)
+                .or_else(|| {
+                    // Older bounded evaluator fixtures used `values` for
+                    // finite lists. Keep that alias at runtime while the
+                    // pinned 1.0 source signature canonically names `rows`.
+                    (name == "values" && expected.first() == Some(&"rows"))
+                        .then_some(0)
+                })
         } else if named_started {
             None
         } else {
@@ -6512,6 +6544,70 @@ fn text_name(expression: &Expr) -> Option<&str> {
 
 fn collection_name(expression: &Expr) -> Option<&str> {
     standard_name(expression, "collection")
+}
+fn query_name(expression: &Expr) -> Option<&str> {
+    standard_name(expression, "query")
+}
+fn portable_collection_name(expression: &Expr) -> Option<&str> {
+    collection_name(expression).or_else(|| query_name(expression))
+}
+
+fn portable_collection_operation<'a>(
+    expression: &'a Expr,
+    resolved_function: Option<&'a str>,
+) -> Option<&'a str> {
+    resolved_function
+        .and_then(standard_collection_function_operation)
+        .or_else(|| portable_collection_name(expression))
+}
+
+fn standard_collection_function_operation(name: &str) -> Option<&str> {
+    name.strip_prefix("std.collection.")
+        .or_else(|| name.strip_prefix("std.query."))
+}
+
+fn is_native_collection_binding(
+    callee: &Expr,
+    resolved_function: Option<&str>,
+    scope: &Scope,
+    allow_unresolved_qualified: bool,
+    source_export_available: bool,
+) -> bool {
+    // A source export in the loaded pinned module is the admission record for
+    // the intrinsic; an unresolved explicit path is accepted only by the
+    // unrestricted standalone evaluator. Lexical `std` values still win.
+    if scope.0.contains_key("std") && resolved_function.is_none() {
+        return false;
+    }
+    let resolved_operation = resolved_function.and_then(standard_collection_function_operation);
+    let Some(operation) = resolved_operation.or_else(|| portable_collection_name(callee)) else {
+        return false;
+    };
+    if !matches!(
+        operation,
+        "filter"
+            | "map"
+            | "flat_map"
+            | "sort_by"
+            | "take"
+            | "drop"
+            | "distinct"
+            | "union"
+            | "count"
+            | "first"
+            | "one"
+            | "sum"
+            | "min"
+            | "max"
+            | "every"
+            | "exists"
+    ) {
+        return false;
+    }
+    match resolved_function {
+        Some(_) => resolved_operation.is_some(),
+        None => allow_unresolved_qualified || source_export_available,
+    }
 }
 fn stats_name(expression: &Expr) -> Option<&str> {
     standard_name(expression, "stats")
@@ -6584,7 +6680,8 @@ fn relation_expression_candidate(expression: &Expr, scope: &Scope) -> bool {
         Expr::Binary { lhs, op, .. } if op == "|" => relation_expression_candidate(lhs, scope),
         Expr::Call {
             callee, arguments, ..
-        } if root_collection_name(callee).is_some() => arguments
+        } if root_collection_name(callee).is_some()
+            || portable_collection_name(callee).is_some() => arguments
             .iter()
             .find(|argument| argument.name.as_deref() == Some("rows"))
             .or_else(|| arguments.first())
