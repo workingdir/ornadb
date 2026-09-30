@@ -227,7 +227,8 @@ impl PackageResolver {
 
     /// Loads the exact attachments declared by `primary`'s pinned snapshot.
     /// Parent history is authoritative: later edits to the primary manifest
-    /// cannot move this session to newer package commits.
+    /// cannot move this session to newer package commits. Resolution is
+    /// all-or-nothing: a failed pin never returns a partially attached session.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
@@ -239,8 +240,12 @@ impl PackageResolver {
         // `use std.*` away from the program's captured Git module.
         let standard_gitlink =
             captured_standard_gitlink(&primary.repository, &primary.pin.commit)?;
-        let mut session = AttachedDatabaseSession::new(primary)?;
+        AttachedDatabaseSession::validate_primary_name(&primary.pin.name)?;
+        let mut resolved_databases = Vec::with_capacity(manifest.pins().len());
         for spec in manifest.pins() {
+            if spec.name() == primary.pin.name {
+                return Err(AttachmentError::DuplicateAttachment);
+            }
             if spec.name() == "std"
                 && standard_gitlink
                     .as_ref()
@@ -273,6 +278,14 @@ impl PackageResolver {
                 AttachmentError::Project(_) => AttachmentError::PinnedPackageInvalid,
                 error => error,
             })?;
+            resolved_databases.push(database);
+        }
+
+        // The reference requires each attachment to use its exact pin but
+        // leaves batch failure visibility unspecified. Resolve every package
+        // before creating the session so callers can observe no partial set.
+        let mut session = AttachedDatabaseSession::new(primary)?;
+        for database in resolved_databases {
             session.attach_database(database)?;
         }
         Ok(session)
@@ -288,13 +301,18 @@ pub struct AttachedDatabaseSession {
 
 impl AttachedDatabaseSession {
     pub fn new(primary: PinnedDatabase) -> Result<Self, AttachmentError> {
-        if primary.pin.name == "sys" || primary.pin.name == "std" {
-            return Err(AttachmentError::InvalidName);
-        }
+        Self::validate_primary_name(&primary.pin.name)?;
         Ok(Self {
             primary,
             attached: BTreeMap::new(),
         })
+    }
+
+    fn validate_primary_name(name: &str) -> Result<(), AttachmentError> {
+        if name == "sys" || name == "std" {
+            return Err(AttachmentError::InvalidName);
+        }
+        Ok(())
     }
 
     /// Adds a secondary snapshot. The source and rows remain read-only for the

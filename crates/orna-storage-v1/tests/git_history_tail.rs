@@ -128,3 +128,46 @@ fn replacing_a_row_at_the_same_path_keeps_its_prior_snapshot_reachable() {
         .lines()
         .any(|commit| commit == prior_snapshot));
 }
+
+#[test]
+fn delete_and_reinsert_keeps_the_pre_tombstone_snapshot_reachable() {
+    let root = tempfile::tempdir().unwrap();
+    git(root.path(), &["init", "-b", "main"]);
+    git(root.path(), &["config", "user.name", "kierandrewett"]);
+    git(root.path(), &["config", "user.email", "kieran@drewett.dev"]);
+    git(root.path(), &["config", "commit.gpgsign", "false"]);
+    let row_path = root.path().join("tables/Reading/1.orna");
+    fs::create_dir_all(row_path.parent().unwrap()).unwrap();
+    fs::write(&row_path, REPLACED_ROW_BEFORE).unwrap();
+    git(root.path(), &["add", "tables/Reading/1.orna"]);
+    git(root.path(), &["commit", "-m", "seed row before deletion"]);
+    let original_snapshot = git(root.path(), &["rev-parse", "HEAD"]);
+
+    fs::remove_file(&row_path).unwrap();
+    git(root.path(), &["add", "-u", "tables/Reading/1.orna"]);
+    git(root.path(), &["commit", "-m", "explicitly delete row"]);
+    let tombstone_snapshot = git(root.path(), &["rev-parse", "HEAD"]);
+    assert_eq!(
+        git(root.path(), &["ls-tree", "-r", "--name-only", "HEAD", "--", "tables/Reading"]),
+        ""
+    );
+
+    fs::write(&row_path, REPLACED_ROW_AFTER).unwrap();
+    git(root.path(), &["add", "tables/Reading/1.orna"]);
+    git(root.path(), &["commit", "-m", "reinsert row after deletion"]);
+
+    assert_eq!(
+        git(root.path(), &["show", "HEAD:tables/Reading/1.orna"]),
+        REPLACED_ROW_AFTER.trim()
+    );
+    assert_eq!(
+        git(
+            root.path(),
+            &["show", &format!("{original_snapshot}:tables/Reading/1.orna")]
+        ),
+        REPLACED_ROW_BEFORE.trim()
+    );
+    let ancestry = git(root.path(), &["rev-list", "HEAD"]);
+    assert!(ancestry.lines().any(|commit| commit == original_snapshot));
+    assert!(ancestry.lines().any(|commit| commit == tombstone_snapshot));
+}
