@@ -1237,6 +1237,109 @@ fn chained_primary_prefix_aliases_detach_only_the_exact_route() {
 }
 
 #[test]
+fn attached_main_alias_has_a_distinct_prefix_chain_module_namespace() {
+    let (_primary_dir, primary_repository, primary_commit) = repository(&[
+        (
+            "main.orna",
+            include_str!("fixtures/attach-routing-primary.orna"),
+        ),
+        (
+            "contacts.orna",
+            include_str!("fixtures/attach-routing-table.orna"),
+        ),
+    ]);
+    let (attached_dir, attached_repository, main_alias_commit) = repository(&[
+        (
+            "main.orna",
+            include_str!("fixtures/attach-routing-package.orna"),
+        ),
+        (
+            "contacts.orna",
+            include_str!("fixtures/attach-routing-table.orna"),
+        ),
+    ]);
+    let longer_alias_commit = write_commit(
+        attached_dir.path(),
+        "main.orna",
+        &include_str!("fixtures/attach-routing-package.orna").replace("42", "43"),
+    );
+    let replacement_commit = write_commit(
+        attached_dir.path(),
+        "main.orna",
+        &include_str!("fixtures/attach-routing-package.orna").replace("42", "99"),
+    );
+
+    let loader = ProjectLoader::default();
+    let primary = PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader)
+        .unwrap();
+    let main_alias = PinnedDatabase::resolve(
+        "main",
+        attached_repository.clone(),
+        &main_alias_commit,
+        loader,
+    )
+    .unwrap();
+    let longer_alias = PinnedDatabase::resolve(
+        "main_archive",
+        attached_repository.clone(),
+        &longer_alias_commit,
+        loader,
+    )
+    .unwrap();
+    let mut session = AttachedDatabaseSession::new(primary).unwrap();
+    session.attach_database(main_alias).unwrap();
+    session.attach_database(longer_alias).unwrap();
+
+    let modules = session.module_inputs();
+    assert_eq!(
+        modules
+            .iter()
+            .filter(|module| module.logical_path == "main.orna")
+            .count(),
+        1,
+        "only the primary owns the root module path"
+    );
+    assert_routed_module_source(&session, "main.orna", "primary_value");
+    assert_routed_module_source(&session, "main/main.orna", "= 42");
+    assert_routed_module_source(&session, "main/contacts.orna", "table Contact");
+    assert_routed_module_source(&session, "main_archive.orna", "= 43");
+    assert_routed_module_source(&session, "main_archive/contacts.orna", "table Contact");
+    assert!(matches!(
+        session.validate_write_target("main"),
+        Err(AttachmentError::AttachedSnapshotReadOnly)
+    ));
+
+    let old_clone = session.clone();
+    session.detach_database("main").unwrap();
+    let detached_clone = session.clone();
+    assert_routed_module_source(&session, "main.orna", "primary_value");
+    assert!(routed_module_source(&session, "main/main.orna").is_none());
+    assert_routed_module_source(&session, "main_archive.orna", "= 43");
+
+    let replacement = PinnedDatabase::resolve(
+        "main",
+        attached_repository,
+        &replacement_commit,
+        loader,
+    )
+    .unwrap();
+    session.attach_database(replacement).unwrap();
+    assert_routed_module_source(&session, "main.orna", "primary_value");
+    assert_routed_module_source(&session, "main/main.orna", "= 99");
+    assert_routed_module_source(&session, "main_archive.orna", "= 43");
+    assert_routed_module_source(&old_clone, "main/main.orna", "= 42");
+    assert_routed_module_source(&old_clone, "main_archive.orna", "= 43");
+    assert!(detached_clone.database("main").is_none());
+    assert!(routed_module_source(&detached_clone, "main/main.orna").is_none());
+    assert_routed_module_source(&detached_clone, "main_archive.orna", "= 43");
+
+    session.detach_database("main_archive").unwrap();
+    assert_routed_module_source(&session, "main.orna", "primary_value");
+    assert_routed_module_source(&session, "main/main.orna", "= 99");
+    assert!(routed_module_source(&session, "main_archive.orna").is_none());
+}
+
+#[test]
 fn package_pin_failures_are_redacted_and_fail_before_a_session_is_returned() {
     let (_valid_dir, _valid_repository, valid_commit) = repository(&[(
         "main.orna",
