@@ -1866,6 +1866,96 @@ mod tests {
     }
 
     #[test]
+    fn nested_pin_closure_resolves_equal_shared_repository_aliases_independently() {
+        let app_source = include_str!("../tests/fixtures/attached-incompatible-main.orna");
+        let shared_source = include_str!("../tests/fixtures/attached-equivalent-main.orna");
+        let (app_dir, app_repository, _) = repository(app_source);
+        let (shared_dir, shared_repository, _) = repository(shared_source);
+        let (_leaf_dir, leaf_repository, leaf_commit) = repository(shared_source);
+        let shared_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("leaf {leaf_commit}\n"),
+        );
+        let app_commit = write_commit(
+            app_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("backup {shared_commit}\nmirror {shared_commit}\n"),
+        );
+
+        let loader = ProjectLoader::default();
+        let app = PinnedDatabase::resolve(
+            "app",
+            app_repository.clone(),
+            &app_commit,
+            loader,
+        )
+        .unwrap();
+        let resolver = PackageResolver::new(
+            [
+                ("app".to_owned(), app_repository),
+                ("backup".to_owned(), shared_repository.clone()),
+                ("mirror".to_owned(), shared_repository),
+                ("leaf".to_owned(), leaf_repository),
+            ],
+            loader,
+        )
+        .unwrap();
+
+        let root_session = resolver.resolve_for_parent(app).unwrap();
+        assert_eq!(root_session.attached().count(), 2);
+        let backup = root_session.database("backup").unwrap().clone();
+        let mirror = root_session.database("mirror").unwrap().clone();
+        assert_eq!(backup.pin().commit(), mirror.pin().commit());
+        assert_ne!(backup.pin(), mirror.pin());
+        assert!(root_session.units_structurally_equivalent(
+            "backup",
+            "meter",
+            "mirror",
+            "meter"
+        ));
+
+        let backup_closure = resolver.resolve_for_parent(backup).unwrap();
+        let mirror_closure = resolver.resolve_for_parent(mirror).unwrap();
+
+        // The reference fixes exact pins but leaves recursive alias sharing
+        // unspecified. V1 resolves each selected alias as its own parent and
+        // follows the shared snapshot's child pin in both closures.
+        assert_eq!(backup_closure.primary().pin().name(), "backup");
+        assert_eq!(mirror_closure.primary().pin().name(), "mirror");
+        assert_ne!(
+            backup_closure.primary().pin(),
+            mirror_closure.primary().pin()
+        );
+        assert_eq!(backup_closure.attached().count(), 1);
+        assert_eq!(mirror_closure.attached().count(), 1);
+        let backup_leaf = backup_closure.database("leaf").unwrap();
+        let mirror_leaf = mirror_closure.database("leaf").unwrap();
+        assert_eq!(backup_leaf.pin(), mirror_leaf.pin());
+        assert_eq!(backup_leaf.pin().commit().as_str(), leaf_commit);
+        assert!(backup_closure.units_structurally_equivalent(
+            "backup",
+            "meter",
+            "leaf",
+            "meter"
+        ));
+        assert!(mirror_closure.units_structurally_equivalent(
+            "mirror",
+            "meter",
+            "leaf",
+            "meter"
+        ));
+        assert_eq!(
+            root_session
+                .database("backup")
+                .unwrap()
+                .pin()
+                .commit(),
+            root_session.database("mirror").unwrap().pin().commit()
+        );
+    }
+
+    #[test]
     fn equivalent_units_interoperate_across_attachments_but_name_match_is_not_enough() {
         let primary_source = include_str!("fixtures/attached-primary-main.orna");
         let (_primary_dir, primary_repository, primary_commit) = repository(&primary_source);
