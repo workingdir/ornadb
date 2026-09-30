@@ -20750,6 +20750,26 @@ mod tests {
             "first() exhausts only the outer prefix when its filter has no match"
         );
 
+        // The reference leaves the inclusive closure edge of a filtered
+        // outer take implicit. A match on its final row satisfies `first()`;
+        // the following missing projection lies outside the bound.
+        let (first_matches_at_filtered_outer_bound, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-first-last-bound-match.orna"
+                ),
+            );
+        assert_eq!(
+            first_matches_at_filtered_outer_bound.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(107u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "first() includes a match at the outer boundary and leaves the tail unopened"
+        );
+
         // The reference fixes left-to-right union order and bounded
         // enumeration but leaves projection failures across a child-local
         // take boundary implicit. Keep the left child lazy: its excluded
