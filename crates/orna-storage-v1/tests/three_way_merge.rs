@@ -2251,8 +2251,21 @@ fn positionless_checkpoint_delete_resolves_with_upper_segment_tombstone() {
     };
 
     // The deleted row is exactly the inclusive lower edge of the upper range.
-    // A short budget stops in that range before checkpoint resolution; at the
-    // exact budget, the row tombstone and cursorless checkpoint delete coexist.
+    // A zero row budget reports that active range on its first fixture row and
+    // never reaches the checkpoint delete. The exact boundary then proves the
+    // row tombstone and cursorless checkpoint delete coexist in a complete plan.
+    let (base, left, right, mut source) = build_inputs();
+    let zero_budget = BranchMergeBudget { max_rows_examined: 0, max_conflicts: 0 };
+    let error = merge_three_way_snapshots(&base, &left, &right, &mut source, zero_budget).unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("zero row budget must stop before the tombstone or checkpoint phase")
+    };
+    assert_eq!(report.rows_examined, 1);
+    assert_eq!(report.conflicts_lower_bound, 0);
+    assert!(report.affected_ranges.contains(&(id(1), high_range.clone())));
+    assert!(report.affected_checkpoints.is_empty());
+    assert_eq!(source.visited, vec![(MergeSide::Base, b"base-upper".to_vec())]);
+
     let (base, left, right, mut source) = build_inputs();
     let short_budget = BranchMergeBudget { max_rows_examined: 1, max_conflicts: 0 };
     let error = merge_three_way_snapshots(&base, &left, &right, &mut source, short_budget).unwrap_err();
