@@ -48,7 +48,7 @@ pub use repl::{ReplSession, parse_admitted_repl};
 /// crate verifies its pinned profile before either boundary admits an import.
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
-pub fn reference_standard_sources() -> [(String, String); 6] {
+pub fn reference_standard_sources() -> [(String, String); 7] {
     orna_standard::reference_standard_sources_v1()
 }
 
@@ -4407,6 +4407,22 @@ impl Context<'_, '_> {
             "stats",
             &["mean", "median", "percentile"],
         );
+        // The zone rules shipped by this evaluator are valid only for the
+        // edition declared by the imported, captured std.time source. A
+        // different historical source keeps its ordinary fail-closed body.
+        let native_time = captured_timezone_snapshot_matches(self.functions)
+            .then(|| {
+                native_standard_module_operation(
+                    callee,
+                    resolved_function.as_deref(),
+                    scope,
+                    false,
+                    function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
+                    "time",
+                    &["offset_at", "resolve_local"],
+                )
+            })
+            .flatten();
         let qualified_math = (!scope.0.contains_key("std"))
             .then(|| math_name(callee))
             .flatten();
@@ -4419,12 +4435,16 @@ impl Context<'_, '_> {
         let qualified_stats = (!scope.0.contains_key("std"))
             .then(|| stats_name(callee))
             .flatten();
+        let qualified_time = (!scope.0.contains_key("std"))
+            .then(|| time_name(callee))
+            .flatten();
         if self.restrict_function_names
             && resolved_function.is_none()
             && ((qualified_math.is_some() && native_math.is_none())
                 || (qualified_text.is_some() && native_text.is_none())
                 || (qualified_bits.is_some() && native_bits.is_none())
-                || (qualified_stats.is_some() && native_stats.is_none()))
+                || (qualified_stats.is_some() && native_stats.is_none())
+                || (qualified_time.is_some() && native_time.is_none()))
         {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
@@ -4461,10 +4481,12 @@ impl Context<'_, '_> {
             && native_text.is_none()
             && native_bits.is_none()
             && native_stats.is_none()
+            && native_time.is_none()
             && (qualified_math.is_none()
                 && qualified_bits.is_none()
                 && qualified_text.is_none()
                 && qualified_stats.is_none()
+                && qualified_time.is_none()
                 && portable_collection_operation(callee, resolved_function.as_deref()).is_none()
                 && root_collection.is_none()
                 || resolved_function.is_some())
@@ -4633,12 +4655,14 @@ impl Context<'_, '_> {
                 .then_some(qualified_stats)
                 .flatten()
         });
+        let time = native_time;
         let collection =
             portable_collection_operation(callee, resolved_function.as_deref()).or(root_collection);
         let name = math
             .or(bits)
             .or(text)
             .or(stats)
+            .or(time)
             .or(collection)
             .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
         let implicit = usize::from(input.is_some());
@@ -4685,6 +4709,8 @@ impl Context<'_, '_> {
             } else {
                 Ok(value)
             }
+        } else if time.is_some() {
+            self.time(name, values)
         } else {
             self.collection(name, values, depth)
         }
@@ -4896,6 +4922,62 @@ impl Context<'_, '_> {
             | ("join", [_, _])
             | ("replace", [_, _, _])
             | ("normalise", [_, _]) => Err(error("ORNA-EVAL-TYPE")),
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+    fn time(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
+        match (name, values.as_slice()) {
+            (
+                "offset_at",
+                [Value::Instant {
+                    unix_seconds,
+                    nanosecond,
+                }, Value::String(zone)],
+            ) => {
+                self.step()?;
+                let zone = resolve_time_zone(zone).map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                let instant = Instant::new(*unix_seconds, *nanosecond)
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                let offset = zone
+                    .at(instant)
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?
+                    .offset_seconds;
+                Ok(Value::Int(BigInt::from(offset)))
+            }
+            (
+                "resolve_local",
+                [Value::String(local), Value::String(zone), Value::String(ambiguous)],
+            ) => {
+                if !matches!(ambiguous.as_str(), "reject" | "earlier" | "later") {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                self.step()?;
+                let local = parse_local_datetime(local).ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+                let zone = resolve_time_zone(zone).map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                let instant = match zone
+                    .resolve_local(local)
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?
+                {
+                    LocalTimeResolution::Unique { instant, .. } => instant,
+                    LocalTimeResolution::Ambiguous { earlier, .. }
+                        if ambiguous == "earlier" =>
+                    {
+                        earlier
+                    }
+                    LocalTimeResolution::Ambiguous { later, .. } if ambiguous == "later" => later,
+                    // A portable implementation cannot choose a machine-local
+                    // gap policy. Ambiguous times require an explicit choice.
+                    LocalTimeResolution::Ambiguous { .. }
+                    | LocalTimeResolution::Nonexistent { .. } => {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    }
+                };
+                Ok(Value::Instant {
+                    unix_seconds: instant.unix_seconds,
+                    nanosecond: instant.nanosecond,
+                })
+            }
+            ("offset_at" | "resolve_local", _) => Err(error("ORNA-EVAL-TYPE")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
@@ -6567,6 +6649,8 @@ fn named_arguments(
         "contains" => &["value", "needle"],
         "replace" => &["value", "from", "to"],
         "normalise" => &["value", "form"],
+        "offset_at" => &["instant", "zone"],
+        "resolve_local" => &["local", "zone", "ambiguous"],
         "bit_or" | "bit_and" | "bit_xor" => &["left", "right"],
         "bit_not" => &["value"],
         "shift_left" | "shift_right" => &["value", "count"],
@@ -6763,6 +6847,7 @@ fn native_standard_module_operation<'a>(
         "text" => "std.text.",
         "bits" => "std.bits.",
         "stats" => "std.stats.",
+        "time" => "std.time.",
         _ => return None,
     };
     if let Some(operation) = resolved_function.and_then(|name| name.strip_prefix(prefix)) {
@@ -6781,8 +6866,70 @@ fn native_standard_module_operation<'a>(
     .then_some(operation)
 }
 
+fn captured_timezone_snapshot_matches(functions: &Functions) -> bool {
+    let Some(version) = functions.get("std.time.timezone_data_version") else {
+        return false;
+    };
+    if !version.parameters.is_empty() {
+        return false;
+    }
+    matches!(
+        &version.body,
+        Expr::Literal {
+            text,
+            kind: LiteralKind::String,
+            ..
+        } if unescape_string(text).is_ok_and(|edition| edition == TIMEZONE_DATASET_VERSION)
+    )
+}
+
+fn parse_local_datetime(text: &str) -> Option<LocalDateTime> {
+    // Keep this wire spelling intentionally narrow: ISO local civil seconds
+    // plus an optional decimal fraction, without an offset or host locale.
+    let (whole, fraction) = match text.split_once('.') {
+        Some((whole, fraction)) => {
+            if fraction.is_empty()
+                || fraction.len() > 9
+                || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return None;
+            }
+            (whole, Some(fraction))
+        }
+        None => (text, None),
+    };
+    if whole.len() != 19
+        || whole.as_bytes()[4] != b'-'
+        || whole.as_bytes()[7] != b'-'
+        || whole.as_bytes()[10] != b'T'
+        || whole.as_bytes()[13] != b':'
+        || whole.as_bytes()[16] != b':'
+        || !whole
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7 | 10 | 13 | 16) || byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let parse = |range: std::ops::Range<usize>| whole[range].parse::<u32>().ok();
+    let year = i32::try_from(parse(0..4)?).ok()?;
+    let month = u8::try_from(parse(5..7)?).ok()?;
+    let day = u8::try_from(parse(8..10)?).ok()?;
+    let hour = u8::try_from(parse(11..13)?).ok()?;
+    let minute = u8::try_from(parse(14..16)?).ok()?;
+    let second = u8::try_from(parse(17..19)?).ok()?;
+    let nanosecond = fraction.map_or(Some(0), |fraction| {
+        format!("{fraction:0<9}").parse::<u32>().ok()
+    })?;
+    LocalDateTime::new(year, month, day, hour, minute, second, nanosecond).ok()
+}
+
 fn stats_name(expression: &Expr) -> Option<&str> {
     standard_name(expression, "stats")
+}
+
+fn time_name(expression: &Expr) -> Option<&str> {
+    standard_name(expression, "time")
 }
 
 fn root_collection_name(expression: &Expr) -> Option<&str> {
