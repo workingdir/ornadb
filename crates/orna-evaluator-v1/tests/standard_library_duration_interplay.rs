@@ -6,6 +6,10 @@ fn text(value: &str) -> CanonicalValue {
     CanonicalValue::new(Raw::Text(value.to_owned())).unwrap()
 }
 
+fn boolean(value: bool) -> CanonicalValue {
+    CanonicalValue::new(Raw::Bool(value)).unwrap()
+}
+
 #[test]
 fn pinned_duration_formatters_preserve_exact_fractional_elapsed_values() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
@@ -227,6 +231,100 @@ fn clock_output_bound_keeps_elapsed_hours_and_fractional_tail() {
     assert_eq!(
         bounded
             .submit(include_str!("fixtures/stdlib-time-duration-clock-max-hours-h4ei4.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
+#[test]
+fn core_elapsed_instant_arithmetic_works_without_std() {
+    let mut session = AdmittedReplSession::new(Limits::default());
+    for source in [
+        include_str!("fixtures/stdlib-time-instant-add-duration-y2w0.orna"),
+        include_str!("fixtures/stdlib-time-duration-add-instant-y2w0.orna"),
+        include_str!("fixtures/stdlib-time-instant-subtract-duration-y2w0.orna"),
+    ] {
+        assert_eq!(session.submit(source), Ok(Some(boolean(true))), "{source}");
+    }
+}
+
+#[test]
+fn pinned_std_formats_normalized_elapsed_arithmetic() {
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-time-elapsed-duration-use-iso-y2w0.orna")),
+        Ok(None)
+    );
+    for (source, expected) in [
+        (
+            include_str!("fixtures/stdlib-time-elapsed-duration-sum-y2w0.orna"),
+            "PT1S",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-elapsed-duration-difference-y2w0.orna"),
+            "-PT0.25S",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-elapsed-duration-negation-y2w0.orna"),
+            "-PT0.000000001S",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-instant-difference-y2w0.orna"),
+            "PT0.000000001S",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-instant-negative-difference-y2w0.orna"),
+            "-PT0.5S",
+        ),
+    ] {
+        let result = session.submit(source);
+        assert_eq!(
+            result,
+            Ok(Some(text(expected))),
+            "{source}; diagnostic={}",
+            result.as_ref().err().map_or("none", |error| error.code())
+        );
+    }
+    assert_eq!(
+        session
+            .submit(include_str!("fixtures/stdlib-time-instant-overflow-y2w0.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-VALUE"
+    );
+    assert_eq!(
+        session
+            .submit(include_str!("fixtures/stdlib-time-instant-calendar-period-y2w0.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-S021-TYPE"
+    );
+}
+
+#[test]
+fn elapsed_duration_arithmetic_enforces_result_digit_limit() {
+    let limits = Limits {
+        max_integer_digits: 2,
+        ..Limits::default()
+    };
+    let mut session = AdmittedReplSession::new(limits);
+    assert_eq!(
+        session
+            .submit(include_str!("fixtures/stdlib-time-duration-sum-digit-limit-y2w0.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-LIMIT"
+    );
+
+    let limits = Limits {
+        max_integer_digits: 11,
+        ..Limits::default()
+    };
+    let mut session = AdmittedReplSession::new(limits);
+    assert_eq!(
+        session
+            .submit(include_str!("fixtures/stdlib-time-instant-difference-digit-limit-y2w0.orna"))
             .unwrap_err()
             .code(),
         "ORNA-EVAL-LIMIT"
