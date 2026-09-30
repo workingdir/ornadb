@@ -20627,6 +20627,27 @@ mod tests {
             "a nested filter match follows two bounded rejects without evaluating its tail"
         );
 
+        // The reference fixes union order and order-preserving filter/take,
+        // but leaves a rejected outer take bound across nested siblings
+        // implicit. The first row consumes the outer bound before filtering;
+        // that rejection must stop the whole nested union before its bad tail.
+        let (outer_bounded_filter_stops_nested_siblings, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-take-filter-stops-nested-siblings.orna"
+                ),
+            );
+        assert_eq!(
+            outer_bounded_filter_stops_nested_siblings.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (1, 1),
+            "the rejected outer bounded row prevents any nested sibling projection"
+        );
+
         // The reference fixes left-to-right union order and bounded
         // enumeration but leaves projection failures across a child-local
         // take boundary implicit. Keep the left child lazy: its excluded
