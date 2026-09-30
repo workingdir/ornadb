@@ -20770,6 +20770,26 @@ mod tests {
             "first() includes a match at the outer boundary and leaves the tail unopened"
         );
 
+        // The reference leaves the first matching row immediately beyond a
+        // filtered outer bound implicit. The three-row prefix has no match;
+        // do not scan its fourth row, which would satisfy `first()`.
+        let (first_excludes_next_filtered_match, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-first-excludes-next-match.orna"
+                ),
+            );
+        assert_eq!(
+            first_excludes_next_filtered_match.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 3),
+            "first() does not scan the matching row just outside its filtered outer prefix"
+        );
+
         // The reference fixes left-to-right union order and bounded
         // enumeration but leaves projection failures across a child-local
         // take boundary implicit. Keep the left child lazy: its excluded
