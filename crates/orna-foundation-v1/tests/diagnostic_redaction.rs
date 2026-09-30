@@ -4633,6 +4633,246 @@ fn mixed_trust_sibling_closures_cross_restore_captured_generations() {
 }
 
 #[test]
+fn mixed_trust_sibling_closures_restore_resized_generations() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let untrusted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(message).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let original = vec![
+        admitted("ORNA-E-GEN-BASE-ADMITTED", "generation base admission")
+            .with_cause(untrusted("ORNA-E-GEN-BASE-CHILD", "generation base child secret")),
+        untrusted("ORNA-E-GEN-BASE-RAW", "generation base parent secret")
+            .with_cause(admitted("ORNA-E-GEN-BASE-RAW-CHILD", "generation base raw child")),
+    ];
+    let mut contracted = vec![
+        admitted("ORNA-E-GEN-SMALL-ADMITTED", "generation small admission")
+            .with_cause(untrusted("ORNA-E-GEN-SMALL-CHILD", "generation small child secret")),
+    ];
+    let mut expanded = vec![
+        untrusted("ORNA-E-GEN-WIDE-RAW-0", "generation wide raw parent secret")
+            .with_cause(admitted("ORNA-E-GEN-WIDE-RAW-CHILD-0", "generation wide raw child")),
+        admitted("ORNA-E-GEN-WIDE-ADMITTED", "generation wide admission")
+            .with_cause(untrusted("ORNA-E-GEN-WIDE-CHILD", "generation wide child secret")),
+        untrusted("ORNA-E-GEN-WIDE-RAW-2", "generation wide tail secret")
+            .with_cause(admitted("ORNA-E-GEN-WIDE-RAW-CHILD-2", "generation wide tail child")),
+    ];
+    let original_snapshot = original.clone();
+    let contracted_snapshot = contracted.clone();
+    let expanded_snapshot = expanded.clone();
+    let original_projection = serde_json::to_value(&original_snapshot).unwrap();
+    let original_wires = original_snapshot
+        .iter()
+        .map(|diagnostic| diagnostic.encode_ovb().unwrap())
+        .collect::<Vec<_>>();
+    let contracted_projection = serde_json::to_value(&contracted_snapshot).unwrap();
+    let contracted_wires = contracted_snapshot
+        .iter()
+        .map(|diagnostic| diagnostic.encode_ovb().unwrap())
+        .collect::<Vec<_>>();
+    let expanded_projection = serde_json::to_value(&expanded_snapshot).unwrap();
+    let expanded_wires = expanded_snapshot
+        .iter()
+        .map(|diagnostic| diagnostic.encode_ovb().unwrap())
+        .collect::<Vec<_>>();
+
+    // The reference specifies immutable closure captures and diagnostic
+    // redaction, but leaves host Vec::clone_from resizing and slot reuse open.
+    // Retain each sibling's captured generation as an owned snapshot across
+    // both shrink and growth so trust state cannot migrate between siblings.
+    let capture_contracted = {
+        let snapshot = contracted_snapshot.clone();
+        move || snapshot.clone()
+    };
+    let capture_expanded = {
+        let snapshot = expanded_snapshot.clone();
+        move || snapshot.clone()
+    };
+    let empty: Vec<Diagnostic> = Vec::new();
+    contracted.clone_from(&empty);
+    expanded.clone_from(&empty);
+    assert!(contracted.is_empty() && expanded.is_empty());
+
+    let mut left = original.clone();
+    let mut right = original.clone();
+    left.clone_from(&capture_contracted());
+    right.clone_from(&capture_expanded());
+    let left_contracted = left.clone();
+    let right_expanded = right.clone();
+    assert_eq!(left_contracted, contracted_snapshot);
+    assert_eq!(right_expanded, expanded_snapshot);
+
+    let restore_left_contracted = {
+        let snapshot = left_contracted.clone();
+        move || snapshot.clone()
+    };
+    let restore_right_expanded = {
+        let snapshot = right_expanded.clone();
+        move || snapshot.clone()
+    };
+    left.clone_from(&capture_expanded());
+    right.clone_from(&capture_contracted());
+    let left_expanded = left.clone();
+    let right_contracted = right.clone();
+    assert_eq!(left_expanded, expanded_snapshot);
+    assert_eq!(right_contracted, contracted_snapshot);
+
+    left.clone_from(&restore_left_contracted());
+    right.clone_from(&restore_right_expanded());
+    assert_eq!(left, contracted_snapshot);
+    assert_eq!(right, expanded_snapshot);
+    assert_eq!(serde_json::to_value(&original_snapshot).unwrap(), original_projection);
+    assert_eq!(
+        original_snapshot
+            .iter()
+            .map(|diagnostic| diagnostic.encode_ovb().unwrap())
+            .collect::<Vec<_>>(),
+        original_wires
+    );
+    assert_eq!(
+        serde_json::to_value(&contracted_snapshot).unwrap(),
+        contracted_projection
+    );
+    assert_eq!(
+        contracted_snapshot
+            .iter()
+            .map(|diagnostic| diagnostic.encode_ovb().unwrap())
+            .collect::<Vec<_>>(),
+        contracted_wires
+    );
+    assert_eq!(serde_json::to_value(&expanded_snapshot).unwrap(), expanded_projection);
+    assert_eq!(
+        expanded_snapshot
+            .iter()
+            .map(|diagnostic| diagnostic.encode_ovb().unwrap())
+            .collect::<Vec<_>>(),
+        expanded_wires
+    );
+
+    let compose_sibling_generations = {
+        let left_after_growth = left_expanded.clone();
+        let right_after_shrink = right_contracted.clone();
+        let left_after_restore = left.clone();
+        let right_after_restore = right.clone();
+        move || {
+            let mut outer = admitted("ORNA-E-GEN-OUTER", "generation edge outer admission");
+            for cause in [
+                left_after_growth[0].clone(),
+                right_after_shrink[0].clone(),
+                left_after_restore[0].clone(),
+                right_after_restore[2].clone(),
+            ] {
+                outer = outer.with_cause(cause);
+            }
+            outer
+        }
+    };
+    left.clone_from(&empty);
+    right.clone_from(&empty);
+    assert!(left.is_empty() && right.is_empty());
+
+    let outer = compose_sibling_generations();
+    assert_eq!(outer, compose_sibling_generations());
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["message"], "generation edge outer admission");
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 4);
+    for cause in causes {
+        assert_eq!(cause["message"], "<redacted>");
+        assert_eq!(cause["causes"].as_array().unwrap().len(), 1);
+        assert_eq!(cause["causes"][0]["message"], "<redacted>");
+    }
+
+    let envelope = serde_json::json!({
+        "outer": outer.clone(),
+        "left_contracted": left_contracted,
+        "right_expanded": right_expanded,
+    });
+    let json = serde_json::to_vec(&envelope).unwrap();
+    for message in [
+        b"generation edge outer admission".as_slice(),
+        b"generation small admission".as_slice(),
+        b"generation wide admission".as_slice(),
+    ] {
+        assert_eq!(
+            json.windows(message.len())
+                .filter(|window| *window == message)
+                .count(),
+            1
+        );
+    }
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"generation base parent secret".as_slice(),
+            b"generation base child secret".as_slice(),
+            b"generation small child secret".as_slice(),
+            b"generation wide raw parent secret".as_slice(),
+            b"generation wide raw child".as_slice(),
+            b"generation wide child secret".as_slice(),
+            b"generation wide tail secret".as_slice(),
+            b"generation wide tail child".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+
+    let wire = outer.encode_ovb().unwrap();
+    assert!(
+        wire.windows(b"generation edge outer admission".len())
+            .any(|window| window == b"generation edge outer admission")
+    );
+    for disclosure in [
+        fixture.as_bytes(),
+        b"generation small admission".as_slice(),
+        b"generation wide admission".as_slice(),
+        b"generation wide raw parent secret".as_slice(),
+        b"generation wide child secret".as_slice(),
+        b"generation wide tail secret".as_slice(),
+    ]
+    .into_iter()
+    .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
+    {
+        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    assert_eq!(
+        decoded["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cause| cause["causes"].as_array().unwrap().len())
+            .collect::<Vec<_>>(),
+        [1, 1, 1, 1]
+    );
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
