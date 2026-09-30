@@ -87,3 +87,24 @@ fn duration_formatter_rejects_subnanosecond_and_calendar_period_inputs() {
         "ORNA-EVAL-VALUE"
     );
 }
+
+#[test]
+fn exact_decimal_duration_respects_seconds_digit_limit_not_nanosecond_intermediate() {
+    let limits = Limits {
+        max_integer_digits: 10,
+        ..Limits::default()
+    };
+    let mut session = AdmittedReplSession::with_reference_standard(limits).unwrap();
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna")),
+        Ok(None)
+    );
+    let source = include_str!("fixtures/stdlib-time-duration-limited-digits-gy9ln.orna");
+    let result = session.submit(source);
+    assert_eq!(
+        result,
+        Ok(Some(text("277777:46:39"))),
+        "{source}; diagnostic={}",
+        result.as_ref().err().map_or("none", |error| error.code())
+    );
+}
