@@ -968,6 +968,105 @@ fn recovered_interpolated_else_if_chain_keeps_deep_branch_tails() {
 }
 
 #[test]
+fn recovered_deep_else_if_chain_keeps_interpolated_condition_and_all_tails() {
+    let source = include_str!("fixtures/malformed-case-arm-max-depth-interpolated-deepest-else-if.orna");
+    let parsed = parse_module(source);
+
+    assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+    let diagnostic = &parsed.diagnostics[0];
+    assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+    assert_eq!(diagnostic.message, "expected pattern");
+    let invalid_pattern = source.find("\"layer").expect("fixture has a string pattern");
+    assert_eq!(diagnostic.span.start, invalid_pattern);
+    assert_eq!(diagnostic.span.end, invalid_pattern + 1);
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block { statements, tail, .. } = body else {
+        panic!("expected a function block");
+    };
+    assert!(statements.is_empty(), "{statements:?}");
+    let Some(Expr::Control {
+        arms: outer_arms, ..
+    }) = tail.as_deref()
+    else {
+        panic!("expected the outer case to remain the function tail");
+    };
+    assert_eq!(outer_arms.len(), 1, "{outer_arms:?}");
+
+    let Expr::Control {
+        condition: Some(scrutinee),
+        arms: recovered_arms,
+        ..
+    } = &outer_arms[0].body
+    else {
+        panic!("expected a nested case in the recovered arm");
+    };
+    assert_eq!(recovered_arms.len(), 2, "{recovered_arms:?}");
+    let Expr::InterpolatedString { segments, .. } = scrutinee.as_ref() else {
+        panic!("expected an interpolated nested-case scrutinee");
+    };
+    let [StringSegment::Text { text, .. }, StringSegment::Expression { value, .. }] =
+        segments.as_slice()
+    else {
+        panic!("expected one interpolation after the string prefix: {segments:?}");
+    };
+    assert_eq!(text, "branches ");
+
+    let assert_branch_tail = |branch: &Expr, expected: &str| {
+        let Expr::Block {
+            statements,
+            tail: Some(tail),
+            ..
+        } = branch
+        else {
+            panic!("expected an if branch block with a final tail");
+        };
+        assert!(matches!(
+            statements.as_slice(),
+            [Statement::Control {
+                value: Expr::Control { arms, .. },
+                ..
+            }] if arms.len() == 2
+        ));
+        assert!(matches!(
+            tail.as_ref(),
+            Expr::Literal { text, .. } if text == expected
+        ));
+    };
+
+    let mut branch_control = value;
+    for (index, expected_tail) in ["7", "8", "9", "10"].iter().enumerate() {
+        let Expr::Control {
+            condition,
+            body: Some(branch_body),
+            alternate: Some(alternate),
+            ..
+        } = branch_control
+        else {
+            panic!("expected else-if level {index} in the interpolation chain");
+        };
+        assert_branch_tail(branch_body.as_ref(), expected_tail);
+        if index == 2 {
+            assert!(matches!(
+                condition.as_deref(),
+                Some(Expr::InterpolatedString { segments, .. })
+                    if matches!(segments.as_slice(), [
+                        StringSegment::Text { text, .. },
+                        StringSegment::Expression {
+                            value: Expr::Control { arms, .. },
+                            ..
+                        }
+                    ] if text == "gate " && arms.len() == 2)
+            ));
+        }
+        branch_control = alternate.as_ref();
+    }
+    assert_branch_tail(branch_control, "11");
+}
+
+#[test]
 fn semicolon_keeps_control_expression_as_a_statement() {
     let parsed = parse_module(include_str!("fixtures/semicolon-control-block-item.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
