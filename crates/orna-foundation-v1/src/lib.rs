@@ -1342,6 +1342,8 @@ pub struct Diagnostic {
     notes: Vec<SafeText>,
     causes: Vec<Diagnostic>,
     redacted: bool,
+    // Clone state follows the record; clone_from replaces this admission from
+    // its source rather than preserving a destination's stale trust mark.
     root_message_admitted: bool,
     reference: Option<[u8; 16]>,
 }
