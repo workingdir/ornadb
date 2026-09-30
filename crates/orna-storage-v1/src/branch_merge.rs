@@ -181,6 +181,11 @@ pub fn merge_three_way_snapshots<R: BranchRowSource>(
 ) -> Result<BranchMergePlan, BranchMergeError> {
     let mut report = BranchMergeReport::default();
     let mut conflicts = Vec::new();
+    // Resolution has a stable phase boundary: schema must be settled before
+    // row data is read; after that, row conflicts are collected before
+    // checkpoint conflicts. MERGE-1 requires an isolated complete result but
+    // leaves diagnostic ordering open, so this order is the deterministic
+    // policy used here.
     let schema = match merge_schema_bounded(&base.schema, &left.schema, &right.schema, budget.max_conflicts) {
         Ok(schema) => schema,
         Err(schema_failure) => {
@@ -243,6 +248,8 @@ pub fn merge_three_way_snapshots<R: BranchRowSource>(
     }
 
     if !conflicts.is_empty() {
+        // Intermediate table candidates are never observable when any later
+        // row or checkpoint conflict remains unresolved.
         return Err(BranchMergeError::Conflicts { conflicts, report });
     }
     Ok(BranchMergePlan { schema, tables: merged_tables, checkpoints, report })
