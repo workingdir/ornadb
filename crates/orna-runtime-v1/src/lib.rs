@@ -24369,6 +24369,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sys_invocation_tail_cursor_stays_stale_after_digest_aba_and_reopen() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(150)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let invocation_id = id(151);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(152)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .finish_invocation_observation(writer, invocation_id, InvocationCompletion::Succeeded)
+            .await
+            .unwrap();
+        let end_page = state.invocation_observation_tail(None, 2).await.unwrap();
+        assert_eq!(end_page.entries.len(), 2);
+        assert!(!end_page.has_more);
+        let stale_cursor = end_page.next_cursor.expect("tail end has a cursor");
+
+        let key = stream_delivery("cursor-digest-aba", "cursor-digest-aba-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("cursor-digest-aba:reset").unwrap(),
+            },
+            reason: "generation cursor digest ABA boundary".into(),
+        };
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request, id(153))
+            .await
+            .unwrap();
+
+        let initial = state.capture().await.unwrap();
+        let initial_digest = initial.generation_digest();
+        let intermediate = state
+            .commit(
+                writer,
+                &initial,
+                &mutation(154),
+                digest(155),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert_ne!(intermediate.generation_digest(), initial_digest);
+        let restored = state
+            .commit(
+                writer,
+                &intermediate,
+                &mutation(156),
+                initial_digest,
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert_eq!(restored.generation_digest(), initial_digest);
+        assert_ne!(restored.generation(), initial.generation());
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        let persisted = reopened.capture().await.unwrap();
+        assert_eq!(persisted, restored);
+        assert_eq!(persisted.generation_digest(), initial_digest);
+        assert_eq!(reopened.stream_checkpoint(&key).await.unwrap(), receipt);
+        assert_eq!(
+            reopened
+                .invocation_observation_tail(Some(stale_cursor), 2)
+                .await,
+            Err(RuntimeError::InvocationTailInvalid),
+            "restoring the old digest and reopening cannot revive the old generation cursor"
+        );
+        let tail = reopened
+            .invocation_observation_tail(None, 4)
+            .await
+            .unwrap();
+        assert_eq!(
+            tail.entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "digest ABA does not affect durable lifecycle sequence"
+        );
+    }
+
+    #[tokio::test]
     async fn sys_lifecycle_parent_waits_for_children_and_replacement_orphans_old_owner() {
         assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
         let (_temp, repo) = repository();
