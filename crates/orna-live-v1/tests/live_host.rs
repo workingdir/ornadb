@@ -2941,6 +2941,111 @@ fn async_rejection_after_session_delete_stays_behind_the_session_fence() {
 }
 
 #[test]
+fn async_rejection_keeps_watch_correlation_after_session_resume() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(r#"{{"database":"{}","protocol":"{}"}}"#, uuid(2), SUBPROTOCOL),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    assert_eq!(created.status, 201);
+    let session_token = token(&created);
+    assert_eq!(
+        block_on(transport.upgrade(
+            websocket_upgrade(1, &session_token),
+            [5; 16],
+            1,
+        ))
+        .status,
+        101
+    );
+
+    let mut socket = WebSocketState::new([5; 16]);
+    let mut watch_application = IdentityWatchApplication {
+        next_revision: 0,
+        next_present: IdentityWatchApplication::present("after-resume"),
+    };
+    let subscribed = block_on(transport.receive_with_application(
+        &mut socket,
+        2,
+        &masked_binary_payload(&subscribe_request([40; 16])),
+        &mut watch_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &subscribed[0] else {
+        panic!("subscribe should return its initial snapshot");
+    };
+    let snapshot = Envelope::decode(payload, Limits::default().protocol).unwrap();
+    let watch = snapshot.watch.expect("the session owns a live watch");
+    assert_eq!(watch, [55; 16]);
+
+    // Exercise the crate-local Orna source fixture in the same session before
+    // checking that a delayed event rejection retains its watch identity.
+    let mut eval_application = UnitApplication::default();
+    let fixture_eval = eval_with_context([1; 16], [42; 16], [2; 16], None);
+    assert_eq!(
+        block_on(transport.receive_with_application(
+            &mut socket,
+            2,
+            &masked_binary_payload(&fixture_eval),
+            &mut eval_application,
+        ))
+        .unwrap()
+        .len(),
+        1
+    );
+
+    let preparation = block_on(transport.prepare_websocket_application(
+        &mut socket,
+        2,
+        &masked_binary_payload(&event([1; 16], [41; 16], watch)),
+    ))
+    .unwrap();
+    let WebSocketApplicationPreparation::Work(ticket) = preparation else {
+        panic!("the watched event should be admitted as async work");
+    };
+    let completion = ticket.reject(Error::Denied);
+
+    let resumed = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session/01010101-0101-0101-0101-010101010101/resume",
+            &format!(
+                r#"{{"resume_token":"{session_token}","protocol":"{SUBPROTOCOL}"}}"#
+            ),
+        ),
+        3,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    assert_eq!(resumed.status, 200);
+    assert_ne!(token(&resumed), session_token);
+    assert_eq!(transport.take_retired_attachments(), vec![[5; 16]]);
+    assert!(transport.acknowledge_retired_attachment([5; 16]));
+
+    let WebSocketOutput::Binary { outcome, payload } =
+        block_on(transport.complete_application(completion)).unwrap()
+    else {
+        panic!("the live event rejection should be correlated on the wire");
+    };
+    assert_eq!(outcome, FrameOutcome::Accepted);
+    let rejected = Envelope::decode(&payload, Limits::default().protocol).unwrap();
+    assert_eq!(rejected.request, Some([41; 16]));
+    assert_eq!(rejected.watch, Some(watch));
+    assert!(matches!(rejected.message, Message::Diagnostic { .. }));
+}
+
+#[test]
 fn websocket_commit_without_completed_delivery_aborts_candidate_and_preserves_incumbent() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
     let mut issuer = Issuer(1, None);
