@@ -2788,8 +2788,12 @@ impl LiveHost {
                     // Retain mapped rejections at the host boundary so a
                     // retry on a resumed attachment replays the same
                     // correlated diagnostic instead of a generic failure.
-                    if let Some(outcome) =
-                        self.operational_error_outcome(Some(session), &envelope, error)?
+                    if let Some(outcome) = self.operational_error_outcome(
+                        Some(session),
+                        &envelope,
+                        error,
+                        true,
+                    )?
                     {
                         return self.complete(session, request, &envelope, outcome).await;
                     }
@@ -3007,24 +3011,32 @@ impl LiveHost {
         session: Option<[u8; 16]>,
         envelope: &Envelope,
         error: Error,
+        admitted_application_work: bool,
     ) -> Result<Option<DispatchOutcome>> {
         let Some(request) = envelope.request else {
             return Ok(None);
         };
-        let known_watch = session.and_then(|session| {
-            envelope
-                .watch
-                .filter(|watch| self.watches.contains(&(session, *watch)))
-        });
+        let known_watch = if admitted_application_work
+            && matches!(envelope.message, Message::Event { .. })
+        {
+            // Admission already proved this ID belongs to the originating
+            // session; a later unsubscribe must not erase rejection context.
+            envelope.watch
+        } else {
+            session.and_then(|session| {
+                envelope
+                    .watch
+                    .filter(|watch| self.watches.contains(&(session, *watch)))
+            })
+        };
         let (code, watch) = match error {
             Error::RequestMismatch => (Error::RequestMismatch.code(), None),
             Error::UnsupportedOperation => ("wire.unsupported", None),
             Error::AdminBusy => (Error::AdminBusy.code(), None),
-            // A denied event on a live watch is an action-handle rejection;
-            // one without a live watch (including resync) is an unknown
-            // operational handle. Only these request shapes use Denied for
-            // handle validation, keeping attachment-boundary denials outside
-            // the protocol diagnostic path.
+            // A denied event admitted on a live watch is an action-handle
+            // rejection; a pre-admission event without a live watch
+            // (including resync) is an unknown handle. Attachment-boundary
+            // denials stay outside this protocol diagnostic path.
             Error::Denied if matches!(envelope.message, Message::Event { .. }) => {
                 if let Some(watch) = known_watch {
                     ("wire.stale_action", Some(watch))
@@ -6247,6 +6259,7 @@ impl LiveTransport {
                                 self.host.attachments.get(&socket.attachment).copied(),
                                 envelope,
                                 error,
+                                false,
                             )?
                         {
                             Ok(WebSocketApplicationPreparation::Output(
@@ -6324,7 +6337,7 @@ impl LiveTransport {
                 // remain transport errors owned by the caller.
                 if let Some(outcome) =
                     self.host
-                        .operational_error_outcome(Some(session), &envelope, error)?
+                        .operational_error_outcome(Some(session), &envelope, error, false)?
                 {
                     self.websocket_output(outcome)
                 } else {
@@ -7628,6 +7641,7 @@ impl LiveTransport {
                                     self.host.attachments.get(&socket.attachment).copied(),
                                     envelope,
                                     error,
+                                    false,
                                 )?
                         {
                             return Ok(Some(self.websocket_output(outcome)?));
@@ -9260,6 +9274,9 @@ mod tests {
             panic!("the live watched event should be admitted as application work");
         };
         let completion = ticket.reject(Error::Denied);
+        // The outstanding ticket owns the admission-time watch identity even
+        // after an unsubscribe removes the live handle.
+        host.watches.remove(&([1; 16], watch));
 
         let mut issuer = FixedIssuer(None);
         let (replacement, retired) = futures::executor::block_on(host.rotate_and_retire(
@@ -9291,9 +9308,6 @@ mod tests {
         assert_eq!(response.watch, Some(watch));
         assert!(matches!(response.message, Message::Diagnostic { .. }));
 
-        // A terminal retry keeps its original action diagnostic even after
-        // the watch identity stops being operational.
-        host.watches.remove(&([1; 16], watch));
         let replay = futures::executor::block_on(host.prepare_application_frame(
             [6; 16],
             5,
@@ -9374,6 +9388,7 @@ mod tests {
             panic!("the watched Event must be admitted as application work");
         };
         let event_completion = event_ticket.reject(Error::Denied);
+        host.watches.remove(&([1; 16], watch));
 
         let mut issuer = FixedIssuer(None);
         let (replacement, retired) = futures::executor::block_on(host.rotate_and_retire(
@@ -9405,9 +9420,8 @@ mod tests {
         assert_eq!(event_response.request, Some([41; 16]));
         assert_eq!(event_response.watch, Some(watch));
 
-        // Durable terminal replay likewise takes precedence over a watch
-        // that was closed after the diagnostic was first delivered.
-        host.watches.remove(&([1; 16], watch));
+        // Durable terminal replay likewise preserves the admission-time watch
+        // after the live handle has been closed.
         for (frame, expected) in [(&fixture_eval, &fixture_first), (&event, &event_first)] {
             let replay = futures::executor::block_on(host.prepare_application_frame(
                 [6; 16],
@@ -9437,7 +9451,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            host.operational_error_outcome(Some([1; 16]), &envelope, Error::Denied)
+            host.operational_error_outcome(Some([1; 16]), &envelope, Error::Denied, false)
                 .unwrap(),
             Some(DispatchOutcome {
                 outcome: FrameOutcome::Accepted,
