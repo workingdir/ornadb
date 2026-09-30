@@ -20483,6 +20483,26 @@ mod tests {
             "outer demand below the child cap skips the failing left tail and right sibling"
         );
 
+        // Bounded enumeration hides effects beyond the demanded prefix, not
+        // a failure needed to produce its final row. Reaching two rows pulls
+        // the failing second left projection into the prefix before union can
+        // advance to the right sibling.
+        let (outer_demand_reaches_tail, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-project-left-child-demand-reaches-tail.orna"
+            ),
+        );
+        assert_eq!(
+            outer_demand_reaches_tail.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "demand for the second left row exposes its failure before the right sibling"
+        );
+
         let (missing, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
             include_str!("../tests/fixtures/query-session-projection-missing.orna"),
