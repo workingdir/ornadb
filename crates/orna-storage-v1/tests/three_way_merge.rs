@@ -1381,6 +1381,95 @@ fn positionless_deletes_wait_for_segment_boundary_row_budget() {
 }
 
 #[test]
+fn positionless_checkpoint_delete_resolves_with_upper_segment_tombstone() {
+    let candidate_a = integer(10);
+    let candidate_b = integer(20);
+    let high_key = if candidate_a.encode().unwrap() < candidate_b.encode().unwrap() {
+        candidate_b
+    } else {
+        candidate_a
+    };
+    let boundary = high_key.encode().unwrap();
+    let low_range = KeyRange::new(None, Some(boundary.clone())).unwrap();
+    let high_range = KeyRange::new(Some(boundary), None).unwrap();
+    let split_manifest = |table_digest, upper_digest, upper_locator: &[u8]| TableManifest {
+        digest: [table_digest; 32],
+        segments: vec![
+            RowSegmentManifest {
+                locator: b"shared-lower".to_vec(),
+                range: low_range.clone(),
+                digest: [7; 32],
+            },
+            RowSegmentManifest {
+                locator: upper_locator.to_vec(),
+                range: high_range.clone(),
+                digest: [upper_digest; 32],
+            },
+        ],
+    };
+    let mut deleted_row = parse_fixture(BASE, RowKeyKind::Explicit);
+    deleted_row.key = high_key.clone();
+
+    let build_inputs = || {
+        let mut source = FixtureRows::default();
+        source.add(MergeSide::Base, b"base-upper", vec![deleted_row.clone()]);
+        source.add(MergeSide::Left, b"left-upper", Vec::new());
+        source.add(MergeSide::Right, b"right-upper", vec![deleted_row.clone()]);
+
+        let mut base = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(60, 10, b"base-upper"),
+            None,
+        );
+        let left = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(61, 11, b"left-upper"),
+            None,
+        );
+        let mut right = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(62, 12, b"right-upper"),
+            None,
+        );
+
+        let checkpoint_id = b"consumer/upper-segment-positionless-delete".to_vec();
+        let checkpoint = CheckpointGeneration { generation: 120, position: None };
+        base.checkpoints.insert(checkpoint_id.clone(), checkpoint.clone());
+        right.checkpoints.insert(checkpoint_id, checkpoint);
+        (base, left, right, source)
+    };
+
+    // The deleted row is exactly the inclusive lower edge of the upper range.
+    // A short budget stops in that range before checkpoint resolution; at the
+    // exact budget, the row tombstone and cursorless checkpoint delete coexist.
+    let (base, left, right, mut source) = build_inputs();
+    let short_budget = BranchMergeBudget { max_rows_examined: 1, max_conflicts: 0 };
+    let error = merge_three_way_snapshots(&base, &left, &right, &mut source, short_budget).unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("the upper-segment row scan must stop at the first row over budget")
+    };
+    assert_eq!(report.rows_examined, 2);
+    assert!(report.affected_ranges.contains(&(id(1), high_range.clone())));
+    assert!(report.affected_checkpoints.is_empty());
+
+    let (base, left, right, mut source) = build_inputs();
+    let exact_budget = BranchMergeBudget { max_rows_examined: 2, max_conflicts: 0 };
+    let plan = merge_three_way_snapshots(&base, &left, &right, &mut source, exact_budget).unwrap();
+    assert_eq!(plan.report.rows_examined, 2);
+    assert_eq!(source.visited.len(), 3);
+    assert!(source.visited.iter().all(|(_, locator)| locator.ends_with(b"upper")));
+    let segments = &plan.tables[&id(1)].segments;
+    assert_eq!(segments.len(), 2);
+    assert!(matches!(segments[0], MergedSegment::Reuse { from: MergeSide::Left, .. }));
+    let MergedSegment::Rows { rows, tombstones, .. } = &segments[1] else {
+        panic!("the changed upper segment materializes a tombstone")
+    };
+    assert!(rows.is_empty());
+    assert_eq!(tombstones, &[high_key]);
+    assert!(plan.checkpoints.is_empty());
+}
+
+#[test]
 fn schema_conflict_is_a_boundary_before_row_reads_and_checkpoint_resolution() {
     let base_checkpoint = CheckpointGeneration {
         generation: 4,
