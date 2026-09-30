@@ -2325,6 +2325,159 @@ fn recovered_deep_final_else_if_keeps_suffix_interpolations_in_case_arm_tails() 
 }
 
 #[test]
+fn recovered_deep_final_case_arm_suffixes_remain_in_the_final_branch_tail() {
+    let source = include_str!("fixtures/malformed-case-arm-max-depth-interpolated-final-else-if-case-arm-final-tail.orna");
+    let parsed = parse_module(source);
+
+    assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+    let diagnostic = &parsed.diagnostics[0];
+    assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+    assert_eq!(diagnostic.message, "expected pattern");
+    let invalid_pattern = source.find("\"layer").expect("fixture has a string pattern");
+    assert_eq!(diagnostic.span.start, invalid_pattern);
+    assert_eq!(diagnostic.span.end, invalid_pattern + 1);
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block { tail, .. } = body else {
+        panic!("expected a function block");
+    };
+    let Some(Expr::Control { arms, .. }) = tail.as_deref() else {
+        panic!("expected the outer case to remain the function tail");
+    };
+    assert_eq!(arms.len(), 1, "{arms:?}");
+    let Expr::Control {
+        condition: Some(scrutinee),
+        ..
+    } = &arms[0].body
+    else {
+        panic!("expected the recovered outer arm to contain a case");
+    };
+    let Expr::InterpolatedString { segments, .. } = scrutinee.as_ref() else {
+        panic!("expected an interpolated nested-case scrutinee");
+    };
+    let [StringSegment::Text { text, .. }, StringSegment::Expression { value, .. }] =
+        segments.as_slice()
+    else {
+        panic!("expected one interpolation after the string prefix: {segments:?}");
+    };
+    assert_eq!(text, "branches ");
+
+    let mut branch_control = value;
+    for index in 0..24 {
+        let Expr::Control {
+            alternate: Some(alternate),
+            ..
+        } = branch_control
+        else {
+            panic!("else-if chain ended before final branch {index}");
+        };
+        branch_control = alternate.as_ref();
+    }
+
+    let Expr::Control {
+        condition,
+        body: Some(branch_body),
+        alternate,
+        ..
+    } = branch_control
+    else {
+        panic!("expected the deepest else-if branch");
+    };
+    assert!(alternate.is_none(), "deepest else-if unexpectedly has an else");
+    assert!(matches!(
+        condition.as_deref(),
+        Some(Expr::InterpolatedString { segments, .. })
+            if matches!(segments.as_slice(), [
+                StringSegment::Text { text, .. },
+                StringSegment::Expression { value: Expr::Literal { text: value, .. }, .. }
+            ] if text == "finish " && value == "true")
+    ));
+    let Expr::Block {
+        statements,
+        tail: Some(branch_tail),
+        ..
+    } = branch_body.as_ref()
+    else {
+        panic!("deepest branch lost its final case tail");
+    };
+    assert!(matches!(
+        statements.as_slice(),
+        [Statement::Control {
+            value: Expr::Control { arms, .. },
+            ..
+        }] if arms.len() == 2
+    ));
+
+    let Expr::Control { arms, .. } = branch_tail.as_ref() else {
+        panic!("expected the final case expression to remain the branch tail");
+    };
+    assert_eq!(arms.len(), 2, "{arms:?}");
+    let assert_arm_tail = |body: &Expr,
+                           leading: &str,
+                           first: &str,
+                           middle: &str,
+                           second: &str,
+                           repeated: &str,
+                           third: &str,
+                           trailing: &str| {
+        let Expr::Block {
+            statements,
+            tail: Some(tail),
+            ..
+        } = body
+        else {
+            panic!("expected a case-arm block with a final interpolated tail");
+        };
+        assert_eq!(statements.len(), 1, "{statements:?}");
+        assert!(matches!(
+            tail.as_ref(),
+            Expr::InterpolatedString { segments, .. }
+                if matches!(segments.as_slice(), [
+                    StringSegment::Text { text: first_text, .. },
+                    StringSegment::Expression { value: Expr::Literal { text: first_value, .. }, .. },
+                    StringSegment::Text { text: middle_text, .. },
+                    StringSegment::Expression { value: Expr::Literal { text: second_value, .. }, .. },
+                    StringSegment::Text { text: repeated_text, .. },
+                    StringSegment::Expression { value: Expr::Literal { text: third_value, .. }, .. },
+                    StringSegment::Text { text: last_text, .. }
+                ] if first_text == leading
+                    && first_value == first
+                    && middle_text == middle
+                    && second_value == second
+                    && repeated_text == repeated
+                    && third_value == third
+                    && last_text == trailing)
+        ));
+    };
+
+    // The reference specifies the final case expression and string grammar,
+    // but not recovery at maximum nesting; keep each arm suffix on the direct
+    // final branch tail in source order.
+    assert_arm_tail(
+        &arms[0].body,
+        "then ",
+        "true",
+        " and ",
+        "false",
+        " and ",
+        "true",
+        " done",
+    );
+    assert_arm_tail(
+        &arms[1].body,
+        "otherwise ",
+        "false",
+        " then ",
+        "true",
+        " then ",
+        "false",
+        " done",
+    );
+}
+
+#[test]
 fn semicolon_keeps_control_expression_as_a_statement() {
     let parsed = parse_module(include_str!("fixtures/semicolon-control-block-item.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
