@@ -2,4 +2,5 @@ pub fn current_snapshot() = sys.snapshot();
 pub fn find_object(name: Str) = sys.resolve(name);
 pub fn current_changes(): Relation<sys.Change> = sys.changes();
 pub fn all_changes(from: sys.SnapshotRef, to: sys.SnapshotRef): Relation<sys.DiffEntry> = sys.diff(from, to);
+pub fn all_changes_explicit_scope(from: sys.SnapshotRef, to: sys.SnapshotRef): Relation<sys.DiffEntry> = sys.diff(from, to, sys.DiffScope.all);
 pub fn dependencies(object: sys.ObjectRef): Relation<sys.Dependency> = sys.dependencies(object);
