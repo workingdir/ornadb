@@ -916,6 +916,87 @@ fn explain_known_cost_overflow_survives_an_unknown_final_tail() {
 }
 
 #[test]
+fn explain_partial_unknown_mutation_tail_retains_cost_boundary() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_with_insert_tail = |affected_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-unknown-mutation-tail"),
+            source: obj("table:large"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(0),
+                    estimated_write_bytes: Some(0),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Insert,
+                    estimated_affected_rows: Some(affected_rows),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(1),
+                },
+            ],
+            materialize_into: Some(obj("materialization:partial-unknown-tail")),
+        })
+        .expect("partially known mutation estimate at the final plan tail")
+    };
+
+    let exact = explain_with_insert_tail(0);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None,
+        "known rows contribute zero, leaving the exact scan subtotal at u64::MAX"
+    );
+    let exact_insert = exact
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("insert".to_owned())))
+        .expect("partial final insert");
+    assert_eq!(exact_insert.estimated_rows(), Some(0));
+    assert_eq!(exact_insert.estimated_bytes(), None);
+    assert_eq!(exact_insert.estimated_work(), None);
+
+    let overflow = explain_with_insert_tail(1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one known affected row pushes the MAX scan subtotal over the boundary"
+    );
+    let overflow_insert = overflow
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("insert".to_owned())))
+        .expect("partial final insert");
+    assert_eq!(overflow_insert.estimated_rows(), Some(1));
+    assert_eq!(overflow_insert.estimated_bytes(), None);
+    assert_eq!(overflow_insert.estimated_work(), None);
+    let surface = serde_json::to_value(&overflow).expect("partial-tail overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
 fn explain_cost_overflow_survives_unknown_intermediate_estimates() {
     let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
