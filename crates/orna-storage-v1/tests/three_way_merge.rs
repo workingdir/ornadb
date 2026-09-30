@@ -704,6 +704,85 @@ fn both_delete_update_orientations_survive_the_checkpoint_budget_tail() {
 }
 
 #[test]
+fn segment_batch_conflicts_keep_checkpoint_delete_update_impact_at_budget_boundary() {
+    let candidate_a = integer(10);
+    let candidate_b = integer(20);
+    let (low_key, high_key) = if candidate_a.encode().unwrap() < candidate_b.encode().unwrap() {
+        (candidate_a, candidate_b)
+    } else {
+        (candidate_b, candidate_a)
+    };
+    let boundary = high_key.encode().unwrap();
+    let low_range = KeyRange::new(None, Some(boundary.clone())).unwrap();
+    let high_range = KeyRange::new(Some(boundary), None).unwrap();
+    let split_manifest = |digest, low_digest, high_digest, low_locator: &[u8], high_locator: &[u8]| {
+        TableManifest {
+            digest: [digest; 32],
+            segments: vec![
+                RowSegmentManifest {
+                    locator: low_locator.to_vec(),
+                    range: low_range.clone(),
+                    digest: [low_digest; 32],
+                },
+                RowSegmentManifest {
+                    locator: high_locator.to_vec(),
+                    range: high_range.clone(),
+                    digest: [high_digest; 32],
+                },
+            ],
+        }
+    };
+    let mut source = FixtureRows::default();
+    let fixture_row = |fixture: &str, key: CanonicalValue| {
+        let mut row = parse_fixture(fixture, RowKeyKind::Explicit);
+        row.key = key;
+        row
+    };
+    source.add(MergeSide::Base, b"base-low", vec![fixture_row(BASE, low_key.clone())]);
+    source.add(MergeSide::Left, b"left-low", vec![fixture_row(LEFT, low_key.clone())]);
+    source.add(MergeSide::Right, b"right-low", vec![fixture_row(CONFLICT, low_key.clone())]);
+    source.add(MergeSide::Base, b"base-high", vec![fixture_row(BASE, high_key.clone())]);
+    source.add(MergeSide::Left, b"left-high", vec![fixture_row(LEFT, high_key.clone())]);
+    source.add(MergeSide::Right, b"right-high", vec![fixture_row(CONFLICT, high_key)]);
+
+    let checkpoint = |generation, token: &[u8]| CheckpointGeneration {
+        generation,
+        position: Some(token.to_vec()),
+    };
+    let base = snapshot(
+        schema(true, FieldType::Str),
+        split_manifest(10, 1, 4, b"base-low", b"base-high"),
+        Some(checkpoint(4, b"base-token")),
+    );
+    let left = snapshot(
+        schema(true, FieldType::Str),
+        split_manifest(11, 2, 5, b"left-low", b"left-high"),
+        None,
+    );
+    let right = snapshot(
+        schema(true, FieldType::Str),
+        split_manifest(12, 3, 6, b"right-low", b"right-high"),
+        Some(checkpoint(5, b"right-token")),
+    );
+
+    // Aligned segment ranges are separate row batches; their conflicts share
+    // the same budget with the later checkpoint delete/update phase.
+    let two_row_details = BranchMergeBudget { max_rows_examined: 100, max_conflicts: 2 };
+    let error = merge_three_way_snapshots(&base, &left, &right, &mut source, two_row_details)
+        .unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("the checkpoint delete/update conflict crosses the two-row budget")
+    };
+    assert_eq!(report.conflicts_lower_bound, 3);
+    assert_eq!(report.rows_examined, 6);
+    assert!(report.affected_tables.contains(&id(1)));
+    assert!(report.affected_ranges.contains(&(id(1), low_range)));
+    assert!(report.affected_ranges.contains(&(id(1), high_range)));
+    assert!(report.affected_checkpoints.contains(b"consumer/source".as_slice()));
+    assert_eq!(source.visited.len(), 6);
+}
+
+#[test]
 fn schema_conflict_is_a_boundary_before_row_reads_and_checkpoint_resolution() {
     let base_checkpoint = CheckpointGeneration {
         generation: 4,
