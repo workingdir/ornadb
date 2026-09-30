@@ -11861,9 +11861,37 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
     .expect("the exact rejected retarget replays its mismatch");
     assert_eq!(retarget_mismatch_retry, first_retarget_mismatch);
 
+    let eval_reusing_failure_query_id = eval_with_context([1; 16], [93; 16], [3; 16], None);
+    assert!(matches!(
+        Envelope::decode(&eval_reusing_failure_query_id, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    // Cross-kind reuse of a completed status-query ID is rejected, while the
+    // original terminal snapshot remains available for an exact status replay.
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            11,
+            Frame::Binary(eval_reusing_failure_query_id.clone()),
+            &mut application,
+        )),
+        Err(Error::RequestMismatch)
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            12,
+            Frame::Binary(eval_reusing_failure_query_id),
+            &mut application,
+        )),
+        Err(Error::RequestMismatch)
+    );
+
     let exact_failure_query_retry = block_on(host.dispatch_frame(
         [6; 16],
-        11,
+        13,
         Frame::Binary(failure_status_query),
         &mut application,
     ))
