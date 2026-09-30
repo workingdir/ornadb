@@ -9277,11 +9277,22 @@ fn delete_cancels_durable_session_work_before_returning_success() {
 }
 
 #[test]
-fn sibling_status_request_id_reuse_survives_neighbor_closure() {
+fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
+    const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
+
     let (root, repository) = durable_repository();
     // The reference scopes request IDs by session but does not spell out how
-    // closing one session affects a sibling query reusing its request bytes.
+    // closing one session affects a sibling query reusing its request bytes,
+    // or whether that query remains a fixed snapshot after its target changes.
+    // Keep exact retries bound to the original scoped query identity; a fresh
+    // query observes the target's newer status.
     let first_target_request = eval_with_context([1; 16], [91; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&first_target_request, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
     let first_fingerprint = request_fingerprint(&first_target_request, [1; 16]);
     let second_target_request = eval_with_context([2; 16], [92; 16], [2; 16], None);
     let second_fingerprint = request_fingerprint(&second_target_request, [2; 16]);
@@ -9427,10 +9438,107 @@ fn sibling_status_request_id_reuse_survives_neighbor_closure() {
             result: None,
         } if *target == [91; 16] && *returned == first_fingerprint
     ));
+    // The deleted sibling's request remains cancelled under its own identity,
+    // but the same target bytes resolve as Unknown from this session. The
+    // reference scopes request identities by session and does not specify this
+    // post-closure lookup explicitly; avoid disclosing the sibling's outcome.
+    let closed_sibling_target_query = Envelope {
+        request: Some([96; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [92; 16],
+            fingerprint: second_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let closed_sibling_target_status = block_on(host.dispatch_frame(
+        [6; 16],
+        3,
+        Frame::Binary(closed_sibling_target_query),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a sibling cannot inspect the closed session's target");
+    assert!(matches!(
+        &closed_sibling_target_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Unknown,
+            fingerprint: None,
+            result: None,
+        } if *target == [92; 16]
+    ));
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status(
+            RequestIdentity {
+                session_id: [1; 16],
+                request_id: [92; 16],
+            },
+            second_fingerprint,
+        ))
+        .unwrap(),
+        None
+    ));
     assert!(matches!(
         block_on(open_durable_state(&repository).request_status(first_identity, first_fingerprint))
             .unwrap(),
         Some(status) if status.state == orna_runtime_v1::RequestState::Running
+    ));
+
+    let first_result = unit_result([91; 16], first_fingerprint);
+    block_on(open_durable_state(&repository).complete_request_with_owner(
+        first_identity,
+        first_fingerprint,
+        lease,
+        TerminalOutcome::new(first_result.encode(Limits::default().protocol).unwrap()).unwrap(),
+    ))
+    .unwrap();
+    let exact_retry = block_on(host.dispatch_frame(
+        [6; 16],
+        3,
+        Frame::Binary(sibling_status_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the exact scoped query replays its original status snapshot");
+    assert_eq!(exact_retry, sibling_status);
+
+    let fresh_status_request = Envelope {
+        request: Some([95; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint: first_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let fresh_status = block_on(host.dispatch_frame(
+        [6; 16],
+        4,
+        Frame::Binary(fresh_status_request),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a fresh query observes the target's terminal state");
+    let expected_result =
+        ResultBody::from_result(&first_result, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        &fresh_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(returned),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *returned == first_fingerprint
+            && result == &expected_result
     ));
     assert!(matches!(
         block_on(open_durable_state(&repository).request_status(second_identity, second_fingerprint))
