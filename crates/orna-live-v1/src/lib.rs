@@ -3189,6 +3189,11 @@ impl LiveHost {
                 } = &envelope.message
                     && *sent != fingerprint
                 {
+                    // A stale redundant fingerprint is a pre-admission
+                    // rejection: it must not claim the durable request ID.
+                    // The protocol requires a correlated diagnostic but does
+                    // not specify whether such a rejected frame reserves the
+                    // ID, so a corrected canonical retry remains admissible.
                     return Err(Error::RequestMismatch);
                 }
                 if self.runtime.is_some()

@@ -732,6 +732,7 @@ enum WatchEventMode {
 struct WatchEventApplication {
     mode: WatchEventMode,
     subscriptions: usize,
+    events: usize,
 }
 
 struct IdentityWatchApplication {
@@ -902,6 +903,7 @@ impl LiveApplication for WatchEventApplication {
         _: Option<&'a orna_runtime_v1::RuntimeActivationContext>,
         _: &'a mut orna_live_v1::LiveApplicationWorkLease,
     ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
+        self.events += 1;
         let Message::Event { fingerprint, .. } = message else {
             return Box::pin(async { Err(Error::ApplicationRejected) });
         };
@@ -3073,6 +3075,7 @@ fn synchronous_event_diagnostic_replays_after_watch_closure() {
     let mut application = WatchEventApplication {
         mode: WatchEventMode::Denied,
         subscriptions: 0,
+        events: 0,
     };
 
     let fixture_eval = block_on(host.dispatch_frame(
@@ -3146,6 +3149,7 @@ fn durable_event_diagnostic_status_and_replay_keep_closed_watch_correlation() {
     let mut application = WatchEventApplication {
         mode: WatchEventMode::Denied,
         subscriptions: 0,
+        events: 0,
     };
 
     let fixture_eval = block_on(host.dispatch_frame(
@@ -3294,6 +3298,7 @@ fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch()
     let mut application = WatchEventApplication {
         mode: WatchEventMode::Denied,
         subscriptions: 0,
+        events: 0,
     };
 
     let fixture_eval = block_on(host.dispatch_frame(
@@ -3459,6 +3464,153 @@ fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch()
         diagnostic
     );
     assert_eq!(application.calls, 0);
+
+    drop(transport);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn stale_event_fingerprint_does_not_reserve_durable_request_id() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
+    let mut socket = WebSocketState::new([5; 16]);
+    let mut fixture_application = WatchEventApplication {
+        mode: WatchEventMode::Pure,
+        subscriptions: 0,
+        events: 0,
+    };
+
+    let fixture_eval = eval_with_context([1; 16], [30; 16], [2; 16], None);
+    let fixture_output = block_on(transport.receive_with_application(
+        &mut socket,
+        2,
+        &masked_binary_payload(&fixture_eval),
+        &mut fixture_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &fixture_output[0] else {
+        panic!("the in-crate ORNA fixture receives a terminal response");
+    };
+    assert!(matches!(
+        Envelope::decode(payload, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Diagnostic { .. }
+    ));
+
+    let mut application = WatchEventApplication {
+        mode: WatchEventMode::Denied,
+        subscriptions: 0,
+        events: 0,
+    };
+
+    let subscribe = subscribe_request([31; 16]);
+    let subscribed = block_on(transport.receive_with_application(
+        &mut socket,
+        3,
+        &masked_binary_payload(&subscribe),
+        &mut application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &subscribed[0] else {
+        panic!("subscription returns a snapshot");
+    };
+    let watch = Envelope::decode(payload, Limits::default().protocol)
+        .unwrap()
+        .watch
+        .expect("the snapshot establishes the watch identity");
+
+    let canonical_event = event([1; 16], [32; 16], watch);
+    let mut stale = Envelope::decode(&canonical_event, Limits::default().protocol).unwrap();
+    if let Message::Event { revision, .. } = &mut stale.message {
+        *revision = 1;
+    } else {
+        panic!("fixture proof must retain an Event request");
+    }
+    let stale = stale.encode(Limits::default().protocol).unwrap();
+    let rejected = block_on(transport.receive_with_application(
+        &mut socket,
+        4,
+        &masked_binary_payload(&stale),
+        &mut application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &rejected[0] else {
+        panic!("stale embedded fingerprints receive a portable diagnostic");
+    };
+    let rejected = Envelope::decode(payload, Limits::default().protocol).unwrap();
+    assert_eq!(rejected.request, Some([32; 16]));
+    assert_eq!(rejected.watch, Some(watch));
+    assert!(matches!(rejected.message, Message::Diagnostic { .. }));
+    assert_eq!(application.events, 0, "the stale event never reaches the app");
+    assert!(block_on(open_durable_state(&repository).request_status_for_identity(
+        RequestIdentity {
+            session_id: [1; 16],
+            request_id: [32; 16],
+        },
+    ))
+    .unwrap()
+    .is_none(), "pre-admission rejection leaves the durable ID available");
+
+    let accepted = block_on(transport.receive_with_application(
+        &mut socket,
+        5,
+        &masked_binary_payload(&canonical_event),
+        &mut application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &accepted[0] else {
+        panic!("the corrected canonical retry completes");
+    };
+    let accepted = Envelope::decode(payload, Limits::default().protocol).unwrap();
+    assert_eq!(accepted.request, Some([32; 16]));
+    assert!(matches!(accepted.message, Message::Diagnostic { .. }));
+    assert_eq!(application.events, 1, "only the corrected event is dispatched");
+
+    let stored = block_on(open_durable_state(&repository).request_status_for_identity(
+        RequestIdentity {
+            session_id: [1; 16],
+            request_id: [32; 16],
+        },
+    ))
+    .unwrap()
+    .expect("the corrected request is now durable");
+    assert_eq!(stored.state, RequestState::Completed);
+    assert_eq!(
+        Envelope::decode(
+            stored.terminal_outcome.as_ref().unwrap().as_bytes(),
+            Limits::default().protocol,
+        )
+        .unwrap(),
+        accepted
+    );
+
+    let replay = block_on(transport.receive_with_application(
+        &mut socket,
+        6,
+        &masked_binary_payload(&canonical_event),
+        &mut application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &replay[0] else {
+        panic!("an exact canonical retry replays the terminal Event result");
+    };
+    assert_eq!(
+        Envelope::decode(payload, Limits::default().protocol).unwrap(),
+        accepted
+    );
+    assert_eq!(application.events, 1, "terminal replay does not redispatch");
 
     drop(transport);
     remove_test_repository(&root);
@@ -4818,6 +4970,7 @@ fn subscribe_request_identity_replays_only_the_original_watch() {
     let mut application = WatchEventApplication {
         mode: WatchEventMode::Pure,
         subscriptions: 0,
+        events: 0,
     };
 
     let original_request = subscribe_request([41; 16]);
@@ -5264,6 +5417,7 @@ fn mutating_event_invalidates_only_its_owning_watch() {
     let mut application = WatchEventApplication {
         mode: WatchEventMode::Commit,
         subscriptions: 0,
+        events: 0,
     };
     for (request, attachment_sequence) in [([30; 16], 2), ([31; 16], 3)] {
         block_on(host.dispatch_frame(
@@ -5332,6 +5486,7 @@ fn pure_rejected_and_rolled_back_events_preserve_their_watch() {
         let mut application = WatchEventApplication {
             mode,
             subscriptions: 0,
+            events: 0,
         };
         block_on(host.dispatch_frame(
             [5; 16],
@@ -5384,6 +5539,7 @@ fn cancelled_event_preserves_its_watch() {
     let mut application = WatchEventApplication {
         mode: WatchEventMode::Commit,
         subscriptions: 0,
+        events: 0,
     };
     block_on(host.dispatch_frame(
         [5; 16],
