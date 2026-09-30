@@ -7,6 +7,7 @@ mod cli_args;
 mod cli_dispatch;
 mod cli_help;
 mod cli_status;
+mod cli_serve;
 mod repl;
 
 use cli_args::{
@@ -2626,15 +2627,15 @@ mod tests {
                 .code,
             "E1001"
         );
-        let error = parse_cli(&["serve".into()]).expect_err("unknown command");
         assert_eq!(
-            (error.code, error.exit, error.title, error.help),
-            (
-                "E1002",
-                Exit::Usage,
-                "unknown Orna command",
-                "use `--help` to list supported commands",
-            )
+            parse_cli(&["serve".into()]).unwrap().command,
+            Command::Serve { port: 8080 }
+        );
+        assert_eq!(
+            parse_cli(&["serve".into(), "--port".into(), "0".into()])
+                .unwrap()
+                .command,
+            Command::Serve { port: 0 }
         );
     }
 
