@@ -16,6 +16,10 @@ const CASE_COLLISION_LOWER_ROW: &str = include_str!("fixtures/storage-placement-
 const PATH_AT_LIMIT_ROW: &str = include_str!("fixtures/storage-placement-path-at-limit.orna");
 const PATH_OVER_LIMIT_ROW: &str = include_str!("fixtures/storage-placement-path-over-limit.orna");
 const PATH_ORDINARY_ROW: &str = include_str!("fixtures/storage-placement-path-ordinary.orna");
+const ESCAPED_PATH_AT_LIMIT_ROW: &str =
+    include_str!("fixtures/storage-placement-escaped-path-at-limit.orna");
+const ESCAPED_PATH_OVER_LIMIT_ROW: &str =
+    include_str!("fixtures/storage-placement-escaped-path-over-limit.orna");
 const REWRITE_TAIL_FIRST: &str = include_str!("fixtures/storage-rewrite-tail-first.orna");
 const REWRITE_TAIL_LAST: &str = include_str!("fixtures/storage-rewrite-tail-last.orna");
 const KEY_FIELD: Uuid = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
@@ -188,6 +192,16 @@ fn editable_path_components(
     keys: &[String],
 ) -> Result<orna_storage_v1::LoosePath, orna_storage_v1::Error> {
     orna_storage_v1::LoosePath::for_key("Placement", keys)
+}
+
+fn encoded_table_relative_path(path: &orna_storage_v1::LoosePath) -> String {
+    path.as_managed_path()
+        .as_path()
+        .components()
+        .skip(1)
+        .map(|component| component.as_os_str().to_str().unwrap())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn existing_numeric_paths(count: usize) -> Vec<orna_storage_v1::LoosePath> {
@@ -572,6 +586,86 @@ fn portable_path_component_and_relative_path_limits_are_inclusive() {
     assert_eq!(retained_boundary_row.placement(), PhysicalPlacement::Editable);
     assert_eq!(retained_boundary_row.editable_path(), Some(&exact_path));
     assert!(over_limit_plan
+        .decisions()
+        .iter()
+        .filter(|decision| decision.action() == PlacementAction::Insert)
+        .all(|decision| decision.placement() == PhysicalPlacement::Compact));
+}
+
+#[test]
+fn escaped_utf8_expansion_uses_encoded_bytes_for_fallback_boundaries() {
+    let at_limit = text_key_components_from_fixture(ESCAPED_PATH_AT_LIMIT_ROW);
+    let over_limit = text_key_components_from_fixture(ESCAPED_PATH_OVER_LIMIT_ROW);
+    let at_limit_path = editable_path_components(&at_limit).unwrap();
+    let encoded_path = encoded_table_relative_path(&at_limit_path);
+    assert_eq!(encoded_path.len(), 1024);
+    assert_eq!(
+        encoded_path
+            .split('/')
+            .map(str::len)
+            .collect::<Vec<_>>(),
+        [200, 200, 200, 200, 200, 19]
+    );
+    assert!(editable_path_components(&over_limit).is_err());
+
+    let profile = profile_for_str_key_arity(Uuid::from_u128(10), 6);
+    let at_limit_plan = plan_storage_placement(
+        &profile,
+        StoragePreference::Automatic,
+        0,
+        false,
+        Vec::new(),
+        [PlacementCandidate::insert(
+            composite_text_key(&at_limit),
+            ESCAPED_PATH_AT_LIMIT_ROW.len(),
+            Some(at_limit_path),
+        )],
+    )
+    .unwrap();
+    assert_eq!(at_limit_plan.new_row_placement(), PhysicalPlacement::Editable);
+
+    let existing_components = text_key_components_from_fixture(PATH_AT_LIMIT_ROW);
+    let existing_path = editable_path_components(&existing_components).unwrap();
+    let ordinary_components = text_key_components_from_fixture(PATH_ORDINARY_ROW);
+    let ordinary_path = editable_path_components(&ordinary_components).unwrap();
+    let fallback_plan = plan_storage_placement(
+        &profile,
+        StoragePreference::Automatic,
+        1,
+        false,
+        vec![existing_path.clone()],
+        [
+            PlacementCandidate::update(
+                composite_text_key(&existing_components),
+                PATH_AT_LIMIT_ROW.len(),
+                PhysicalPlacement::Editable,
+                Some(existing_path.clone()),
+            ),
+            PlacementCandidate::insert(
+                composite_text_key(&over_limit),
+                ESCAPED_PATH_OVER_LIMIT_ROW.len(),
+                None,
+            ),
+            PlacementCandidate::insert(
+                composite_text_key(&ordinary_components),
+                PATH_ORDINARY_ROW.len(),
+                Some(ordinary_path),
+            ),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(fallback_plan.new_row_placement(), PhysicalPlacement::Compact);
+    let retained = fallback_plan
+        .decisions()
+        .iter()
+        .find(|decision| {
+            decision.key().encoded() == composite_text_key(&existing_components)
+        })
+        .unwrap();
+    assert_eq!(retained.placement(), PhysicalPlacement::Editable);
+    assert_eq!(retained.editable_path(), Some(&existing_path));
+    assert!(fallback_plan
         .decisions()
         .iter()
         .filter(|decision| decision.action() == PlacementAction::Insert)
