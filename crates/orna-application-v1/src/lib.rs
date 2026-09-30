@@ -4728,6 +4728,87 @@ mod tests {
     }
 
     #[test]
+    fn inserted_destination_update_spans_two_source_retry_episodes() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "table-rekey-inserted-destination-two-source-retries.orna",
+                include_str!("../tests/fixtures/table-rekey-inserted-destination-two-source-retries.orna"),
+                "main",
+            )
+            .expect("checked-in two-source retry fixture should be admitted");
+
+        let int = |value: i64| {
+            CanonicalValue::new(OvbRaw::Int(value.into())).expect("integer is canonical")
+        };
+        let row = |id: i64, text: &str, quantity: i64| {
+            CanonicalValue::new(OvbRaw::Map(vec![
+                (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
+                (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
+                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+            ]))
+            .expect("row is canonical")
+        };
+        let key = |value: i64| int(value).encode().expect("key is canonical");
+        let rows = BTreeMap::from([(
+            "Note".to_owned(),
+            vec![
+                (key(1), row(1, "source", 10).encode().unwrap()),
+                (key(2), row(2, "original destination", 20).encode().unwrap()),
+            ],
+        )]);
+        let tables = admitted_table_schemas(&application.module_header);
+        let mut handler =
+            SourceMutationEffectHandler::with_table_rows(tables, rows).expect("valid snapshot");
+
+        invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            &Environment::new(),
+            application.limits,
+            &mut handler,
+        )
+        .expect("the inserted blocker follows both sources through separate retry episodes");
+
+        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        assert_eq!(mutations.len(), 12);
+
+        let expected = [
+            (2, Some(3), false, row(3, "original destination", 20)),
+            (2, None, true, row(2, "replacement", 30)),
+            (2, None, false, row(2, "replacement", 31)),
+            (2, Some(4), false, row(4, "replacement", 31)),
+            (4, None, false, row(4, "replacement", 32)),
+            (1, Some(2), false, row(2, "source", 10)),
+            (4, Some(5), false, row(5, "replacement", 32)),
+            (5, None, false, row(5, "replacement", 33)),
+            (3, Some(4), false, row(4, "original destination", 20)),
+            (2, None, false, row(2, "source", 11)),
+            (4, None, false, row(4, "original destination", 21)),
+            (5, None, false, row(5, "replacement", 34)),
+        ];
+
+        for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in
+            mutations.iter().zip(expected).enumerate()
+        {
+            assert_eq!(mutation.key(), key(old_key), "mutation {index} source key");
+            let expected_key = new_key.map(key);
+            assert_eq!(
+                mutation.rekey_to(),
+                expected_key.as_deref(),
+                "mutation {index} re-key destination"
+            );
+            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
+                expected_row,
+                "mutation {index} row value"
+            );
+        }
+    }
+
+    #[test]
     fn failed_mutation_tail_does_not_return_earlier_effects_for_staging() {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
