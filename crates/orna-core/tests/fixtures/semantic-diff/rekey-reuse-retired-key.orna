@@ -1,0 +1,9 @@
+pub table Note(id: Int) {
+    text: Str,
+}
+
+fn retire_and_reuse_key() {
+    Note.rekey(1, 3);
+    Note.rekey(2, 1);
+    Note.delete(3);
+}
