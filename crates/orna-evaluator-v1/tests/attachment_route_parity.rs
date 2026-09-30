@@ -151,6 +151,34 @@ fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
         Ok(Some(Value::int(43.into())))
     );
 
+    // Detach prunes one exact route immediately; restoring the same pin must
+    // recover only that route while preserving the overlapping alias.
+    let recovered_pin = PinnedDatabase::resolve(
+        "main",
+        package_repository.clone(),
+        &main_alias_commit,
+        loader,
+    )
+    .unwrap();
+    databases.attach_database(recovered_pin).unwrap();
+    let recovered_modules = databases.module_inputs();
+    assert!(recovered_modules.iter().any(|module| {
+        module.logical_path == "main/main.orna" && module.source.contains("= 42")
+    }));
+    assert!(recovered_modules.iter().any(|module| {
+        module.logical_path == "main_archive.orna" && module.source.contains("= 43")
+    }));
+    assert_eq!(
+        databases
+            .database("main")
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        main_alias_commit
+    );
+    databases.detach_database("main").unwrap();
+
     let replacement_commit = commit_source(
         package_dir.path(),
         &include_str!("fixtures/attachment-route-package.orna").replace("42", "99"),
