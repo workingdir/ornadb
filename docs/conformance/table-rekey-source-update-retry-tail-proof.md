@@ -201,3 +201,10 @@ the second inserted-target closure: the inserted blocker is re-keyed to a free
 key and updated there, then the owner's retry claims the vacated target. The
 inserted row remains addressable, and the asserted order documents local
 closure behavior where the reference is silent.
+
+`inserted_target_move_closure_releases_occupied_destination` covers a blocked
+move-aside: another row occupies the inserted blocker's requested key, so a
+nested closure updates and deletes that destination blocker before retrying the
+inserted re-key. The inserted row then moves and the owner claims its target;
+the mutation tail documents this local nested closure order where the reference
+is silent.
