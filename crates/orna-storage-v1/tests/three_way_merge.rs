@@ -3021,6 +3021,47 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         assert_eq!(source.visited.len(), 3);
         assert!(source.visited.iter().all(|(_, locator)| locator.ends_with(b"upper")));
 
+        // With only the m conflict present, one detail is exactly sufficient:
+        // preserve the fixture-backed orientation and return a typed conflict
+        // instead of reporting a budget overrun.
+        let (mut base, mut left, mut right, mut source, agreed_delete_id, unchanged_delete_id, checkpoint_id, tail_id) =
+            build_inputs(row_delete_on_left, checkpoint_delete_on_left, true);
+        for snapshot in [&mut base, &mut left, &mut right] {
+            snapshot.checkpoints.remove(&tail_id);
+        }
+        let error = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 1 },
+        )
+        .unwrap_err();
+        let BranchMergeError::Conflicts { conflicts, report } = error else {
+            panic!("the single fixture conflict fits exactly in the detail budget")
+        };
+        let updated = parse_checkpoint_fixture(CHECKPOINT_EDITED);
+        assert_eq!(
+            conflicts,
+            vec![BranchMergeConflict::CheckpointConflict {
+                id: checkpoint_id.clone(),
+                conflict: orna_evolution_v1::CheckpointMergeConflict {
+                    base: Some(parse_checkpoint_fixture(CHECKPOINT_BASE)),
+                    left: if checkpoint_delete_on_left { None } else { Some(updated.clone()) },
+                    right: if checkpoint_delete_on_left { Some(updated) } else { None },
+                },
+            }]
+        );
+        assert_eq!(report.conflicts_lower_bound, 1);
+        assert_eq!(report.rows_examined, 2);
+        assert_eq!(report.affected_ranges.len(), 1);
+        assert!(report.affected_ranges.contains(&(id(1), high_range.clone())));
+        assert_eq!(report.affected_checkpoints.len(), 1);
+        assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(agreed_delete_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(unchanged_delete_id.as_slice()));
+        assert_eq!(source.visited.len(), 3);
+
         // The same row/checkpoint deletion orientation without the divergent
         // checkpoint proves the changed segment emits the tombstone itself.
         let (base, left, right, mut source, _, _, checkpoint_id, tail_id) = build_inputs(
