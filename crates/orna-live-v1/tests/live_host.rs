@@ -3388,16 +3388,54 @@ fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch()
             result: None,
         } if target == [37; 16] && fingerprint == event_fingerprint
     ));
-    let replay = block_on(recovered.dispatch_frame(
-        [6; 16],
+
+    let mut transport = LiveTransport::new(recovered, TransportLimits::default()).unwrap();
+    let mut socket = WebSocketState::new([6; 16]);
+    let mut application = UnitApplication::default();
+    let mut altered = Envelope::decode(&request, Limits::default().protocol).unwrap();
+    if let Message::Event { revision, .. } = &mut altered.message {
+        *revision = 1;
+    } else {
+        panic!("fixture proof must retain an Event request");
+    }
+    let altered_fingerprint =
+        canonical_request_fingerprint([1; 16], &altered, Limits::default().protocol).unwrap();
+    if let Message::Event { fingerprint, .. } = &mut altered.message {
+        *fingerprint = altered_fingerprint;
+    }
+    let altered = altered.encode(Limits::default().protocol).unwrap();
+    let mismatch = block_on(transport.receive_with_application(
+        &mut socket,
         8,
-        Frame::Binary(request),
-        &mut UnitApplication::default(),
+        &masked_binary_payload(&altered),
+        &mut application,
     ))
     .unwrap();
-    assert_eq!(replay.response, Some(diagnostic));
+    let WebSocketOutput::Binary { payload, .. } = &mismatch[0] else {
+        panic!("same request ID with a different fingerprint gets a diagnostic");
+    };
+    let mismatch = Envelope::decode(payload, Limits::default().protocol).unwrap();
+    assert_eq!(mismatch.request, Some([37; 16]));
+    assert_eq!(mismatch.watch, None, "the old watch is not restored");
+    assert!(matches!(mismatch.message, Message::Diagnostic { .. }));
 
-    drop(recovered);
+    let replay = block_on(transport.receive_with_application(
+        &mut socket,
+        9,
+        &masked_binary_payload(&request),
+        &mut application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &replay[0] else {
+        panic!("an exact retry replays the durable Event diagnostic");
+    };
+    assert_eq!(
+        Envelope::decode(payload, Limits::default().protocol).unwrap(),
+        diagnostic
+    );
+    assert_eq!(application.calls, 0);
+
+    drop(transport);
     remove_test_repository(&root);
 }
 
