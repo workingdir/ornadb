@@ -80,6 +80,47 @@ fn routed_relation_source(
         })
 }
 
+fn routed_relation_sources(
+    session: &AttachedDatabaseSession,
+    table_path: &str,
+    database: &str,
+) -> Vec<(String, String, String)> {
+    let mut sources = session
+        .relation_sources(table_path)
+        .into_iter()
+        .filter(|source| source.database() == database)
+        .map(|source| {
+            (
+                source.commit().as_str().to_owned(),
+                source.row().logical_path().to_owned(),
+                source.row().source().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    sources.sort_by(|left, right| left.1.cmp(&right.1));
+    sources
+}
+
+fn assert_relation_routes(
+    session: &AttachedDatabaseSession,
+    database: &str,
+    commit: &str,
+    expected: &[(&str, &str)],
+) {
+    let sources = routed_relation_sources(session, "contacts/Contact", database);
+    assert_eq!(sources.len(), expected.len(), "rows for {database}");
+    for ((actual_commit, actual_path, actual_source), (path, value)) in
+        sources.iter().zip(expected)
+    {
+        assert_eq!(actual_commit, commit, "snapshot for {database}/{path}");
+        assert_eq!(actual_path, path, "row identity for {database}");
+        assert!(
+            actual_source.contains(value),
+            "{database}/{path} did not retain {value}: {actual_source}"
+        );
+    }
+}
+
 #[test]
 fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
     let (_primary_dir, primary_repository, primary_commit) = repository(&[(
@@ -440,6 +481,10 @@ fn detaching_one_relation_alias_preserves_other_routes_in_each_clone() {
             "contacts/Contact/1.orna",
             include_str!("fixtures/attach-routing-primary-row.orna"),
         ),
+        (
+            "contacts/Contact/2.orna",
+            include_str!("fixtures/attach-routing-primary-row-2.orna"),
+        ),
     ]);
     let (archive_dir, archive_repository, archive_commit) = repository(&[
         (
@@ -454,6 +499,10 @@ fn detaching_one_relation_alias_preserves_other_routes_in_each_clone() {
             "contacts/Contact/1.orna",
             include_str!("fixtures/attach-routing-package-row.orna"),
         ),
+        (
+            "contacts/Contact/2.orna",
+            include_str!("fixtures/attach-routing-package-row-2.orna"),
+        ),
     ]);
     let archive_replacement_commit = write_commit(
         archive_dir.path(),
@@ -461,6 +510,8 @@ fn detaching_one_relation_alias_preserves_other_routes_in_each_clone() {
         &include_str!("fixtures/attach-routing-package-row.orna").replace("42", "99"),
     );
     let catalog_row = include_str!("fixtures/attach-routing-package-row.orna").replace("42", "17");
+    let catalog_row_2 =
+        include_str!("fixtures/attach-routing-package-row-2.orna").replace("43", "18");
     let (_catalog_dir, catalog_repository, catalog_commit) = repository(&[
         (
             "main.orna",
@@ -471,6 +522,7 @@ fn detaching_one_relation_alias_preserves_other_routes_in_each_clone() {
             include_str!("fixtures/attach-routing-table.orna"),
         ),
         ("contacts/Contact/1.orna", &catalog_row),
+        ("contacts/Contact/2.orna", &catalog_row_2),
     ]);
 
     let loader = ProjectLoader::default();
@@ -494,32 +546,29 @@ fn detaching_one_relation_alias_preserves_other_routes_in_each_clone() {
     session.attach_database(archive).unwrap();
     session.attach_database(catalog).unwrap();
 
-    assert_eq!(
-        routed_relation_source(&session, "contacts/Contact", "archive")
-            .unwrap()
-            .0,
-        archive_commit
-    );
-    assert!(routed_relation_source(&session, "contacts/Contact", "archive")
-        .unwrap()
-        .1
-        .contains("value: 42"));
-    assert_eq!(
-        routed_relation_source(&session, "contacts/Contact", "catalog")
-            .unwrap()
-            .0,
-        catalog_commit
-    );
+    let archive_rows = [
+        ("contacts/Contact/1.orna", "value: 42"),
+        ("contacts/Contact/2.orna", "value: 43"),
+    ];
+    let catalog_rows = [
+        ("contacts/Contact/1.orna", "value: 17"),
+        ("contacts/Contact/2.orna", "value: 18"),
+    ];
+    let primary_rows = [
+        ("contacts/Contact/1.orna", "value: 7"),
+        ("contacts/Contact/2.orna", "value: 8"),
+    ];
+    // Aliases can contribute the same row identities without collapsing one
+    // snapshot into another; each alias retains every row from its own pin.
+    assert_relation_routes(&session, "app", &primary_commit, &primary_rows);
+    assert_relation_routes(&session, "archive", &archive_commit, &archive_rows);
+    assert_relation_routes(&session, "catalog", &catalog_commit, &catalog_rows);
 
     let mut old_clone = session.clone();
     session.detach_database("archive").unwrap();
     assert!(routed_relation_source(&session, "contacts/Contact", "archive").is_none());
-    assert_eq!(
-        routed_relation_source(&session, "contacts/Contact", "catalog")
-            .unwrap()
-            .0,
-        catalog_commit
-    );
+    assert_relation_routes(&session, "catalog", &catalog_commit, &catalog_rows);
+    assert_relation_routes(&session, "app", &primary_commit, &primary_rows);
     assert!(matches!(
         session.validate_write_target("archive"),
         Err(AttachmentError::DatabaseUnavailable)
@@ -538,39 +587,21 @@ fn detaching_one_relation_alias_preserves_other_routes_in_each_clone() {
     )
     .unwrap();
     session.attach_database(archive_replacement).unwrap();
-    assert_eq!(
-        routed_relation_source(&session, "contacts/Contact", "archive")
-            .unwrap()
-            .0,
-        archive_replacement_commit
+    let replacement_rows = [
+        ("contacts/Contact/1.orna", "value: 99"),
+        ("contacts/Contact/2.orna", "value: 43"),
+    ];
+    assert_relation_routes(
+        &session,
+        "archive",
+        &archive_replacement_commit,
+        &replacement_rows,
     );
-    assert!(routed_relation_source(&session, "contacts/Contact", "archive")
-        .unwrap()
-        .1
-        .contains("value: 99"));
-    assert_eq!(
-        routed_relation_source(&session, "contacts/Contact", "catalog")
-            .unwrap()
-            .0,
-        catalog_commit
-    );
+    assert_relation_routes(&session, "catalog", &catalog_commit, &catalog_rows);
 
-    assert_eq!(
-        routed_relation_source(&old_clone, "contacts/Contact", "archive")
-            .unwrap()
-            .0,
-        archive_commit
-    );
-    assert!(routed_relation_source(&old_clone, "contacts/Contact", "archive")
-        .unwrap()
-        .1
-        .contains("value: 42"));
-    assert_eq!(
-        routed_relation_source(&detached_clone, "contacts/Contact", "catalog")
-            .unwrap()
-            .0,
-        catalog_commit
-    );
+    assert_relation_routes(&old_clone, "archive", &archive_commit, &archive_rows);
+    assert_relation_routes(&old_clone, "catalog", &catalog_commit, &catalog_rows);
+    assert_relation_routes(&detached_clone, "catalog", &catalog_commit, &catalog_rows);
     assert!(routed_relation_source(&detached_clone, "contacts/Contact", "archive").is_none());
 
     old_clone.detach_database("catalog").unwrap();
