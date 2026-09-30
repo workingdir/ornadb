@@ -4,10 +4,14 @@ use orna_sys_v1::{
     DependencyConfidence, DependencyGraph, DependencyGraphError, DependencyInput, DependencyKind,
     ExplainError,
     FileRef, FunctionPlanDescription, FunctionRef, ObjectRef, PlanNodeKind, PlanOrdering,
-    PlanSortDirection, PlanNullOrder, QueryPlanDescription, SnapshotRef, MAX_PLAN_EXPRESSIONS,
+    PlanSortDirection, PlanNullOrder, QueryJoinDescription, QueryPlanDescription,
+    QuerySourceStatistics, MutableBranchSnapshot, SnapshotRef, MAX_PLAN_EXPRESSIONS,
     SystemEffect, explain_function, explain_query, system_function_descriptor, SourceSpan,
 };
 use serde_json::Value;
+
+const DEPENDENCY_DIAMOND: &str = include_str!("fixtures/dependency_diamond.orna");
+const MUTABLE_BRANCH_QUERY: &str = include_str!("fixtures/mutable_branch_query.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -151,6 +155,88 @@ fn dependency_filters_apply_to_traversal_and_dependents_keep_edge_direction() {
 }
 
 #[test]
+fn dependency_fixture_proves_deterministic_diamond_and_cycle_traversal() {
+    let parsed = orna_syntax_v1::parse_module(DEPENDENCY_DIAMOND);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 3);
+    let dashboard = obj("function:dashboard");
+    let render = obj("function:render_contacts");
+    let active = obj("function:active_contacts");
+    let graph = DependencyGraph::new(
+        SnapshotRef::descriptive("snapshot:fixture"),
+        [dashboard.clone(), render.clone(), active.clone()],
+        [
+            DependencyInput::new(
+                dashboard.clone(),
+                render.clone(),
+                DependencyKind::Call,
+                None,
+                None,
+                DependencyConfidence::Exact,
+                false,
+            ),
+            DependencyInput::new(
+                dashboard.clone(),
+                active.clone(),
+                DependencyKind::Call,
+                None,
+                None,
+                DependencyConfidence::Exact,
+                false,
+            ),
+            DependencyInput::new(
+                render.clone(),
+                active.clone(),
+                DependencyKind::Call,
+                None,
+                None,
+                DependencyConfidence::Exact,
+                false,
+            ),
+            // Cycles are legal catalogue facts; visited-object tracking keeps
+            // the transitive query finite and preserves this return edge.
+            DependencyInput::new(
+                active.clone(),
+                dashboard.clone(),
+                DependencyKind::Call,
+                None,
+                None,
+                DependencyConfidence::Conservative,
+                true,
+            ),
+        ],
+    )
+    .expect("fixture dependency graph");
+
+    let traversed = graph
+        .dependencies(&dashboard, true, None)
+        .expect("cycle-safe traversal");
+    assert_eq!(
+        traversed
+            .iter()
+            .map(|edge| (edge.from().as_str(), edge.to().as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("function:dashboard", "function:active_contacts"),
+            ("function:dashboard", "function:render_contacts"),
+            ("function:active_contacts", "function:dashboard"),
+            ("function:render_contacts", "function:active_contacts"),
+        ]
+    );
+    assert_eq!(traversed.len(), 4);
+
+    let reverse = graph
+        .dependents(&active, true, None)
+        .expect("transitive reverse traversal");
+    assert!(reverse.iter().any(|edge| {
+        edge.from() == &dashboard && edge.to() == &active
+    }));
+    assert!(reverse.iter().all(|edge| {
+        edge.kind() == DependencyKind::Call
+    }));
+}
+
+#[test]
 fn dependency_graph_rejects_unknown_endpoints_and_query_roots() {
     let a = obj("module:a");
     let missing = obj("missing:object");
@@ -204,6 +290,8 @@ fn query_explain_returns_a_snapshot_pinned_scan_fallback_without_fabricated_stat
     let query = QueryPlanDescription {
         snapshot: SnapshotRef::descriptive("snapshot:one"),
         source: obj("table:contacts"),
+        source_statistics: None,
+        joins: Vec::new(),
         predicate: Some(orna_sys_v1::ExpressionRef::descriptive("expr:active")),
         projections: vec![orna_sys_v1::ExpressionRef::descriptive("expr:name")],
         distinct: true,
@@ -213,6 +301,7 @@ fn query_explain_returns_a_snapshot_pinned_scan_fallback_without_fabricated_stat
             null_order: PlanNullOrder::Last,
         }],
         limit: Some(10),
+        materialize_into: None,
     };
     let explained = explain_query(&query).expect("structured query plan");
     assert_eq!(
@@ -257,6 +346,133 @@ fn query_explain_returns_a_snapshot_pinned_scan_fallback_without_fabricated_stat
     let rendered_plan = serde_json::to_value(explained.plan()).expect("portable plan row");
     assert!(rendered_plan.get("estimated_cost").is_none());
     assert_eq!(rendered_plan["actual_available"], Value::Bool(false));
+}
+
+#[test]
+fn explain_builds_a_deep_join_materialization_plan_from_mutable_branch_stats() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 3);
+    let query = QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:workspace-generation-7"),
+        source: obj("table:Contact"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(1_000),
+            estimated_bytes: Some(64_000),
+            mutable_branch: Some(MutableBranchSnapshot {
+                name: "branch:working".to_owned(),
+                generation: 7,
+            }),
+        }),
+        joins: vec![QueryJoinDescription {
+            source: obj("table:ContactTag"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(100),
+                estimated_bytes: Some(8_000),
+                mutable_branch: Some(MutableBranchSnapshot {
+                    name: "branch:working".to_owned(),
+                    generation: 7,
+                }),
+            }),
+            predicate: Some(orna_sys_v1::ExpressionRef::descriptive(
+                "expr:contact.id=tag.contact_id",
+            )),
+        }],
+        predicate: Some(orna_sys_v1::ExpressionRef::descriptive("expr:contact.active")),
+        projections: vec![orna_sys_v1::ExpressionRef::descriptive("expr:contact.name")],
+        distinct: true,
+        ordering: vec![PlanOrdering {
+            expression: orna_sys_v1::ExpressionRef::descriptive("expr:contact.name"),
+            direction: PlanSortDirection::Ascending,
+            null_order: PlanNullOrder::Last,
+        }],
+        limit: Some(30),
+        materialize_into: Some(obj("materialization:active_contact_names")),
+    };
+    let explained = explain_query(&query).expect("deep query plan");
+    assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(explained.root().object(), Some(&obj("materialization:active_contact_names")));
+    assert!(explained.nodes().iter().any(|node| node.kind() == PlanNodeKind::Join));
+    let join = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("join operator");
+    assert_eq!(join.inputs().len(), 2);
+    assert_eq!(join.estimated_rows(), Some(10_000));
+    assert_eq!(
+        explained
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Filter)
+            .unwrap()
+            .estimated_rows(),
+        Some(5_000)
+    );
+    assert_eq!(
+        explained
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Aggregate)
+            .unwrap()
+            .estimated_rows(),
+        Some(2_500)
+    );
+    assert_eq!(explained.root().estimated_rows(), Some(30));
+    assert!(explained.nodes().iter().any(|node| {
+        node.kind() == PlanNodeKind::Scan
+            && node.object() == Some(&obj("table:Contact"))
+            && node.estimated_rows() == Some(1_000)
+    }));
+    assert!(explained.nodes().iter().any(|node| {
+        node.kind() == PlanNodeKind::Scan
+            && node.object() == Some(&obj("table:ContactTag"))
+            && node.estimated_rows() == Some(100)
+    }));
+    assert!(explained.plan().estimated_cost().is_some());
+    assert!(explained
+        .nodes()
+        .iter()
+        .all(|node| node.actual_rows().is_none()));
+    assert!(explained
+        .nodes()
+        .iter()
+        .all(|node| node.estimated_bytes().is_none() || node.estimated_rows().is_some()));
+    assert!(!explained.plan().actual_available());
+
+    let rendered = serde_json::to_value(explained.nodes()).expect("structured plan nodes");
+    let contact_scan = rendered
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["object"] == "table:Contact")
+        .expect("serialized contact scan");
+    assert_eq!(contact_scan["details"]["mutable_branch"], "branch:working");
+    assert_eq!(contact_scan["details"]["branch_generation"], 7);
+    assert_eq!(contact_scan["details"]["statistics_scope"], "overlay_inclusive");
+
+    let mut next_generation = query.clone();
+    next_generation.source_statistics.as_mut().unwrap().mutable_branch.as_mut().unwrap().generation = 8;
+    next_generation.source_statistics.as_mut().unwrap().estimated_rows = Some(1_050);
+    let changed = explain_query(&next_generation).expect("new mutable branch state");
+    assert_ne!(explained.plan().id(), changed.plan().id());
+    assert_eq!(
+        changed
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj("table:Contact")))
+            .unwrap()
+            .estimated_rows(),
+        Some(1_050)
+    );
+
+    let fallback = explain_query(&QueryPlanDescription {
+        materialize_into: None,
+        ..query
+    })
+    .expect("reference scan/query fallback");
+    assert_ne!(fallback.root().kind(), PlanNodeKind::Materialize);
+    assert!(fallback.nodes().iter().any(|node| node.kind() == PlanNodeKind::Scan));
 }
 
 #[test]
@@ -344,6 +560,8 @@ fn explain_rejects_conflicting_function_edges_and_over_limit_query_shapes() {
     let over_limit = QueryPlanDescription {
         snapshot: SnapshotRef::descriptive("snapshot:one"),
         source: obj("table:contacts"),
+        source_statistics: None,
+        joins: Vec::new(),
         predicate: Some(orna_sys_v1::ExpressionRef::descriptive("expr:active")),
         projections: (0..MAX_PLAN_EXPRESSIONS)
             .map(|position| {
@@ -353,6 +571,7 @@ fn explain_rejects_conflicting_function_edges_and_over_limit_query_shapes() {
         distinct: false,
         ordering: Vec::new(),
         limit: None,
+        materialize_into: None,
     };
     assert_eq!(
         explain_query(&over_limit),
@@ -362,11 +581,14 @@ fn explain_rejects_conflicting_function_edges_and_over_limit_query_shapes() {
     let invalid_expression = QueryPlanDescription {
         snapshot: SnapshotRef::descriptive("snapshot:one"),
         source: obj("table:contacts"),
+        source_statistics: None,
+        joins: Vec::new(),
         predicate: Some(orna_sys_v1::ExpressionRef::descriptive("\n")),
         projections: Vec::new(),
         distinct: false,
         ordering: Vec::new(),
         limit: None,
+        materialize_into: None,
     };
     assert_eq!(
         explain_query(&invalid_expression),
