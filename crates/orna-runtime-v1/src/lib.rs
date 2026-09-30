@@ -24428,6 +24428,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sys_invocation_orphan_tail_survives_same_id_admin_receipt_reopen() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(225)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let shared_id = id(226);
+        let idempotency_hash = digest(227);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: shared_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(228)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: Some(idempotency_hash),
+                },
+            )
+            .await
+            .unwrap();
+        let admission = state.invocation_observation_tail(None, 1).await.unwrap();
+        assert_eq!(admission.entries[0].sequence, 1);
+        let cursor = admission.next_cursor.expect("running admission has a cursor");
+
+        let key = stream_delivery("orphan-shared-receipt", "orphan-shared-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("orphan-shared:reset").unwrap(),
+            },
+            reason: "orphan transition and admin receipt share an ID".into(),
+        };
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request.clone(), shared_id)
+            .await
+            .unwrap();
+        let replacement = state.takeover_lease(writer, id(229)).await.unwrap();
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(reopened.stream_checkpoint(&key).await.unwrap(), receipt);
+        let replacement = reopened.acquire_lease(replacement.owner_id).await.unwrap();
+        assert_eq!(
+            reopened
+                .reset_checkpoint_with_invocation_id(replacement, request.clone(), shared_id)
+                .await,
+            Ok(receipt.clone())
+        );
+        assert_eq!(
+            reopened.orphan_abandoned_invocations(replacement).await.unwrap(),
+            1
+        );
+        assert_eq!(
+            reopened
+                .reset_checkpoint_with_invocation_id(replacement, request, shared_id)
+                .await,
+            Ok(receipt)
+        );
+
+        assert!(reopened
+            .admin_invocation_receipt(shared_id)
+            .await
+            .unwrap()
+            .is_some());
+        let retained = reopened
+            .invocation_observation(shared_id)
+            .await
+            .unwrap()
+            .expect("orphaned sys.Invocation remains tracked");
+        assert_eq!(retained.status, InvocationObservationStatus::Orphaned);
+        assert_eq!(retained.idempotency_key_hash, Some(idempotency_hash));
+        let terminal = reopened
+            .invocation_observation_tail(Some(cursor), 1)
+            .await
+            .unwrap();
+        assert_eq!(terminal.entries.len(), 1);
+        assert!(!terminal.has_more);
+        assert_eq!(terminal.entries[0].sequence, 2);
+        assert_eq!(terminal.entries[0].invocation_id, shared_id);
+        assert_eq!(terminal.entries[0].status, InvocationObservationStatus::Orphaned);
+        let whole_tail = reopened.invocation_observation_tail(None, 4).await.unwrap();
+        assert_eq!(
+            whole_tail
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[tokio::test]
     async fn sys_invocation_tail_partial_cursor_tracks_admission_between_polls() {
         assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
         let (_temp, repo) = repository();
