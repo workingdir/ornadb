@@ -1477,6 +1477,24 @@ impl Snapshot {
             ]),
         }
     }
+
+    /// Encodes this pin as its canonical OVB-1 value.
+    ///
+    /// Snapshot variants are publicly constructible for compatibility, so an
+    /// encoder must revalidate the generation-derived CWD identity instead of
+    /// serializing a forged `id` supplied through the enum fields.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        let canonical = Self::decode(&self.raw())?;
+        Value::new(canonical.raw())?.encode()
+    }
+
+    /// Decodes a snapshot pin from canonical OVB-1 bytes. The inner decoder
+    /// verifies the CWD id against its database, runtime, and full generation.
+    pub fn decode_bytes(bytes: &[u8]) -> Result<Self> {
+        let value = Value::decode(bytes)?;
+        Self::decode(value.raw())
+    }
+
     pub fn decode(raw: &Raw) -> Result<Self> {
         let a = array(raw)?;
         match int_u64(a.first().ok_or(Error::InvalidValue)?)? {
@@ -4547,6 +4565,46 @@ mod tests {
         ]);
         assert!(Snapshot::decode(&noncanonical).is_err());
     }
+
+    #[test]
+    fn snapshot_byte_codec_preserves_full_generation_identity() {
+        let db = h("000102030405060708090a0b0c0d0e0f").try_into().unwrap();
+        let rt = h("101112131415161718191a1b1c1d1e1f").try_into().unwrap();
+        let generation = (BigInt::from(1_u8) << 130_usize) + BigInt::from(42_u8);
+        let snapshot = Snapshot::cwd(db, rt, generation.clone()).unwrap();
+
+        let encoded = snapshot.encode().unwrap();
+        let decoded = Snapshot::decode_bytes(&encoded).unwrap();
+        assert_eq!(decoded, snapshot);
+        assert_eq!(decoded.encode().unwrap(), encoded);
+
+        let Snapshot::Cwd {
+            id,
+            generation: pinned,
+            ..
+        } = &decoded
+        else {
+            unreachable!();
+        };
+        assert_eq!(pinned, &generation);
+        let next = Snapshot::cwd(db, rt, &generation + 1).unwrap();
+        let Snapshot::Cwd { id: next_id, .. } = next else {
+            unreachable!();
+        };
+        assert_ne!(*id, next_id, "each logical generation has its own id");
+
+        let mut forged = snapshot;
+        let Snapshot::Cwd { id, .. } = &mut forged else {
+            unreachable!();
+        };
+        *id = [0xa5; 32];
+        assert!(forged.encode().is_err());
+
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert_eq!(Snapshot::decode_bytes(&trailing), Err(Error::TrailingBytes));
+    }
+
     #[test]
     fn fixture_path_vectors() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(

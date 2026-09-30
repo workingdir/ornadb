@@ -11383,14 +11383,14 @@ fn bigint_to_i64(value: &BigInt) -> Result<i64, RuntimeError> {
 }
 
 fn encode_capture(capture: &CwdCapture) -> Result<Vec<u8>, RuntimeError> {
-    Value::new(capture.snapshot().raw())
-        .and_then(|value| value.encode())
+    capture
+        .snapshot()
+        .encode()
         .map_err(|_| RuntimeError::RecoveryInvalid)
 }
 
 fn decode_capture(bytes: Vec<u8>, digest: [u8; 32]) -> Result<CwdCapture, RuntimeError> {
-    let value = Value::decode(&bytes).map_err(|_| RuntimeError::RecoveryInvalid)?;
-    let snapshot = Snapshot::decode(value.raw()).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let snapshot = Snapshot::decode_bytes(&bytes).map_err(|_| RuntimeError::RecoveryInvalid)?;
     CwdCapture::new(snapshot, digest).map_err(|_| RuntimeError::RecoveryInvalid)
 }
 
@@ -13313,33 +13313,7 @@ fn encode_row_ref(reference: &RowRef) -> Result<Vec<u8>, RuntimeError> {
 }
 
 fn decode_row_ref(bytes: Vec<u8>) -> Result<RowRef, RuntimeError> {
-    let value = Value::decode(&bytes).map_err(|_| RuntimeError::RecoveryInvalid)?;
-    let OvbRaw::Tag(60010, payload) = value.raw() else {
-        return Err(RuntimeError::RecoveryInvalid);
-    };
-    let OvbRaw::Array(parts) = payload.as_ref() else {
-        return Err(RuntimeError::RecoveryInvalid);
-    };
-    let [
-        OvbRaw::Tag(37, database),
-        OvbRaw::Tag(37, table),
-        key,
-        snapshot,
-    ] = parts.as_slice()
-    else {
-        return Err(RuntimeError::RecoveryInvalid);
-    };
-    let (OvbRaw::Bytes(database), OvbRaw::Bytes(table)) = (database.as_ref(), table.as_ref())
-    else {
-        return Err(RuntimeError::RecoveryInvalid);
-    };
-    RowRef::new(
-        fixed(database.clone())?,
-        fixed(table.clone())?,
-        key.clone(),
-        Snapshot::decode(snapshot).map_err(|_| RuntimeError::RecoveryInvalid)?,
-    )
-    .map_err(|_| RuntimeError::RecoveryInvalid)
+    RowRef::decode(&bytes).map_err(|_| RuntimeError::RecoveryInvalid)
 }
 
 fn encode_nonnegative_bigint(value: &BigInt) -> Result<Vec<u8>, RuntimeError> {
