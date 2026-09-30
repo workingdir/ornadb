@@ -2478,6 +2478,98 @@ fn composed_cause_snapshot_keeps_original_tree_after_source_resizes() {
 }
 
 #[test]
+fn pre_resize_composed_projection_is_stable_after_source_mutation() {
+    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture_credential = fixture.split('"').nth(1).unwrap();
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let original = admitted("ORNA-E-PRESIZE-ORIGINAL", "pre-resize parent admission")
+        .with_cause(admitted("ORNA-E-PRESIZE-OLD-A", "pre-resize branch a"))
+        .with_cause(admitted("ORNA-E-PRESIZE-OLD-B", "pre-resize branch b"))
+        .with_cause(admitted("ORNA-E-PRESIZE-OLD-C", "pre-resize branch c"));
+    let mut destination = original.clone();
+
+    // Capture both public projections before mutating their source. The cause
+    // edge owns a snapshot and boundary serialization must remain non-mutating.
+    let outer = admitted("ORNA-E-PRESIZE-OUTER", "outer root admission")
+        .with_cause(destination.clone());
+    let before_projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(before_projection["message"], "outer root admission");
+    assert_eq!(before_projection["causes"][0]["message"], "<redacted>");
+    assert_eq!(
+        before_projection["causes"][0]["causes"].as_array().unwrap().len(),
+        3
+    );
+    let before_json = serde_json::to_vec(&outer).unwrap();
+    let before_wire = outer.encode_ovb().unwrap();
+
+    let shrink = admitted("ORNA-E-PRESIZE-SHRUNK", "shrink root admission")
+        .with_cause(admitted("ORNA-E-PRESIZE-SHRINK-CAUSE", "shrink cause"));
+    destination.clone_from(&shrink);
+    assert_eq!(destination, shrink);
+    let grown = admitted("ORNA-E-PRESIZE-GROWN", "grown root admission")
+        .with_cause(admitted("ORNA-E-PRESIZE-GROWN-A", "grown cause a"))
+        .with_cause(admitted("ORNA-E-PRESIZE-GROWN-B", "grown cause b"));
+    destination.clone_from(&grown);
+    assert_eq!(destination, grown);
+
+    let after_projection = serde_json::to_value(&outer).unwrap();
+    let after_json = serde_json::to_vec(&outer).unwrap();
+    let after_wire = outer.encode_ovb().unwrap();
+    assert_eq!(after_projection, before_projection);
+    assert_eq!(after_json, before_json);
+    assert_eq!(after_wire, before_wire);
+    assert!(
+        !after_json
+            .windows(fixture_credential.len())
+            .any(|window| window == fixture_credential.as_bytes())
+    );
+    assert!(
+        !after_wire
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+
+    let destination_projection = serde_json::to_value(&destination).unwrap();
+    assert_eq!(destination_projection["message"], "grown root admission");
+    assert_eq!(destination_projection["causes"].as_array().unwrap().len(), 2);
+    for cause in destination_projection["causes"].as_array().unwrap() {
+        assert_eq!(cause["message"], "<redacted>");
+    }
+    let destination_wire = destination.encode_ovb().unwrap();
+    assert!(
+        destination_wire
+            .windows(b"grown root admission".len())
+            .any(|window| window == b"grown root admission")
+    );
+    for disclosure in [
+        b"pre-resize branch a".as_slice(),
+        b"pre-resize branch b".as_slice(),
+        b"pre-resize branch c".as_slice(),
+        b"grown cause a".as_slice(),
+        b"grown cause b".as_slice(),
+    ] {
+        assert!(
+            !destination_wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&after_wire).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    assert_eq!(decoded["causes"][0]["message"], "<redacted>");
+    assert_eq!(decoded["causes"][0]["causes"].as_array().unwrap().len(), 3);
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
