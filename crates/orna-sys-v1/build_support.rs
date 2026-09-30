@@ -888,6 +888,19 @@ fn validate_api_type_graph(api: &Value, names: &ApiTypeNames) -> Result<(), Stri
                 "relation `{name}` reference_type `{reference_type}` must be its matching reference alias"
             ));
         }
+        let key_fields = relation["key_fields"]
+            .as_array()
+            .expect("validated key fields")
+            .iter()
+            .map(|field| field.as_str().expect("validated key field"))
+            .collect::<Vec<_>>();
+        let key = relation["key"].as_str().expect("validated relation key");
+        let expected_key = key_fields.join(" + ");
+        if key_fields.is_empty() || key != expected_key {
+            return Err(format!(
+                "relation `{name}` key `{key}` does not match key_fields `{expected_key}`"
+            ));
+        }
         for field in relation["fields"].as_array().into_iter().flatten() {
             let field_name = field["name"].as_str().expect("validated field name");
             let field_type = field["type"].as_str().expect("validated field type");

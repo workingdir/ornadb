@@ -1,0 +1,8 @@
+pub fn storage_object(storage: sys.Storage): sys.ObjectRef = storage.object;
+pub fn storage_policy(storage: sys.Storage): sys.Value = storage.publication_policy;
+pub fn storage_pending_rows(storage: sys.Storage): Int = storage.pending_rows;
+pub fn storage_pending_bytes(storage: sys.Storage): Int = storage.pending_bytes;
+pub fn storage_last_publication(storage: sys.Storage): Instant? = storage.last_publication;
+pub fn maintenance_status(job: sys.MaintenanceJob): sys.BuildStatus = job.status;
+
+pub fn pending_storage() = sys.Storage | filter(storage => storage.pending_rows > 0);

@@ -294,6 +294,7 @@ impl SystemApi {
                 || relation.key.trim().is_empty()
                 || relation.purpose.trim().is_empty()
                 || relation.key_fields.is_empty()
+                || relation.key != relation.key_fields.join(" + ")
                 || relation
                     .key_fields
                     .iter()
@@ -2443,6 +2444,26 @@ mod tests {
             SystemApi::from_json(&source),
             Err(SystemApiError::InvalidRelationMetadata)
         );
+
+        for (member, value) in [
+            ("key", serde_json::json!("profile")),
+            ("key_fields", serde_json::json!(["profile"])),
+        ] {
+            let mut mismatched_key = document();
+            let storage_index = mismatched_key["relations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .position(|relation| relation["name"] == "sys.Storage")
+                .unwrap();
+            mismatched_key["relations"][storage_index][member] = value;
+            let source = serde_json::to_string(&mismatched_key).unwrap();
+            assert_eq!(
+                SystemApi::from_json(&source),
+                Err(SystemApiError::InvalidRelationMetadata),
+                "relation {member} must agree with the other natural-key representation"
+            );
+        }
 
         let mut non_string_invariant = document();
         non_string_invariant["relations"][0]["invariants"] = serde_json::json!([42]);
