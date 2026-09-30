@@ -11404,6 +11404,157 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
 }
 
 #[test]
+fn mismatch_query_replay_survives_colliding_eval_completion() {
+    const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
+
+    let (root, repository) = durable_repository();
+    let owner = [101; 16];
+    let target_request = eval_with_context([1; 16], [91; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&target_request, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    let target_fingerprint = request_fingerprint(&target_request, [1; 16]);
+    let target_identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [91; 16],
+    };
+
+    let runtime = open_durable_state(&repository);
+    let lease = block_on(runtime.acquire_lease(owner)).unwrap();
+    let (_, capability) =
+        block_on(runtime.reserve_request_with_admission(target_identity, target_fingerprint))
+            .unwrap();
+    let capability = capability.expect("fresh capability for the fixture-backed Eval");
+    block_on(runtime.start_request_with_owner_and_admission(
+        target_identity,
+        target_fingerprint,
+        lease,
+        capability,
+    ))
+    .unwrap();
+    drop(runtime);
+
+    let mut host = durable_host_with_owner(open_durable_state(&repository), owner);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [6; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+
+    let other_eval = eval_with_context([1; 16], [92; 16], [2; 16], None);
+    let mismatch_query = Envelope {
+        request: Some([91; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [92; 16],
+            fingerprint: request_fingerprint(&other_eval, [1; 16]),
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let first_mismatch = block_on(host.dispatch_frame(
+        [6; 16],
+        2,
+        Frame::Binary(mismatch_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("query ID collision produces a correlated mismatch");
+    assert!(matches!(
+        &first_mismatch.message,
+        Message::Diagnostic { .. }
+    ));
+    let running_retry = block_on(host.dispatch_frame(
+        [6; 16],
+        3,
+        Frame::Binary(mismatch_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the same colliding query replays its mismatch while Eval runs");
+    assert_eq!(running_retry, first_mismatch);
+
+    let target_result = unit_result([91; 16], target_fingerprint);
+    block_on(open_durable_state(&repository).complete_request_with_owner(
+        target_identity,
+        target_fingerprint,
+        lease,
+        TerminalOutcome::new(target_result.encode(Limits::default().protocol).unwrap()).unwrap(),
+    ))
+    .unwrap();
+
+    // The reference requires this ID/input collision to fail, but is silent
+    // on replay after the existing operation becomes terminal. Preserve the
+    // original mismatch diagnostic and keep the Eval's completed row intact.
+    let terminal_retry = block_on(host.dispatch_frame(
+        [6; 16],
+        4,
+        Frame::Binary(mismatch_query),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("completion of the colliding Eval does not retarget the replay");
+    assert_eq!(terminal_retry, first_mismatch);
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(target_identity))
+            .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == target_fingerprint
+    ));
+
+    let fresh_status_query = Envelope {
+        request: Some([93; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint: target_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let terminal_status = block_on(host.dispatch_frame(
+        [6; 16],
+        5,
+        Frame::Binary(fresh_status_query),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a fresh query still observes the Eval's terminal outcome");
+    let expected_result = ResultBody::from_result(&target_result, Limits::default().protocol)
+        .unwrap();
+    assert!(matches!(
+        &terminal_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(returned),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *returned == target_fingerprint
+            && result == &expected_result
+    ));
+
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn delete_enumerates_reserved_durable_work_before_joining_children() {
     let (root, repository) = durable_repository();
     let runtime = open_durable_state(&repository);
