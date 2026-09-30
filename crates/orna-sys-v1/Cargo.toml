@@ -20,3 +20,4 @@ syn = { version = "2.0.119", features = ["full", "visit"] }
 
 [dev-dependencies]
 orna-syntax-v1 = { path = "../orna-syntax-v1" }
+syn = { version = "2.0.119", features = ["full", "visit"] }
