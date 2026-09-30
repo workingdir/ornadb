@@ -7178,9 +7178,7 @@ fn infer(
                     effects: base.effects,
                 };
             }
-            if name == "display"
-                && matches!(&base.ty, Type::Applied { base, .. } if base == "Secret")
-            {
+            if name == "display" && contains_secret_value_type(&base.ty) {
                 diagnostics.push(diag(DIAG_TYPE, "secret values cannot be displayed"));
                 return Inferred {
                     ty: Type::Error,
@@ -7485,6 +7483,8 @@ fn infer(
             {
                 return inferred;
             }
+            let presentation_boundary = qualified_path(callee)
+                .is_some_and(|path| is_secret_sensitive_presentation_path(&path));
             let intrinsic = intrinsic_call_effects(callee);
             let callee = infer(callee, scope, local, diagnostics);
             let mut effects = callee.effects.clone();
@@ -7516,6 +7516,13 @@ fn infer(
                     x.ty
                 })
                 .collect::<Vec<_>>();
+            if presentation_boundary && values.iter().any(contains_secret_value_type) {
+                diagnostics.push(diag(DIAG_TYPE, "secret values cannot be presented"));
+                return Inferred {
+                    ty: Type::Error,
+                    effects,
+                };
+            }
             match callee.ty {
                 Type::Function {
                     parameters,
@@ -16041,6 +16048,45 @@ fn infer_money_constructor_type(
 
 fn is_money_rate(ty: &Type) -> bool {
     matches!(ty, Type::MoneyPerUnit { .. })
+}
+
+fn contains_secret_value_type(ty: &Type) -> bool {
+    match ty {
+        Type::Applied { base, arguments } => {
+            base == "Secret" || arguments.iter().any(contains_secret_value_type)
+        }
+        Type::List(value)
+        | Type::Range(value)
+        | Type::Relation(value)
+        | Type::Stream(value)
+        | Type::Optional(value) => contains_secret_value_type(value),
+        Type::Record(fields) => fields.values().any(contains_secret_value_type),
+        Type::Tuple(values) => values.iter().any(contains_secret_value_type),
+        Type::MoneyPerUnit { currency, unit } => {
+            contains_secret_value_type(currency) || contains_secret_value_type(unit)
+        }
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters.iter().any(contains_secret_value_type)
+                || contains_secret_value_type(result)
+        }
+        Type::Named(name) => name == "Secret",
+        Type::Int
+        | Type::Decimal
+        | Type::Float
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null
+        | Type::Bottom
+        | Type::Error => false,
+    }
+}
+
+fn is_secret_sensitive_presentation_path(path: &[&str]) -> bool {
+    path.starts_with(&["std", "ui"]) || path == &["std", "terminal", "present_table"]
 }
 
 fn infer_ui_action_call(

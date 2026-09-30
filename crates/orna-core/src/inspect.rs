@@ -1046,6 +1046,17 @@ impl InspectTraceEvent {
         observer_invocation: Option<InvocationId>,
         purpose: Option<String>,
     ) -> Result<Self, InspectError> {
+        let payload = match payload {
+            InspectTracePayload::ValueBatch { values, .. } => {
+                // This trace model has no per-value secrecy labels or
+                // classifier proof. Keep the batch count and fail closed by
+                // dropping typed payloads before an event can be observed.
+                InspectTracePayload::ValueBatchRedacted {
+                    value_count: values.len() as u64,
+                }
+            }
+            payload => payload,
+        };
         match &payload {
             InspectTracePayload::ValueBatch { values, .. } if values.is_empty() => {
                 return Err(InspectError::EmptyValueBatch);
