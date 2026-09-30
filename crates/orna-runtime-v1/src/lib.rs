@@ -24663,13 +24663,13 @@ mod tests {
         assert_eq!(retained.idempotency_key_hash, Some(idempotency_hash));
         assert_eq!(
             reopened
-                .reset_checkpoint_with_invocation_id(writer, request, shared_id)
+                .reset_checkpoint_with_invocation_id(writer, request.clone(), shared_id)
                 .await,
-            Ok(reopened.stream_checkpoint(&key).await.unwrap())
+            Ok(receipt.clone())
         );
 
         let terminal = reopened
-            .invocation_observation_tail(Some(cursor), 1)
+            .invocation_observation_tail(Some(cursor.clone()), 1)
             .await
             .unwrap();
         assert_eq!(terminal.entries.len(), 1);
@@ -24681,8 +24681,22 @@ mod tests {
             terminal.entries[0].observation.failure_code.as_deref(),
             Some(diagnostic_code.as_str())
         );
+        assert_eq!(
+            reopened
+                .reset_checkpoint_with_invocation_id(writer, request, shared_id)
+                .await,
+            Ok(receipt)
+        );
+        let terminal_after_replay = reopened
+            .invocation_observation_tail(Some(cursor), 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            terminal_after_replay, terminal,
+            "receipt replay after reading the terminal event leaves that tail page unchanged"
+        );
         let after_replay = reopened
-            .invocation_observation_tail(terminal.next_cursor, 1)
+            .invocation_observation_tail(terminal.next_cursor.clone(), 1)
             .await
             .unwrap();
         assert!(after_replay.entries.is_empty());
