@@ -21028,6 +21028,27 @@ mod tests {
             "last() continues after one post-filter match until the second-row predicate fails"
         );
 
+        // The reference requires bounded take not to enumerate beyond its
+        // demand, but leaves last() closing immediately after the second
+        // post-filter match implicit. The later missing lookup is outside
+        // the filled prefix and must stay unopened.
+        let (last_closes_after_second_post_filter_match, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-closes-after-second-match.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_after_second_post_filter_match.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "last() closes after two post-filter matches before opening the failing tail"
+        );
+
         // The reference is silent when the bounded tail continues past a
         // nonmatch to a predicate failure, with another match after that
         // failure. Preserve the error instead of allowing last() to evaluate
