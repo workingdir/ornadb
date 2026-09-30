@@ -1270,6 +1270,11 @@ fn map_compact_runtime_error(error: RuntimeError) -> Error {
         | RuntimeError::InvalidDigest
         | RuntimeError::InvalidObservationReference
         | RuntimeError::ObservationCoordinateMismatch
+        | RuntimeError::ProcedureMaterializationConflict
+        | RuntimeError::InvocationObservationConflict
+        | RuntimeError::InvocationStateConflict
+        | RuntimeError::InvocationChildrenActive
+        | RuntimeError::InvocationOwnerInvalid
         | RuntimeError::AdminInvocationConflict
         | RuntimeError::ConflictingPublicationIntent
         | RuntimeError::ConflictingPublicationCommit
