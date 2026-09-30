@@ -276,3 +276,8 @@ The extension continues with a retry through an earlier released destination:
 the inserted row moves aside into it, the competitor retries at the freed key,
 and the inserted row reuses the competitor's source. This continuation pins the
 local handoff order because the reference is silent.
+
+The retry tail continues through another reused target: the competitor moves
+aside into a previously released key, the inserted row retries at the handoff
+target, and the competitor returns to the inserted row's source. This continued
+retry order is recorded as local behavior where the reference is silent.

@@ -145,7 +145,16 @@ fn main() {
                                                             Note.rekey(10, 11);
                                                             Note.update(11, { quantity: 66 });
                                                             Note.rekey(12, 10);
-                                                            Note.update(10, { quantity: 113 })
+                                                            Note.update(10, { quantity: 113 });
+                                                            Note.rekey(10, 11) |? (inserted_retries_after_reused_target_handoff => {
+                                                                Note.update(11, { quantity: 67 });
+                                                                Note.rekey(11, 15);
+                                                                Note.update(15, { quantity: 68 });
+                                                                Note.rekey(10, 11);
+                                                                Note.update(11, { quantity: 114 });
+                                                                Note.rekey(15, 10);
+                                                                Note.update(10, { quantity: 69 })
+                                                            })
                                                         })
                                                     })
                                                 })
