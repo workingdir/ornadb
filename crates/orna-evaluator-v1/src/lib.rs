@@ -603,6 +603,13 @@ pub trait EffectHandler {
         self.resolve_reference(reference)
     }
 
+    /// Validate a relation source without enumerating rows. Runtime handlers
+    /// use this to preserve relation visibility when a plan such as `take(0)`
+    /// can return without requesting its first page.
+    fn validate_relation_source(&mut self, _source: &str) -> Result<(), EvaluationError> {
+        Ok(())
+    }
+
     /// Supplies one bounded page for an evaluator-owned relation plan at its
     /// first observation. Existing handlers return `Ok(None)` by default so
     /// this remains a backward-compatible extension of the effect boundary.
@@ -3784,6 +3791,7 @@ impl Context<'_, '_> {
             .iter()
             .any(|stage| matches!(stage, RelationStage::Take(0)))
         {
+            self.validate_relation_plan_sources(plan)?;
             return Ok(());
         }
         let mut counters = vec![0usize; plan.stages.len()];
@@ -4008,6 +4016,7 @@ impl Context<'_, '_> {
             .iter()
             .any(|stage| matches!(stage, RelationStage::Take(0)))
         {
+            self.validate_relation_plan_sources(plan)?;
             return Ok(());
         }
         let Some(sort_index) = plan
@@ -4186,6 +4195,21 @@ impl Context<'_, '_> {
             return Err(error("ORNA-EVAL-VALUE"));
         }
         Ok(page)
+    }
+
+    fn validate_relation_plan_sources(
+        &mut self,
+        plan: &RelationPlan,
+    ) -> Result<(), EvaluationError> {
+        if let Some((left, right)) = &plan.source_union {
+            self.validate_relation_plan_sources(left)?;
+            self.validate_relation_plan_sources(right)
+        } else {
+            self.effects
+                .as_deref_mut()
+                .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?
+                .validate_relation_source(&plan.source)
+        }
     }
 
     fn ui_action(
