@@ -6,6 +6,16 @@ fn text(value: &str) -> CanonicalValue {
     CanonicalValue::new(Raw::Text(value.to_owned())).unwrap()
 }
 
+fn texts(values: &[&str]) -> CanonicalValue {
+    CanonicalValue::new(Raw::Array(
+        values
+            .iter()
+            .map(|value| Raw::Text((*value).to_owned()))
+            .collect(),
+    ))
+    .unwrap()
+}
+
 fn boolean(value: bool) -> CanonicalValue {
     CanonicalValue::new(Raw::Bool(value)).unwrap()
 }
@@ -566,6 +576,59 @@ fn duration_formatters_keep_positive_factor_products_on_the_correct_side_of_a_mi
         assert_eq!(
             result,
             Ok(Some(text(expected))),
+            "{source}; diagnostic={}",
+            result.as_ref().err().map_or("none", |error| error.code())
+        );
+    }
+}
+
+#[test]
+fn positive_factor_tails_keep_the_minute_edge_after_duration_arithmetic() {
+    // The reference is silent on scaled-tail addition and subtraction. Keep
+    // exact nanoseconds through arithmetic: five ns leaves a 1 ns tail, while
+    // six ns closes the factor-produced tail exactly at one minute.
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
+    ] {
+        assert_eq!(session.submit(source), Ok(None), "{source}");
+    }
+
+    for (source, expected) in [
+        (
+            include_str!("fixtures/stdlib-time-duration-factor-tail-before-minute-p9kew.orna"),
+            texts(&[
+                "59.999999999s",
+                "00:00:59.999999999",
+                "59.999999999 seconds",
+                "PT59.999999999S",
+            ]),
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-factor-tail-at-minute-from-below-p9kew.orna"),
+            texts(&["1m", "00:01:00", "1 minute", "PT1M"]),
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-factor-tail-after-minute-p9kew.orna"),
+            texts(&[
+                "1m 0.000000001s",
+                "00:01:00.000000001",
+                "1 minute, 0.000000001 seconds",
+                "PT1M0.000000001S",
+            ]),
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-factor-tail-at-minute-from-above-p9kew.orna"),
+            texts(&["1m", "00:01:00", "1 minute", "PT1M"]),
+        ),
+    ] {
+        let result = session.submit(source);
+        assert_eq!(
+            result,
+            Ok(Some(expected)),
             "{source}; diagnostic={}",
             result.as_ref().err().map_or("none", |error| error.code())
         );
