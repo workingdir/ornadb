@@ -112,6 +112,29 @@ CREATE TABLE IF NOT EXISTS checkpoint (
     digest BLOB NOT NULL CHECK (length(digest) = 32),
     mutation_sequence INTEGER NOT NULL
 );
+-- Runtime checkpoints are retained after their pending mutation prefix is
+-- published. Keep table row versions independently so a local generation
+-- remains readable after publication has pruned that prefix.
+CREATE TABLE IF NOT EXISTS runtime_table_history (
+    mutation_sequence INTEGER NOT NULL CHECK (mutation_sequence >= 0),
+    table_id TEXT NOT NULL CHECK (length(table_id) > 0),
+    row_key BLOB NOT NULL CHECK (length(row_key) > 0),
+    row_value BLOB,
+    row_digest BLOB,
+    deleted INTEGER NOT NULL CHECK (deleted IN (0, 1)),
+    PRIMARY KEY (mutation_sequence, table_id, row_key),
+    CHECK (
+        (deleted = 1 AND row_value IS NULL AND row_digest IS NULL)
+        OR (deleted = 0 AND row_value IS NOT NULL AND length(row_digest) = 32)
+    )
+);
+CREATE INDEX IF NOT EXISTS runtime_table_history_lookup
+    ON runtime_table_history (table_id, row_key, mutation_sequence);
+CREATE TABLE IF NOT EXISTS runtime_table_history_metadata (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    floor_generation INTEGER NOT NULL CHECK (floor_generation >= 0),
+    floor_digest BLOB NOT NULL CHECK (length(floor_digest) = 32)
+);
 CREATE TABLE IF NOT EXISTS publication_freeze (
     intent_id BLOB PRIMARY KEY CHECK (length(intent_id) = 16),
     checkpoint_generation INTEGER NOT NULL,
@@ -740,6 +763,71 @@ pub struct Checkpoint {
     pub generation: u64,
     pub digest: [u8; 32],
     pub mutation_sequence: u64,
+}
+
+/// A read-only pin to one runtime checkpoint generation.
+///
+/// The mutation sequence is retained privately because generation numbers
+/// alone do not identify the row state when querying the append-only history.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoricalSnapshot {
+    capture: CwdCapture,
+    mutation_sequence: u64,
+}
+
+impl HistoricalSnapshot {
+    /// The exact database/runtime/generation identity selected by this pin.
+    pub fn capture(&self) -> &CwdCapture {
+        &self.capture
+    }
+
+    /// The immutable checkpoint mutation boundary represented by this pin.
+    pub const fn mutation_sequence(&self) -> u64 {
+        self.mutation_sequence
+    }
+
+    /// Whether two values can safely participate in one snapshot-scoped
+    /// operation. Runtime snapshots at different generations are distinct
+    /// contexts even when they belong to the same database.
+    pub fn require_same_context(&self, other: &Self) -> Result<(), RuntimeError> {
+        if self.capture == other.capture {
+            Ok(())
+        } else {
+            Err(RuntimeError::SnapshotContextMismatch)
+        }
+    }
+}
+
+/// The result of reading one table at a pinned historical runtime generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoricalTableRows {
+    capture: CwdCapture,
+    table: String,
+    rows: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl HistoricalTableRows {
+    pub fn capture(&self) -> &CwdCapture {
+        &self.capture
+    }
+
+    /// Whether rows read under these pins can be combined as one historical
+    /// value context.
+    pub fn require_same_context(&self, other: &Self) -> Result<(), RuntimeError> {
+        if self.capture == other.capture {
+            Ok(())
+        } else {
+            Err(RuntimeError::SnapshotContextMismatch)
+        }
+    }
+
+    pub fn table(&self) -> &str {
+        &self.table
+    }
+
+    pub fn rows(&self) -> &[(Vec<u8>, Vec<u8>)] {
+        &self.rows
+    }
 }
 
 /// The canonical row encoding selected by the compact publication profile.
@@ -1479,6 +1567,9 @@ pub enum RuntimeError {
     StreamSourceNotReplayable,
     StreamCheckpointStale,
     CheckpointNotReplayable,
+    SnapshotNotFound,
+    SnapshotIncomplete,
+    SnapshotContextMismatch,
     LeaseHeld,
     AdminBusy,
     OwnerLost,
@@ -1516,6 +1607,11 @@ impl RuntimeError {
             Self::AdminBusy => Some("sys.admin.busy"),
             Self::StreamCheckpointStale => Some("sys.checkpoint.conflict"),
             Self::CheckpointNotReplayable => Some("sys.checkpoint.not_replayable"),
+            Self::SnapshotNotFound => Some("sys.snapshot.not_found"),
+            Self::SnapshotIncomplete => Some("sys.snapshot.incomplete"),
+            // No standalone cross-context code is defined; an exact pin that
+            // cannot be resolved in this runtime is incomplete, never rebound.
+            Self::SnapshotContextMismatch => Some("sys.snapshot.incomplete"),
             _ => None,
         }
     }
@@ -1532,6 +1628,9 @@ impl fmt::Display for RuntimeError {
             Self::StreamSourceNotReplayable => "stream source does not support durable recovery",
             Self::StreamCheckpointStale => "stream checkpoint is stale",
             Self::CheckpointNotReplayable => "checkpoint target is not replayable",
+            Self::SnapshotNotFound => "runtime checkpoint generation was not found",
+            Self::SnapshotIncomplete => "historical runtime generation is incomplete",
+            Self::SnapshotContextMismatch => "historical snapshot contexts do not match",
             Self::LeaseHeld => "runtime writer is held",
             Self::AdminBusy => "runtime administration callback is busy",
             Self::OwnerLost => "runtime writer ownership was lost",
@@ -2931,6 +3030,7 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         Self::initialize_runtime_meta(&connection, identity, initial_digest).await?;
+        migrate_runtime_table_history(&connection).await?;
         migrate_publication_policy_schema(&connection).await?;
         migrate_compact_receipt_schema(&connection).await?;
         let (compact_receipt_signing_key, compact_receipt_public_key) =
@@ -4889,6 +4989,218 @@ impl RuntimeState {
             ));
         }
         Ok(result)
+    }
+
+    /// Selects one retained runtime checkpoint generation without changing the
+    /// live CWD or writer state. A generation is a data pin only: this runtime
+    /// layer does not select historical function code or silently substitute
+    /// current semantic assets when a caller evaluates a historical program.
+    pub async fn select_historical_snapshot(
+        &self,
+        generation: u64,
+    ) -> Result<HistoricalSnapshot, RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut rows = transaction
+            .query(
+                "SELECT database_id, runtime_id, generation FROM runtime_meta
+                 WHERE singleton = 1",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let meta = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let database_id = fixed(meta.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let runtime_id = fixed(meta.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let current_generation = decode_u64(
+            meta.get::<i64>(2)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        if generation > current_generation {
+            return Err(RuntimeError::SnapshotNotFound);
+        }
+
+        let (floor_generation, floor_digest) = runtime_table_history_floor(&transaction).await?;
+        if generation < floor_generation {
+            return Err(RuntimeError::SnapshotIncomplete);
+        }
+        let (digest, mutation_sequence) = if generation == 0 {
+            if floor_generation != 0 {
+                return Err(RuntimeError::SnapshotIncomplete);
+            }
+            (floor_digest, 0)
+        } else {
+            let mut rows = transaction
+                .query(
+                    "SELECT digest, mutation_sequence FROM checkpoint WHERE generation = ?1",
+                    params![i64::try_from(generation).map_err(|_| RuntimeError::SnapshotNotFound)?],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            let Some(row) = rows
+                .next()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?
+            else {
+                return Err(RuntimeError::SnapshotNotFound);
+            };
+            (
+                fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+                decode_u64(
+                    row.get::<i64>(1)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                )?,
+            )
+        };
+        let capture = CwdCapture::new(
+            Snapshot::cwd(database_id, runtime_id, BigInt::from(generation))
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            digest,
+        )
+        .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(HistoricalSnapshot {
+            capture,
+            mutation_sequence,
+        })
+    }
+
+    /// Reads one table as it existed at an immutable runtime checkpoint pin.
+    /// Row keys and values remain in their canonical stored byte encodings;
+    /// callers must decode them using schema metadata from this same snapshot.
+    pub async fn read_table_at(
+        &self,
+        snapshot: &HistoricalSnapshot,
+        table: &str,
+    ) -> Result<HistoricalTableRows, RuntimeError> {
+        validate_table_name(table)?;
+        let transaction = self
+            .connection
+            .transaction()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut rows = transaction
+            .query(
+                "SELECT database_id, runtime_id, generation FROM runtime_meta
+                 WHERE singleton = 1",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let meta = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let database_id = fixed(meta.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let runtime_id = fixed(meta.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let current_generation = decode_u64(
+            meta.get::<i64>(2)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        let capture = snapshot.capture();
+        let generation = capture
+            .generation()
+            .to_u64_digits()
+            .1
+            .first()
+            .copied()
+            .unwrap_or(0);
+        if capture.database_id() != database_id
+            || capture.runtime_id() != runtime_id
+            || generation > current_generation
+        {
+            return Err(RuntimeError::SnapshotContextMismatch);
+        }
+        let (floor_generation, floor_digest) = runtime_table_history_floor(&transaction).await?;
+        if generation < floor_generation {
+            return Err(RuntimeError::SnapshotIncomplete);
+        }
+        let (digest, mutation_sequence) = if generation == 0 {
+            if floor_generation != 0 {
+                return Err(RuntimeError::SnapshotIncomplete);
+            }
+            (floor_digest, 0)
+        } else {
+            let mut rows = transaction
+                .query(
+                    "SELECT digest, mutation_sequence FROM checkpoint WHERE generation = ?1",
+                    params![i64::try_from(generation).map_err(|_| RuntimeError::SnapshotNotFound)?],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            let Some(row) = rows
+                .next()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?
+            else {
+                return Err(RuntimeError::SnapshotNotFound);
+            };
+            (
+                fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+                decode_u64(
+                    row.get::<i64>(1)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                )?,
+            )
+        };
+        if digest != capture.generation_digest() || mutation_sequence != snapshot.mutation_sequence
+        {
+            return Err(RuntimeError::SnapshotContextMismatch);
+        }
+
+        let mut query = transaction
+            .query(
+                "SELECT history.row_key, history.row_value, history.row_digest
+                 FROM runtime_table_history AS history
+                 WHERE history.table_id = ?1
+                   AND history.mutation_sequence <= ?2
+                   AND history.deleted = 0
+                   AND NOT EXISTS (
+                       SELECT 1 FROM runtime_table_history AS newer
+                       WHERE newer.table_id = history.table_id
+                         AND newer.row_key = history.row_key
+                         AND newer.mutation_sequence <= ?2
+                         AND newer.mutation_sequence > history.mutation_sequence
+                   )
+                 ORDER BY history.row_key",
+                params![table, i64::try_from(mutation_sequence).map_err(|_| RuntimeError::RecoveryInvalid)?],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut table_rows = Vec::new();
+        while let Some(row) = query
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let key: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let value: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let row_digest: [u8; 32] = fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+            if <[u8; 32]>::from(Sha256::digest(&value)) != row_digest {
+                return Err(RuntimeError::SnapshotIncomplete);
+            }
+            table_rows.push((key, value));
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(HistoricalTableRows {
+            capture: capture.clone(),
+            table: table.to_owned(),
+            rows: table_rows,
+        })
     }
 
     /// Reads one durable stream checkpoint without exposing the runtime
@@ -14842,6 +15154,15 @@ async fn append_mutations_with_catalogue_tx(
         });
     }
     let mut sequence: Option<i64> = None;
+    let generation = current
+        .generation()
+        .to_u64_digits()
+        .1
+        .first()
+        .copied()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or(RuntimeError::RecoveryInvalid)?;
     for mutation in mutations {
         connection
             .execute(
@@ -14866,18 +15187,37 @@ async fn append_mutations_with_catalogue_tx(
                 .get(0)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
         );
+        if mutation.payload.starts_with(b"ORNA-TABLE-MUTATION\0") {
+            let table_mutation = TableMutation::decode(mutation)?;
+            let sequence = sequence.ok_or(RuntimeError::RecoveryInvalid)?;
+            let (value, row_digest, deleted) = match table_mutation.value() {
+                Some(value) => (
+                    Some(value.to_vec()),
+                    Some(Sha256::digest(value).to_vec()),
+                    0_i64,
+                ),
+                None => (None, None, 1_i64),
+            };
+            connection
+                .execute(
+                    "INSERT INTO runtime_table_history
+                     (mutation_sequence, table_id, row_key, row_value, row_digest, deleted)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        sequence,
+                        table_mutation.table().to_owned(),
+                        table_mutation.key().to_vec(),
+                        value,
+                        row_digest,
+                        deleted,
+                    ],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
     }
     faults.check(FaultPoint::AfterMutation)?;
     let sequence = sequence.ok_or(RuntimeError::RecoveryInvalid)?;
-    let generation = current
-        .generation()
-        .to_u64_digits()
-        .1
-        .first()
-        .copied()
-        .unwrap_or(0)
-        .checked_add(1)
-        .ok_or(RuntimeError::RecoveryInvalid)?;
     connection
         .execute(
             "INSERT INTO checkpoint (generation, digest, mutation_sequence) VALUES (?1, ?2, ?3)",
@@ -14906,6 +15246,189 @@ async fn append_mutations_with_catalogue_tx(
         crate::catalogue::persist_capture_for_runtime_tx(connection, &current, &capture).await?;
     }
     Ok(capture)
+}
+
+/// Adds an honest temporal baseline when opening a database created before
+/// table history existed. Earlier generations cannot be reconstructed from
+/// the current table image, so the recorded floor prevents false empty reads.
+async fn migrate_runtime_table_history(connection: &Connection) -> Result<(), RuntimeError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut history_metadata = transaction
+        .query(
+            "SELECT floor_generation, floor_digest
+             FROM runtime_table_history_metadata WHERE singleton = 1",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    if let Some(row) = history_metadata
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        let floor_generation = decode_u64(
+            row.get::<i64>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        let floor_digest: [u8; 32] =
+            fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let mut runtime_meta = transaction
+            .query(
+                "SELECT generation FROM runtime_meta WHERE singleton = 1",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let current_generation = decode_u64(
+            runtime_meta
+                .next()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?
+                .ok_or(RuntimeError::RecoveryInvalid)?
+                .get::<i64>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        if floor_generation > current_generation {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        if floor_generation > 0 {
+            let mut checkpoint = transaction
+                .query(
+                    "SELECT digest FROM checkpoint WHERE generation = ?1",
+                    params![i64::try_from(floor_generation)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            let checkpoint_digest: [u8; 32] = fixed(
+                checkpoint
+                    .next()
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?
+                    .ok_or(RuntimeError::RecoveryInvalid)?
+                    .get(0)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?;
+            if checkpoint_digest != floor_digest {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+        }
+    } else {
+        let mut runtime_meta = transaction
+            .query(
+                "SELECT generation, generation_digest FROM runtime_meta WHERE singleton = 1",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let row = runtime_meta
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let floor_generation = decode_u64(
+            row.get::<i64>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        let floor_digest: [u8; 32] =
+            fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        if floor_generation > 0 {
+            let mut checkpoint = transaction
+                .query(
+                    "SELECT digest FROM checkpoint WHERE generation = ?1",
+                    params![i64::try_from(floor_generation)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            let checkpoint_digest: [u8; 32] = fixed(
+                checkpoint
+                    .next()
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?
+                    .ok_or(RuntimeError::RecoveryInvalid)?
+                    .get(0)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?;
+            if checkpoint_digest != floor_digest {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+        }
+        transaction
+            .execute(
+                "INSERT INTO runtime_table_history_metadata
+                 (singleton, floor_generation, floor_digest) VALUES (1, ?1, ?2)",
+                params![
+                    i64::try_from(floor_generation)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    floor_digest.to_vec(),
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+
+        let mut current_rows = transaction
+            .query(
+                "SELECT table_id, row_key, row_value, row_digest FROM table_row",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        while let Some(row) = current_rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let table: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let key: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let value: Vec<u8> = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let digest: [u8; 32] = fixed(row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+            if <[u8; 32]>::from(Sha256::digest(&value)) != digest {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            transaction
+                .execute(
+                    "INSERT INTO runtime_table_history
+                     (mutation_sequence, table_id, row_key, row_value, row_digest, deleted)
+                     VALUES (0, ?1, ?2, ?3, ?4, 0)",
+                    params![table, key, value, digest.to_vec()],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)
+}
+
+async fn runtime_table_history_floor(
+    transaction: &Transaction,
+) -> Result<(u64, [u8; 32]), RuntimeError> {
+    let mut rows = transaction
+        .query(
+            "SELECT floor_generation, floor_digest
+             FROM runtime_table_history_metadata WHERE singleton = 1",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .ok_or(RuntimeError::RecoveryInvalid)?;
+    Ok((
+        decode_u64(
+            row.get::<i64>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?,
+        fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+    ))
 }
 
 async fn migrate_publication_policy_schema(connection: &Connection) -> Result<(), RuntimeError> {
@@ -15745,6 +16268,60 @@ mod tests {
         let row = rows.next().await.unwrap().expect("synchronous pragma row");
         let synchronous: i64 = row.get(0).unwrap();
         assert_eq!(synchronous, 2, "RuntimeState must use SQLite FULL synchronous mode");
+    }
+
+    #[tokio::test]
+    async fn history_migration_seeds_current_rows_and_marks_older_generations_incomplete() {
+        let (_temp, repository) = repository();
+        let state = open_state(&repository).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let first_context = state.begin_activation().await.unwrap();
+        state
+            .commit_table_activation(
+                writer,
+                &first_context,
+                &[table_mutation(5, 1, Some(11)), table_mutation(6, 2, Some(22))],
+                digest(7),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        let second_context = state.begin_activation().await.unwrap();
+        state
+            .commit_table_activation(
+                writer,
+                &second_context,
+                &[table_mutation(8, 1, Some(33))],
+                digest(9),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+
+        // Simulate an existing database from before the history migration.
+        // Its current row image is known, but generation 1's row image is not.
+        let transaction = state.connection.transaction().await.unwrap();
+        transaction
+            .execute("DELETE FROM runtime_table_history", ())
+            .await
+            .unwrap();
+        transaction
+            .execute("DELETE FROM runtime_table_history_metadata", ())
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        drop(state);
+
+        let reopened = open_state(&repository).await;
+        assert_eq!(
+            reopened.select_historical_snapshot(1).await.unwrap_err(),
+            RuntimeError::SnapshotIncomplete
+        );
+        let latest = reopened.select_historical_snapshot(2).await.unwrap();
+        assert_eq!(
+            reopened.read_table_at(&latest, "books").await.unwrap().rows(),
+            &[(vec![1], vec![33]), (vec![2], vec![22])]
+        );
     }
 
     async fn begin_continuable_request(
