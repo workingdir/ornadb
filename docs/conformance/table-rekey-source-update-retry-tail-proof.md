@@ -112,3 +112,9 @@ key, then moves aside to block the competitor's release move. The competitor's
 failure closure moves the owner again, retries the competitor move, and lets the
 owner take its original key. The fixture documents the resulting mutation log
 as local adapter behavior because the reference does not specify this ordering.
+
+`owner_retries_after_competitor_target_delete_closure` covers the paired target
+blocker edge: the owner's retry waits while the competitor's alternate target
+is occupied, then the competitor's failure closure updates and deletes that
+blocker before retrying its move. The owner then reclaims its original key. The
+fixture records the local caught-retry order where the reference is silent.
