@@ -1,0 +1,6 @@
+pub table SourceRemainderMultiscanSource(id: Int) { value: Int, }
+pub table SourceRemainderMultiscanFirst(id: Int) { value: Int, }
+pub table SourceRemainderMultiscanSecond(id: Int) { value: Int, }
+pub table SourceRemainderMultiscanUnknown(id: Int) { value: Int, }
+pub table SourceRemainderMultiscanTarget(id: Int) { value: Int, }
+pub fn delete_source_remainder_multiscan() = SourceRemainderMultiscanTarget.delete(1);
