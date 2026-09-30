@@ -1,0 +1,2 @@
+pub table MaxSourceMaterializationFirstRemainder(id: Int) { value: Int, }
+pub fn max_source_materialization_first_remainder() = MaxSourceMaterializationFirstRemainder;
