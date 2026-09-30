@@ -6346,6 +6346,9 @@ impl RuntimeState {
         let generation = match digits.as_slice() {
             [] => 0,
             [generation] => *generation,
+            // The runtime history API stores and selects u64 generations. A
+            // wider, otherwise canonical descriptor cannot name a retained
+            // checkpoint here, so fail closed instead of narrowing it.
             _ => return Err(RuntimeError::SnapshotNotFound),
         };
         let resolved = self.select_historical_snapshot(generation).await?;
