@@ -1,0 +1,1 @@
+clock_fmt.format(999999999.0.seconds, context: { locale: "en", time_zone: "UTC" })

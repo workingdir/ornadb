@@ -2124,7 +2124,8 @@ impl Context<'_, '_> {
             }
             quotient
         };
-        self.integer(total_nanoseconds.clone())?;
+        // The configured digit limit applies to source integers and the
+        // stored seconds value, not this temporary nanosecond scaling.
         let (seconds, nanosecond) =
             total_nanoseconds.div_mod_floor(&BigInt::from(1_000_000_000u32));
         let nanosecond = nanosecond.to_u32().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
