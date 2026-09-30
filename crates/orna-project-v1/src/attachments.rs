@@ -341,7 +341,9 @@ impl AttachedDatabaseSession {
     /// the alias immediately, so callers must revalidate module admission
     /// before the next evaluation. A detached alias is unavailable as both a
     /// read and write target; reattaching it admits only the new read-only pin.
-    /// In-flight clones retain their original aliases and exact pins.
+    /// Each clone keeps its own alias map: later detach or reattach operations
+    /// on one value do not update another, and a clone made while detached
+    /// stays detached.
     pub fn detach_database(&mut self, name: &str) -> Result<(), AttachmentError> {
         let name = checked_name(name.to_owned())?;
         if name == self.primary.pin.name {
