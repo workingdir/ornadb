@@ -912,7 +912,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     let writer = state.acquire_lease([65; 16]).await.expect("acquire writer");
     let mut pins = Vec::new();
 
-    for generation in 1..=525_u64 {
+    for generation in 1..=535_u64 {
         let mut mutation_id = [0; 16];
         mutation_id[8..].copy_from_slice(&generation.to_be_bytes());
         // Delete the prefix while its extended neighbor remains stable, restore an
@@ -1026,13 +1026,17 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         // the prefix, then close the prefix before replacing the tail. Restore
         // both rows, close the prefix and tail separately, and pin the final
         // prefix-only image because the reference leaves this order unspecified.
+        // Replace the tail before and after deleting the prefix, jointly restore
+        // both rows, and delete the tail while the prefix remains. Reopen the
+        // tail, then close prefix and tail in turn; record each image because the
+        // reference does not prescribe this repeated closure order.
         let prefix_value = match generation {
             256 | 259 | 261 | 263 | 264 | 266 | 273 | 277 | 282 | 284 | 288 | 291 | 295 | 298
             | 303 | 308 | 311 | 314 | 319 | 321 | 324 | 329 | 332 | 337 | 340 | 343 | 346
             | 353 | 355 | 359 | 362 | 367 | 370 | 375 | 378 | 384 | 387 | 393 | 396 | 402
             | 405 | 410 | 413 | 415 | 420 | 424 | 429 | 433 | 437 | 442 | 446 | 451 | 456
             | 461 | 466 | 469 | 473 | 479 | 482 | 484 | 488 | 491 | 493 | 497 | 499 | 503
-            | 505 | 509 | 511 | 515 | 520 | 523 => None,
+            | 505 | 509 | 511 | 515 | 520 | 523 | 528 | 533 => None,
             257 => Some(b"intermediate-prefix".to_vec()),
             265 => Some(b"original-prefix".to_vec()),
             477 => Some(b"case-closure-prefix-final".to_vec()),
@@ -1041,6 +1045,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             500 => Some(b"case-closure-edge-prefix-four-restored".to_vec()),
             513 => Some(b"case-closure-edge-prefix-five-final".to_vec()),
             522 => Some(b"case-closure-edge-prefix-six-final".to_vec()),
+            530 => Some(b"case-closure-edge-prefix-seven-final".to_vec()),
             _ => Some(b"original-prefix".to_vec()),
         };
         let mut mutations = Vec::new();
@@ -1056,6 +1061,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                 | 449 | 450 | 452 | 454 | 455 | 457 | 458 | 460 | 463 | 464 | 465 | 467 | 470
                 | 472 | 474 | 475 | 478 | 481 | 483 | 484 | 487 | 490 | 492 | 493 | 496
                 | 501 | 502 | 504 | 505 | 508 | 510 | 511 | 514 | 517 | 518 | 519 | 521 | 524
+                | 527 | 529 | 531 | 532 | 534
         ) {
             mutations.push(
                 TableMutation::new(mutation_id, "records", vec![5], prefix_value)
@@ -2738,10 +2744,65 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                 )
                 .expect("valid joint case closure edge prefix and tail six update"),
             );
+        } else if generation == 526 || generation == 527 {
+            let mut extension_mutation_id = mutation_id;
+            extension_mutation_id[0] = 1;
+            let value = if generation == 526 {
+                b"case-closure-edge-tail-seven-first".to_vec()
+            } else {
+                b"case-closure-edge-tail-seven-replaced".to_vec()
+            };
+            mutations.push(
+                TableMutation::new(extension_mutation_id, "records", vec![5, 0], Some(value))
+                    .expect("valid case closure edge tail seven image"),
+            );
+        } else if generation == 529 {
+            let mut extension_mutation_id = mutation_id;
+            extension_mutation_id[0] = 1;
+            mutations.push(
+                TableMutation::new(
+                    extension_mutation_id,
+                    "records",
+                    vec![5, 0],
+                    Some(b"case-closure-edge-tail-seven-absent-prefix".to_vec()),
+                )
+                .expect("valid absent-prefix case closure edge tail seven replacement"),
+            );
+        } else if generation == 530 {
+            let mut extension_mutation_id = mutation_id;
+            extension_mutation_id[0] = 1;
+            mutations.push(
+                TableMutation::new(
+                    extension_mutation_id,
+                    "records",
+                    vec![5, 0],
+                    Some(b"case-closure-edge-tail-seven-joint".to_vec()),
+                )
+                .expect("valid joint case closure edge prefix and tail seven update"),
+            );
+        } else if generation == 531 || generation == 534 {
+            let mut extension_mutation_id = mutation_id;
+            extension_mutation_id[0] = 1;
+            mutations.push(
+                TableMutation::new(extension_mutation_id, "records", vec![5, 0], None)
+                    .expect("valid case closure edge tail seven deletion"),
+            );
+        } else if generation == 532 {
+            let mut extension_mutation_id = mutation_id;
+            extension_mutation_id[0] = 1;
+            mutations.push(
+                TableMutation::new(
+                    extension_mutation_id,
+                    "records",
+                    vec![5, 0],
+                    Some(b"case-closure-edge-tail-seven-recreated".to_vec()),
+                )
+                .expect("valid case closure edge tail seven recreation"),
+            );
         }
         commit(&state, writer, &mutations, 57).await;
 
-        if (255..=525).contains(&generation) {
+        if (255..=535).contains(&generation) {
             let selected = state
                 .select_historical_snapshot(generation)
                 .await
@@ -2773,7 +2834,8 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             468, 469, 470, 471, 472, 473, 474, 475, 476, 477, 478, 479, 480, 481, 482, 483,
             484, 485, 486, 487, 488, 489, 490, 491, 492, 493, 494, 495, 496, 497, 498, 499,
             500, 501, 502, 503, 504, 505, 506, 507, 508, 509, 510, 511, 512, 513, 514, 515,
-            516, 517, 518, 519, 520, 521, 522, 523, 524, 525,
+            516, 517, 518, 519, 520, 521, 522, 523, 524, 525, 526, 527, 528, 529, 530, 531,
+            532, 533, 534, 535,
         ]
     );
     assert!(pins.windows(2).all(|pair| {
@@ -3341,6 +3403,28 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         523 => vec![(vec![5, 0], b"case-closure-edge-tail-six-joint".to_vec())],
         524 => vec![],
         525 => vec![(vec![5], b"original-prefix".to_vec())],
+        526 => vec![
+            (vec![5], b"original-prefix".to_vec()),
+            (vec![5, 0], b"case-closure-edge-tail-seven-first".to_vec()),
+        ],
+        527 => vec![
+            (vec![5], b"original-prefix".to_vec()),
+            (vec![5, 0], b"case-closure-edge-tail-seven-replaced".to_vec()),
+        ],
+        528 => vec![(vec![5, 0], b"case-closure-edge-tail-seven-replaced".to_vec())],
+        529 => vec![(vec![5, 0], b"case-closure-edge-tail-seven-absent-prefix".to_vec())],
+        530 => vec![
+            (vec![5], b"case-closure-edge-prefix-seven-final".to_vec()),
+            (vec![5, 0], b"case-closure-edge-tail-seven-joint".to_vec()),
+        ],
+        531 => vec![(vec![5], b"case-closure-edge-prefix-seven-final".to_vec())],
+        532 => vec![
+            (vec![5], b"case-closure-edge-prefix-seven-final".to_vec()),
+            (vec![5, 0], b"case-closure-edge-tail-seven-recreated".to_vec()),
+        ],
+        533 => vec![(vec![5, 0], b"case-closure-edge-tail-seven-recreated".to_vec())],
+        534 => vec![],
+        535 => vec![(vec![5], b"original-prefix".to_vec())],
         _ => unreachable!("only closure remainder boundary generations are read"),
     };
     assert_eq!(expected_rows(255), expected_rows(258));
@@ -3706,6 +3790,18 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     assert_eq!(expected_rows(522)[1], expected_rows(523)[0]);
     assert!(expected_rows(524).is_empty());
     assert_eq!(expected_rows(525), expected_rows(506));
+    assert_eq!(expected_rows(526)[0], expected_rows(527)[0]);
+    assert_ne!(expected_rows(526)[1], expected_rows(527)[1]);
+    assert_eq!(expected_rows(527)[1], expected_rows(528)[0]);
+    assert_ne!(expected_rows(528)[0], expected_rows(529)[0]);
+    assert_eq!(
+        expected_rows(530)[0],
+        (vec![5], b"case-closure-edge-prefix-seven-final".to_vec())
+    );
+    assert_eq!(expected_rows(530)[0], expected_rows(531)[0]);
+    assert_eq!(expected_rows(532)[1], expected_rows(533)[0]);
+    assert!(expected_rows(534).is_empty());
+    assert_eq!(expected_rows(535), expected_rows(506));
 
     for (generation, descriptor, selected) in &pins {
         let resolved = state
