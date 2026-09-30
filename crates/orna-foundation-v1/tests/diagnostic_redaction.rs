@@ -7274,6 +7274,201 @@ fn readmitted_cause_closure_survives_second_revocation_of_its_parent() {
 }
 
 #[test]
+fn recursive_revocation_closure_preserves_nested_parent_snapshots() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let untrusted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(message).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+
+    let initial_generation = admitted("ORNA-E-RECURSIVE-INITIAL", "nested initial admission");
+    let capture_initial = {
+        let snapshot = initial_generation.clone();
+        move || snapshot.clone()
+    };
+    let revoked_generation = capture_initial().redacted();
+    let capture_revoked = {
+        let snapshot = revoked_generation.clone();
+        move || snapshot.clone()
+    };
+    let readmitted_generation = capture_revoked()
+        .redacted_with_message(SafeText::new("nested readmitted cause admission").unwrap());
+    let capture_readmitted = {
+        let snapshot = readmitted_generation.clone();
+        move || snapshot.clone()
+    };
+
+    // ORNA-SECRET-002 requires secret values redacted from diagnostics, but
+    // leaves closure snapshots through recursive parent revocation unspecified.
+    // Treat recursive redaction as a new tree generation and keep old captures.
+    let parent_generation = admitted("ORNA-E-RECURSIVE-PARENT", "nested parent admission")
+        .with_cause(capture_readmitted());
+    let capture_parent = {
+        let snapshot = parent_generation.clone();
+        move || snapshot.clone()
+    };
+    let ancestor_generation = admitted("ORNA-E-RECURSIVE-ANCESTOR", "nested ancestor admission")
+        .with_cause(capture_parent());
+    let capture_ancestor = {
+        let snapshot = ancestor_generation.clone();
+        move || snapshot.clone()
+    };
+    let recursively_revoked_generation = capture_ancestor().redacted();
+    let capture_recursively_revoked = {
+        let snapshot = recursively_revoked_generation.clone();
+        move || snapshot.clone()
+    };
+
+    assert_eq!(
+        serde_json::to_value(capture_initial()).unwrap()["message"],
+        "nested initial admission"
+    );
+    assert_eq!(
+        serde_json::to_value(capture_readmitted()).unwrap()["message"],
+        "nested readmitted cause admission"
+    );
+    assert_eq!(
+        serde_json::to_value(capture_parent()).unwrap()["message"],
+        "nested parent admission"
+    );
+    assert_eq!(
+        serde_json::to_value(capture_ancestor()).unwrap()["message"],
+        "nested ancestor admission"
+    );
+    assert_redacted_tree(&serde_json::to_value(capture_recursively_revoked()).unwrap());
+
+    let mut left = capture_ancestor();
+    let mut right = capture_recursively_revoked();
+    left.clone_from(&capture_recursively_revoked());
+    right.clone_from(&capture_ancestor());
+    assert_eq!(left, recursively_revoked_generation);
+    assert_eq!(right, ancestor_generation);
+    left.clone_from(&capture_ancestor());
+    right.clone_from(&capture_recursively_revoked());
+    assert_eq!(left, ancestor_generation);
+    assert_eq!(right, recursively_revoked_generation);
+
+    let compose_captured_generations = {
+        let left = left.clone();
+        let right = right.clone();
+        let capture_initial = capture_initial;
+        let capture_readmitted = capture_readmitted;
+        let capture_parent = capture_parent;
+        move || {
+            admitted("ORNA-E-RECURSIVE-OUTER", "nested outer admission")
+                .with_cause(left.clone())
+                .with_cause(right.clone())
+                .with_cause(capture_initial())
+                .with_cause(capture_readmitted())
+                .with_cause(capture_parent())
+        }
+    };
+
+    let empty_live = untrusted("ORNA-E-RECURSIVE-LIVE", "nested replaced sibling secret");
+    left.clone_from(&empty_live);
+    right.clone_from(&empty_live);
+    assert_eq!(left, empty_live);
+    assert_eq!(right, empty_live);
+
+    let outer = compose_captured_generations();
+    assert_eq!(outer, compose_captured_generations());
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["message"], "nested outer admission");
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 5);
+    for cause in causes {
+        assert_redacted_tree(cause);
+    }
+    assert_eq!(causes[0]["causes"].as_array().unwrap().len(), 1);
+    assert_eq!(causes[0]["causes"][0]["causes"].as_array().unwrap().len(), 1);
+    assert_eq!(causes[1]["causes"].as_array().unwrap().len(), 1);
+    assert_eq!(causes[1]["causes"][0]["causes"].as_array().unwrap().len(), 1);
+
+    let json = serde_json::to_vec(&outer).unwrap();
+    assert_eq!(
+        json.windows(b"nested outer admission".len())
+            .filter(|window| *window == b"nested outer admission")
+            .count(),
+        1
+    );
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"nested initial admission".as_slice(),
+            b"nested readmitted cause admission".as_slice(),
+            b"nested parent admission".as_slice(),
+            b"nested ancestor admission".as_slice(),
+            b"nested replaced sibling secret".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+
+    let wire = outer.encode_ovb().unwrap();
+    assert!(
+        wire.windows(b"nested outer admission".len())
+            .any(|window| window == b"nested outer admission")
+    );
+    for disclosure in [
+        fixture.as_bytes(),
+        b"nested initial admission".as_slice(),
+        b"nested readmitted cause admission".as_slice(),
+        b"nested parent admission".as_slice(),
+        b"nested ancestor admission".as_slice(),
+    ]
+    .into_iter()
+    .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
+    {
+        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    let decoded_causes = decoded["causes"].as_array().unwrap();
+    assert_eq!(decoded_causes.len(), 5);
+    for cause in decoded_causes {
+        assert_redacted_tree(cause);
+    }
+    assert_eq!(
+        decoded_causes
+            .iter()
+            .map(|cause| cause["causes"].as_array().unwrap().len())
+            .collect::<Vec<_>>(),
+        [1, 1, 0, 0, 1]
+    );
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
