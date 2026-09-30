@@ -980,6 +980,7 @@ pub struct Checkpoint {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HistoricalSnapshot {
     capture: CwdCapture,
+    generation: u64,
     mutation_sequence: u64,
     admin_audit_sequence: u64,
     checkpoint_reset_audit_sequence: u64,
@@ -989,6 +990,11 @@ impl HistoricalSnapshot {
     /// The exact database/runtime/generation identity selected by this pin.
     pub fn capture(&self) -> &CwdCapture {
         &self.capture
+    }
+
+    /// The checkpoint generation represented by this immutable pin.
+    pub const fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// The immutable checkpoint mutation boundary represented by this pin.
@@ -1055,6 +1061,7 @@ impl<T> HistoricalAuditRows<T> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HistoricalSnapshotAttestation {
     capture: CwdCapture,
+    generation: u64,
     mutation_sequence: u64,
     row_count: u64,
     table_count: u64,
@@ -1065,6 +1072,11 @@ pub struct HistoricalSnapshotAttestation {
 impl HistoricalSnapshotAttestation {
     pub fn capture(&self) -> &CwdCapture {
         &self.capture
+    }
+
+    /// The checkpoint generation whose retained rows were verified.
+    pub const fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub const fn mutation_sequence(&self) -> u64 {
@@ -6143,6 +6155,7 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         Ok(HistoricalSnapshot {
             capture,
+            generation,
             mutation_sequence,
             admin_audit_sequence,
             checkpoint_reset_audit_sequence,
@@ -6353,7 +6366,7 @@ impl RuntimeState {
         validate_historical_snapshot_tx(&transaction, snapshot).await?;
         let mut rows = transaction
             .query(
-                "SELECT history.table_id, history.row_value, history.row_digest
+                "SELECT history.table_id, history.row_value, history.row_digest, history.deleted
                  FROM runtime_table_history AS history
                  WHERE history.mutation_sequence <= ?1
                    AND NOT EXISTS (
@@ -6381,16 +6394,22 @@ impl RuntimeState {
             validate_table_name(&table)?;
             let value: Option<Vec<u8>> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let digest: Option<Vec<u8>> = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
-            let (value, digest) = match (value, digest) {
-                (Some(value), Some(digest)) => (value, digest),
-                (None, None) => {
+            let deleted = row
+                .get::<i64>(3)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let (value, digest) = match (deleted, value, digest) {
+                (0, Some(value), Some(digest)) => (value, digest),
+                (1, None, None) => {
                     // The latest tombstone is history bookkeeping, not part of
                     // the logical row image described by this attestation.
                     continue;
                 }
-                _ => return Err(RuntimeError::RecoveryInvalid),
+                // Retained history is required to satisfy the same marker
+                // contract as the storage schema. A contradictory tombstone
+                // cannot be counted as either a live row or a complete delete.
+                _ => return Err(RuntimeError::SnapshotIncomplete),
             };
-            let digest: [u8; 32] = fixed(digest)?;
+            let digest: [u8; 32] = fixed(digest).map_err(|_| RuntimeError::SnapshotIncomplete)?;
             if <[u8; 32]>::from(Sha256::digest(&value)) != digest {
                 return Err(RuntimeError::SnapshotIncomplete);
             }
@@ -6410,6 +6429,7 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         Ok(HistoricalSnapshotAttestation {
             capture: snapshot.capture.clone(),
+            generation: snapshot.generation,
             mutation_sequence: snapshot.mutation_sequence,
             row_count,
             table_count,
@@ -17419,6 +17439,7 @@ async fn validate_historical_snapshot_tx(
         .map_err(|_| RuntimeError::SnapshotContextMismatch)?;
     if capture.database_id() != database_id
         || capture.runtime_id() != runtime_id
+        || generation != snapshot.generation
         || generation > current_generation
     {
         return Err(RuntimeError::SnapshotContextMismatch);
