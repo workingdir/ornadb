@@ -547,6 +547,10 @@ fn table_mutations_validate_patch_fields_and_ordered_keys_across_imports() {
             include_str!("fixtures/table-mutation-patch-computed-field.orna"),
             "table update cannot change a computed field",
         ),
+        (
+            include_str!("fixtures/table-mutation-computed-field-tail.orna"),
+            "table update cannot change a computed field",
+        ),
     ] {
         let result = analyze(&[ModuleInput::new(
             "rows.orna",
@@ -1959,6 +1963,21 @@ fn computed_fields_reject_effectful_initializers() {
         &[ModuleInput::new(
             "contact.orna",
             include_str!("fixtures/inline-semantic_graph/281a25bf6870.orna"),
+        )],
+        &Catalogue::authoritative_core(),
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message() == "computed field must be deterministic and row-local"
+    }));
+}
+
+#[test]
+fn computed_fields_reject_database_mutation_effects() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "contact.orna",
+            include_str!("fixtures/table-computed-mutation-effect.orna"),
         )],
         &Catalogue::authoritative_core(),
     );

@@ -1,0 +1,9 @@
+pub table Note(id: Int) {
+    text: Str,
+    quantity: Int,
+}
+
+fn main() {
+    Note.insert({ id: 1, text: "first", quantity: 3 });
+    Note.insert({ id: 1, text: "duplicate", quantity: 4 });
+}
