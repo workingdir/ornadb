@@ -124,3 +124,9 @@ release path: the competitor's failure closure updates and re-keys the blocker
 aside rather than deleting it, retries its move, and releases the owner's
 original key. The complete mutation log records the adapter's local closure
 order where the reference is silent.
+
+`owner_retries_after_competitor_closure_reuses_released_target` covers the
+follow-on collision: after the blocker moves aside, the owner takes the released
+competitor target, so the competitor must enter a second failure closure before
+the owner can retry its original key. The fixture asserts the full ordered log;
+the reference does not specify this nested caught-retry ordering.
