@@ -1555,8 +1555,8 @@ fn build_plan(
         .collect::<Vec<_>>();
 
     let root = references[positions[root_index]].clone();
-    let work_estimates_complete = operators.iter().all(|operator| operator.work.is_some());
     let mut total_work_overflow = false;
+    let mut known_work_total = Some(0u64);
     let mut total_work = Some(0u64);
     let mut nodes = Vec::with_capacity(order.len());
     for (position, index) in order.iter().enumerate() {
@@ -1579,6 +1579,10 @@ fn build_plan(
             }
             _ => None,
         };
+        if let Some(work) = operator.work {
+            known_work_total = known_work_total.and_then(|known| known.checked_add(work));
+            total_work_overflow |= known_work_total.is_none();
+        }
         let mut details = operator.details.clone();
         if let Some(work) = operator.work {
             // `sys.PlanNode` has no dedicated cost column. Keep each local
@@ -1601,10 +1605,10 @@ fn build_plan(
             details,
         });
     }
-    if work_estimates_complete && total_work_overflow {
+    if total_work_overflow {
         // The portable plan has a nullable total but no cost-status field.
-        // Mark an exact aggregation overflow on the root; unknown inputs do
-        // not receive this marker because they are a different estimate edge.
+        // Even when some work is unknown, nonnegative known contributions
+        // alone exceeding u64 prove the total is unrepresentable.
         nodes[positions[root_index]].details.insert(
             "estimated_cost_overflow".to_owned(),
             PlanDetail::Boolean(true),
