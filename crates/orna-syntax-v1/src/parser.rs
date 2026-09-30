@@ -5053,9 +5053,10 @@ impl Parser {
         }
     }
     fn recover_case_arms(&mut self) -> bool {
-        let (mut braces, mut parens, mut brackets) = (0usize, 0usize, 0usize);
+        let (mut braces, mut parens, mut brackets, mut interpolations) =
+            (0usize, 0usize, 0usize, 0usize);
         while !self.eof() {
-            if braces == 0 && parens == 0 && brackets == 0 {
+            if braces == 0 && parens == 0 && brackets == 0 && interpolations == 0 {
                 // Stop before this case expression's close, or consume its
                 // arm separator and resume parsing later arms. This keeps a
                 // malformed arm from swallowing valid arms or the outer tail.
@@ -5067,7 +5068,12 @@ impl Parser {
                     return true;
                 }
             }
+            // Interpolation boundaries are dedicated tokens, not braces.
             match &self.current().kind {
+                TokenKind::InterpolationStart => interpolations += 1,
+                TokenKind::InterpolationEnd => {
+                    interpolations = interpolations.saturating_sub(1)
+                }
                 TokenKind::Punct("{") => braces += 1,
                 TokenKind::Punct("}") => braces = braces.saturating_sub(1),
                 TokenKind::Punct("(") => parens += 1,
