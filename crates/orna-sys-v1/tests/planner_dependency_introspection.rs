@@ -1597,6 +1597,116 @@ fn explain_mixed_partial_bounds_accumulate_through_unknown_join_tails() {
 }
 
 #[test]
+fn explain_partial_bounds_survive_unknown_source_and_join_tails() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_with_last_bytes = |write_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-bound-unknown-join-tails"),
+            source: obj("table:missing-stats"),
+            source_statistics: None,
+            joins: vec![QueryJoinDescription {
+                source: obj("table:large"),
+                statistics: Some(QuerySourceStatistics {
+                    estimated_rows: Some(u64::MAX - 2),
+                    estimated_bytes: Some(0),
+                    mutable_branch: None,
+                }),
+                predicate: None,
+            }],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:missing-stats"),
+                    kind: QueryMutationKind::Insert,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:missing-stats"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+                QueryMutationDescription {
+                    table: obj("table:missing-stats"),
+                    kind: QueryMutationKind::Delete,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: Some(write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+            ],
+            materialize_into: Some(obj("materialization:partial-bound-unknown-join")),
+        })
+        .expect("partial mutation bounds across unknown input and join estimates")
+    };
+
+    // An unknown left input makes the join and total unknown. The known right
+    // scan and partial mutation components still establish a useful lower bound.
+    let exact = explain_with_last_bytes(4_096);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let known_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj("table:large")))
+        .expect("known right scan under unknown join");
+    assert_eq!(known_scan.estimated_work(), Some(u64::MAX - 2));
+    let unknown_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:missing-stats"))
+        })
+        .expect("unknown left scan");
+    assert_eq!(unknown_scan.estimated_work(), None);
+    let join = exact
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("join with unknown input cardinality");
+    assert_eq!(join.estimated_work(), None);
+    let partial_insert = exact
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("insert".to_owned())))
+        .expect("row-bounded partial insert");
+    assert_eq!(partial_insert.estimated_rows(), Some(1));
+    assert_eq!(partial_insert.estimated_bytes(), None);
+    assert_eq!(partial_insert.estimated_work(), None);
+    let partial_delete = exact
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned())))
+        .expect("byte-bounded partial delete");
+    assert_eq!(partial_delete.estimated_rows(), None);
+    assert_eq!(partial_delete.estimated_bytes(), Some(4_096));
+    assert_eq!(partial_delete.estimated_work(), None);
+
+    let overflow = explain_with_last_bytes(8_192);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the rounded byte lower bound crosses MAX despite unknown source and join work"
+    );
+    let surface = serde_json::to_value(&overflow).expect("partial-bound overflow through join");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
 fn explain_cost_overflow_survives_unknown_intermediate_estimates() {
     let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
