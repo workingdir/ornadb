@@ -1274,9 +1274,9 @@ fn explain_unknown_final_join_tails_retain_known_left_scan_boundary() {
     let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
 
-    // Join work is unknown when right-side statistics are unavailable, but
-    // independently known work from the left scan still counts at the total
-    // boundary, even though those joins are the final unknown plan tails.
+    // Missing right-side cardinalities keep join work unknown: a known zero
+    // byte estimate cannot stand in for missing row counts. Independently
+    // known left-scan work still counts at the total boundary through tails.
     let explain_with_mutation_tail = |affected_rows| {
         explain_query(&QueryPlanDescription {
             snapshot: SnapshotRef::descriptive("snapshot:unknown-final-join-tail-boundary"),
@@ -1289,12 +1289,20 @@ fn explain_unknown_final_join_tails_retain_known_left_scan_boundary() {
             joins: vec![
                 QueryJoinDescription {
                     source: obj("table:unknown-right-first"),
-                    statistics: None,
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(0),
+                        mutable_branch: None,
+                    }),
                     predicate: None,
                 },
                 QueryJoinDescription {
                     source: obj("table:unknown-right-second"),
-                    statistics: None,
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(0),
+                        mutable_branch: None,
+                    }),
                     predicate: None,
                 },
             ],
@@ -1346,6 +1354,8 @@ fn explain_unknown_final_join_tails_retain_known_left_scan_boundary() {
             .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
             .expect("unknown right scan");
         assert_eq!(scan.estimated_work(), None);
+        assert_eq!(scan.estimated_rows(), None);
+        assert_eq!(scan.estimated_bytes(), Some(0));
     }
 
     let overflow = explain_with_mutation_tail(2);
