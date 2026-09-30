@@ -3,103 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod build_support;
+
+use build_support::{Collector, validate_api_document};
 use serde_json::{Value, json};
-use syn::{
-    Expr, ImplItem, Lit,
-    visit::{self, Visit},
-};
-
-#[derive(Clone)]
-struct Function {
-    method: String,
-    metadata: Value,
-}
-
-#[derive(Default)]
-struct Collector {
-    functions: Vec<Function>,
-    errors: Vec<String>,
-}
-
-impl<'ast> Visit<'ast> for Collector {
-    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
-        for member in &item.items {
-            if let ImplItem::Fn(method) = member {
-                for attribute in &method.attrs {
-                    if attribute.path().segments.last().is_some_and(|segment| {
-                        segment.ident == "ornasys"
-                    }) {
-                        match parse_function_attribute(attribute) {
-                            Ok(metadata) => self.functions.push(Function {
-                                method: method.sig.ident.to_string(),
-                                metadata,
-                            }),
-                            Err(error) => self
-                                .errors
-                                .push(format!("{}: {error}", method.sig.ident)),
-                        }
-                    }
-                }
-            }
-        }
-        visit::visit_item_impl(self, item);
-    }
-
-    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
-        if item.attrs.iter().any(|attribute| {
-            attribute
-                .path()
-                .segments
-                .last()
-                .is_some_and(|segment| segment.ident == "ornasys")
-        }) {
-            self.errors.push(format!(
-                "{} is annotated with #[ornasys] outside an impl; annotate an implementation method",
-                item.sig.ident
-            ));
-        }
-        visit::visit_item_fn(self, item);
-    }
-}
-
-fn parse_function_attribute(attribute: &syn::Attribute) -> Result<Value, String> {
-    let mut function_json = None;
-    attribute
-        .parse_nested_meta(|meta| {
-            if !meta.path.is_ident("function") {
-                return Err(meta.error("expected `function = \"<JSON>\"`"));
-            }
-            let value = meta.value()?;
-            let expression: Expr = value.parse()?;
-            let Expr::Lit(expression) = expression else {
-                return Err(meta.error("function metadata must be a string literal"));
-            };
-            let Lit::Str(value) = expression.lit else {
-                return Err(meta.error("function metadata must be a string literal"));
-            };
-            if function_json.replace(value.value()).is_some() {
-                return Err(meta.error("only one function metadata value is allowed"));
-            }
-            Ok(())
-        })
-        .map_err(|error| error.to_string())?;
-    let source = function_json.ok_or_else(|| "missing function JSON metadata".to_owned())?;
-    let metadata: Value = serde_json::from_str(&source)
-        .map_err(|error| format!("invalid function JSON metadata: {error}"))?;
-    let object = metadata
-        .as_object()
-        .ok_or_else(|| "function metadata must be a JSON object".to_owned())?;
-    for field in ["name", "effect", "signature", "purpose"] {
-        if !object.get(field).is_some_and(Value::is_string) {
-            return Err(format!("function metadata requires string field `{field}`"));
-        }
-    }
-    let effect = metadata["effect"].as_str().expect("validated string");
-    if !matches!(effect, "read" | "invoke" | "admin") {
-        return Err(format!("unknown system API effect `{effect}`"));
-    }
-    Ok(metadata)
-}
 
 fn rust_sources(root: &Path, output: &mut Vec<PathBuf>) -> std::io::Result<()> {
     let mut entries = fs::read_dir(root)?.collect::<Result<Vec<_>, _>>()?;
@@ -127,9 +34,9 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     // `syn` scans written Rust source and cannot see items emitted later by
-    // `macro_rules!` or procedural-macro expansion. System API bindings must
-    // therefore be explicit annotated impl methods; generated methods are not
-    // collected unless a future collector adds macro expansion support.
+    // `macro_rules!` or procedural-macro expansion. Annotated methods in impls
+    // and trait declarations are collected; methods emitted by macros remain
+    // unsupported and are documented at the source declaration.
     let mut sources = Vec::new();
     rust_sources(&source_root, &mut sources).expect("walk sys crate Rust source");
     let mut collector = Collector::default();
@@ -137,9 +44,7 @@ fn main() {
         println!("cargo:rerun-if-changed={}", source.display());
         let text = fs::read_to_string(source)
             .unwrap_or_else(|error| panic!("read {}: {error}", source.display()));
-        let syntax = syn::parse_file(&text)
-            .unwrap_or_else(|error| panic!("parse {}: {error}", source.display()));
-        collector.visit_file(&syntax);
+        collector.collect_source(&source.display().to_string(), &text);
     }
     assert!(collector.errors.is_empty(), "{}", collector.errors.join("\n"));
     assert!(
@@ -172,6 +77,8 @@ fn main() {
     api["source_of_truth"] = json!(
         "crates/orna-sys-v1/src/system_api.rs #[ornasys] descriptor methods; normative semantics in source chapters and generated system reference"
     );
+
+    validate_api_document(&api).expect("generated system API schema is internally consistent");
 
     let mut generated_json = serde_json::to_string_pretty(&api).expect("serialize system API");
     generated_json.push('\n');
