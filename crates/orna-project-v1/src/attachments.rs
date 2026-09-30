@@ -413,7 +413,13 @@ impl AttachedDatabaseSession {
             }
             modules.extend(database.project.modules().iter().map(|module| {
                 let logical_path = if module.logical_path == "main.orna" {
-                    format!("{name}.orna")
+                    if name == "main" {
+                        // Keep the attached `main` namespace distinct from the
+                        // primary root module, which already owns `main.orna`.
+                        "main/main.orna".to_owned()
+                    } else {
+                        format!("{name}.orna")
+                    }
                 } else {
                     format!("{name}/{}", module.logical_path)
                 };
