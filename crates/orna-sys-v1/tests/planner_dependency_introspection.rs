@@ -3559,3 +3559,73 @@ fn explain_keeps_per_scan_rounding_representable_at_max_byte_closure() {
         node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
     }));
 }
+
+#[test]
+fn explain_closes_independent_half_block_remainders_across_scans() {
+    let parsed = orna_syntax_v1::parse_module(ROUNDING_TAIL_INTERPLAY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:rounding-remainder-closure"),
+        source: obj("table:RoundingFirst"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(1),
+            estimated_bytes: Some(2_048),
+            mutable_branch: None,
+        }),
+        joins: vec![QueryJoinDescription {
+            source: obj("table:RoundingTail"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(1),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            predicate: None,
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: Vec::new(),
+        materialize_into: Some(obj("materialization:rounding-remainder-closure")),
+    })
+    .expect("rounded scan remainders close through join materialization");
+
+    // ORNA-PLAN leaves byte-cost units unspecified. With the existing 4-KiB
+    // rule, each half-block scan rounds up independently, while their joined
+    // 4-KiB output is charged as one block.
+    for table in ["table:RoundingFirst", "table:RoundingTail"] {
+        let scan = explained
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("fixture scan in remainder proof");
+        assert_eq!(scan.estimated_rows(), Some(1));
+        assert_eq!(scan.estimated_bytes(), Some(2_048));
+        assert_eq!(scan.estimated_work(), Some(2));
+    }
+    let join = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("joined remainder output");
+    assert_eq!(join.estimated_rows(), Some(1));
+    assert_eq!(join.estimated_bytes(), Some(4_096));
+    assert_eq!(join.estimated_work(), Some(2));
+    let materialize = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Materialize)
+        .expect("materialization closes the rounded scans");
+    assert_eq!(materialize.estimated_bytes(), Some(4_096));
+    assert_eq!(materialize.estimated_work(), Some(2));
+    assert_eq!(explained.plan().estimated_cost(), Some("8"));
+
+    let surface = serde_json::to_value(&explained).expect("rounded remainder surface");
+    assert_eq!(surface["plan"]["estimated_cost"], "8");
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
