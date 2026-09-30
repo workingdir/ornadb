@@ -83,6 +83,38 @@ fn pinned_duration_formatters_preserve_exact_fractional_elapsed_values() {
             include_str!("fixtures/stdlib-time-duration-scaled-minute-iso-mncjs.orna"),
             "PT1M0.00012S",
         ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scaled-before-minute-compact-kzs8s.orna"),
+            "59.999999999s",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scaled-before-minute-clock-kzs8s.orna"),
+            "00:00:59.999999999",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scaled-before-minute-words-kzs8s.orna"),
+            "59.999999999 seconds",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scaled-before-minute-iso-kzs8s.orna"),
+            "PT59.999999999S",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scaled-after-minute-compact-kzs8s.orna"),
+            "1m 0.000000001s",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scaled-after-minute-clock-kzs8s.orna"),
+            "00:01:00.000000001",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scaled-after-minute-words-kzs8s.orna"),
+            "1 minute, 0.000000001 seconds",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scaled-after-minute-iso-kzs8s.orna"),
+            "PT1M0.000000001S",
+        ),
     ] {
         let result = session.submit(source);
         assert_eq!(
