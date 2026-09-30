@@ -699,8 +699,27 @@ impl PlanNode {
         self.estimated_rows
     }
 
+    pub const fn actual_bytes(&self) -> Option<u64> {
+        self.actual_bytes
+    }
+
     pub const fn estimated_bytes(&self) -> Option<u64> {
         self.estimated_bytes
+    }
+
+    /// Returns the structured details carried by this operator in `sys.PlanNode`.
+    pub fn details(&self) -> &BTreeMap<String, PlanDetail> {
+        &self.details
+    }
+
+    /// Returns this operator's estimated work when all inputs for that local
+    /// estimate are known. `Some(0)` is a measured zero estimate; `None` means
+    /// the planner could not compute the contribution.
+    pub fn estimated_work(&self) -> Option<u64> {
+        match self.details.get("estimated_work") {
+            Some(PlanDetail::Integer(work)) => Some(*work),
+            _ => None,
+        }
     }
 }
 
