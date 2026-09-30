@@ -15797,6 +15797,16 @@ fn descriptor_call_type(
     match ty {
         system_api::SystemType::Named(name) if type_parameters.contains(name) => None,
         system_api::SystemType::Named(_) => Some(descriptor_type(ty)),
+        system_api::SystemType::Applied { base, arguments } if base == "Relation" => {
+            // Source annotations normalize Relation<T> to this semantic type.
+            let [element] = arguments.as_slice() else {
+                return None;
+            };
+            Some(Type::Relation(Box::new(descriptor_call_type(
+                element,
+                type_parameters,
+            )?)))
+        }
         system_api::SystemType::Applied { base, arguments } => Some(Type::Applied {
             base: base.clone(),
             arguments: arguments
