@@ -771,6 +771,87 @@ fn clone_from_nested_cause_vectors_resize_without_secret_tails() {
 }
 
 #[test]
+fn clone_from_nested_same_length_mixed_trust_slots_redacts_all_causes() {
+    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture_credential = fixture.split('"').nth(1).unwrap();
+    let diagnostic = |code: &str, admitted: bool| {
+        let diagnostic = Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap();
+        let diagnostic = if admitted {
+            diagnostic.redacted_with_message(SafeText::new(fixture).unwrap())
+        } else {
+            diagnostic
+        };
+        diagnostic.with_note(SafeText::new(fixture).unwrap())
+    };
+
+    let source_branch = diagnostic("ORNA-E-MIXED-SOURCE-BRANCH", true)
+        .with_cause(diagnostic("ORNA-E-MIXED-SOURCE-A", true))
+        .with_cause(diagnostic("ORNA-E-MIXED-SOURCE-B", false))
+        .with_cause(diagnostic("ORNA-E-MIXED-SOURCE-C", true));
+    let source = Diagnostic::new(
+        SafeText::new("ORNA-E-MIXED-SOURCE-ROOT").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .redacted_with_message(SafeText::new("admitted mixed-trust root").unwrap())
+    .with_cause(source_branch);
+
+    let destination_branch = diagnostic("ORNA-E-MIXED-OLD-BRANCH", false)
+        .with_cause(diagnostic("ORNA-E-MIXED-OLD-A", false))
+        .with_cause(diagnostic("ORNA-E-MIXED-OLD-B", true))
+        .with_cause(diagnostic("ORNA-E-MIXED-OLD-C", false));
+    let mut destination = Diagnostic::new(
+        SafeText::new("ORNA-E-MIXED-OLD-ROOT").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .with_cause(destination_branch);
+
+    destination.clone_from(&source);
+    // Equality includes the private admission marks: each reused slot now
+    // carries precisely the source node's state before boundary projection.
+    assert_eq!(destination, source);
+
+    let json = serde_json::to_vec(&destination).unwrap();
+    let projection = serde_json::to_value(&destination).unwrap();
+    assert_eq!(projection["message"], "admitted mixed-trust root");
+    assert_eq!(projection["causes"][0]["message"], "<redacted>");
+    assert_eq!(projection["causes"][0]["notes"][0], "<redacted>");
+    let nested = projection["causes"][0]["causes"].as_array().unwrap();
+    assert_eq!(nested.len(), 3);
+    for cause in nested {
+        assert_eq!(cause["message"], "<redacted>");
+        assert_eq!(cause["notes"][0], "<redacted>");
+        assert_eq!(cause["redacted"], true);
+    }
+    assert!(
+        !json
+            .windows(fixture_credential.len())
+            .any(|window| window == fixture_credential.as_bytes())
+    );
+
+    let encoded = destination.encode_ovb().unwrap();
+    assert!(
+        !encoded
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    assert_eq!(decoded["causes"][0]["message"], "<redacted>");
+    for cause in decoded["causes"][0]["causes"].as_array().unwrap() {
+        assert_eq!(cause["message"], "<redacted>");
+    }
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
