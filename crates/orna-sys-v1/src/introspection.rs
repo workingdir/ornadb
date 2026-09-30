@@ -1498,6 +1498,12 @@ fn build_plan(
             (Some(total), Some(work)) => total.checked_add(work),
             _ => None,
         };
+        let mut details = operator.details.clone();
+        if let Some(work) = operator.work {
+            // `sys.PlanNode` has no dedicated cost column. Keep each local
+            // contribution in details so the explain tail adds to Plan.cost.
+            details.insert("estimated_work".to_owned(), PlanDetail::Integer(work));
+        }
         nodes.push(PlanNode {
             reference: references[position].clone(),
             plan: plan.clone(),
@@ -1511,7 +1517,7 @@ fn build_plan(
             estimated_bytes: operator.cardinality.bytes,
             actual_bytes: None,
             predicate: operator.predicate.clone(),
-            details: operator.details.clone(),
+            details,
         });
     }
     Ok(ExplainedPlan {
