@@ -165,3 +165,9 @@ deleted move target: the primary blocker takes the freed key before the owner's
 retry, then moves aside under a nested closure so the owner can move and the
 remaining competitor retries can complete. Its ordered log documents local
 adapter behavior where the reference is silent.
+
+`owner_retry_after_reused_target_deleted_in_nested_closure` covers the paired
+release path: after the primary blocker reuses the deleted owner target, its
+nested closure deletes that row, allowing the owner retry to finish before the
+competitor returns. The fixture documents this local mutation order where the
+reference is silent.
