@@ -341,6 +341,8 @@ impl AttachedDatabaseSession {
     /// the alias immediately, so callers must revalidate module admission
     /// before the next evaluation. A detached alias is unavailable as both a
     /// read and write target; reattaching it admits only the new read-only pin.
+    /// Matching is by exact alias name; a prefix does not select or detach a
+    /// neighboring alias.
     /// Each clone keeps its own alias map: later detach or reattach operations
     /// on one value do not update another, and a clone made while detached
     /// stays detached. Module and relation routing use the same per-instance
@@ -455,7 +457,7 @@ impl AttachedDatabaseSession {
     /// from every alias without deduplicating them; consumers keep the alias
     /// and commit with each row and decide how their query treats that overlap.
     /// Aliases are exact names, so prefix overlap never selects or replaces a
-    /// different route; attached `app` and primary `app_copy` remain distinct.
+    /// different route; `app`, `app_copy`, and `app_copy_archive` stay distinct.
     pub fn relation_sources<'a>(
         &'a self,
         table_path: &str,
