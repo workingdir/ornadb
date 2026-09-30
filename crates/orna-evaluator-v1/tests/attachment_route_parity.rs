@@ -340,6 +340,30 @@ fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
             .as_str(),
         longer_alias_commit
     );
+    // A cloned admitted session retains the original pair of pins even after
+    // the source map has detached the archive and replaced the `main` alias.
+    assert_eq!(
+        historical_session
+            .attached_databases()
+            .unwrap()
+            .database("main")
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        main_alias_commit
+    );
+    assert_eq!(
+        historical_session
+            .attached_databases()
+            .unwrap()
+            .database("main_archive")
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        longer_alias_commit
+    );
     assert_eq!(after_detach_session.submit("use main;"), Ok(None));
     assert_eq!(
         after_detach_session.submit("main.package_value()"),
