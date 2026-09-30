@@ -6923,6 +6923,18 @@ fn evaluates_literals_collections_bindings_and_math() {
 }
 
 #[test]
+fn final_control_expression_in_a_block_returns_its_value() {
+    let source = include_str!("fixtures/control-expression-block-tail-uamr.orna");
+    let result = invoke(source, &Environment::new(), Limits::default())
+        .expect("the final control expression evaluates to its branch value");
+    assert_eq!(
+        result.raw(),
+        &Raw::Int(BigInt::from(1)),
+        "an unsemicolonated final control expression is the block tail"
+    );
+}
+
+#[test]
 fn evaluates_canonical_date_literals_at_boundaries_and_leap_days() {
     for (source, expected) in [
         (
