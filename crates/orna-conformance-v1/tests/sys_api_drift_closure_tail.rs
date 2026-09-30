@@ -52,14 +52,14 @@ fn default_argument_fixture_uses_published_schema_edges() {
 }
 
 #[test]
-fn edge_interplay_fixture_closes_nested_flat_map_relation_fields() {
+fn edge_interplay_fixture_closes_nested_flat_map_row_chains() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
         EDGE_INTERPLAY,
     )]);
     assert!(
         analysis.is_ok(),
-        "nested DiffEntry and SourceMap projections plus SYS relation-valued flat_map fields must resolve through the published schema: {:?}",
+        "nested DiffEntry and SourceMap projections plus chained SYS flat_map row descriptors must resolve through the published schema: {:?}",
         analysis
             .diagnostics
             .iter()
