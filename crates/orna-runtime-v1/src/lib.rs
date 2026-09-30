@@ -20562,6 +20562,27 @@ mod tests {
             "the second nested child supplies one match without entering its failing sibling"
         );
 
+        // The reference gives filters, union order and bounded enumeration,
+        // but not demand propagation when an outer filter rejects one nested
+        // child's match. Continue to the next child; once it supplies the
+        // outer match, stop before the deeper failing projection.
+        let (nested_filter_reject_then_stop, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-nested-filter-reject-child-then-stop.orna"
+                ),
+            );
+        assert_eq!(
+            nested_filter_reject_then_stop.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "a later nested child satisfies the outer filter before the failing tail"
+        );
+
         // The reference fixes left-to-right union order and bounded
         // enumeration but leaves projection failures across a child-local
         // take boundary implicit. Keep the left child lazy: its excluded
