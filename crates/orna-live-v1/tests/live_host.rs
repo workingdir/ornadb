@@ -10546,6 +10546,202 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
         )),
         Err(Error::Closed)
     ));
+
+    // The reverse cross-kind edge is also session-scoped: ID 96 was a status
+    // query in several closed scopes, but may name a new Eval target here.
+    let eighth_subscribe = subscribe();
+    let mut eighth_issuer = Issuer(8, None);
+    let eighth_credential = block_on(host.create(
+        CreateRequest {
+            id: [8; 16],
+            origin: origin(),
+            expires_at: 100,
+            now: 15,
+            subscribe: &eighth_subscribe,
+        },
+        &mut eighth_issuer,
+    ))
+    .unwrap();
+    block_on(host.resume(ResumeRequest {
+        id: [8; 16],
+        origin: &origin(),
+        credential: &eighth_credential,
+        attachment: [13; 16],
+        now: 16,
+    }))
+    .unwrap();
+
+    let eighth_target_request = eval_with_context([8; 16], [96; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&eighth_target_request, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    let eighth_target_fingerprint = request_fingerprint(&eighth_target_request, [8; 16]);
+    let eighth_identity = RequestIdentity {
+        session_id: [8; 16],
+        request_id: [96; 16],
+    };
+    let eighth_query_request = Envelope {
+        request: Some([98; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [96; 16],
+            fingerprint: eighth_target_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let eighth_query_fingerprint = request_fingerprint(&eighth_query_request, [8; 16]);
+    let eighth_unknown = block_on(host.dispatch_frame(
+        [13; 16],
+        2,
+        Frame::Binary(eighth_query_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a fresh target ID is Unknown before this scope starts the Eval");
+    assert!(matches!(
+        &eighth_unknown.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Unknown,
+            fingerprint: None,
+            result: None,
+        } if *target == [96; 16]
+    ));
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(eighth_identity))
+            .unwrap(),
+        None
+    ));
+    for (session_id, expected_fingerprint) in [
+        ([1; 16], closed_sibling_target_query_fingerprint),
+        ([3; 16], third_query_fingerprint),
+        ([4; 16], fourth_query_fingerprint),
+        ([5; 16], fifth_query_fingerprint),
+        ([6; 16], sixth_query_fingerprint),
+    ] {
+        assert!(matches!(
+            block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+                session_id,
+                request_id: [96; 16],
+            }))
+            .unwrap(),
+            Some(status)
+                if status.state == orna_runtime_v1::RequestState::Completed
+                    && status.fingerprint == expected_fingerprint
+        ));
+    }
+
+    let runtime = open_durable_state(&repository);
+    let (_, capability) = block_on(runtime.reserve_request_with_admission(
+        eighth_identity,
+        eighth_target_fingerprint,
+    ))
+    .unwrap();
+    let capability = capability.expect("fresh owner-bound capability in the eighth session");
+    block_on(runtime.start_request_with_owner_and_admission(
+        eighth_identity,
+        eighth_target_fingerprint,
+        lease,
+        capability,
+    ))
+    .unwrap();
+    drop(runtime);
+
+    let eighth_unknown_retry = block_on(host.dispatch_frame(
+        [13; 16],
+        3,
+        Frame::Binary(eighth_query_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the exact query keeps its pre-start Unknown snapshot");
+    assert_eq!(eighth_unknown_retry, eighth_unknown);
+    let eighth_fresh_request = Envelope {
+        request: Some([99; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [96; 16],
+            fingerprint: eighth_target_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let eighth_fresh = block_on(host.dispatch_frame(
+        [13; 16],
+        4,
+        Frame::Binary(eighth_fresh_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a fresh status query observes the reused Eval ID running");
+    assert!(matches!(
+        &eighth_fresh.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Running,
+            fingerprint: Some(returned),
+            result: None,
+        } if *target == [96; 16] && *returned == eighth_target_fingerprint
+    ));
+
+    let mut eighth_deletion = RecordingDelete::default();
+    let mut eighth_children = RecordingChildren::default();
+    assert_eq!(
+        block_on(host.http_delete_with_children(
+            DeleteRequest {
+                id: [8; 16],
+                origin: &origin(),
+                credential: &eighth_credential,
+                now: 17,
+            },
+            &mut eighth_deletion,
+            &mut eighth_children,
+        ))
+        .status,
+        204
+    );
+    assert_eq!(eighth_children.requests, vec![eighth_identity]);
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status(
+            eighth_identity,
+            eighth_target_fingerprint,
+        ))
+        .unwrap(),
+        Some(status) if status.state == orna_runtime_v1::RequestState::Cancelled
+    ));
+    for (request_id, expected_fingerprint) in [
+        ([98; 16], eighth_query_fingerprint),
+        ([99; 16], request_fingerprint(&eighth_fresh_request, [8; 16])),
+    ] {
+        assert!(matches!(
+            block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+                session_id: [8; 16],
+                request_id,
+            }))
+            .unwrap(),
+            Some(status)
+                if status.state == orna_runtime_v1::RequestState::Completed
+                    && status.fingerprint == expected_fingerprint
+        ));
+    }
+    assert!(matches!(
+        block_on(host.dispatch_frame(
+            [13; 16],
+            5,
+            Frame::Binary(eighth_query_request),
+            &mut application,
+        )),
+        Err(Error::Closed)
+    ));
     assert_eq!(application.calls, 0);
     drop(host);
     remove_test_repository(&root);
