@@ -1,0 +1,4 @@
+pub table FirstRemainderUnknownJoinEdgeSource(id: Int) { value: Int, }
+pub table FirstRemainderUnknownJoinEdgeRight(id: Int) { value: Int, }
+pub table FirstRemainderUnknownJoinEdgeTarget(id: Int) { value: Int, }
+pub fn delete_first_remainder_unknown_join_edge() = FirstRemainderUnknownJoinEdgeTarget.delete(1);
