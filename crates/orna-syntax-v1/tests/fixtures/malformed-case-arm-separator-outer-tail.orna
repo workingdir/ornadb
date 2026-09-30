@@ -1,1 +1,0 @@
-pub fn bad(): Int { case 1 { 1: 2 3 if true { 4 } } 5 }

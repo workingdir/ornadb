@@ -4580,7 +4580,14 @@ impl Parser {
                     self.bump();
                     while !self.eof() && !self.is_punct("}") {
                         let arm_start = self.current().span.clone();
+                        let pattern_start = self.at;
                         let pattern = self.parse_pattern();
+                        if self.at == pattern_start {
+                            if self.recover_case_arms() {
+                                continue;
+                            }
+                            break;
+                        }
                         let guard = if self.keyword() == Some(Keyword::If) {
                             self.bump();
                             self.expr()
@@ -4589,7 +4596,9 @@ impl Parser {
                         };
                         if !self.is_punct(":") {
                             self.error_here("ORNA-PARSE-001", "expected `:` after case pattern");
-                            self.recover_case_arms();
+                            if self.recover_case_arms() {
+                                continue;
+                            }
                             break;
                         }
                         self.bump();
@@ -4603,16 +4612,9 @@ impl Parser {
                         });
                         if self.is_punct(",") {
                             self.bump()
-                        } else if !self.is_punct("}") {
-                            self.error_here(
-                                "ORNA-PARSE-001",
-                                "expected `,` or `}` after case arm",
-                            );
-                            self.recover_case_arms();
-                            break;
-                        } else {
-                            break;
                         }
+                        // Case-arm commas are optional; otherwise the next
+                        // loop pass parses the adjacent arm pattern.
                     }
                     if self.is_punct("}") {
                         self.bump()
@@ -5050,13 +5052,20 @@ impl Parser {
             self.bump()
         }
     }
-    fn recover_case_arms(&mut self) {
+    fn recover_case_arms(&mut self) -> bool {
         let (mut braces, mut parens, mut brackets) = (0usize, 0usize, 0usize);
         while !self.eof() {
-            // A malformed arm must not consume the enclosing block's close;
-            // synchronize only at this case expression's brace boundary.
-            if self.is_punct("}") && braces == 0 && parens == 0 && brackets == 0 {
-                return;
+            if braces == 0 && parens == 0 && brackets == 0 {
+                // Stop before this case expression's close, or consume its
+                // arm separator and resume parsing later arms. This keeps a
+                // malformed arm from swallowing valid arms or the outer tail.
+                if self.is_punct("}") {
+                    return false;
+                }
+                if self.is_punct(",") {
+                    self.bump();
+                    return true;
+                }
             }
             match &self.current().kind {
                 TokenKind::Punct("{") => braces += 1,
@@ -5069,6 +5078,7 @@ impl Parser {
             }
             self.bump();
         }
+        false
     }
     fn contextual(&self) -> bool {
         matches!(
