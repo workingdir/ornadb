@@ -3351,6 +3351,54 @@ mod tests {
             decoded
         );
 
+        let extension_incoming = wire(
+            3,
+            Some(id(5)),
+            Some(id(6)),
+            Node::Map(vec![
+                (uint(0), uint(0)),
+                (uint(1), Node::Bytes(id(7).to_vec())),
+                (uint(2), Node::Text("ordinary event value".into())),
+                (uint(3), Node::Bytes(digest(9).to_vec())),
+                (uint(11), error_node(fixture, true)),
+            ]),
+        );
+        let extension = Envelope::decode(&extension_incoming, Limits::default()).unwrap();
+        assert!(!format!("{extension:?}").contains(fixture));
+        let extension_wire = extension.encode(Limits::default()).unwrap();
+        assert!(!extension_wire
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
+        assert_eq!(
+            Envelope::decode(&extension_wire, Limits::default()).unwrap(),
+            extension
+        );
+
+        let patch_incoming = wire(
+            17,
+            None,
+            Some(id(8)),
+            Node::Map(vec![
+                (uint(0), uint(0)),
+                (uint(1), uint(1)),
+                (
+                    uint(2),
+                    Node::Array(vec![Node::Array(vec![
+                        uint(0),
+                        Node::Array(vec![]),
+                        error_node(fixture, true),
+                    ])]),
+                ),
+                (uint(3), snapshot_node(&snapshot()).unwrap()),
+            ]),
+        );
+        let patch = Envelope::decode(&patch_incoming, Limits::default()).unwrap();
+        assert!(!format!("{patch:?}").contains(fixture));
+        let patch_wire = patch.encode(Limits::default()).unwrap();
+        assert!(!patch_wire
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
+
         let status = Envelope {
             request: Some(id(4)),
             watch: None,
