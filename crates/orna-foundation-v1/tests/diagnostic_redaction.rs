@@ -1268,6 +1268,133 @@ fn clone_from_replacement_revokes_only_that_post_clone_sibling() {
 }
 
 #[test]
+fn clone_from_grant_and_revoke_stay_local_at_cause_boundaries() {
+    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture_credential = fixture.split('"').nth(1).unwrap();
+    let admitted_source = Diagnostic::new(
+        SafeText::new("ORNA-E-ADMISSION-REPLACE-SOURCE").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .redacted_with_message(SafeText::new("source local admission").unwrap())
+    .with_cause(
+        Diagnostic::new(
+            SafeText::new("ORNA-E-ADMISSION-REPLACE-SOURCE-CAUSE").unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .redacted_with_message(SafeText::new("nested source admission").unwrap()),
+    );
+    let untrusted_source = Diagnostic::new(
+        SafeText::new("ORNA-E-ADMISSION-REPLACE-UNTRUSTED").unwrap(),
+        DiagnosticSeverity::Warning,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .with_note(SafeText::new(fixture).unwrap())
+    .with_cause(
+        Diagnostic::new(
+            SafeText::new("ORNA-E-ADMISSION-REPLACE-UNTRUSTED-CAUSE").unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap(),
+    );
+
+    let mut granted_destination = untrusted_source.clone();
+    granted_destination.clone_from(&admitted_source);
+    let mut revoked_destination = admitted_source.clone();
+    revoked_destination.clone_from(&untrusted_source);
+    assert_eq!(granted_destination, admitted_source);
+    assert_eq!(revoked_destination, untrusted_source);
+
+    let outer = Diagnostic::new(
+        SafeText::new("ORNA-E-ADMISSION-REPLACE-OUTER").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .redacted_with_message(SafeText::new("outer local admission").unwrap())
+    .with_cause(granted_destination.clone())
+    .with_cause(revoked_destination.clone());
+
+    let outer_projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(outer_projection["message"], "outer local admission");
+    assert_eq!(outer_projection["causes"][0]["message"], "<redacted>");
+    assert_eq!(outer_projection["causes"][1]["message"], "<redacted>");
+    assert_eq!(
+        outer_projection["causes"][0]["causes"][0]["message"],
+        "<redacted>"
+    );
+    let granted_projection = serde_json::to_value(&granted_destination).unwrap();
+    assert_eq!(granted_projection["message"], "source local admission");
+    assert_eq!(
+        granted_projection["causes"][0]["message"],
+        "<redacted>"
+    );
+    let revoked_projection = serde_json::to_value(&revoked_destination).unwrap();
+    assert_eq!(revoked_projection["message"], "<redacted>");
+
+    let envelope = serde_json::json!({
+        "outer": outer,
+        "granted": granted_destination,
+        "revoked": revoked_destination,
+    });
+    let json = serde_json::to_vec(&envelope).unwrap();
+    assert_eq!(
+        json.windows(b"source local admission".len())
+            .filter(|window| *window == b"source local admission")
+            .count(),
+        1
+    );
+    assert!(
+        !json
+            .windows(b"nested source admission".len())
+            .any(|window| window == b"nested source admission")
+    );
+    assert!(
+        !json
+            .windows(fixture_credential.len())
+            .any(|window| window == fixture_credential.as_bytes())
+    );
+
+    let granted_wire = granted_destination.encode_ovb().unwrap();
+    assert!(
+        granted_wire
+            .windows(b"source local admission".len())
+            .any(|window| window == b"source local admission")
+    );
+    assert!(
+        !granted_wire
+            .windows(b"nested source admission".len())
+            .any(|window| window == b"nested source admission")
+    );
+    let revoked_wire = revoked_destination.encode_ovb().unwrap();
+    assert!(
+        !revoked_wire
+            .windows(b"source local admission".len())
+            .any(|window| window == b"source local admission")
+    );
+    let outer_wire = outer.encode_ovb().unwrap();
+    assert!(
+        !outer_wire
+            .windows(b"source local admission".len())
+            .any(|window| window == b"source local admission")
+    );
+    assert!(
+        !outer_wire
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&outer_wire).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    assert_eq!(decoded["causes"][0]["message"], "<redacted>");
+    assert_eq!(decoded["causes"][1]["message"], "<redacted>");
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
