@@ -84,7 +84,7 @@ fn control_tail_keeps_postfix_field_continuation() {
 }
 
 #[test]
-fn malformed_control_continuation_keeps_primary_diagnostics_without_false_unterminated_block() {
+fn malformed_control_continuation_keeps_following_tail_and_primary_diagnostics() {
     let source = include_str!("fixtures/control-continuation-missing-separator.orna");
     let parsed = parse_module(source);
 
@@ -103,6 +103,25 @@ fn malformed_control_continuation_keeps_primary_diagnostics_without_false_unterm
     assert_eq!(parsed.diagnostics[1].span.start, missing_separator);
     assert_eq!(parsed.diagnostics[1].span.end, missing_separator + 1);
     assert!(parsed.is_malformed());
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block {
+        statements, tail, ..
+    } = body
+    else {
+        panic!("expected a function block");
+    };
+    assert_eq!(statements.len(), 2, "{statements:?}");
+    assert!(matches!(
+        statements.get(1),
+        Some(Statement::Expression {
+            value: Expr::Literal { text, .. },
+            ..
+        }) if text == "2"
+    ));
+    assert!(matches!(tail.as_deref(), Some(Expr::Control { .. })), "{tail:?}");
 }
 
 #[test]
