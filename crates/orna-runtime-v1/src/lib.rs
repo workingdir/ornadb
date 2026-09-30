@@ -21090,6 +21090,26 @@ mod tests {
             "last() returns the sole accepted row after take(2) exhausts between nonmatches"
         );
 
+        // The reference leaves repeated trailing rejects after a bracketed
+        // match implicit. A short take(2) must preserve its accepted value
+        // while both tail candidates are tested and the source exhausts.
+        let (last_returns_bracketed_match_after_repeated_trailing_nonmatches, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-short-bracketed-match-repeated-tail.orna"
+                ),
+            );
+        assert_eq!(
+            last_returns_bracketed_match_after_repeated_trailing_nonmatches.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 6),
+            "last() preserves the bracketed match across two trailing nonmatches"
+        );
+
         // The reference is silent when the entire bracketed candidate tail
         // is rejected before take(2) naturally exhausts. The empty last()
         // result keeps its explicit coalesce fallback.
