@@ -2279,6 +2279,205 @@ fn nested_vector_shrink_and_growth_preserve_held_tail_snapshots() {
 }
 
 #[test]
+fn composed_cause_snapshot_keeps_original_tree_after_source_resizes() {
+    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture_credential = fixture.split('"').nth(1).unwrap();
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let branch = |code: &str, message: &str, leaf_code: &str, leaf_message: &str| {
+        admitted(code, message).with_cause(admitted(leaf_code, leaf_message))
+    };
+
+    let old_a = branch(
+        "ORNA-E-COMPOSED-SNAPSHOT-OLD-A",
+        "old a root admission",
+        "ORNA-E-COMPOSED-SNAPSHOT-OLD-A-LEAF",
+        "old a leaf admission",
+    );
+    let old_b = branch(
+        "ORNA-E-COMPOSED-SNAPSHOT-OLD-B",
+        "old b root admission",
+        "ORNA-E-COMPOSED-SNAPSHOT-OLD-B-LEAF",
+        "old b leaf admission",
+    );
+    let old_c = branch(
+        "ORNA-E-COMPOSED-SNAPSHOT-OLD-C",
+        "old c root admission",
+        "ORNA-E-COMPOSED-SNAPSHOT-OLD-C-LEAF",
+        "old c leaf admission",
+    );
+    let old_a_snapshot = old_a.clone();
+    let old_b_snapshot = old_b.clone();
+    let old_c_snapshot = old_c.clone();
+    let original_parent = admitted(
+        "ORNA-E-COMPOSED-SNAPSHOT-OLD-PARENT",
+        "original parent admission",
+    )
+    .with_cause(old_a)
+    .with_cause(old_b)
+    .with_cause(old_c);
+    let mut destination = original_parent.clone();
+
+    // Composition captures an owned cause tree. Later resizing the source
+    // destination must not reshape or revoke the cause already attached here.
+    let outer = admitted(
+        "ORNA-E-COMPOSED-SNAPSHOT-OUTER",
+        "outer snapshot admission",
+    )
+    .with_cause(destination.clone());
+
+    let shrink_branch = branch(
+        "ORNA-E-COMPOSED-SNAPSHOT-SHRINK",
+        "shrink branch admission",
+        "ORNA-E-COMPOSED-SNAPSHOT-SHRINK-LEAF",
+        "shrink leaf admission",
+    );
+    let shrink_parent = admitted(
+        "ORNA-E-COMPOSED-SNAPSHOT-SHRINK-PARENT",
+        "shrink parent admission",
+    )
+    .with_cause(shrink_branch);
+    destination.clone_from(&shrink_parent);
+    assert_eq!(destination, shrink_parent);
+
+    let grown_a = branch(
+        "ORNA-E-COMPOSED-SNAPSHOT-GROWN-A",
+        "grown a root admission",
+        "ORNA-E-COMPOSED-SNAPSHOT-GROWN-A-LEAF",
+        "grown a leaf admission",
+    );
+    let grown_b = branch(
+        "ORNA-E-COMPOSED-SNAPSHOT-GROWN-B",
+        "grown b root admission",
+        "ORNA-E-COMPOSED-SNAPSHOT-GROWN-B-LEAF",
+        "grown b leaf admission",
+    );
+    let grown_a_snapshot = grown_a.clone();
+    let grown_b_snapshot = grown_b.clone();
+    let grown_parent = admitted(
+        "ORNA-E-COMPOSED-SNAPSHOT-GROWN-PARENT",
+        "grown parent admission",
+    )
+    .with_cause(grown_a)
+    .with_cause(grown_b);
+    destination.clone_from(&grown_parent);
+    assert_eq!(destination, grown_parent);
+
+    let outer_projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(outer_projection["message"], "outer snapshot admission");
+    let original_projection = &outer_projection["causes"][0];
+    assert_eq!(original_projection["message"], "<redacted>");
+    let original_causes = original_projection["causes"].as_array().unwrap();
+    assert_eq!(original_causes.len(), 3);
+    for cause in original_causes {
+        assert_eq!(cause["message"], "<redacted>");
+        assert_eq!(cause["causes"][0]["message"], "<redacted>");
+    }
+    let destination_projection = serde_json::to_value(&destination).unwrap();
+    assert_eq!(destination_projection["message"], "grown parent admission");
+    assert_eq!(destination_projection["causes"].as_array().unwrap().len(), 2);
+    for cause in destination_projection["causes"].as_array().unwrap() {
+        assert_eq!(cause["message"], "<redacted>");
+    }
+
+    let roots = [
+        (&outer, "outer snapshot admission"),
+        (&destination, "grown parent admission"),
+        (&original_parent, "original parent admission"),
+        (&old_a_snapshot, "old a root admission"),
+        (&old_b_snapshot, "old b root admission"),
+        (&old_c_snapshot, "old c root admission"),
+        (&shrink_parent, "shrink parent admission"),
+        (&grown_a_snapshot, "grown a root admission"),
+        (&grown_b_snapshot, "grown b root admission"),
+    ];
+    for (root, message) in roots {
+        let projection = serde_json::to_value(root).unwrap();
+        assert_eq!(projection["message"], message);
+        let wire = root.encode_ovb().unwrap();
+        assert!(wire.windows(message.len()).any(|window| window == message.as_bytes()));
+        assert!(
+            !wire
+                .windows(fixture.len())
+                .any(|window| window == fixture.as_bytes())
+        );
+    }
+
+    let envelope = serde_json::json!({
+        "outer": outer,
+        "destination": destination,
+        "original_parent": original_parent,
+        "old_a": old_a_snapshot,
+        "old_b": old_b_snapshot,
+        "old_c": old_c_snapshot,
+        "shrink_parent": shrink_parent,
+        "grown_a": grown_a_snapshot,
+        "grown_b": grown_b_snapshot,
+    });
+    let json = serde_json::to_vec(&envelope).unwrap();
+    for (_, message) in roots {
+        assert_eq!(
+            json.windows(message.len())
+                .filter(|window| *window == message.as_bytes())
+                .count(),
+            1
+        );
+    }
+    for disclosure in [
+        b"old a leaf admission".as_slice(),
+        b"old b leaf admission".as_slice(),
+        b"old c leaf admission".as_slice(),
+        b"shrink leaf admission".as_slice(),
+        b"grown a leaf admission".as_slice(),
+        b"grown b leaf admission".as_slice(),
+    ] {
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+    }
+    assert!(
+        !json
+            .windows(fixture_credential.len())
+            .any(|window| window == fixture_credential.as_bytes())
+    );
+
+    let outer_wire = outer.encode_ovb().unwrap();
+    for (_, message) in roots.iter().skip(1) {
+        assert!(
+            !outer_wire
+                .windows(message.len())
+                .any(|window| window == message.as_bytes())
+        );
+    }
+    assert!(
+        !outer_wire
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+    let decoded_outer = serde_json::to_value(Diagnostic::decode_ovb(&outer_wire).unwrap()).unwrap();
+    assert_eq!(decoded_outer["message"], "<redacted>");
+    assert_eq!(decoded_outer["causes"][0]["message"], "<redacted>");
+    assert_eq!(
+        decoded_outer["causes"][0]["causes"].as_array().unwrap().len(),
+        3
+    );
+    assert_eq!(
+        decoded_outer["causes"][0]["causes"][0]["causes"][0]["message"],
+        "<redacted>"
+    );
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
