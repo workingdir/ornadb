@@ -166,6 +166,41 @@ fn row_checkpoint_conflict_inputs() -> (
     (base, left, right, source)
 }
 
+fn schema_conflict_inputs() -> (
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    FixtureRows,
+) {
+    let base_schema = schema(true, FieldType::Str);
+    let mut left_schema = base_schema.clone();
+    left_schema.tables[0].fields[1].ty = FieldType::Int;
+    left_schema.tables[0].fields[2].ty = FieldType::Int;
+    let mut right_schema = base_schema.clone();
+    right_schema.tables[0].fields[1].ty = FieldType::Bool;
+    right_schema.tables[0].fields[2].ty = FieldType::Bool;
+    let base_checkpoint = CheckpointGeneration {
+        generation: 4,
+        position: Some(b"base-token".to_vec()),
+    };
+    let left_checkpoint = CheckpointGeneration {
+        generation: 5,
+        position: Some(b"left-token".to_vec()),
+    };
+    let right_checkpoint = CheckpointGeneration {
+        generation: 6,
+        position: Some(b"right-token".to_vec()),
+    };
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"base", vec![parse_fixture(BASE, RowKeyKind::Explicit)]);
+    source.add(MergeSide::Left, b"left", vec![parse_fixture(LEFT, RowKeyKind::Explicit)]);
+    source.add(MergeSide::Right, b"right", vec![parse_fixture(CONFLICT, RowKeyKind::Explicit)]);
+    let base = snapshot(base_schema, manifest(1, 1, b"base"), Some(base_checkpoint));
+    let left = snapshot(left_schema, manifest(2, 2, b"left"), Some(left_checkpoint));
+    let right = snapshot(right_schema, manifest(3, 3, b"right"), Some(right_checkpoint));
+    (base, left, right, source)
+}
+
 #[test]
 fn independent_edits_to_one_keyed_row_merge_by_field_from_orna_fixtures() {
     let base_row = parse_fixture(BASE, RowKeyKind::Explicit);
@@ -293,24 +328,36 @@ fn optional_columns_added_on_separate_branches_merge_and_type_edits_conflict() {
 }
 
 #[test]
-fn schema_conflict_budget_caps_details_and_reports_affected_table() {
-    let base_schema = schema(true, FieldType::Str);
-    let mut left_schema = base_schema.clone();
-    left_schema.tables[0].fields[1].ty = FieldType::Int;
-    left_schema.tables[0].fields[2].ty = FieldType::Int;
-    let mut right_schema = base_schema.clone();
-    right_schema.tables[0].fields[1].ty = FieldType::Bool;
-    right_schema.tables[0].fields[2].ty = FieldType::Bool;
-    let base = snapshot(base_schema, manifest(1, 1, b"base"), None);
-    let left = snapshot(left_schema, manifest(1, 1, b"base"), None);
-    let right = snapshot(right_schema, manifest(1, 1, b"base"), None);
-    let mut source = FixtureRows::default();
-    let one_conflict = BranchMergeBudget { max_rows_examined: 100, max_conflicts: 1 };
+fn schema_conflict_budget_boundary_is_exact_and_stops_later_phases() {
+    for (max_conflicts, lower_bound) in [(0, 1), (1, 2)] {
+        let (base, left, right, mut source) = schema_conflict_inputs();
+        let limit = BranchMergeBudget { max_rows_examined: 100, max_conflicts };
+        let error = merge_three_way_snapshots(&base, &left, &right, &mut source, limit)
+            .unwrap_err();
+        let BranchMergeError::BudgetExceeded { report } = error else {
+            panic!("schema conflicts beyond the configured budget stop planning")
+        };
+        assert_eq!(report.conflicts_lower_bound, lower_bound);
+        assert!(report.affected_tables.contains(&id(1)));
+        assert!(report.affected_ranges.is_empty());
+        assert!(report.affected_checkpoints.is_empty());
+        assert!(source.visited.is_empty());
+    }
 
-    let error = merge_three_way_snapshots(&base, &left, &right, &mut source, one_conflict).unwrap_err();
-    let BranchMergeError::BudgetExceeded { report } = error else { panic!("schema conflict budget") };
+    let (base, left, right, mut source) = schema_conflict_inputs();
+    let exact_limit = BranchMergeBudget { max_rows_examined: 100, max_conflicts: 2 };
+    let error = merge_three_way_snapshots(&base, &left, &right, &mut source, exact_limit)
+        .unwrap_err();
+    let BranchMergeError::Conflicts { conflicts, report } = error else {
+        panic!("schema conflicts exactly at the budget remain typed conflicts")
+    };
+    assert_eq!(conflicts.len(), 2);
+    assert!(conflicts.iter().all(|conflict| matches!(conflict, BranchMergeConflict::Schema(_))));
     assert_eq!(report.conflicts_lower_bound, 2);
     assert!(report.affected_tables.contains(&id(1)));
+    assert!(report.affected_ranges.is_empty());
+    assert!(report.affected_checkpoints.is_empty());
+    assert!(source.visited.is_empty());
 }
 
 #[test]
