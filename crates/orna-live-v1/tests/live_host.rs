@@ -3422,6 +3422,41 @@ fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch()
     assert_eq!(stale_diagnostic.watch, None, "the old watch is not restored");
     assert!(matches!(stale_diagnostic.message, Message::Diagnostic { .. }));
 
+    // A malformed retry is rejected before admission, so it cannot rewrite
+    // the terminal record that RequestStatus exposes after host recovery.
+    let post_rejection_status = Envelope {
+        request: Some([39; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [37; 16],
+            fingerprint: event_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let post_rejection_status = block_on(transport.receive_with_application(
+        &mut socket,
+        9,
+        &masked_binary_payload(&post_rejection_status),
+        &mut application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &post_rejection_status[0] else {
+        panic!("request status remains available after a stale frame");
+    };
+    let post_rejection_status = Envelope::decode(payload, Limits::default().protocol).unwrap();
+    assert_eq!(post_rejection_status.request, Some([39; 16]));
+    assert!(matches!(
+        post_rejection_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: None,
+        } if target == [37; 16] && fingerprint == event_fingerprint
+    ));
+
     let mut altered = Envelope::decode(&request, Limits::default().protocol).unwrap();
     if let Message::Event { revision, .. } = &mut altered.message {
         *revision = 1;
@@ -3436,7 +3471,7 @@ fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch()
     let altered = altered.encode(Limits::default().protocol).unwrap();
     let mismatch = block_on(transport.receive_with_application(
         &mut socket,
-        9,
+        10,
         &masked_binary_payload(&altered),
         &mut application,
     ))
@@ -3451,7 +3486,7 @@ fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch()
 
     let replay = block_on(transport.receive_with_application(
         &mut socket,
-        10,
+        11,
         &masked_binary_payload(&request),
         &mut application,
     ))
