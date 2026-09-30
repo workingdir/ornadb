@@ -28,6 +28,8 @@ const MAX_SOURCE_MATERIALIZATION_AGGREGATE_TAIL: &str =
     include_str!("fixtures/max_source_materialization_aggregate_tail.orna");
 const MAX_SOURCE_MATERIALIZATION_LAST_BLOCK_TAIL: &str =
     include_str!("fixtures/max_source_materialization_last_block_tail.orna");
+const MAX_SOURCE_MATERIALIZATION_TERMINAL_BYTE_TAIL: &str =
+    include_str!("fixtures/max_source_materialization_terminal_byte_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -4702,4 +4704,73 @@ fn explain_closes_max_source_materialization_after_terminal_byte_remainder() {
         node.details().get("estimated_cost_overflow").is_none()
             && node.details().get("estimated_work_overflow").is_none()
     }));
+}
+
+#[test]
+fn explain_preserves_max_source_terminal_byte_closure() {
+    let parsed = orna_syntax_v1::parse_module(MAX_SOURCE_MATERIALIZATION_TERMINAL_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    // ORNA-PLAN specifies that plans and materialization are introspectable,
+    // but leaves cost units open. Following the established 4-KiB heuristic,
+    // MAX and MAX-1 bytes both round to 2^52 blocks because each has a
+    // nonzero terminal remainder. The raw byte estimate must still be kept.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    let local_work = u64::MAX / 2;
+    let closing_rows = local_work - MAX_BYTE_BLOCKS;
+    let explain_with_source_bytes = |source_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:max-source-terminal-byte-materialization-closure",
+            ),
+            source: obj("table:MaxSourceMaterializationTerminalByte"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(closing_rows),
+                estimated_bytes: Some(source_bytes),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:max-source-terminal-byte")),
+        })
+        .expect("adjacent max-source bytes close through materialization")
+    };
+
+    let expected_cost = (u64::MAX - 1).to_string();
+    for source_bytes in [u64::MAX - 1, u64::MAX] {
+        let explained = explain_with_source_bytes(source_bytes);
+        assert_eq!(
+            explained.plan().estimated_cost(),
+            Some(expected_cost.as_str())
+        );
+        assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
+        assert_eq!(explained.root().estimated_rows(), Some(closing_rows));
+        assert_eq!(explained.root().estimated_bytes(), Some(source_bytes));
+        assert_eq!(explained.root().estimated_work(), Some(local_work));
+        assert_eq!(explained.root().details().get("estimated_cost_overflow"), None);
+
+        let scan = explained
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan)
+            .expect("MAX-source terminal-byte scan");
+        assert_eq!(scan.estimated_rows(), Some(closing_rows));
+        assert_eq!(scan.estimated_bytes(), Some(source_bytes));
+        assert_eq!(scan.estimated_work(), Some(local_work));
+        assert!(explained.nodes().iter().all(|node| {
+            node.details().get("estimated_work_overflow").is_none()
+                && node.details().get("estimated_cost_overflow").is_none()
+        }));
+
+        let surface = serde_json::to_value(&explained)
+            .expect("max-source terminal-byte materialization surface");
+        assert_eq!(surface["nodes"][0]["estimated_bytes"], serde_json::json!(source_bytes));
+        assert_eq!(surface["nodes"][0]["details"]["estimated_work"], serde_json::json!(local_work));
+    }
 }
