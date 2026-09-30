@@ -29,3 +29,4 @@ pub fn recursive_function_capture_rows(functions: Relation<sys.Function>): Relat
 pub fn inferred_recursive_function_grandchildren(functions: Relation<sys.Function>): Relation<sys.Function> = direct_function_calls(functions) | filter(callee => callee.inferred_signature) | flat_map(inferred => inferred.calls);
 pub fn called_function_effects(functions: Relation<sys.Function>): Relation<sys.Effect> = functions | flat_map(caller => caller.calls) | flat_map(callee => callee.effects);
 pub fn targeted_called_function_effects(functions: Relation<sys.Function>): Relation<sys.Effect> = called_function_effects(functions) | filter(effect => effect.target != null);
+pub fn called_function_read_column_names(functions: Relation<sys.Function>): Relation<Str> = functions | flat_map(caller => caller.calls) | flat_map(callee => callee.reads) | filter(read_table => read_table.row_count != null) | flat_map(kept_table => kept_table.columns) | map(read_column => read_column.name);
