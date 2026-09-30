@@ -303,6 +303,46 @@ async fn historical_snapshot_cannot_be_rebound_to_another_runtime_identity() {
         .await
         .expect("select first runtime generation");
 
+    let mut alternate_database = first_pin.capture().database_id();
+    alternate_database[0] ^= 1;
+    let mut alternate_runtime = first_pin.capture().runtime_id();
+    alternate_runtime[0] ^= 1;
+    let generation_zero = BigInt::from(first_pin.generation());
+    let database_variant = Snapshot::cwd(
+        alternate_database,
+        first_pin.capture().runtime_id(),
+        generation_zero.clone(),
+    )
+    .expect("construct pin with only the database coordinate changed");
+    let runtime_variant = Snapshot::cwd(
+        first_pin.capture().database_id(),
+        alternate_runtime,
+        generation_zero,
+    )
+    .expect("construct pin with only the runtime coordinate changed");
+    for (descriptor, edge) in [
+        (&database_variant, "database identity"),
+        (&runtime_variant, "runtime identity"),
+    ] {
+        let descriptor_id = match descriptor {
+            Snapshot::Cwd { id, .. } => *id,
+            Snapshot::Commit { .. } => unreachable!("constructed CWD pin"),
+        };
+        assert_ne!(
+            descriptor_id,
+            first_pin.snapshot_id(),
+            "snapshot IDs include the {edge} coordinate"
+        );
+        assert_eq!(
+            first
+                .resolve_historical_snapshot(descriptor)
+                .await
+                .unwrap_err(),
+            RuntimeError::SnapshotContextMismatch,
+            "as-of resolution rejects a changed {edge} at the same generation"
+        );
+    }
+
     let second = RuntimeState::open(
         &other_repository,
         RuntimeIdentity {
