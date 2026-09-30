@@ -3137,6 +3137,38 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         assert_eq!(report.rows_examined, 2);
         assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
         assert!(report.affected_checkpoints.contains(tail_id.as_slice()));
+
+        // A terminal fixture conflict after the two retained details proves
+        // the capped scan still closes the tail and reports its lower bound.
+        let (mut base, mut left, mut right, mut source, agreed_delete_id, unchanged_delete_id, checkpoint_id, tail_id) =
+            build_inputs(row_delete_on_left, checkpoint_delete_on_left, true);
+        let final_tail_id = b"consumer/zz-final-tail-conflict".to_vec();
+        base.checkpoints.insert(final_tail_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_BASE));
+        left.checkpoints.insert(final_tail_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_LEFT));
+        right.checkpoints.insert(final_tail_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_RIGHT));
+        let error = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 2 },
+        )
+        .unwrap_err();
+        let BranchMergeError::BudgetExceeded { report } = error else {
+            panic!("the terminal fixture conflict crosses the two-detail budget")
+        };
+        assert_eq!(report.conflicts_lower_bound, 3);
+        assert_eq!(report.rows_examined, 2);
+        assert_eq!(report.affected_ranges.len(), 1);
+        assert!(report.affected_ranges.contains(&(id(1), high_range.clone())));
+        assert_eq!(report.affected_checkpoints.len(), 3);
+        assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
+        assert!(report.affected_checkpoints.contains(tail_id.as_slice()));
+        assert!(report.affected_checkpoints.contains(final_tail_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(agreed_delete_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(unchanged_delete_id.as_slice()));
+        assert_eq!(source.visited.len(), 3);
+        assert!(source.visited.iter().all(|(_, locator)| locator.ends_with(b"upper")));
     }
 }
 
