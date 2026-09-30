@@ -451,7 +451,9 @@ impl AttachedDatabaseSession {
     /// alias map, so clones retain distinct relation sources across detach and
     /// reattach. Detaching one alias leaves other aliases' rows routable. A
     /// query layer can compose these reads without pretending the separate
-    /// write logs are atomic.
+    /// write logs are atomic. V1 deliberately returns overlapping row paths
+    /// from every alias without deduplicating them; consumers keep the alias
+    /// and commit with each row and decide how their query treats that overlap.
     pub fn relation_sources<'a>(
         &'a self,
         table_path: &str,
