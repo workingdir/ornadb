@@ -11622,6 +11622,172 @@ fn mismatch_query_replay_survives_colliding_eval_completion() {
 }
 
 #[test]
+fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
+    const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
+
+    let (root, repository) = durable_repository();
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [6; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication {
+        reject: true,
+        ..UnitApplication::default()
+    };
+
+    let original_eval = eval_with_context([1; 16], [91; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&original_eval, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    let identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [91; 16],
+    };
+    let fingerprint = request_fingerprint(&original_eval, [1; 16]);
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            2,
+            Frame::Binary(original_eval.clone()),
+            &mut application,
+        )),
+        Err(Error::ApplicationRejected)
+    );
+    assert_eq!(application.calls, 1);
+
+    let terminal_before = block_on(
+        open_durable_state(&repository).request_status_for_identity(identity),
+    )
+    .unwrap()
+    .expect("the rejected Eval has a retained terminal record");
+    assert_eq!(terminal_before.state, orna_runtime_v1::RequestState::Completed);
+    assert_eq!(terminal_before.fingerprint, fingerprint);
+    let terminal_bytes = terminal_before
+        .terminal_outcome
+        .as_ref()
+        .expect("the terminal failure response is retained")
+        .as_bytes()
+        .to_vec();
+
+    let other_eval = eval_with_context([1; 16], [92; 16], [2; 16], None);
+    let colliding_query = Envelope {
+        request: Some([91; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [92; 16],
+            fingerprint: request_fingerprint(&other_eval, [1; 16]),
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let first_query_mismatch = block_on(host.dispatch_frame(
+        [6; 16],
+        3,
+        Frame::Binary(colliding_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a status query cannot replace the failed Eval identity");
+    assert!(matches!(
+        &first_query_mismatch.message,
+        Message::Diagnostic { .. }
+    ));
+    let query_mismatch_retry = block_on(host.dispatch_frame(
+        [6; 16],
+        4,
+        Frame::Binary(colliding_query),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the same status-query collision replays its mismatch");
+    assert_eq!(query_mismatch_retry, first_query_mismatch);
+
+    let different_eval = eval_with_context([1; 16], [91; 16], [3; 16], None);
+    assert!(matches!(
+        Envelope::decode(&different_eval, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    // The reference specifies both mismatched-input rejection and exact
+    // terminal replay, but is silent on interleaving retries; do not let
+    // either rejected request evict the retained failure outcome.
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            5,
+            Frame::Binary(different_eval.clone()),
+            &mut application,
+        )),
+        Err(Error::RequestMismatch)
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            6,
+            Frame::Binary(different_eval),
+            &mut application,
+        )),
+        Err(Error::RequestMismatch)
+    );
+
+    let exact_retry = block_on(host.dispatch_frame(
+        [6; 16],
+        7,
+        Frame::Binary(original_eval),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the exact failed Eval still replays after mismatch retries");
+    assert!(matches!(
+        &exact_retry.message,
+        Message::Result {
+            status: ResultStatus::Failure,
+            value: None,
+            fingerprint: returned,
+            ..
+        } if *returned == fingerprint
+    ));
+    assert_eq!(
+        exact_retry.encode(Limits::default().protocol).unwrap(),
+        terminal_bytes
+    );
+    assert_eq!(application.calls, 1);
+    let terminal_after = block_on(
+        open_durable_state(&repository).request_status_for_identity(identity),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(terminal_after.state, orna_runtime_v1::RequestState::Completed);
+    assert_eq!(terminal_after.fingerprint, fingerprint);
+    assert_eq!(
+        terminal_after
+            .terminal_outcome
+            .as_ref()
+            .unwrap()
+            .as_bytes(),
+        terminal_bytes
+    );
+
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn delete_enumerates_reserved_durable_work_before_joining_children() {
     let (root, repository) = durable_repository();
     let runtime = open_durable_state(&repository);
