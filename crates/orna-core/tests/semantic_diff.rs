@@ -19,6 +19,8 @@ const CANDIDATE_SOURCE: &str = include_str!("fixtures/semantic-diff/candidate.or
 const ADDED_SCHEMA_SOURCE: &str = include_str!("fixtures/semantic-diff/archive.orna");
 const REKEY_DELETE_REINSERT_SOURCE: &str =
     include_str!("fixtures/semantic-diff/rekey-delete-reinsert.orna");
+const REKEY_REUSE_RETIRED_KEY_SOURCE: &str =
+    include_str!("fixtures/semantic-diff/rekey-reuse-retired-key.orna");
 
 const TABLE: TypeId = TypeId::from_bytes([0x21; 16]);
 const STATUS_FIELD: FieldId = FieldId::from_bytes([0x23; 16]);
@@ -396,6 +398,45 @@ fn semantic_diff_drops_rekey_continuity_when_the_row_is_deleted_before_reinsert(
     assert_eq!(report.rows()[0].key_bytes(), integer(1).encode().unwrap());
     assert_eq!(report.rows()[1].kind(), RowChangeKind::Added);
     assert_eq!(report.rows()[1].key_bytes(), integer(1).encode().unwrap());
+}
+
+#[test]
+fn semantic_diff_keeps_retired_and_rekeyed_identities_distinct_at_a_reused_key() {
+    assert!(parse_module(REKEY_REUSE_RETIRED_KEY_SOURCE).is_ok());
+    let base = SemanticSnapshot::new(
+        catalogue(1, false),
+        [
+            KeyedRow::new(TABLE, &integer(1), &text("retired identity")).unwrap(),
+            KeyedRow::new(TABLE, &integer(2), &text("surviving identity")).unwrap(),
+        ],
+        [],
+        [],
+        None,
+    )
+    .unwrap();
+    let candidate = SemanticSnapshot::new(
+        catalogue(1, false),
+        [KeyedRow::new(TABLE, &integer(1), &text("surviving identity")).unwrap()],
+        [],
+        [],
+        None,
+    )
+    .unwrap()
+    .with_row_mutations([
+        RowMutationIntent::rekey(RowRekey::new(TABLE, &integer(1), &integer(3)).unwrap()),
+        RowMutationIntent::rekey(RowRekey::new(TABLE, &integer(2), &integer(1)).unwrap()),
+        RowMutationIntent::delete(TABLE, &integer(3)).unwrap(),
+    ])
+    .unwrap();
+
+    let report = semantic_snapshot_diff(&base, &candidate);
+
+    assert_eq!(report.rows().len(), 2);
+    assert_eq!(report.rows()[0].kind(), RowChangeKind::Removed);
+    assert_eq!(report.rows()[0].key_bytes(), integer(1).encode().unwrap());
+    assert_eq!(report.rows()[1].kind(), RowChangeKind::Rekeyed);
+    assert_eq!(report.rows()[1].key_bytes(), integer(1).encode().unwrap());
+    assert_eq!(report.rows()[1].previous_key_bytes(), Some(integer(2).encode().unwrap().as_slice()));
 }
 
 #[test]
