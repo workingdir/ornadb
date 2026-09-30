@@ -118,3 +118,9 @@ blocker edge: the owner's retry waits while the competitor's alternate target
 is occupied, then the competitor's failure closure updates and deletes that
 blocker before retrying its move. The owner then reclaims its original key. The
 fixture records the local caught-retry order where the reference is silent.
+
+`owner_retries_after_competitor_target_rekey_closure` covers the complementary
+release path: the competitor's failure closure updates and re-keys the blocker
+aside rather than deleting it, retries its move, and releases the owner's
+original key. The complete mutation log records the adapter's local closure
+order where the reference is silent.
