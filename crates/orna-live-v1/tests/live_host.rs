@@ -11868,8 +11868,8 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
             .message,
         Message::Eval { source, .. } if source == FIXTURE
     ));
-    // Cross-kind reuse of a completed status-query ID is rejected, while the
-    // original terminal snapshot remains available for an exact status replay.
+    // The reference is silent on cross-kind reuse after a status result; keep
+    // scope ID mismatch behavior and preserve the original terminal snapshot.
     assert_eq!(
         block_on(host.dispatch_frame(
             [6; 16],
