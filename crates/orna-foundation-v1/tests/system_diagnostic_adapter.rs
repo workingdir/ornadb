@@ -96,25 +96,73 @@ fn diagnostic() -> SystemDiagnostic {
 }
 
 #[test]
-fn adapter_keeps_canonical_identity_authority_and_causal_redaction() {
+fn adapter_keeps_correlation_metadata_and_redacts_causal_payloads() {
     let canonical = diagnostic();
     let output = system_diagnostic_explanation_input(canonical.clone())
         .unwrap()
         .finish("<redacted>", vec!["inspect retained context".into()])
         .unwrap();
 
-    assert_eq!(output.diagnostic(), &canonical);
-    assert_eq!(output.causes(), canonical.causes.as_slice());
+    assert_eq!(output.diagnostic().reference, canonical.reference);
+    assert_eq!(output.diagnostic().id, canonical.id);
+    assert_eq!(output.diagnostic().code, canonical.code);
+    assert_eq!(output.diagnostic().trace, canonical.trace);
     assert_eq!(output.summary(), "<redacted>");
     assert_eq!(output.suggestions()[0], "inspect retained context");
     assert!(output.diagnostic().redacted);
     assert!(output.diagnostic().causes[0].redacted);
+    assert_eq!(output.diagnostic().message, "<redacted>");
+    assert_eq!(output.diagnostic().labels[0].message, "<redacted>");
+    assert_eq!(output.diagnostic().help[0], "<redacted>");
+    assert_eq!(output.diagnostic().causes[0].message, "<redacted>");
+    assert_eq!(output.diagnostic().causes[0].help[0], "<redacted>");
     assert_eq!(output.diagnostic().object, canonical.object);
     assert_eq!(output.diagnostic().definition, canonical.definition);
     assert_eq!(output.diagnostic().primary_span, canonical.primary_span);
-    assert_eq!(output.diagnostic().labels, canonical.labels);
-    assert_eq!(output.diagnostic().data, canonical.data);
-    assert_eq!(output.diagnostic().trace, canonical.trace);
+    assert_eq!(output.diagnostic().labels[0].span, canonical.labels[0].span);
+    assert_eq!(output.diagnostic().data, None);
+}
+
+fn secret_sys_value(secret: &str) -> SysValue {
+    let descriptor = OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Str".into())]);
+    SysValue::from_value(
+        Value::new(OvbRaw::Tag(
+            60026,
+            Box::new(OvbRaw::Array(vec![descriptor, OvbRaw::Text(secret.into())])),
+        ))
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn diagnostic_redaction_does_not_depend_on_an_attached_trace() {
+    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    for trace in [None, diagnostic().trace] {
+        let mut candidate = diagnostic();
+        candidate.trace = trace.clone();
+        candidate.message = fixture.to_owned();
+        candidate.labels[0].message = fixture.to_owned();
+        candidate.help[0] = fixture.to_owned();
+        candidate.data = Some(secret_sys_value(fixture));
+        candidate.redacted = false;
+        candidate.causes[0].message = fixture.to_owned();
+        candidate.causes[0].help[0] = fixture.to_owned();
+        candidate.causes[0].redacted = false;
+
+        let input = system_diagnostic_explanation_input(candidate).unwrap();
+        let output = input
+            .finish("safe code-based summary", ["safe fixed suggestion".into()])
+            .unwrap();
+        assert_eq!(output.diagnostic().trace, trace);
+        assert_eq!(output.diagnostic().message, "<redacted>");
+        assert_eq!(output.diagnostic().labels[0].message, "<redacted>");
+        assert_eq!(output.diagnostic().help[0], "<redacted>");
+        assert_eq!(output.diagnostic().data, None);
+        assert_eq!(output.diagnostic().causes[0].message, "<redacted>");
+        assert_eq!(output.diagnostic().causes[0].help[0], "<redacted>");
+        assert!(!format!("{output:?}").contains(fixture));
+    }
 }
 
 #[test]
@@ -138,8 +186,10 @@ fn adapter_rejects_unsafe_or_invalid_canonical_input_with_typed_failure() {
 fn adapter_does_not_turn_authority_fields_into_flattened_live_diagnostic() {
     let canonical = diagnostic();
     let input = system_diagnostic_explanation_input(canonical.clone()).unwrap();
-    assert_eq!(input.diagnostic(), &canonical);
-    assert!(input.diagnostic().data.is_some());
+    assert_eq!(input.diagnostic().reference, canonical.reference);
+    assert_eq!(input.diagnostic().code, canonical.code);
+    assert_eq!(input.diagnostic().message, "<redacted>");
+    assert!(input.diagnostic().data.is_none());
     assert!(input.diagnostic().trace.is_some());
     assert!(input.diagnostic().reference.as_row_ref().key != OvbRaw::Null);
 }

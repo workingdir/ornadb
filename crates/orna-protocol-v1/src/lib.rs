@@ -1394,7 +1394,18 @@ fn matches_selector(node: &Node, selector: &PatchPathComponent) -> Result<bool> 
 impl Diagnostic {
     fn decode(node: &Node) -> Result<Self> {
         validate_diagnostic(node)?;
-        Ok(Self(ValueNode(node.clone())))
+        let bytes = encode_node(node)?;
+        let diagnostic = orna_foundation_v1::Diagnostic::decode_ovb(&bytes)
+            .map_err(|_| Error::InvalidValue)?
+            .redacted();
+        // The wire protocol carries no disclosure authorization. Redact every
+        // diagnostic at ingress so standalone, Result, and status responses
+        // share the same fail-closed boundary, including recursive causes.
+        let safe_bytes = diagnostic
+            .encode_ovb()
+            .map_err(|_| Error::InvalidValue)?;
+        let safe = CanonicalValue::decode(&safe_bytes).map_err(|_| Error::InvalidValue)?;
+        Ok(Self(ValueNode(from_ovb(safe.raw())?)))
     }
 }
 impl ResultBody {
@@ -3195,5 +3206,64 @@ mod tests {
         let error = Envelope::decode(&[0xff], Limits::default()).unwrap_err();
         assert_eq!(error.to_string(), "wire.unsupported");
         assert!(!error.to_string().contains("ff"));
+    }
+
+    #[test]
+    fn diagnostic_wire_paths_redact_payloads_without_trace_context() {
+        let fixture = include_str!("../tests/fixtures/secret-diagnostic.orna").trim();
+        let diagnostic = |code: &str| {
+            let cause = Node::Tag(
+                60011,
+                Box::new(Node::Map(vec![
+                    (uint(0), Node::Text("vendor.secret.cause".into())),
+                    (uint(1), uint(2)),
+                    (uint(2), Node::Text(fixture.into())),
+                    (uint(3), Node::Array(vec![])),
+                    (uint(4), Node::Array(vec![Node::Text(fixture.into())])),
+                    (uint(5), Node::Array(vec![])),
+                    (uint(6), Node::Bool(false)),
+                ])),
+            );
+            Node::Tag(
+                60011,
+                Box::new(Node::Map(vec![
+                    (uint(0), Node::Text(code.into())),
+                    (uint(1), uint(3)),
+                    (uint(2), Node::Text(fixture.into())),
+                    (uint(3), Node::Array(vec![])),
+                    (uint(4), Node::Array(vec![Node::Text(fixture.into())])),
+                    (uint(5), Node::Array(vec![cause])),
+                    (uint(6), Node::Bool(false)),
+                ])),
+            )
+        };
+        let standalone = wire(
+            19,
+            Some(id(1)),
+            Some(id(2)),
+            Node::Map(vec![
+                (uint(0), diagnostic("wire.secret.failure")),
+                (uint(1), Node::Bool(true)),
+            ]),
+        );
+        let result = wire(
+            18,
+            Some(id(1)),
+            None,
+            Node::Map(vec![
+                (uint(0), uint(ResultStatus::Failure.code())),
+                (uint(1), Node::Null),
+                (uint(2), Node::Bytes(digest(4).to_vec())),
+                (uint(3), diagnostic("wire.secret.result")),
+            ]),
+        );
+
+        for incoming in [standalone, result] {
+            let decoded = Envelope::decode(&incoming, Limits::default()).unwrap();
+            assert!(!format!("{decoded:?}").contains(fixture));
+            let outgoing = decoded.encode(Limits::default()).unwrap();
+            assert!(!outgoing.windows(fixture.len()).any(|part| part == fixture.as_bytes()));
+            assert_eq!(Envelope::decode(&outgoing, Limits::default()).unwrap(), decoded);
+        }
     }
 }
