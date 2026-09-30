@@ -836,6 +836,51 @@ fn positive_factor_subnanosecond_remainders_at_minute_edges_are_rejected() {
 }
 
 #[test]
+fn positive_factor_subnanosecond_tails_compose_to_exact_minute_edges() {
+    // The reference is silent on composing factors before duration scaling.
+    // Each near-two factor alone leaves a half-nanosecond on five seconds;
+    // multiplying it by six first yields exact 3 ns tails around one minute.
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
+    ] {
+        assert_eq!(session.submit(source), Ok(None), "{source}");
+    }
+
+    for (source, expected) in [
+        (
+            include_str!("fixtures/stdlib-time-duration-factor-composed-half-ns-before-minute-f7dqb.orna"),
+            texts(&[
+                "59.999999997s",
+                "00:00:59.999999997",
+                "59.999999997 seconds",
+                "PT59.999999997S",
+            ]),
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-factor-composed-half-ns-after-minute-f7dqb.orna"),
+            texts(&[
+                "1m 0.000000003s",
+                "00:01:00.000000003",
+                "1 minute, 0.000000003 seconds",
+                "PT1M0.000000003S",
+            ]),
+        ),
+    ] {
+        let result = session.submit(source);
+        assert_eq!(
+            result,
+            Ok(Some(expected)),
+            "{source}; diagnostic={}",
+            result.as_ref().err().map_or("none", |error| error.code())
+        );
+    }
+}
+
+#[test]
 fn clock_output_bound_keeps_elapsed_hours_and_fractional_tail() {
     let limits = Limits {
         max_string_bytes: 129,
