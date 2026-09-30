@@ -25,6 +25,8 @@ use std::{
 };
 
 const SOURCE: &str = include_str!("fixtures/admin-pause-stream.orna");
+const STAGED_ADMIN_SOURCE: &str = include_str!("fixtures/admin-pause-staged.orna");
+const RESUME_SOURCE: &str = include_str!("fixtures/admin-resume-stream.orna");
 const CANCEL_SOURCE: &str = include_str!("fixtures/typed-sys-cancel.orna");
 static NEXT_REPOSITORY: AtomicU64 = AtomicU64::new(0);
 
@@ -37,6 +39,23 @@ impl AsyncApplicationEffectDispatcher for SourcePauseDispatcher {
         _context: &'a orna_runtime_v1::RuntimeActivationContext,
     ) -> ApplicationEffectFuture<'a> {
         Box::pin(async move { Ok(CanonicalValue::new(OvbRaw::Bool(self.0)).unwrap()) })
+    }
+}
+
+struct SourceResumeDispatcher;
+
+impl AsyncApplicationEffectDispatcher for SourceResumeDispatcher {
+    fn dispatch<'a>(
+        &'a self,
+        effect: ApplicationEffectRequest,
+        _context: &'a orna_runtime_v1::RuntimeActivationContext,
+    ) -> ApplicationEffectFuture<'a> {
+        Box::pin(async move {
+            if !matches!(effect, ApplicationEffectRequest::ResumeStream { .. }) {
+                return Err("expected sys.admin.resume_stream".to_owned());
+            }
+            Ok(CanonicalValue::new(OvbRaw::Bool(true)).unwrap())
+        })
     }
 }
 
@@ -150,6 +169,17 @@ fn admitted() -> (
     (authority, application)
 }
 
+fn admitted_staged_admin() -> (
+    ApplicationAuthority,
+    orna_application_v1::AdmittedApplication,
+) {
+    let authority = ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+    let application = authority
+        .admit_module("admin-pause-staged.orna", STAGED_ADMIN_SOURCE, "main")
+        .expect("the staged admin fixture must pass parser and semantic admission");
+    (authority, application)
+}
+
 fn source_stream_argument() -> Environment {
     Environment::from([(
         "stream".to_owned(),
@@ -202,6 +232,9 @@ impl AsyncApplicationEffectDispatcher for RuntimePauseDispatcher<'_> {
                             | StreamAdministrationOutcome::PausePending { .. }
                     );
                     Ok(CanonicalValue::new(OvbRaw::Bool(accepted)).unwrap())
+                }
+                ApplicationEffectRequest::ResumeStream { .. } => {
+                    Err("unexpected resume".to_owned())
                 }
                 ApplicationEffectRequest::CancelInvocation { .. } => {
                     Err("unexpected cancellation".to_owned())
@@ -262,7 +295,7 @@ fn typed_sys_cancel_fixture_reaches_the_trusted_source_effect_dispatcher() {
 }
 
 #[test]
-fn trusted_async_dispatch_preserves_staged_writes_and_uses_host_result() {
+fn trusted_async_dispatch_returns_admin_outcome_without_staged_writes() {
     let (authority, application) = admitted();
     let runtime = runtime_context();
     let dispatcher = SourcePauseDispatcher(true);
@@ -274,8 +307,7 @@ fn trusted_async_dispatch_preserves_staged_writes_and_uses_host_result() {
     ))
     .expect("the trusted async dispatcher should return the admitted pause result");
 
-    assert_eq!(staged.mutations().len(), 1);
-    assert_eq!(staged.mutations()[0].table(), "Note");
+    assert!(staged.mutations().is_empty());
     assert_eq!(staged.value().raw(), &OvbRaw::Bool(true));
     let runtime_dispatch = RuntimePauseDispatcher {
         state: &runtime._state,
@@ -300,6 +332,45 @@ fn trusted_async_dispatch_preserves_staged_writes_and_uses_host_result() {
         observed.streams[0].status,
         orna_runtime_v1::StreamObservationStatus::Paused
     );
+    runtime.cleanup();
+}
+
+#[test]
+fn administrative_effect_is_busy_until_staged_table_writes_finish() {
+    let (authority, application) = admitted_staged_admin();
+    let runtime = runtime_context();
+    let dispatcher = SourcePauseDispatcher(true);
+    let result = block_on(authority.evaluate_staged_with_async_effects(
+        &application,
+        &source_stream_argument(),
+        &runtime.context,
+        &dispatcher,
+    ));
+
+    assert!(matches!(
+        result,
+        Err(ApplicationError::SourceEffectFailed(code)) if code == "sys.admin.busy"
+    ));
+    runtime.cleanup();
+}
+
+#[test]
+fn sys_admin_resume_stream_reaches_the_trusted_effect_dispatcher() {
+    let authority = ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+    let application = authority
+        .admit_module("admin-resume-stream.orna", RESUME_SOURCE, "main")
+        .expect("the checked-in resume source fixture is admitted");
+    let runtime = runtime_context();
+    let staged = block_on(authority.evaluate_staged_with_async_effects(
+        &application,
+        &source_stream_argument(),
+        &runtime.context,
+        &SourceResumeDispatcher,
+    ))
+    .expect("resume_stream reaches the trusted admin dispatcher");
+
+    assert!(staged.mutations().is_empty());
+    assert_eq!(staged.value().raw(), &OvbRaw::Bool(true));
     runtime.cleanup();
 }
 
