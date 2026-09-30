@@ -4699,6 +4699,111 @@ fn durable_unknown_status_retry_survives_orphan_resolution() {
             diagnostic: None,
         } if *fingerprint == event_fingerprint
     ));
+
+    // The same numeric request ID may name a query in another session even
+    // while it remains the orphaned Event identity in the owning session.
+    let scoped_collision_request = Envelope {
+        request: Some([37; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [50; 16],
+            fingerprint: event_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let second_session_scoped_output = block_on(recovered_transport.receive_with_application(
+        &mut second_socket,
+        41,
+        &masked_binary_payload(&scoped_collision_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &second_session_scoped_output[0] else {
+        panic!("the second session has its own request identity for ID 37");
+    };
+    let second_session_scoped_status =
+        Envelope::decode(payload, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        &second_session_scoped_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Unknown,
+            fingerprint: None,
+            result: None,
+        } if *target == [50; 16]
+    ));
+
+    let first_session_scoped_output = block_on(recovered_transport.receive_with_application(
+        &mut recovered_socket,
+        42,
+        &masked_binary_payload(&scoped_collision_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &first_session_scoped_output[0] else {
+        panic!("the first session fences ID 37 as its Event identity");
+    };
+    let first_session_scoped_diagnostic =
+        Envelope::decode(payload, Limits::default().protocol).unwrap();
+    assert_eq!(first_session_scoped_diagnostic.request, Some([37; 16]));
+    assert!(matches!(
+        &first_session_scoped_diagnostic.message,
+        Message::Diagnostic { .. }
+    ));
+
+    let second_session_scoped_retry = block_on(recovered_transport.receive_with_application(
+        &mut second_socket,
+        43,
+        &masked_binary_payload(&scoped_collision_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &second_session_scoped_retry[0] else {
+        panic!("the second session replays its own query snapshot");
+    };
+    assert_eq!(
+        Envelope::decode(payload, Limits::default().protocol).unwrap(),
+        second_session_scoped_status
+    );
+
+    let first_session_scoped_retry = block_on(recovered_transport.receive_with_application(
+        &mut recovered_socket,
+        44,
+        &masked_binary_payload(&scoped_collision_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &first_session_scoped_retry[0] else {
+        panic!("the owning session replays its Event-ID collision diagnostic");
+    };
+    assert_eq!(
+        Envelope::decode(payload, Limits::default().protocol).unwrap(),
+        first_session_scoped_diagnostic
+    );
+
+    let post_scope_event_retry = block_on(recovered_transport.receive_with_application(
+        &mut recovered_socket,
+        45,
+        &masked_binary_payload(&event_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &post_scope_event_retry[0] else {
+        panic!("the owning session's orphaned Event remains replayable");
+    };
+    assert!(matches!(
+        &Envelope::decode(payload, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Result {
+            status: ResultStatus::RetainedWithoutValue,
+            value: None,
+            fingerprint,
+            diagnostic: None,
+        } if *fingerprint == event_fingerprint
+    ));
     assert_eq!(recovered_application.calls, 0);
 
     drop(recovered_transport);
