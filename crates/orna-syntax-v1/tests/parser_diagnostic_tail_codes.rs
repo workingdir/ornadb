@@ -125,6 +125,71 @@ fn malformed_control_continuation_keeps_following_tail_and_primary_diagnostics()
 }
 
 #[test]
+fn malformed_case_arm_recovers_at_case_boundary_and_preserves_outer_tail() {
+    let source = include_str!("fixtures/malformed-case-arm-outer-tail.orna");
+    let parsed = parse_module(source);
+
+    assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+    let diagnostic = &parsed.diagnostics[0];
+    assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+    assert_eq!(diagnostic.message, "expected `:` after case pattern");
+    let bad_pattern_separator = source.find(" 2 if").expect("fixture has a malformed arm") + 1;
+    assert_eq!(diagnostic.span.start, bad_pattern_separator);
+    assert_eq!(diagnostic.span.end, bad_pattern_separator + 1);
+    assert!(parsed.is_malformed());
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block {
+        statements, tail, ..
+    } = body
+    else {
+        panic!("expected a function block");
+    };
+    assert!(matches!(
+        statements.as_slice(),
+        [Statement::Control {
+            value: Expr::Control { .. },
+            ..
+        }]
+    ));
+    assert!(matches!(
+        tail.as_deref(),
+        Some(Expr::Literal { text, .. }) if text == "4"
+    ));
+}
+
+#[test]
+fn malformed_case_arm_separator_recovers_before_outer_tail() {
+    let source = include_str!("fixtures/malformed-case-arm-separator-outer-tail.orna");
+    let parsed = parse_module(source);
+
+    assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+    let diagnostic = &parsed.diagnostics[0];
+    assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+    assert_eq!(diagnostic.message, "expected `,` or `}` after case arm");
+    let bad_arm_separator = source.find(" 3 if").expect("fixture has a missing comma") + 1;
+    assert_eq!(diagnostic.span.start, bad_arm_separator);
+    assert_eq!(diagnostic.span.end, bad_arm_separator + 1);
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block {
+        statements, tail, ..
+    } = body
+    else {
+        panic!("expected a function block");
+    };
+    assert!(matches!(statements.as_slice(), [Statement::Control { .. }]));
+    assert!(matches!(
+        tail.as_deref(),
+        Some(Expr::Literal { text, .. }) if text == "5"
+    ));
+}
+
+#[test]
 fn semicolon_keeps_control_expression_as_a_statement() {
     let parsed = parse_module(include_str!("fixtures/semicolon-control-block-item.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
