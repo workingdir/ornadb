@@ -15001,7 +15001,9 @@ fn substitute_generic_descriptor_type(
             .get(name)
             .cloned()
             .or_else(|| Some(descriptor_type(ty))),
-        system_api::SystemType::Applied { base, arguments } if base == "Query" => {
+        system_api::SystemType::Applied { base, arguments }
+            if matches!(base.as_str(), "Relation" | "Query") =>
+        {
             let element = arguments.first()?;
             Some(Type::Relation(Box::new(substitute_generic_descriptor_type(
                 element,
@@ -16124,12 +16126,27 @@ fn infer_historical_member(
 }
 
 fn infer_system_member(base: &Type, name: &str) -> Option<Type> {
-    if let Type::Named(system_type) = base
-        && let Some(ty) = system_api::embedded_system_api().field(system_type, name)
-    {
-        return Some(descriptor_type(ty));
+    let api = system_api::embedded_system_api();
+    match base {
+        Type::Named(system_type) => api.field(system_type, name).map(descriptor_type),
+        Type::Applied {
+            base: system_type,
+            arguments,
+        } => {
+            let parameters = api.type_parameters(system_type)?;
+            if parameters.len() != arguments.len() {
+                return None;
+            }
+            let substitutions = parameters
+                .iter()
+                .cloned()
+                .zip(arguments.iter().cloned())
+                .collect::<BTreeMap<_, _>>();
+            api.field(system_type, name)
+                .and_then(|ty| substitute_generic_descriptor_type(ty, &substitutions))
+        }
+        _ => None,
     }
-    None
 }
 
 fn infer_text_member(base: &Type, name: &str) -> Option<Type> {
