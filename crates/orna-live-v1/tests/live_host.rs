@@ -724,6 +724,7 @@ impl LiveApplication for TransactionalApplication {
 enum WatchEventMode {
     Pure,
     Rejected,
+    Denied,
     Rollback,
     Commit,
 }
@@ -881,6 +882,16 @@ impl LiveApplication for WatchEventApplication {
         Ok(Self::snapshot(request, watch))
     }
 
+    fn unsubscribe(
+        &mut self,
+        _: [u8; 16],
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+        _: &Message,
+    ) -> Result<Envelope, Error> {
+        Ok(unit_result(request, fingerprint))
+    }
+
     fn dispatch_event_with_work<'a>(
         &'a mut self,
         _: [u8; 16],
@@ -900,6 +911,7 @@ impl LiveApplication for WatchEventApplication {
             match mode {
                 WatchEventMode::Pure => Ok(LiveEvalResponse::pure(response)),
                 WatchEventMode::Rejected => Err(Error::ApplicationRejected),
+                WatchEventMode::Denied => Err(Error::Denied),
                 WatchEventMode::Rollback => Ok(LiveEvalResponse::transaction(
                     response,
                     LiveEvalTransaction::new(
@@ -3046,6 +3058,78 @@ fn async_rejection_keeps_watch_correlation_after_session_resume() {
 }
 
 #[test]
+fn synchronous_event_diagnostic_replays_after_watch_closure() {
+    let mut host = host();
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = WatchEventApplication {
+        mode: WatchEventMode::Denied,
+        subscriptions: 0,
+    };
+
+    let fixture_eval = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(eval_with_context([1; 16], [36; 16], [2; 16], None)),
+        &mut application,
+    ))
+    .unwrap();
+    assert!(matches!(
+        fixture_eval.response.unwrap().message,
+        Message::Diagnostic { .. }
+    ));
+
+    let subscribed = block_on(host.dispatch_frame(
+        [5; 16],
+        3,
+        Frame::Binary(subscribe_request([35; 16])),
+        &mut application,
+    ))
+    .unwrap();
+    let watch = subscribed
+        .response
+        .and_then(|response| response.watch)
+        .expect("subscription returns its host watch identity");
+
+    let request = event([1; 16], [37; 16], watch);
+    let first = block_on(host.dispatch_frame(
+        [5; 16],
+        4,
+        Frame::Binary(request.clone()),
+        &mut application,
+    ))
+    .unwrap();
+    let diagnostic = first.response.expect("portable rejection has a response");
+    assert_eq!(diagnostic.request, Some([37; 16]));
+    assert_eq!(diagnostic.watch, Some(watch));
+    assert!(matches!(diagnostic.message, Message::Diagnostic { .. }));
+
+    block_on(host.dispatch_frame(
+        [5; 16],
+        5,
+        Frame::Binary(unsubscribe()),
+        &mut application,
+    ))
+    .unwrap();
+    let replay = block_on(host.dispatch_frame(
+        [5; 16],
+        6,
+        Frame::Binary(request),
+        &mut application,
+    ))
+    .unwrap();
+    assert_eq!(replay.response, Some(diagnostic));
+}
+
+#[test]
 fn websocket_commit_without_completed_delivery_aborts_candidate_and_preserves_incumbent() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
     let mut issuer = Issuer(1, None);
@@ -4931,6 +5015,7 @@ fn pure_rejected_and_rolled_back_events_preserve_their_watch() {
         match mode {
             WatchEventMode::Pure => assert!(event_result.is_ok()),
             WatchEventMode::Rejected => assert_eq!(event_result, Err(Error::ApplicationRejected)),
+            WatchEventMode::Denied => assert!(event_result.is_ok()),
             WatchEventMode::Rollback => assert_eq!(event_result, Err(Error::RuntimeUnavailable)),
             WatchEventMode::Commit => unreachable!("commit is covered by the invalidation test"),
         }
