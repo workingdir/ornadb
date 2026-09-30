@@ -2778,6 +2778,33 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         assert_eq!(source.visited.len(), 3);
         assert!(source.visited.iter().all(|(_, locator)| locator.ends_with(b"upper")));
 
+        // One retained checkpoint detail fits; the later fixture conflict
+        // crosses the shared tail after the clean row tombstone has resolved.
+        let (base, left, right, mut source, agreed_delete_id, unchanged_delete_id, checkpoint_id, tail_id) =
+            build_inputs(row_delete_on_left, checkpoint_delete_on_left, true);
+        let error = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 1 },
+        )
+        .unwrap_err();
+        let BranchMergeError::BudgetExceeded { report } = error else {
+            panic!("the later checkpoint conflict crosses the one-detail budget")
+        };
+        assert_eq!(report.conflicts_lower_bound, 2);
+        assert_eq!(report.rows_examined, 2);
+        assert_eq!(report.affected_ranges.len(), 1);
+        assert!(report.affected_ranges.contains(&(id(1), high_range.clone())));
+        assert_eq!(report.affected_checkpoints.len(), 2);
+        assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
+        assert!(report.affected_checkpoints.contains(tail_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(agreed_delete_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(unchanged_delete_id.as_slice()));
+        assert_eq!(source.visited.len(), 3);
+        assert!(source.visited.iter().all(|(_, locator)| locator.ends_with(b"upper")));
+
         // The same row/checkpoint deletion orientation without the divergent
         // checkpoint proves the changed segment emits the tombstone itself.
         let (base, left, right, mut source, _, _, checkpoint_id, tail_id) = build_inputs(
