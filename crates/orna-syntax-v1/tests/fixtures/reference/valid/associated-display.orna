@@ -1,0 +1,7 @@
+pub type Contact {
+    pub name: Str,
+
+    impl Display {
+        fn display(self, context: DisplayContext): Str = self.name;
+    }
+}

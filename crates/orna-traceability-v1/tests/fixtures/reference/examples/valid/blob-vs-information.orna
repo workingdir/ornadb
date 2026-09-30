@@ -1,0 +1,4 @@
+pub table Object(id: Str) {
+    payload: Blob,
+    size: Float<MiB>,
+}

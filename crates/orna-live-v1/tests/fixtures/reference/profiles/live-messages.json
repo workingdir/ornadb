@@ -1,0 +1,237 @@
+{
+  "profile": "orna.present.v1",
+  "value_profile": "OVB-1",
+  "envelope": {
+    "required": {
+      "0": "constant UInt 1",
+      "1": "UInt16 message type",
+      "2": "bytes16 or null request",
+      "3": "bytes16 or null watch",
+      "4": "body map"
+    },
+    "unknown_keys": "reject"
+  },
+  "body_extensions": {
+    "optional_unknown_range": [
+      0,
+      32767
+    ],
+    "mandatory_unknown_range": [
+      32768,
+      65535
+    ],
+    "fingerprint_includes_all_fields": true
+  },
+  "messages": [
+    {
+      "code": 0,
+      "direction": "client",
+      "name": "subscribe",
+      "request": "required",
+      "watch": "null",
+      "required": {
+        "0": "bytes16",
+        "1": "PresentationContext"
+      },
+      "optional": {}
+    },
+    {
+      "code": 1,
+      "direction": "client",
+      "name": "unsubscribe",
+      "request": "required",
+      "watch": "required",
+      "required": {},
+      "optional": {}
+    },
+    {
+      "code": 2,
+      "direction": "client",
+      "name": "resync",
+      "request": "required",
+      "watch": "required",
+      "required": {},
+      "optional": {}
+    },
+    {
+      "code": 3,
+      "direction": "client",
+      "name": "event",
+      "request": "required",
+      "watch": "required",
+      "required": {
+        "0": "UInt",
+        "1": "bytes16",
+        "2": "TypedValue",
+        "3": "bytes32"
+      },
+      "optional": {}
+    },
+    {
+      "code": 4,
+      "direction": "client",
+      "name": "eval",
+      "request": "required",
+      "watch": "null",
+      "required": {
+        "0": "Str",
+        "1": "DatabaseContext",
+        "2": "PresentationContext",
+        "3": "bytes32"
+      },
+      "optional": {}
+    },
+    {
+      "code": 5,
+      "direction": "client",
+      "name": "watch",
+      "request": "required",
+      "watch": "null",
+      "required": {
+        "0": "Str",
+        "1": "DatabaseContext",
+        "2": "PresentationContext"
+      },
+      "optional": {
+        "3": "NonnegativeDuration"
+      }
+    },
+    {
+      "code": 6,
+      "direction": "client",
+      "name": "cancel",
+      "request": "required",
+      "watch": "null",
+      "required": {
+        "0": "TargetKind",
+        "1": "bytes16"
+      },
+      "optional": {}
+    },
+    {
+      "code": 7,
+      "direction": "client",
+      "name": "request_status",
+      "request": "required",
+      "watch": "null",
+      "required": {
+        "0": "bytes16",
+        "1": "bytes32"
+      },
+      "optional": {}
+    },
+    {
+      "code": 16,
+      "direction": "host",
+      "name": "snapshot",
+      "request": "optional",
+      "watch": "required",
+      "required": {
+        "0": "UInt",
+        "1": "PresentNode",
+        "2": "Snapshot"
+      },
+      "optional": {}
+    },
+    {
+      "code": 17,
+      "direction": "host",
+      "name": "delta",
+      "request": "null",
+      "watch": "required",
+      "required": {
+        "0": "UInt",
+        "1": "UInt",
+        "2": "PatchList",
+        "3": "Snapshot"
+      },
+      "optional": {}
+    },
+    {
+      "code": 18,
+      "direction": "host",
+      "name": "result",
+      "request": "required",
+      "watch": "null",
+      "required": {
+        "0": "ResultStatus",
+        "1": "TypedValueOrNull",
+        "2": "bytes32",
+        "3": "DiagnosticOrNull"
+      },
+      "optional": {}
+    },
+    {
+      "code": 19,
+      "direction": "host",
+      "name": "diagnostic",
+      "request": "optional",
+      "watch": "optional",
+      "required": {
+        "0": "Diagnostic"
+      },
+      "optional": {
+        "1": "Bool"
+      }
+    },
+    {
+      "code": 20,
+      "direction": "host",
+      "name": "request_status_result",
+      "request": "required",
+      "watch": "null",
+      "required": {
+        "0": "bytes16",
+        "1": "RequestState",
+        "2": "bytes32?",
+        "3": "ResultBody?"
+      },
+      "optional": {}
+    }
+  ],
+  "definitions": {
+    "UInt": "An untagged CBOR integer >= 0; Bool is not an integer.",
+    "bytes16": "A CBOR byte string with exactly 16 bytes; never text.",
+    "bytes32": "A CBOR byte string with exactly 32 bytes.",
+    "DatabaseContext": {
+      "required": {
+        "0": "Uuid",
+        "1": "Snapshot?"
+      },
+      "unknown_keys": "reject"
+    },
+    "PresentationContext": {
+      "required": {
+        "0": "Str",
+        "1": "Str?",
+        "2": "PositiveUInt?",
+        "3": "Str",
+        "4": "[Str]"
+      },
+      "unknown_keys": "reject"
+    },
+    "TargetKind": [
+      0,
+      1
+    ],
+    "ResultStatus": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "RequestState": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "Snapshot": "Exact structure in the canonical value profile; a bare [0] is invalid.",
+    "PresentNode": "Tag 60012 around [kind, stable_key_or_null, properties, children].",
+    "Diagnostic": "Tag 60011 around the required diagnostic map; severity 0..4.",
+    "TypedValue": "Schema-directed OVB-1 application value, never a structural null.",
+    "NonnegativeDuration": "Tag 60005 around [floor_seconds, nanosecond], with seconds >= 0 and 0 <= nanosecond < 1000000000.",
+    "PatchList": "Ordered operations and typed paths from the live protocol chapter."
+  }
+}

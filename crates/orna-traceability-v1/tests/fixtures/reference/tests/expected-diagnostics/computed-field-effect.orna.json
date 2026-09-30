@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/computed-field-effect.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E3012",
+  "message_contains": "computed field must be deterministic and row-local",
+  "status": "expected-not-executed"
+}

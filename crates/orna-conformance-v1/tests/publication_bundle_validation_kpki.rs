@@ -12,10 +12,9 @@ struct Heading {
 }
 
 fn reference_root() -> PathBuf {
-    PathBuf::from(
-        std::env::var_os("ORNA_REFERENCE_DIR")
-            .expect("set ORNA_REFERENCE_DIR to the frozen Orna-1.0.0 reference"),
-    )
+    std::env::var_os("ORNA_REFERENCE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference"))
 }
 
 fn read_text(relative: &str) -> String {

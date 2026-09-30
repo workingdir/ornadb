@@ -1,0 +1,8 @@
+pub fn exact_eighth() = 1.decimal / 8.decimal;
+
+pub fn rounded_third() =
+    1.decimal.divide(
+        3.decimal,
+        scale: 6,
+        rounding: half_even,
+    );

@@ -1,0 +1,4 @@
+pub table Note {
+    created: Instant,
+    text: Str,
+}

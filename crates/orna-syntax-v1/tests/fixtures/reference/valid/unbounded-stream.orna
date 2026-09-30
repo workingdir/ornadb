@@ -1,0 +1,13 @@
+pub fn sync() =
+    google.mail(credential: std.secret.ref("google.personal"))
+    | for_each(message => mail.Email.insert({
+        provider: "google",
+        id: message.id,
+        sent: message.sent,
+        received: message.received,
+        from: message.from,
+        to: message.to,
+        subject: message.subject,
+        body_text: message.body_text,
+        body_html: message.body_html,
+    }));

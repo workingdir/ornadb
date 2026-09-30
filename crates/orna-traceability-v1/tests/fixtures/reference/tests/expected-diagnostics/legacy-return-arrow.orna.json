@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-return-arrow.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "ORNA091-E-RETURN-ARROW",
+  "message_contains": "function return annotations use `: Type`",
+  "status": "expected-not-executed"
+}

@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-sys-storage-call.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "ORNA100-E-SYS-STORAGE-CALL",
+  "message_contains": "`sys.storage` is a grouping namespace; use `sys.Storage` or `sys.admin` storage functions",
+  "status": "expected-not-executed"
+}

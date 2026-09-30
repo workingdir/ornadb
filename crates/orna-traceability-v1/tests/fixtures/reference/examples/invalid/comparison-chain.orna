@@ -1,0 +1,1 @@
+pub fn bad(a: Int, b: Int, c: Int) = a < b < c;

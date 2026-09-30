@@ -1,0 +1,29 @@
+pub table Book(id: Str) {
+    title: Str,
+    assert every(book => book.title != "");
+}
+
+pub table Loan(book_id: Str) {
+    borrower: Str,
+    assert every(loan => loan.borrower != "");
+}
+
+assert every(Loan, loan =>
+    exists(Book, book => book.id == loan.book_id)
+);
+
+pub fn seed() {
+    Book.insert({ id: "book-1", title: "The Night Garden" });
+    Book.insert({ id: "book-2", title: "A Map of Small Things" });
+}
+
+pub fn lend(book_id: Str, borrower: Str) {
+    Loan.insert({ book_id: book_id, borrower: borrower });
+}
+
+pub fn return_book(book_id: Str) {
+    Loan.delete(book_id);
+}
+
+pub fn available() =
+    Book | filter(book => !exists(Loan, loan => loan.book_id == book.id));

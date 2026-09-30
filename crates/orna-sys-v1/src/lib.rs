@@ -26,6 +26,18 @@ use serde::{
 use sha2::{Digest, Sha256};
 use orna_security_v1::SecretMetadata;
 
+mod introspection;
+pub use introspection::{
+    Dependency, DependencyConfidence, DependencyGraph, DependencyGraphError, DependencyInput,
+    DependencyKind,
+    DefinitionRef, ExplainedPlan, ExplainError, ExpressionRef, FileRef, FunctionPlanDescription,
+    FunctionRef, MAX_DEPENDENCY_EDGES, MAX_DEPENDENCY_OBJECTS, MAX_PLAN_EXPRESSIONS,
+    MAX_PLAN_NODES, MAX_REFERENCE_BYTES, Plan, PlanDetail, PlanNode, PlanNodeKind, PlanNodeRef,
+    PlanNullOrder,
+    PlanOrdering, PlanSortDirection, QueryPlanDescription, SnapshotRef, SourceSpan, explain_function,
+    explain_query,
+};
+
 pub const CANONICAL_VALUE_CODEC_V1: &str = "OVB-1";
 
 macro_rules! identity {
@@ -552,6 +564,10 @@ pub enum SystemEffect {
 
 mod system_api;
 pub use system_api::*;
+
+/// Compatibility name for callers predating the macro-generated API catalog.
+pub const SYS_EXPLAIN_FUNCTION_DESCRIPTOR: SystemFunctionDescriptor =
+    SYS_EXPLAIN_FUNCTION_REF_DESCRIPTOR;
 
 /// Returns the macro-declared descriptor for a portable system function.
 ///
@@ -2618,6 +2634,21 @@ mod tests {
             system_function_descriptor("sys.meta"),
             Some(&SYS_META_DESCRIPTOR)
         );
+        for (name, expected) in [
+            (
+                "sys.explain(Query)",
+                &SYS_EXPLAIN_QUERY_DESCRIPTOR,
+            ),
+            (
+                "sys.explain(FunctionRef)",
+                &SYS_EXPLAIN_FUNCTION_DESCRIPTOR,
+            ),
+            ("sys.dependencies", &SYS_DEPENDENCIES_DESCRIPTOR),
+            ("sys.dependents", &SYS_DEPENDENTS_DESCRIPTOR),
+        ] {
+            assert_eq!(system_function_descriptor(name), Some(expected));
+            assert_eq!(expected.effect, SystemEffect::Read);
+        }
         assert_eq!(
             system_function_descriptor("sys.admin.flush"),
             Some(&SystemFunctionDescriptor {

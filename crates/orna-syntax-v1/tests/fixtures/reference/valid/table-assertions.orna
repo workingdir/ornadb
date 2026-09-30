@@ -1,0 +1,7 @@
+pub table User(id: Uuid) {
+    username: Str,
+    email: Str?,
+
+    assert all_unique(user => user.username);
+    assert every(user => user.username != "");
+}

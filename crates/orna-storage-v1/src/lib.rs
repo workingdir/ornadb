@@ -7,6 +7,9 @@
 
 mod compact;
 mod compact_parquet;
+mod maintenance;
+mod placement;
+mod scan_planner;
 mod publication_policy;
 
 pub use compact::{
@@ -19,6 +22,23 @@ pub use compact::{
     EditableBaseRow, HybridBaseState, OVB_PROFILE,
 };
 pub use compact_parquet::{CompactParquetError, CompactParquetKeySource};
+pub use maintenance::{
+    plan_compact_consolidation, CompactConsolidationError, CompactConsolidationPlan,
+    ConsolidatedRow, ConsolidationVerification, MIN_OVERLAY_BYTES_SHARE_PERCENT,
+    MIN_OVERLAY_SEGMENTS_FOR_CONSOLIDATION,
+};
+pub use placement::{
+    plan_storage_placement, plan_storage_rewrite, PhysicalPlacement, PlacementAction,
+    PlacementCandidate, PlacementDecision, PlacementPlan, StoragePlacementError,
+    StoragePlacementPolicy, StoragePreference, StorageProfile, StorageRewriteError, StorageRewritePlan,
+    StorageRewriteRow, StorageRewriteTarget, StorageRewriteVerification,
+    PlacementReason, AUTOMATIC_EDITABLE_MAX_PUBLICATION_BYTES,
+    AUTOMATIC_EDITABLE_MAX_ROWS, MAX_EDITABLE_ROW_BYTES, MAX_STORAGE_REWRITE_BYTES,
+    MAX_STORAGE_REWRITE_ROWS,
+};
+pub use scan_planner::{
+    plan_compact_scan, CompactKeyRange, CompactScanPlan, CompactScanPlanError,
+};
 pub use publication_policy::{
     CompactPublicationPolicy, CompactPublicationPolicyError, COMPACT_FILE_BOUND_BYTES,
     DEFAULT_COMPRESSED_TARGET_BYTES, MAX_COMPRESSED_TARGET_BYTES,
@@ -1248,7 +1268,10 @@ fn map_compact_runtime_error(error: RuntimeError) -> Error {
         | RuntimeError::InvalidCompactReceipt
         | RuntimeError::RecoveryInvalid
         | RuntimeError::CheckpointNotReplayable
-        | RuntimeError::StreamSourceNotReplayable => Error::InvalidTransition,
+        | RuntimeError::StreamSourceNotReplayable
+        | RuntimeError::SnapshotNotFound
+        | RuntimeError::SnapshotIncomplete
+        | RuntimeError::SnapshotContextMismatch => Error::InvalidTransition,
         RuntimeError::RecoveryPending | RuntimeError::AdminBusy => Error::RuntimeUnavailable,
         RuntimeError::StreamIdentityMismatch
         | RuntimeError::StreamCheckpointStale

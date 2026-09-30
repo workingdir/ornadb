@@ -1255,6 +1255,7 @@ dependencies = [
 name = "orna-cli-v1"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
  "orna-application-v1",
  "orna-client",
  "orna-conformance-v1",
@@ -1262,9 +1263,12 @@ dependencies = [
  "orna-foundation-v1",
  "orna-live-v1",
  "orna-project-v1",
+ "orna-protocol-v1",
  "orna-repository-v1",
  "orna-runtime-v1",
+ "orna-security-v1",
  "orna-semantic-v1",
+ "orna-serving-v1",
  "orna-value-v1",
  "sha2 0.10.9",
  "tempfile",
@@ -1506,7 +1510,12 @@ dependencies = [
 name = "orna-security-v1"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "subtle",
+ "tempfile",
+ "zeroize",
 ]
 
 [[package]]
@@ -1515,6 +1524,7 @@ version = "1.0.0"
 dependencies = [
  "orna-foundation-v1",
  "orna-syntax-v1",
+ "orna-value-v1",
  "serde_json",
  "sha2 0.10.9",
  "unicode-casefold",
