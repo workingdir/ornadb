@@ -20026,6 +20026,22 @@ mod tests {
         );
         assert_eq!((lookups, scans), (2, 2), "the later-page miss stops projection");
 
+        // A downstream filter cannot erase an effectful projection failure;
+        // pipeline stage order remains observable even when no row survives.
+        let (filtered_failure, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-projection-filter-after.orna"),
+        );
+        assert_eq!(
+            filtered_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "the later projected failure occurs before the downstream filter"
+        );
+
         // Relation `take` need not enumerate its remainder, so the later
         // missing lookup must stay latent when its row is outside the result.
         let (taken, lookups, scans) = invoke_query_fixture_with_counts(
