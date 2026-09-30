@@ -698,6 +698,67 @@ fn zero_conflict_budget_stops_at_first_checkpoint_after_fixture_row_merge() {
 }
 
 #[test]
+fn zero_budget_checkpoint_delete_update_tail_reports_first_identity() {
+    for delete_on_left in [true, false] {
+        let mut source = FixtureRows::default();
+        source.add(MergeSide::Base, b"base", vec![parse_fixture(BASE, RowKeyKind::Explicit)]);
+        source.add(MergeSide::Left, b"left", vec![parse_fixture(LEFT, RowKeyKind::Explicit)]);
+        source.add(MergeSide::Right, b"right", vec![parse_fixture(RIGHT, RowKeyKind::Explicit)]);
+
+        let mut base = snapshot(schema(true, FieldType::Str), manifest(1, 1, b"base"), None);
+        let mut left = snapshot(schema(true, FieldType::Str), manifest(2, 2, b"left"), None);
+        let mut right = snapshot(schema(true, FieldType::Str), manifest(3, 3, b"right"), None);
+
+        let clean_id = b"consumer/a-clean".to_vec();
+        let clean = CheckpointGeneration { generation: 1, position: None };
+        for snapshot in [&mut base, &mut left, &mut right] {
+            snapshot.checkpoints.insert(clean_id.clone(), clean.clone());
+        }
+
+        let first_conflict_id = b"consumer/m-positionless-delete-update".to_vec();
+        base.checkpoints.insert(
+            first_conflict_id.clone(),
+            CheckpointGeneration { generation: 4, position: None },
+        );
+        let update_side = if delete_on_left { &mut right } else { &mut left };
+        update_side.checkpoints.insert(
+            first_conflict_id.clone(),
+            CheckpointGeneration { generation: 5, position: None },
+        );
+
+        let later_conflict_id = b"consumer/z-unvisited".to_vec();
+        for (snapshot, generation) in [(&mut base, 7), (&mut left, 8), (&mut right, 9)] {
+            snapshot.checkpoints.insert(
+                later_conflict_id.clone(),
+                CheckpointGeneration { generation, position: None },
+            );
+        }
+
+        // Positionless values remain present checkpoint state. After clean
+        // fixture row reconciliation, bytewise checkpoint order reports the
+        // first delete/update impact at zero budget and leaves the later tail unseen.
+        let error = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 0 },
+        )
+        .unwrap_err();
+        let BranchMergeError::BudgetExceeded { report } = error else {
+            panic!("the first positionless delete/update checkpoint exceeds zero detail budget")
+        };
+        assert_eq!(report.conflicts_lower_bound, 1);
+        assert_eq!(report.rows_examined, 3);
+        assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+        assert!(report.affected_checkpoints.contains(first_conflict_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(clean_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(later_conflict_id.as_slice()));
+        assert_eq!(source.visited.len(), 3);
+    }
+}
+
+#[test]
 fn checkpoint_delete_update_budget_tail_reports_identity_for_either_deleted_side() {
     for delete_on_left in [true, false] {
         let (mut base, mut left, mut right, mut source) = row_checkpoint_conflict_inputs();
