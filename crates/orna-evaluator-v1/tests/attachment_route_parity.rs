@@ -313,6 +313,33 @@ fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
         .any(|module| module.logical_path == "main_archive.orna"));
     let mut after_detach_session =
         AdmittedReplSession::from_attached_database_session(&databases, Limits::default()).unwrap();
+    assert!(after_detach_session
+        .attached_databases()
+        .unwrap()
+        .database("main_archive")
+        .is_none());
+    assert_eq!(
+        session
+            .attached_databases()
+            .unwrap()
+            .database("main_archive")
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        longer_alias_commit
+    );
+    assert_eq!(
+        replacement_session
+            .attached_databases()
+            .unwrap()
+            .database("main_archive")
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        longer_alias_commit
+    );
     assert_eq!(after_detach_session.submit("use main;"), Ok(None));
     assert_eq!(
         after_detach_session.submit("main.package_value()"),
