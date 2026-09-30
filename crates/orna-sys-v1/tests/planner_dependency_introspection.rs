@@ -916,6 +916,82 @@ fn explain_known_cost_overflow_survives_an_unknown_final_tail() {
 }
 
 #[test]
+fn explain_cost_overflow_survives_unknown_intermediate_estimates() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    // A missing left-side statistic makes the join and materialization
+    // estimates unknown. The known mutation and later right scan still prove
+    // an overflowing lower bound; unknown estimates cannot reduce that cost.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:overflow-through-unknown-join"),
+        source: obj("table:missing-stats"),
+        source_statistics: None,
+        joins: vec![QueryJoinDescription {
+            source: obj("table:large"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            predicate: None,
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: vec![QueryMutationDescription {
+            table: obj("table:missing-stats"),
+            kind: QueryMutationKind::Update,
+            estimated_affected_rows: Some(1),
+            estimated_write_bytes: Some(0),
+            estimated_table_rows_before: Some(1),
+        }],
+        materialize_into: Some(obj("materialization:unknown-intermediate")),
+    })
+    .expect("plan with an unknown intermediate and overflowing known tail");
+
+    assert_eq!(explained.plan().estimated_cost(), None);
+    assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let join = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("join with missing input cardinality");
+    assert_eq!(join.estimated_work(), None);
+    assert_eq!(join.details().get("estimated_work_overflow"), None);
+    let unknown_scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:missing-stats"))
+        })
+        .expect("unknown left scan");
+    assert_eq!(unknown_scan.estimated_work(), None);
+    let known_tail = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj("table:large"))
+        })
+        .expect("known right scan after the unknown join");
+    assert_eq!(known_tail.estimated_work(), Some(u64::MAX));
+
+    let surface = serde_json::to_value(&explained).expect("unknown-intermediate plan surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
 fn explain_local_work_overflow_is_explicit_on_cost_and_write_tails() {
     let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
