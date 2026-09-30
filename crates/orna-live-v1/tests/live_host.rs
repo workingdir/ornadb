@@ -9277,7 +9277,7 @@ fn delete_cancels_durable_session_work_before_returning_success() {
 }
 
 #[test]
-fn closed_session_request_id_remains_available_for_sibling_status_query() {
+fn sibling_status_request_id_reuse_survives_neighbor_closure() {
     let (root, repository) = durable_repository();
     // The reference scopes request IDs by session but does not spell out how
     // closing one session affects a sibling query reusing its request bytes.
@@ -9346,6 +9346,38 @@ fn closed_session_request_id_remains_available_for_sibling_status_query() {
     }))
     .unwrap();
 
+    let mut application = UnitApplication::default();
+    let deleted_session_status_request = Envelope {
+        request: Some([94; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [92; 16],
+            fingerprint: second_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let deleted_session_status = block_on(host.dispatch_frame(
+        [7; 16],
+        2,
+        Frame::Binary(deleted_session_status_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the deleted session first reads its own running status");
+    assert_eq!(deleted_session_status.request, Some([94; 16]));
+    assert!(matches!(
+        deleted_session_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Running,
+            fingerprint: Some(returned),
+            result: None,
+        } if target == [92; 16] && returned == second_fingerprint
+    ));
+
     let mut deletion = RecordingDelete::default();
     let mut children = RecordingChildren::default();
     assert_eq!(
@@ -9364,11 +9396,10 @@ fn closed_session_request_id_remains_available_for_sibling_status_query() {
     );
     assert_eq!(children.requests, vec![second_identity]);
 
-    let mut application = UnitApplication::default();
     let sibling_status_request = Envelope {
-        // This ID was the deleted session's request ID, but is unused in the
-        // sibling and therefore remains available there.
-        request: Some([92; 16]),
+        // This status-query ID belonged to the deleted session, but remains
+        // available in the sibling because request identity is session-scoped.
+        request: Some([94; 16]),
         watch: None,
         message: Message::RequestStatus {
             target: [91; 16],
@@ -9386,7 +9417,7 @@ fn closed_session_request_id_remains_available_for_sibling_status_query() {
     ))
     .unwrap()
     .response
-    .expect("the sibling may use a request ID released by another session");
+    .expect("the sibling may reuse another session's status-query ID");
     assert!(matches!(
         &sibling_status.message,
         Message::RequestStatusResult {
