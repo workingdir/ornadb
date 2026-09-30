@@ -3938,3 +3938,76 @@ fn explain_closes_max_byte_write_rounding_at_local_work_boundary() {
         node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
     }));
 }
+
+#[test]
+fn explain_closes_aligned_and_remainder_max_byte_write_edges() {
+    let parsed = orna_syntax_v1::parse_module(ROUNDING_TAIL_INTERPLAY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the existing 4-KiB
+    // rule, MAX ends with a 4095-byte remainder and rounds to 2^52 blocks;
+    // the aligned value just below it rounds to one fewer block.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    let aligned_bytes = u64::MAX - 4_095;
+    let aligned_rows = u64::MAX - (MAX_BYTE_BLOCKS - 1);
+    let remainder_rows = u64::MAX - MAX_BYTE_BLOCKS;
+    assert_eq!(aligned_bytes % 4_096, 0);
+
+    let explain_write = |affected_rows, write_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:aligned-max-byte-write-edge"),
+            source: obj("table:RoundingFirst"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(0),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:RoundingWrite"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(affected_rows),
+                estimated_write_bytes: Some(write_bytes),
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: None,
+        })
+        .expect("aligned or remainder write closure edge")
+    };
+
+    let aligned = explain_write(aligned_rows, aligned_bytes);
+    let max_cost = u64::MAX.to_string();
+    assert_eq!(aligned.plan().estimated_cost(), Some(max_cost.as_str()));
+    let aligned_write = aligned.root();
+    assert_eq!(aligned_write.kind(), PlanNodeKind::Invoke);
+    assert_eq!(aligned_write.estimated_rows(), Some(aligned_rows));
+    assert_eq!(aligned_write.estimated_bytes(), Some(aligned_bytes));
+    assert_eq!(aligned_write.estimated_work(), Some(u64::MAX));
+
+    let remainder = explain_write(remainder_rows, u64::MAX);
+    assert_eq!(remainder.plan().estimated_cost(), Some(max_cost.as_str()));
+    let remainder_write = remainder.root();
+    assert_eq!(remainder_write.estimated_rows(), Some(remainder_rows));
+    assert_eq!(remainder_write.estimated_bytes(), Some(u64::MAX));
+    assert_eq!(remainder_write.estimated_work(), Some(u64::MAX));
+
+    let overflow = explain_write(remainder_rows + 1, u64::MAX);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let surface = serde_json::to_value(&overflow).expect("write remainder overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_work_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
