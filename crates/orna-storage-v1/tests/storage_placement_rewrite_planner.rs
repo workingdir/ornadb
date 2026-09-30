@@ -20,6 +20,10 @@ const ESCAPED_PATH_AT_LIMIT_ROW: &str =
     include_str!("fixtures/storage-placement-escaped-path-at-limit.orna");
 const ESCAPED_PATH_OVER_LIMIT_ROW: &str =
     include_str!("fixtures/storage-placement-escaped-path-over-limit.orna");
+const ESCAPED_BOUNDARY_UPPER_ROW: &str =
+    include_str!("fixtures/storage-placement-escaped-boundary-upper.orna");
+const ESCAPED_BOUNDARY_LOWER_ROW: &str =
+    include_str!("fixtures/storage-placement-escaped-boundary-lower.orna");
 const REWRITE_TAIL_FIRST: &str = include_str!("fixtures/storage-rewrite-tail-first.orna");
 const REWRITE_TAIL_LAST: &str = include_str!("fixtures/storage-rewrite-tail-last.orna");
 const KEY_FIELD: Uuid = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
@@ -168,6 +172,31 @@ fn text_key_components_from_fixture(source: &str) -> Vec<String> {
                 .to_owned()
         })
         .collect()
+}
+
+fn text_id_from_fixture(source: &str) -> String {
+    let parsed = parse_row(source);
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    let Expr::Record { fields, .. } = parsed.value else {
+        panic!("escaped path fixture is a row record")
+    };
+    let field = fields
+        .into_iter()
+        .find(|field| field.name == "id")
+        .expect("escaped path fixture has an id key");
+    let Expr::Literal {
+        text,
+        kind: LiteralKind::String,
+        ..
+    } = field.value
+    else {
+        panic!("escaped path fixture key is a string")
+    };
+    text.strip_prefix('"')
+        .unwrap()
+        .strip_suffix('"')
+        .unwrap()
+        .to_owned()
 }
 
 fn row(value: i64) -> CanonicalValue {
@@ -666,6 +695,67 @@ fn escaped_utf8_expansion_uses_encoded_bytes_for_fallback_boundaries() {
     assert_eq!(retained.placement(), PhysicalPlacement::Editable);
     assert_eq!(retained.editable_path(), Some(&existing_path));
     assert!(fallback_plan
+        .decisions()
+        .iter()
+        .filter(|decision| decision.action() == PlacementAction::Insert)
+        .all(|decision| decision.placement() == PhysicalPlacement::Compact));
+}
+
+#[test]
+fn escaped_component_boundary_still_enforces_portable_alias_fallback() {
+    let upper_key_text = text_id_from_fixture(ESCAPED_BOUNDARY_UPPER_ROW);
+    let lower_key_text = text_id_from_fixture(ESCAPED_BOUNDARY_LOWER_ROW);
+    let upper_path = editable_path(&upper_key_text);
+    let lower_path = editable_path(&lower_key_text);
+    let upper_relative = encoded_table_relative_path(&upper_path);
+    let lower_relative = encoded_table_relative_path(&lower_path);
+    let upper_component = upper_relative.strip_suffix(".orna").unwrap();
+    let lower_component = lower_relative.strip_suffix(".orna").unwrap();
+    assert_eq!(upper_component.len(), 200);
+    assert_eq!(lower_component.len(), 200);
+    assert!(upper_component.ends_with("~7e"));
+    assert_eq!(
+        upper_component.to_ascii_lowercase(),
+        lower_component.to_ascii_lowercase()
+    );
+
+    let profile = profile_for_key_type(Uuid::from_u128(11), "Str");
+    let plan = plan_storage_placement(
+        &profile,
+        StoragePreference::Automatic,
+        1,
+        false,
+        vec![upper_path.clone()],
+        [
+            PlacementCandidate::update(
+                text_key(&upper_key_text),
+                ESCAPED_BOUNDARY_UPPER_ROW.len(),
+                PhysicalPlacement::Editable,
+                Some(upper_path.clone()),
+            ),
+            PlacementCandidate::insert(
+                text_key(&lower_key_text),
+                ESCAPED_BOUNDARY_LOWER_ROW.len(),
+                Some(lower_path),
+            ),
+            PlacementCandidate::insert(
+                text_key("safe"),
+                CASE_COLLISION_LOWER_ROW.len(),
+                Some(editable_path("safe")),
+            ),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(plan.new_row_placement(), PhysicalPlacement::Compact);
+    let retained = plan
+        .decisions()
+        .iter()
+        .find(|decision| decision.key().encoded() == text_key(&upper_key_text))
+        .unwrap();
+    assert_eq!(retained.placement(), PhysicalPlacement::Editable);
+    assert_eq!(retained.editable_path(), Some(&upper_path));
+    assert!(plan
         .decisions()
         .iter()
         .filter(|decision| decision.action() == PlacementAction::Insert)
