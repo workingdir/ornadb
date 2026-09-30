@@ -901,11 +901,11 @@ fn positionless_checkpoint_tail_follows_upper_segment_row_delete_edit() {
     };
 
     // The row conflict at the inclusive upper boundary is planned before
-    // checkpoint state. Its detail fills the first slot; the cursorless
-    // delete/update conflict becomes the next impact at the shared tail.
+    // checkpoint state. At zero budget its impact is the only reported one;
+    // with one slot the cursorless delete/update becomes the crossing tail.
     for row_delete_on_left in [true, false] {
         for checkpoint_delete_on_left in [true, false] {
-            for max_conflicts in [1, 2] {
+            for max_conflicts in [0, 1, 2] {
                 let (
                     base,
                     left,
@@ -925,6 +925,12 @@ fn positionless_checkpoint_tail_follows_upper_segment_row_delete_edit() {
                 .unwrap_err();
 
                 match error {
+                    BranchMergeError::BudgetExceeded { report } if max_conflicts == 0 => {
+                        assert_eq!(report.conflicts_lower_bound, 1);
+                        assert_eq!(report.rows_examined, 2);
+                        assert!(report.affected_ranges.contains(&(id(1), high_range.clone())));
+                        assert!(report.affected_checkpoints.is_empty());
+                    }
                     BranchMergeError::BudgetExceeded { report } if max_conflicts == 1 => {
                         assert_eq!(report.conflicts_lower_bound, 2);
                         assert_eq!(report.rows_examined, 2);
