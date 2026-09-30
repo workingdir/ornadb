@@ -21049,6 +21049,27 @@ mod tests {
             "last() closes after two post-filter matches before opening the failing tail"
         );
 
+        // The reference is silent when a post-filter take naturally exhausts
+        // below its requested count. Preserve the available final match
+        // after a trailing nonmatch instead of treating a short prefix as a
+        // failure or discarding its result.
+        let (last_returns_short_post_filter_take_after_nonmatch, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-short-exhausts-after-nonmatch.orna"
+                ),
+            );
+        assert_eq!(
+            last_returns_short_post_filter_take_after_nonmatch.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 4),
+            "last() returns the partial post-filter prefix after a nonmatching tail exhausts"
+        );
+
         // The reference is silent when the bounded tail continues past a
         // nonmatch to a predicate failure, with another match after that
         // failure. Preserve the error instead of allowing last() to evaluate
