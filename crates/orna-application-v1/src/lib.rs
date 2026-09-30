@@ -5429,6 +5429,96 @@ mod tests {
     }
 
     #[test]
+    fn deleting_moved_source_preserves_later_retry_key_owners() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "table-rekey-delete-moved-source-reuse-final-tail.orna",
+                include_str!("../tests/fixtures/table-rekey-delete-moved-source-reuse-final-tail.orna"),
+                "main",
+            )
+            .expect("checked-in moved-source deletion fixture should be admitted");
+
+        let int = |value: i64| {
+            CanonicalValue::new(OvbRaw::Int(value.into())).expect("integer is canonical")
+        };
+        let row = |id: i64, text: &str, quantity: i64| {
+            CanonicalValue::new(OvbRaw::Map(vec![
+                (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
+                (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
+                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+            ]))
+            .expect("row is canonical")
+        };
+        let key = |value: i64| int(value).encode().expect("key is canonical");
+        let rows = BTreeMap::from([(
+            "Note".to_owned(),
+            vec![
+                (key(1), row(1, "first source", 10).encode().unwrap()),
+                (key(2), row(2, "original destination", 20).encode().unwrap()),
+                (key(3), row(3, "second source", 30).encode().unwrap()),
+            ],
+        )]);
+        let tables = admitted_table_schemas(&application.module_header);
+        let mut handler =
+            SourceMutationEffectHandler::with_table_rows(tables, rows).expect("valid snapshot");
+
+        invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            &Environment::new(),
+            application.limits,
+            &mut handler,
+        )
+        .expect("deleting a moved source leaves later retry key owners distinct");
+
+        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        assert_eq!(mutations.len(), 17);
+
+        let expected = [
+            (2, Some(4), false, Some(row(4, "original destination", 20))),
+            (1, Some(2), false, Some(row(2, "first source", 10))),
+            (1, None, true, Some(row(1, "replacement", 30))),
+            (2, None, false, Some(row(2, "first source", 11))),
+            (1, None, false, Some(row(1, "replacement", 31))),
+            (2, None, false, None),
+            (1, None, false, Some(row(1, "replacement", 32))),
+            (1, None, false, None),
+            (3, Some(2), false, Some(row(2, "second source", 30))),
+            (1, None, true, Some(row(1, "late replacement", 40))),
+            (1, None, false, Some(row(1, "late replacement", 41))),
+            (2, None, false, Some(row(2, "second source", 31))),
+            (1, None, false, None),
+            (4, Some(1), false, Some(row(1, "original destination", 20))),
+            (1, None, false, Some(row(1, "original destination", 21))),
+            (2, Some(4), false, Some(row(4, "second source", 31))),
+            (4, None, false, Some(row(4, "second source", 32))),
+        ];
+
+        for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in
+            mutations.iter().zip(expected).enumerate()
+        {
+            assert_eq!(mutation.key(), key(old_key), "mutation {index} source key");
+            let expected_key = new_key.map(key);
+            assert_eq!(
+                mutation.rekey_to(),
+                expected_key.as_deref(),
+                "mutation {index} re-key destination"
+            );
+            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            match expected_row {
+                Some(expected_row) => assert_eq!(
+                    CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
+                    expected_row,
+                    "mutation {index} row value"
+                ),
+                None => assert_eq!(mutation.value(), None, "mutation {index} deletion value"),
+            }
+        }
+    }
+
+    #[test]
     fn failed_mutation_tail_does_not_return_earlier_effects_for_staging() {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
