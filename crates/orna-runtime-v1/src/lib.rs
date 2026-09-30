@@ -20851,6 +20851,25 @@ mod tests {
             "last() observes the failing predicate on the outer bound's final admitted row"
         );
 
+        // The reference defines last(), predicate evaluation, and bounded
+        // enumeration separately but leaves a failure on the first admitted
+        // row implicit. A later in-bound row would match, but last() must
+        // surface the initial predicate error without continuing the tail.
+        let (last_surfaces_initial_predicate_failure, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-initial-predicate-failure.orna"
+                ),
+            );
+        let predicate_failure = last_surfaces_initial_predicate_failure.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (1, 2),
+            "last() returns the first-row predicate failure before evaluating the later match"
+        );
+
         // The reference specifies first-match short-circuiting and bounded
         // enumeration separately, leaving their interaction with a later
         // failing filter predicate implicit. first() matches within the
