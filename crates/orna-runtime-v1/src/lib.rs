@@ -24693,6 +24693,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sys_invocation_cursor_survives_reset_replay_and_reopen_for_later_tail() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(180)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let first_invocation_id = id(181);
+        let second_invocation_id = id(182);
+        for (invocation_id, session_id) in
+            [(first_invocation_id, id(183)), (second_invocation_id, id(184))]
+        {
+            state
+                .begin_invocation_observation(
+                    writer,
+                    InvocationObservationRegistration {
+                        id: invocation_id,
+                        procedure: procedure.clone(),
+                        owner: InvocationLaunchOwner::OwnerSession(session_id),
+                        run: None,
+                        arguments: vec![echo_invocation_input(&procedure)],
+                        idempotency_key_hash: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let first_page = state.invocation_observation_tail(None, 1).await.unwrap();
+        assert_eq!(first_page.entries.len(), 1);
+        assert!(first_page.has_more);
+        assert_eq!(first_page.entries[0].sequence, 1);
+        assert_eq!(first_page.entries[0].invocation_id, first_invocation_id);
+        let cursor = first_page.next_cursor.expect("partial page has a cursor");
+
+        let key = stream_delivery("cursor-reset-reopen", "cursor-reset-reopen-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("cursor-reset-reopen:receipt").unwrap(),
+            },
+            reason: "invocation tail continuation across reset and reopen".into(),
+        };
+        let receipt_id = id(185);
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request.clone(), receipt_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(writer, request.clone(), receipt_id)
+                .await,
+            Ok(receipt.clone())
+        );
+        let replacement = state.takeover_lease(writer, id(186)).await.unwrap();
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(reopened.stream_checkpoint(&key).await.unwrap(), receipt);
+        let replacement = reopened.acquire_lease(replacement.owner_id).await.unwrap();
+        assert_eq!(
+            reopened
+                .reset_checkpoint_with_invocation_id(replacement, request, receipt_id)
+                .await,
+            Ok(receipt)
+        );
+        assert_eq!(
+            reopened.orphan_abandoned_invocations(replacement).await.unwrap(),
+            2
+        );
+
+        let continued = reopened
+            .invocation_observation_tail(Some(cursor), 4)
+            .await
+            .unwrap();
+        assert!(!continued.has_more);
+        assert_eq!(
+            continued
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4],
+            "reset receipts do not consume cursor positions across restart"
+        );
+        assert_eq!(
+            continued
+                .entries
+                .iter()
+                .map(|entry| entry.invocation_id)
+                .collect::<Vec<_>>(),
+            vec![
+                second_invocation_id,
+                first_invocation_id,
+                second_invocation_id,
+            ]
+        );
+        assert_eq!(
+            continued
+                .entries
+                .iter()
+                .map(|entry| entry.status)
+                .collect::<Vec<_>>(),
+            vec![
+                InvocationObservationStatus::Running,
+                InvocationObservationStatus::Orphaned,
+                InvocationObservationStatus::Orphaned,
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn sys_lifecycle_parent_waits_for_children_and_replacement_orphans_old_owner() {
         assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
         let (_temp, repo) = repository();
