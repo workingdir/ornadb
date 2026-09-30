@@ -20668,6 +20668,27 @@ mod tests {
             "the second in-bound match stops before the nested failing sibling"
         );
 
+        // A downstream take can satisfy demand while the earlier outer take
+        // still has room. The reference does not spell out this demand
+        // propagation through a filter; keep the later nested failure latent
+        // after the first post-filter match.
+        let (filtered_consumer_bound_stops_larger_outer, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-take-filter-consumer-stop.orna"
+                ),
+            );
+        assert_eq!(
+            filtered_consumer_bound_stops_larger_outer.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "downstream take(1) stops after the first filtered match before the bad sibling"
+        );
+
         // The reference fixes left-to-right union order and bounded
         // enumeration but leaves projection failures across a child-local
         // take boundary implicit. Keep the left child lazy: its excluded
