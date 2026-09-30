@@ -284,7 +284,7 @@ pub fn plan_storage_placement(
         .and_then(|rows| rows.checked_sub(delete_count))
         .ok_or(StoragePlacementError::RowCountOverflow)?;
 
-    let (new_row_placement, reason) = match preference {
+    let (mut new_row_placement, mut reason) = match preference {
         StoragePreference::Editable => (PhysicalPlacement::Editable, PlacementReason::ExplicitPreference),
         StoragePreference::Compact => (PhysicalPlacement::Compact, PlacementReason::ExplicitPreference),
         StoragePreference::Automatic if compact_data_exists => (
@@ -311,8 +311,6 @@ pub fn plan_storage_placement(
         ),
     };
 
-    let mut planned_paths = BTreeSet::new();
-    let mut editable_paths = Vec::new();
     let mut decisions = Vec::with_capacity(keyed.len());
     for (key, (candidate, action, body_bytes)) in keyed {
         let placement = match candidate.existing {
@@ -322,10 +320,6 @@ pub fn plan_storage_placement(
         };
         let editable_path = if placement == PhysicalPlacement::Editable {
             if let Some(path) = candidate.editable_path {
-                if !planned_paths.insert(path.clone()) {
-                    return Err(StoragePlacementError::PathCollision);
-                }
-                editable_paths.push(path.clone());
                 if body_bytes > MAX_EDITABLE_ROW_BYTES {
                     return Err(StoragePlacementError::EditableRowTooLarge);
                 }
@@ -345,10 +339,47 @@ pub fn plan_storage_placement(
         });
     }
 
-    // A path can be valid on this host and still alias a sibling on a
-    // case-insensitive filesystem. Reject the batch before it is published.
-    crate::validate_portable_paths(&editable_paths)
-        .map_err(|_| StoragePlacementError::PathCollision)?;
+    let requested_paths: Vec<_> = decisions
+        .iter()
+        .filter_map(|decision| decision.editable_path.as_ref())
+        .collect();
+    if placement_paths_collide(&requested_paths) {
+        if preference == StoragePreference::Automatic
+            && new_row_placement == PhysicalPlacement::Editable
+        {
+            let existing_paths: Vec<_> = decisions
+                .iter()
+                .filter(|decision| decision.action != PlacementAction::Insert)
+                .filter_map(|decision| decision.editable_path.as_ref())
+                .collect();
+            if placement_paths_collide(&existing_paths) {
+                return Err(StoragePlacementError::PathCollision);
+            }
+
+            // The reference requires every path to be valid for automatic
+            // editable placement but does not spell out batch path aliases.
+            // Treat a collectively colliding insert set as an automatic
+            // compact fallback; existing editable rows retain their placement.
+            new_row_placement = PhysicalPlacement::Compact;
+            reason = PlacementReason::AutomaticUnrepresentablePath;
+            for decision in &mut decisions {
+                if decision.action == PlacementAction::Insert {
+                    decision.placement = PhysicalPlacement::Compact;
+                    decision.editable_path = None;
+                }
+            }
+        } else {
+            return Err(StoragePlacementError::PathCollision);
+        }
+    }
+
+    let remaining_paths: Vec<_> = decisions
+        .iter()
+        .filter_map(|decision| decision.editable_path.as_ref())
+        .collect();
+    if placement_paths_collide(&remaining_paths) {
+        return Err(StoragePlacementError::PathCollision);
+    }
 
     Ok(PlacementPlan {
         preference,
@@ -357,6 +388,14 @@ pub fn plan_storage_placement(
         reason,
         decisions,
     })
+}
+
+fn placement_paths_collide(paths: &[&LoosePath]) -> bool {
+    let mut exact_paths = BTreeSet::new();
+    if paths.iter().any(|path| !exact_paths.insert(*path)) {
+        return true;
+    }
+    crate::validate_portable_paths(paths.iter().copied()).is_err()
 }
 
 /// One canonical row included in a full placement rewrite.
