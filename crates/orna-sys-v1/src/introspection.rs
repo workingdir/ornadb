@@ -713,8 +713,9 @@ impl PlanNode {
     }
 
     /// Returns this operator's estimated work when all inputs for that local
-    /// estimate are known. `Some(0)` is a measured zero estimate; `None` means
-    /// the planner could not compute the contribution.
+    /// estimate are known. `Some(0)` is a known zero estimate; `None` means
+    /// required inputs were unavailable or exact arithmetic overflowed. The
+    /// latter case is identified by `details["estimated_work_overflow"]`.
     pub fn estimated_work(&self) -> Option<u64> {
         match self.details.get("estimated_work") {
             Some(PlanDetail::Integer(work)) => Some(*work),
@@ -903,10 +904,17 @@ pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, Expl
             .rows
             .zip(right_cardinality.rows)
             .and_then(|(left, right)| left.checked_add(right));
+        let work_overflow = current_cardinality
+            .rows
+            .zip(right_cardinality.rows)
+            .is_some_and(|(left, right)| left.checked_add(right).is_none());
         let mut details = BTreeMap::from([(
             "strategy".to_owned(),
             PlanDetail::Text("hash".to_owned()),
         )]);
+        if work_overflow {
+            record_work_overflow(&mut details);
+        }
         if join.predicate.is_some() {
             details.insert(
                 "selectivity_assumption".to_owned(),
@@ -954,15 +962,19 @@ pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, Expl
         let work = current_cardinality
             .rows
             .and_then(|rows| rows.checked_mul(query.projections.len() as u64));
+        let mut details = BTreeMap::from([(
+            "expressions".to_owned(),
+            PlanDetail::Expressions(query.projections.clone()),
+        )]);
+        if current_cardinality.rows.is_some() && work.is_none() {
+            record_work_overflow(&mut details);
+        }
         current = push_unary(
             &mut operators,
             current,
             PlanNodeKind::Project,
             None,
-            BTreeMap::from([(
-                "expressions".to_owned(),
-                PlanDetail::Expressions(query.projections.clone()),
-            )]),
+            details,
             cardinality,
             work,
         );
@@ -972,7 +984,7 @@ pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, Expl
         // the existing 1.0 logical operator for duplicate elimination.
         let cardinality = scale_cardinality(current_cardinality, 1, 2);
         let work = current_cardinality.rows.and_then(|rows| rows.checked_mul(2));
-        let details = BTreeMap::from([
+        let mut details = BTreeMap::from([
             (
                 "operation".to_owned(),
                 PlanDetail::Text("distinct".to_owned()),
@@ -982,6 +994,9 @@ pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, Expl
                 PlanDetail::Text("0.5_no_histogram".to_owned()),
             ),
         ]);
+        if current_cardinality.rows.is_some() && work.is_none() {
+            record_work_overflow(&mut details);
+        }
         current = push_unary(
             &mut operators,
             current,
@@ -996,15 +1011,19 @@ pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, Expl
     if !query.ordering.is_empty() {
         let cardinality = current_cardinality;
         let work = current_cardinality.rows.and_then(sort_work);
+        let mut details = BTreeMap::from([(
+            "keys".to_owned(),
+            PlanDetail::Ordering(query.ordering.clone()),
+        )]);
+        if current_cardinality.rows.is_some() && work.is_none() {
+            record_work_overflow(&mut details);
+        }
         current = push_unary(
             &mut operators,
             current,
             PlanNodeKind::Sort,
             None,
-            BTreeMap::from([(
-                "keys".to_owned(),
-                PlanDetail::Ordering(query.ordering.clone()),
-            )]),
+            details,
             cardinality,
             work,
         );
@@ -1067,6 +1086,17 @@ pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, Expl
         if let Some(bytes) = mutation.estimated_write_bytes {
             details.insert("write_bytes".to_owned(), PlanDetail::Integer(bytes));
         }
+        let work = mutation_work(
+            mutation.estimated_affected_rows,
+            mutation.estimated_write_bytes,
+        );
+        if mutation
+            .estimated_affected_rows
+            .zip(mutation.estimated_write_bytes)
+            .is_some_and(|(rows, bytes)| rows.checked_add(ceil_div(bytes, 4096)).is_none())
+        {
+            record_work_overflow(&mut details);
+        }
         // `sys.PlanNodeKind` has no mutation variant in 1.0. Preserve the
         // portable vocabulary and identify the table-write operation in details.
         current = push_unary(
@@ -1079,7 +1109,7 @@ pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, Expl
                 rows: mutation.estimated_affected_rows,
                 bytes: mutation.estimated_write_bytes,
             },
-            mutation_work(mutation.estimated_affected_rows, mutation.estimated_write_bytes),
+            work,
         );
         current_cardinality = Cardinality {
             rows: mutation.estimated_affected_rows,
@@ -1090,7 +1120,7 @@ pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, Expl
     }
     if let Some(target) = &query.materialize_into {
         let work = materialize_work(current_cardinality);
-        let details = BTreeMap::from([
+        let mut details = BTreeMap::from([
             (
                 "mode".to_owned(),
                 PlanDetail::Text("write_through".to_owned()),
@@ -1100,6 +1130,13 @@ pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, Expl
                 PlanDetail::Text("evaluate_query".to_owned()),
             ),
         ]);
+        if current_cardinality
+            .rows
+            .zip(current_cardinality.bytes)
+            .is_some_and(|(rows, bytes)| rows.checked_add(ceil_div(bytes, 4096)).is_none())
+        {
+            record_work_overflow(&mut details);
+        }
         current = push_unary(
             &mut operators,
             current,
@@ -1152,6 +1189,13 @@ fn push_scan(
         .rows
         .zip(cardinality.bytes)
         .and_then(|(rows, bytes)| rows.checked_add(ceil_div(bytes, 4096)));
+    if cardinality
+        .rows
+        .zip(cardinality.bytes)
+        .is_some_and(|(rows, bytes)| rows.checked_add(ceil_div(bytes, 4096)).is_none())
+    {
+        record_work_overflow(&mut details);
+    }
     let index = operators.len();
     operators.push(Operator::new(
         PlanNodeKind::Scan,
@@ -1163,6 +1207,15 @@ fn push_scan(
         work,
     ));
     index
+}
+
+// The portable plan has no cost-status field. Keep exact arithmetic overflow
+// distinct from unavailable inputs in node details instead of saturating work.
+fn record_work_overflow(details: &mut BTreeMap<String, PlanDetail>) {
+    details.insert(
+        "estimated_work_overflow".to_owned(),
+        PlanDetail::Boolean(true),
+    );
 }
 
 fn push_unary(
@@ -1502,6 +1555,8 @@ fn build_plan(
         .collect::<Vec<_>>();
 
     let root = references[positions[root_index]].clone();
+    let work_estimates_complete = operators.iter().all(|operator| operator.work.is_some());
+    let mut total_work_overflow = false;
     let mut total_work = Some(0u64);
     let mut nodes = Vec::with_capacity(order.len());
     for (position, index) in order.iter().enumerate() {
@@ -1517,7 +1572,11 @@ fn build_plan(
         // unknown or the exact total overflows, omit only the plan total;
         // known per-node contributions remain available in `details`.
         total_work = match (total_work, operator.work) {
-            (Some(total), Some(work)) => total.checked_add(work),
+            (Some(total), Some(work)) => {
+                let sum = total.checked_add(work);
+                total_work_overflow |= sum.is_none();
+                sum
+            }
             _ => None,
         };
         let mut details = operator.details.clone();
@@ -1541,6 +1600,15 @@ fn build_plan(
             predicate: operator.predicate.clone(),
             details,
         });
+    }
+    if work_estimates_complete && total_work_overflow {
+        // The portable plan has a nullable total but no cost-status field.
+        // Mark an exact aggregation overflow on the root; unknown inputs do
+        // not receive this marker because they are a different estimate edge.
+        nodes[positions[root_index]].details.insert(
+            "estimated_cost_overflow".to_owned(),
+            PlanDetail::Boolean(true),
+        );
     }
     Ok(ExplainedPlan {
         plan: Plan {
