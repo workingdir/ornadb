@@ -11569,6 +11569,20 @@ fn mismatch_query_replay_survives_colliding_eval_completion() {
                 && status.fingerprint == target_fingerprint
     ));
 
+    // Even after repeated different-input rejections, exact replay of the
+    // terminal fixture Eval returns its original result without reexecution.
+    let exact_terminal_replay = block_on(host.dispatch_frame(
+        [6; 16],
+        7,
+        Frame::Binary(target_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the exact terminal Eval still replays after mismatch retries");
+    assert_eq!(exact_terminal_replay, target_result);
+    assert_eq!(application.calls, 0);
+
     let fresh_status_query = Envelope {
         request: Some([93; 16]),
         watch: None,
@@ -11582,7 +11596,7 @@ fn mismatch_query_replay_survives_colliding_eval_completion() {
     .unwrap();
     let terminal_status = block_on(host.dispatch_frame(
         [6; 16],
-        7,
+        8,
         Frame::Binary(fresh_status_query),
         &mut application,
     ))
