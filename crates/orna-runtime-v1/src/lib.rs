@@ -20304,6 +20304,46 @@ mod tests {
             "a left projection failure stops the right sibling before its effects"
         );
 
+        // Taking across an ordered union consumes the left prefix before the
+        // right branch; bounded results must leave later right-side failures latent.
+        let (union_take_one, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-union-project-take-one.orna"),
+        );
+        assert_eq!(
+            union_take_one.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!((lookups, scans), (1, 1), "take(1) never enters the right sibling");
+
+        let (union_take_two, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-union-project-take-two.orna"),
+        );
+        assert_eq!(
+            union_take_two.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(2u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "take(2) crosses into only the first right-side projection"
+        );
+
+        let (union_take_three, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-union-project-take-three.orna"),
+        );
+        assert_eq!(
+            union_take_three.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "take(3) reaches and reports the later right-side projection failure"
+        );
+
         let (missing, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
             include_str!("../tests/fixtures/query-session-projection-missing.orna"),
