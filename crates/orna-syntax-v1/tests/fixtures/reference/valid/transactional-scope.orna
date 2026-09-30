@@ -1,0 +1,6 @@
+pub fn create_order(customer: Customer) {
+    let order = Order.insert({ customer: customer, created: now() });
+    Payment.insert({ order: order, amount: 10.GBP });
+    Audit.insert({ action: "created", order: order });
+    order
+}

@@ -1,0 +1,6 @@
+pub fn main() =
+    std.concurrent.parallel([
+        mail.google.sync,
+        finance.openbanking.sync,
+        vehicle.corsa.freematics.sync,
+    ]);

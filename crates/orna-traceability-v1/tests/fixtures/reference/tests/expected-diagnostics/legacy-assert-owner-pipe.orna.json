@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-assert-owner-pipe.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "ORNA-A091-002",
+  "message_contains": "remove the repeated table owner before the assertion predicate",
+  "status": "expected-not-executed"
+}

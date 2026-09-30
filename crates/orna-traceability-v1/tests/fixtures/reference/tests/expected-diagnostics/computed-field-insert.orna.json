@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/computed-field-insert.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E3010",
+  "message_contains": "computed field `full_name` cannot be supplied during insert",
+  "status": "expected-not-executed"
+}

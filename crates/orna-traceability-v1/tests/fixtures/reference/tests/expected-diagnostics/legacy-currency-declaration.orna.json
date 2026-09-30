@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-currency-declaration.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "ORNA091-E-CURRENCY",
+  "message_contains": "declare an ordinary nominal type with a nested Currency implementation",
+  "status": "expected-not-executed"
+}

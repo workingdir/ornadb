@@ -77,10 +77,6 @@ fn executes_final_scenario_batch_and_dispositions_all_144_entries() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_orna-conformance"))
         .args(["--profile", "bounded-expression-runtime"])
-        .env(
-            "ORNA_REFERENCE_DIR",
-            "/home/pbox/dev/ornadb/reference/Orna-1.0.0",
-        )
         .output()
         .expect("bounded conformance runner starts");
     let cli_exit_code = output.status.code().expect("runner exits normally");
