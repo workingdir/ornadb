@@ -3370,6 +3370,84 @@ mod tests {
     }
 
     #[test]
+    fn nested_pin_prefix_sibling_closure_survives_exact_primary_alias_collision() {
+        let app_source = include_str!("../tests/fixtures/attached-incompatible-main.orna");
+        let shared_source = include_str!("../tests/fixtures/attached-equivalent-main.orna");
+        let (app_dir, app_repository, _) = repository(app_source);
+        let (shared_dir, shared_repository, shared_base_commit) = repository(shared_source);
+
+        let shared_closure_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive {shared_base_commit}\n"),
+        );
+        let app_commit = write_commit(
+            app_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive {shared_closure_commit}\narchive_copy {shared_closure_commit}\n"),
+        );
+
+        let loader = ProjectLoader::default();
+        let app = PinnedDatabase::resolve(
+            "app",
+            app_repository.clone(),
+            &app_commit,
+            loader,
+        )
+        .unwrap();
+        let resolver = PackageResolver::new(
+            [
+                ("app".to_owned(), app_repository),
+                ("archive".to_owned(), shared_repository.clone()),
+                ("archive_copy".to_owned(), shared_repository),
+            ],
+            loader,
+        )
+        .unwrap();
+
+        let root_session = resolver.resolve_for_parent(app).unwrap();
+        let archive = root_session.database("archive").unwrap().clone();
+        let archive_copy = root_session.database("archive_copy").unwrap().clone();
+        assert_eq!(archive.pin().commit(), archive_copy.pin().commit());
+        assert_eq!(archive.pin().commit().as_str(), shared_closure_commit);
+        assert_ne!(archive.pin(), archive_copy.pin());
+
+        // The reference fixes the shared exact snapshot but leaves name
+        // collision behavior open. V1 compares complete aliases: `archive`
+        // collides with that primary while `archive_copy` remains independent.
+        assert!(matches!(
+            resolver.resolve_for_parent(archive),
+            Err(AttachmentError::DuplicateAttachment)
+        ));
+        let copy_closure = resolver.resolve_for_parent(archive_copy).unwrap();
+        assert_eq!(copy_closure.primary().pin().name(), "archive_copy");
+        assert_eq!(
+            copy_closure.primary().pin().commit().as_str(),
+            shared_closure_commit
+        );
+        assert_eq!(copy_closure.attached().count(), 1);
+        let archive_child = copy_closure.database("archive").unwrap();
+        assert_eq!(archive_child.pin().commit().as_str(), shared_base_commit);
+        assert_ne!(archive_child.pin(), copy_closure.primary().pin());
+        assert!(copy_closure.units_structurally_equivalent(
+            "archive_copy", "meter", "archive", "meter"
+        ));
+        assert_eq!(
+            root_session.database("archive").unwrap().pin().commit().as_str(),
+            shared_closure_commit
+        );
+        assert_eq!(
+            root_session
+                .database("archive_copy")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            shared_closure_commit
+        );
+    }
+
+    #[test]
     fn equivalent_units_interoperate_across_attachments_but_name_match_is_not_enough() {
         let primary_source = include_str!("fixtures/attached-primary-main.orna");
         let (_primary_dir, primary_repository, primary_commit) = repository(&primary_source);
