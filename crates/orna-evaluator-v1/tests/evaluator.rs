@@ -3286,11 +3286,11 @@ fn std_collection_first_returns_only_the_head_of_a_finite_list() {
     for (expression, expected) in [
         (
             include_str!("fixtures/evaluator_source_17712d6ff995e8f8.orna"),
-            Value::int(0.into()),
+            Value::option(Some(Value::int(0.into()))).unwrap(),
         ),
         (
             include_str!("fixtures/evaluator_source_07a8406e20b1d251.orna"),
-            Value::int(1.into()),
+            Value::option(Some(Value::int(1.into()))).unwrap(),
         ),
         (
             include_str!("fixtures/evaluator_source_2d2b18fe280307a5.orna"),
@@ -3298,19 +3298,19 @@ fn std_collection_first_returns_only_the_head_of_a_finite_list() {
         ),
         (
             include_str!("fixtures/evaluator_source_740be6f753e31180.orna"),
-            Value::int(3.into()),
+            Value::option(Some(Value::int(3.into()))).unwrap(),
         ),
         (
             include_str!("fixtures/evaluator_source_8ec13e149b873c82.orna"),
-            Value::int(4.into()),
+            Value::option(Some(Value::int(4.into()))).unwrap(),
         ),
         (
             include_str!("fixtures/evaluator_source_c7d672edd6d3968a.orna"),
-            Value::int(7.into()),
+            Value::option(Some(Value::int(7.into()))).unwrap(),
         ),
         (
             include_str!("fixtures/evaluator_source_fc1ead4f7d1e57c2.orna"),
-            Value::int(8.into()),
+            Value::option(Some(Value::int(8.into()))).unwrap(),
         ),
     ] {
         assert_eq!(
@@ -3326,7 +3326,7 @@ fn std_collection_first_returns_only_the_head_of_a_finite_list() {
             Limits::default(),
         )
         .unwrap(),
-        Value::int(10.into())
+        Value::option(Some(Value::int(10.into()))).unwrap()
     );
 }
 

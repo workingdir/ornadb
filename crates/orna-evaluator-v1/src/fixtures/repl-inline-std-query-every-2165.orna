@@ -1,0 +1,1 @@
+std.query.every([1, 2], value => value > 0)
