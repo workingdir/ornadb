@@ -522,7 +522,7 @@ async fn as_of_pins_stay_exact_across_generation_encoding_boundaries() {
 }
 
 #[tokio::test]
-async fn retained_pins_cross_the_small_integer_generation_boundary() {
+async fn retained_pins_cross_generation_encoding_boundaries() {
     let (_directory, repository) = repository();
     let identity = RuntimeIdentity {
         database_id: [42; 16],
@@ -534,15 +534,13 @@ async fn retained_pins_cross_the_small_integer_generation_boundary() {
     let writer = state.acquire_lease([45; 16]).await.expect("acquire writer");
     let mut pins = Vec::new();
 
-    for generation in 1..=24_u64 {
-        commit(
-            &state,
-            writer,
-            &[table_mutation(generation as u8, 1, Some(b"steady"))],
-            55,
-        )
-        .await;
-        if matches!(generation, 23 | 24) {
+    for generation in 1..=256_u64 {
+        let mut mutation_id = [0; 16];
+        mutation_id[8..].copy_from_slice(&generation.to_be_bytes());
+        let mutation = TableMutation::new(mutation_id, "records", vec![1], Some(b"steady".to_vec()))
+            .expect("valid generation-specific table mutation");
+        commit(&state, writer, &[mutation], 55).await;
+        if matches!(generation, 23 | 24 | 255 | 256) {
             let selected = state
                 .select_historical_snapshot(generation)
                 .await
@@ -555,17 +553,25 @@ async fn retained_pins_cross_the_small_integer_generation_boundary() {
         }
     }
 
-    assert_eq!(pins.len(), 2);
     assert_eq!(
-        pins[0].2.capture().generation_digest(),
-        pins[1].2.capture().generation_digest(),
-        "the neighboring generations deliberately share a payload digest"
+        pins.iter().map(|(generation, _, _)| *generation).collect::<Vec<_>>(),
+        [23, 24, 255, 256]
     );
-    assert_ne!(
-        pins[0].2.snapshot_id(),
-        pins[1].2.snapshot_id(),
-        "snapshot identity follows the generation coordinate at the 23/24 boundary"
+    assert!(
+        pins.windows(2).all(|pair| {
+            pair[0].2.capture().generation_digest() == pair[1].2.capture().generation_digest()
+        }),
+        "all boundary generations deliberately share a payload digest"
     );
+    for pair in pins.windows(2) {
+        assert_ne!(
+            pair[0].2.snapshot_id(),
+            pair[1].2.snapshot_id(),
+            "snapshot IDs remain distinct at generations {} and {}",
+            pair[0].0,
+            pair[1].0
+        );
+    }
 
     for (generation, descriptor, selected) in &pins {
         let resolved = state
