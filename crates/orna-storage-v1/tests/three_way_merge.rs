@@ -7410,25 +7410,26 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
             one_sided_full_base_reset_tail_id.clone(),
             full_checkpoint.clone(),
         );
-        // Mirror the one-sided reset with the existing reset orientation so
-        // the final stable ID is covered on both Left and Right.
+        // Keep the final one-sided reset opposite the terminal conflict's
+        // reset branch. The reference leaves this shared tail traversal open,
+        // so cover both cross-branch orientations at the stable final ID.
         if reset_left {
             left.checkpoints.insert(
                 one_sided_full_base_reset_tail_id.clone(),
-                reset_fixture.clone(),
+                full_checkpoint.clone(),
             );
             right.checkpoints.insert(
                 one_sided_full_base_reset_tail_id.clone(),
-                full_checkpoint.clone(),
+                reset_fixture.clone(),
             );
         } else {
             left.checkpoints.insert(
                 one_sided_full_base_reset_tail_id.clone(),
-                full_checkpoint.clone(),
+                reset_fixture.clone(),
             );
             right.checkpoints.insert(
                 one_sided_full_base_reset_tail_id.clone(),
-                reset_fixture.clone(),
+                full_checkpoint.clone(),
             );
         }
 
