@@ -310,6 +310,131 @@ fn annotation_metadata_and_generated_inventory_fail_closed() {
 }
 
 #[test]
+fn schema_type_graph_rejects_dangling_and_misaligned_inventory_edges() {
+    let generated: Value = serde_json::from_str(&orna_sys_v1::system_api_json()).unwrap();
+    build_support::validate_api_document(&generated).expect("published type graph is closed");
+
+    let mut dangling_nested_field = generated.clone();
+    let argument = dangling_nested_field["value_types"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|value_type| value_type["name"] == "sys.Argument")
+        .unwrap();
+    argument["fields"][1]["type"] = serde_json::json!("sys.MissingType?");
+    let error = build_support::validate_api_document(&dangling_nested_field).unwrap_err();
+    assert!(
+        error.contains("unresolved system API type `sys.MissingType`"),
+        "supporting value-type fields must resolve through the shared inventory: {error}"
+    );
+
+    let mut missing_singleton_type = generated.clone();
+    let value_types = missing_singleton_type["value_types"].as_array_mut().unwrap();
+    let index = value_types
+        .iter()
+        .position(|value_type| value_type["name"] == "sys.DatabaseView")
+        .unwrap();
+    value_types.remove(index);
+    missing_singleton_type["counts"]["value_types"] = serde_json::json!(value_types.len());
+    let error = build_support::validate_api_document(&missing_singleton_type).unwrap_err();
+    assert!(
+        error.contains("unresolved system API type `sys.DatabaseView`"),
+        "singleton type references must resolve to supporting type declarations: {error}"
+    );
+
+    let mut dangling_generic_result = generated.clone();
+    let history = dangling_generic_result["functions"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|function| function["name"] == "sys.history(ObjectRef)")
+        .unwrap();
+    history["signature"] = serde_json::json!(
+        "fn sys.history(object: sys.ObjectRef): Relation<sys.MissingRow>"
+    );
+    let error = build_support::validate_api_document(&dangling_generic_result).unwrap_err();
+    assert!(
+        error.contains("unresolved system API type `sys.MissingRow`"),
+        "generic function results must resolve their nested row type: {error}"
+    );
+
+    let mut dangling_enum_default = generated.clone();
+    dangling_enum_default["enums"]["sys.DiffScope"] = serde_json::json!(["semantic", "source", "rows", "storage"]);
+    let error = build_support::validate_api_document(&dangling_enum_default).unwrap_err();
+    assert!(
+        error.contains("references unknown `sys.DiffScope.all`"),
+        "function defaults must retain their closed-enum variants: {error}"
+    );
+
+    let mut mismatched_alias_target = generated.clone();
+    let database_ref = mismatched_alias_target["reference_aliases"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|alias| alias["name"] == "sys.DatabaseRef")
+        .unwrap();
+    database_ref["target"] = serde_json::json!("sys.Snapshot");
+    let error = build_support::validate_api_document(&mismatched_alias_target).unwrap_err();
+    assert!(
+        error.contains("definition does not reference its target `sys.Snapshot`"),
+        "reference aliases must keep their definition and target aligned: {error}"
+    );
+
+    let mut broken_relation_reference = generated.clone();
+    let database = broken_relation_reference["relations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|relation| relation["name"] == "sys.Database")
+        .unwrap();
+    database["reference_type"] = serde_json::json!("sys.SnapshotRef");
+    let error = build_support::validate_api_document(&broken_relation_reference).unwrap_err();
+    assert!(
+        error.contains("must be its matching reference alias"),
+        "a canonical relation must use its own reference alias: {error}"
+    );
+
+    let mut broken_nested_key = generated;
+    let diff_entry = broken_nested_key["relations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|relation| relation["name"] == "sys.DiffEntry")
+        .unwrap();
+    diff_entry["key_fields"][2] = serde_json::json!("change.unknown");
+    let error = build_support::validate_api_document(&broken_nested_key).unwrap_err();
+    assert!(
+        error.contains("cannot resolve field path `change.unknown`"),
+        "nested key paths must resolve at every record hop: {error}"
+    );
+
+    let mut colliding_type_name: Value =
+        serde_json::from_str(&orna_sys_v1::system_api_json()).unwrap();
+    let alias = colliding_type_name["reference_aliases"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|alias| alias["name"] == "sys.DatabaseRef")
+        .unwrap();
+    alias["name"] = serde_json::json!("sys.Database");
+    let error = build_support::validate_api_document(&colliding_type_name).unwrap_err();
+    assert!(
+        error.contains("is declared by both `relations` and `reference_aliases`"),
+        "type names must be unique across published inventories: {error}"
+    );
+
+    let mut dangling_replacement: Value =
+        serde_json::from_str(&orna_sys_v1::system_api_json()).unwrap();
+    dangling_replacement["removed_names"]["sys.runtime"]["replacement"] =
+        serde_json::json!("sys.unknown");
+    let error = build_support::validate_api_document(&dangling_replacement).unwrap_err();
+    assert!(
+        error.contains("has unresolved replacement `sys.unknown`"),
+        "removed names must point at a live public replacement: {error}"
+    );
+}
+
+#[test]
 fn erased_invoke_and_start_labels_require_matching_generic_tails() {
     let mut generated: Value = serde_json::from_str(&orna_sys_v1::system_api_json()).unwrap();
     build_support::validate_api_document(&generated).expect("published overload pairs are valid");
@@ -376,6 +501,24 @@ fn in_crate_orna_fixture_uses_a_published_collected_api_signature() {
     );
     assert!(api["value_types"].as_array().unwrap().iter().any(|value_type| {
         value_type["name"] == "sys.ValueMetadata<T>"
+    }));
+    assert!(SYSTEM_API_FIXTURE.contains(
+        "pub fn diff_entries(from: sys.SnapshotRef, to: sys.SnapshotRef): Relation<sys.DiffEntry>"
+    ));
+    let diff = api["functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|function| function["name"] == "sys.diff")
+        .expect("collected diff function");
+    assert_eq!(
+        diff["signature"],
+        "fn sys.diff(from: sys.SnapshotRef, to: sys.SnapshotRef, scope: sys.DiffScope = sys.DiffScope.all): Relation<sys.DiffEntry>"
+    );
+    assert!(api["relations"].as_array().unwrap().iter().any(|relation| {
+        relation["name"] == "sys.DiffEntry"
+            && relation["reference_type"] == "sys.DiffEntryRef"
+            && relation["key_fields"][2] == "change.area"
     }));
     for (label, signature) in [
         (
