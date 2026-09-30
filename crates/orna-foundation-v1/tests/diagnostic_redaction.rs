@@ -285,6 +285,51 @@ fn local_trust_stays_on_root_across_cause_composition_orders() {
 }
 
 #[test]
+fn explicit_redaction_revokes_admission_before_clone_composition() {
+    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let admitted = Diagnostic::new(
+        SafeText::new("ORNA-E-REVOKED-ROOT").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .with_note(SafeText::new(fixture).unwrap())
+    .redacted_with_message(SafeText::new(fixture).unwrap());
+
+    // Revoking one clone must also prevent its still-admitted sibling from
+    // disclosing when that sibling is later composed as a cause.
+    let revoked = admitted
+        .clone()
+        .redacted()
+        .with_note(SafeText::new(fixture).unwrap())
+        .with_cause(admitted);
+    let envelope = serde_json::json!({"diagnostics": [revoked.clone()]});
+    let json = serde_json::to_vec(&envelope).unwrap();
+    let projection = &envelope["diagnostics"][0];
+
+    assert_eq!(projection["message"], "<redacted>");
+    assert_eq!(projection["notes"][0], "<redacted>");
+    assert_eq!(projection["redacted"], true);
+    assert_eq!(projection["causes"][0]["message"], "<redacted>");
+    assert_eq!(projection["causes"][0]["notes"][0], "<redacted>");
+    assert!(
+        !json
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+
+    let encoded = revoked.encode_ovb().unwrap();
+    assert!(
+        !encoded
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    assert_eq!(decoded["causes"][0]["message"], "<redacted>");
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);

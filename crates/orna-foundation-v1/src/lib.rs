@@ -1402,6 +1402,7 @@ impl Diagnostic {
             .for_each(|note| *note = SafeText::redacted());
         self.causes = self.causes.into_iter().map(Diagnostic::redacted).collect();
         self.redacted = true;
+        // Explicit redaction revokes any earlier local root-message admission.
         self.root_message_admitted = false;
         self
     }
