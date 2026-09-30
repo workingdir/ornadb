@@ -51,3 +51,9 @@ updates attached to those owners. ORNA-MUT-005/006 are silent on this competitio
 between caught retries, so this proof follows evaluation order: the successful
 claim owns the freed key until its later re-key. This remains adapter behavior,
 not a new language-level guarantee.
+
+`returned_source_delete_competitor_deletion_allows_final_retry` covers the
+matching delete edge: the source that claims the returned key is deleted while
+blocking the final retry, after which the retry takes the freed key. Its fixture
+asserts the complete log, including the competitor deletion and final source
+re-key under the same evaluation-order choice.
