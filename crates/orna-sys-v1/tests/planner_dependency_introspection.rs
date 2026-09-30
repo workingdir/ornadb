@@ -680,6 +680,80 @@ fn explain_estimate_reporting_distinguishes_unknown_zero_and_partial_cost() {
 }
 
 #[test]
+fn explain_total_work_overflow_keeps_known_operator_estimates_in_the_tail() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let half = u64::MAX / 2;
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:work-total-overflow"),
+        source: obj("table:left"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(half),
+            estimated_bytes: Some(0),
+            mutable_branch: None,
+        }),
+        joins: vec![QueryJoinDescription {
+            source: obj("table:right"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(half),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            predicate: None,
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: vec![QueryMutationDescription {
+            table: obj("table:left"),
+            kind: QueryMutationKind::Update,
+            estimated_affected_rows: Some(1),
+            estimated_write_bytes: Some(0),
+            estimated_table_rows_before: Some(17),
+        }],
+        materialize_into: Some(obj("materialization:overflow-proof")),
+    })
+    .expect("bounded plan with overflowing aggregate work");
+
+    assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(explained.root().estimated_work(), Some(1));
+    assert_eq!(explained.plan().estimated_cost(), None);
+    let join = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("join estimate");
+    assert_eq!(join.estimated_work(), Some(u64::MAX - 1));
+    for (table, work) in [("table:left", half), ("table:right", half)] {
+        let scan = explained
+            .nodes()
+            .iter()
+            .find(|node| {
+                node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table))
+            })
+            .expect("scan estimate");
+        assert_eq!(scan.estimated_work(), Some(work));
+    }
+
+    let surface = serde_json::to_value(&explained).expect("structured overflow plan");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_work"], 1);
+    let mutation = surface["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["details"]["mutation"] == "update")
+        .expect("mutation tail");
+    assert_eq!(mutation["details"]["estimated_work"], 1);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
 fn mutation_estimate_edges_keep_unknown_overflow_and_underflow_unfabricated() {
     let explained = explain_query(&QueryPlanDescription {
         snapshot: SnapshotRef::descriptive("snapshot:mutation-estimates"),
