@@ -20,7 +20,13 @@ fn main() {
                 Note.rekey(3, 2);
                 Note.update(2, { quantity: 12 });
                 Note.rekey(4, 3);
-                Note.update(3, { quantity: 23 })
+                Note.update(3, { quantity: 23 });
+                Note.rekey(3, 2) |? (competitor_retries_after_owner_reclaims_key => {
+                    Note.rekey(2, 4);
+                    Note.rekey(3, 2);
+                    Note.rekey(4, 3);
+                    Note.update(3, { quantity: 13 })
+                })
             })
         })
     })
