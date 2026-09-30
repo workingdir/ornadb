@@ -1181,6 +1181,108 @@ fn explain_partial_write_lower_bounds_accumulate_through_unknown_tails() {
 }
 
 #[test]
+fn explain_mixed_partial_write_bounds_accumulate_across_unknown_tail() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_with_final_bytes = |write_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:mixed-partial-write-bound-tail"),
+            source: obj("table:large"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 2),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(0),
+                    estimated_write_bytes: Some(0),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Insert,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Delete,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: Some(write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+            ],
+            materialize_into: Some(obj("materialization:mixed-partial-tail")),
+        })
+        .expect("mixed partial write bounds around an unknown mutation")
+    };
+
+    // The known scan subtotal plus a one-row lower bound and one 4 KiB
+    // write-block lower bound reaches MAX exactly; the nullable plan cost
+    // remains absent because these mutation estimates are still partial.
+    let exact = explain_with_final_bytes(4_096);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let partial_insert = exact
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("insert".to_owned())))
+        .expect("row-bounded partial insert");
+    assert_eq!(partial_insert.estimated_rows(), Some(1));
+    assert_eq!(partial_insert.estimated_bytes(), None);
+    assert_eq!(partial_insert.estimated_work(), None);
+    let unknown_update = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+                && node.estimated_rows().is_none()
+        })
+        .expect("unknown estimate between partial writes");
+    assert_eq!(unknown_update.estimated_work(), None);
+    let partial_delete = exact
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned())))
+        .expect("byte-bounded partial delete");
+    assert_eq!(partial_delete.estimated_rows(), None);
+    assert_eq!(partial_delete.estimated_bytes(), Some(4_096));
+    assert_eq!(partial_delete.estimated_work(), None);
+
+    let overflow = explain_with_final_bytes(4_097);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the rounded byte lower bound combines with the row lower bound across an unknown tail"
+    );
+    let surface = serde_json::to_value(&overflow).expect("mixed-bound overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
 fn explain_cost_overflow_survives_unknown_intermediate_estimates() {
     let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
