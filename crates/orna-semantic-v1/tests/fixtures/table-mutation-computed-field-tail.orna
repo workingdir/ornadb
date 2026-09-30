@@ -1,0 +1,4 @@
+fn change() {
+    Person.update("a", { name: "updated" });
+    Person.update("a", { label: "caller supplied" });
+}
