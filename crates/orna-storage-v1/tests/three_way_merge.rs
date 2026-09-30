@@ -4121,9 +4121,31 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         assert!(report.affected_checkpoints.contains(tail_id.as_slice()));
 
         // A terminal fixture conflict after the two retained details proves
-        // the capped scan still closes the tail and reports its lower bound.
+        // the checkpoint cap still closes after exact row-budget tombstone
+        // and changed-empty-suffix scans.
         let (mut base, mut left, mut right, mut source, agreed_delete_id, unchanged_delete_id, checkpoint_id, tail_id) =
             build_inputs(row_delete_on_left, checkpoint_delete_on_left, true, regular_checkpoint_fixtures);
+        let mut ordered_keys = [integer(10), integer(20), integer(30)];
+        ordered_keys.sort_by_key(|key| key.encode().unwrap());
+        let suffix_boundary = ordered_keys[2].encode().unwrap();
+        let tombstone_range = KeyRange::new(high_range.start.clone(), Some(suffix_boundary.clone())).unwrap();
+        let suffix_range = KeyRange::new(Some(suffix_boundary), None).unwrap();
+        for (snapshot, locator, digest) in [
+            (&mut base, b"base-empty-suffix".as_slice(), 90),
+            (&mut left, b"left-empty-suffix".as_slice(), 91),
+            (&mut right, b"right-empty-suffix".as_slice(), 92),
+        ] {
+            let manifest = snapshot.tables.get_mut(&id(1)).unwrap();
+            manifest.segments[1].range = tombstone_range.clone();
+            manifest.segments.push(RowSegmentManifest {
+                locator: locator.to_vec(),
+                range: suffix_range.clone(),
+                digest: [digest; 32],
+            });
+        }
+        source.add(MergeSide::Base, b"base-empty-suffix", Vec::new());
+        source.add(MergeSide::Left, b"left-empty-suffix", Vec::new());
+        source.add(MergeSide::Right, b"right-empty-suffix", Vec::new());
         let final_tail_id = b"consumer/zz-final-tail-conflict".to_vec();
         base.checkpoints.insert(final_tail_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_BASE));
         left.checkpoints.insert(final_tail_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_LEFT));
@@ -4133,7 +4155,7 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
             &left,
             &right,
             &mut source,
-            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 2 },
+            BranchMergeBudget { max_rows_examined: 2, max_conflicts: 2 },
         )
         .unwrap_err();
         let BranchMergeError::BudgetExceeded { report } = error else {
@@ -4141,16 +4163,25 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         };
         assert_eq!(report.conflicts_lower_bound, 3);
         assert_eq!(report.rows_examined, 2);
-        assert_eq!(report.affected_ranges.len(), 1);
-        assert!(report.affected_ranges.contains(&(id(1), high_range.clone())));
+        assert_eq!(report.affected_ranges.len(), 2);
+        assert!(report.affected_ranges.contains(&(id(1), tombstone_range)));
+        assert!(report.affected_ranges.contains(&(id(1), suffix_range)));
         assert_eq!(report.affected_checkpoints.len(), 3);
         assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
         assert!(report.affected_checkpoints.contains(tail_id.as_slice()));
         assert!(report.affected_checkpoints.contains(final_tail_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(agreed_delete_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(unchanged_delete_id.as_slice()));
-        assert_eq!(source.visited.len(), 3);
-        assert!(source.visited.iter().all(|(_, locator)| locator.ends_with(b"upper")));
+        assert_eq!(source.visited.len(), 6);
+        assert!(source.visited[..3].iter().all(|(_, locator)| locator.ends_with(b"upper")));
+        assert_eq!(
+            &source.visited[3..],
+            &[
+                (MergeSide::Base, b"base-empty-suffix".to_vec()),
+                (MergeSide::Left, b"left-empty-suffix".to_vec()),
+                (MergeSide::Right, b"right-empty-suffix".to_vec()),
+            ]
+        );
 
         // ORNA-MERGE-011 requires divergent opaque checkpoints to conflict,
         // but is silent on position resets and cursorless presence. Snapshot
