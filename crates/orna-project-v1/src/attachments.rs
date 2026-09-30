@@ -454,8 +454,8 @@ impl AttachedDatabaseSession {
     /// write logs are atomic. V1 deliberately returns overlapping row paths
     /// from every alias without deduplicating them; consumers keep the alias
     /// and commit with each row and decide how their query treats that overlap.
-    /// Aliases are exact names, so a prefix never selects or replaces a longer
-    /// alias; an attached `app_copy` remains distinct from primary `app`.
+    /// Aliases are exact names, so prefix overlap never selects or replaces a
+    /// different route; attached `app` and primary `app_copy` remain distinct.
     pub fn relation_sources<'a>(
         &'a self,
         table_path: &str,
