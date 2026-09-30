@@ -926,6 +926,51 @@ fn positive_factor_subnanosecond_tails_rescale_through_duration_edges() {
 }
 
 #[test]
+fn positive_factor_subnanosecond_tails_rescale_across_the_second_minute_edge() {
+    // The reference is silent on rescaling subnanosecond-derived minute tails.
+    // Carry the exact 3 ns tail through one more doubling to pin the 6 ns edge
+    // immediately below and above two minutes.
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
+    ] {
+        assert_eq!(session.submit(source), Ok(None), "{source}");
+    }
+
+    for (source, expected) in [
+        (
+            include_str!("fixtures/stdlib-time-duration-factor-rescaled-second-minute-before-mtdzz.orna"),
+            texts(&[
+                "1m 59.999999994s",
+                "00:01:59.999999994",
+                "1 minute, 59.999999994 seconds",
+                "PT1M59.999999994S",
+            ]),
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-factor-rescaled-second-minute-after-mtdzz.orna"),
+            texts(&[
+                "2m 0.000000006s",
+                "00:02:00.000000006",
+                "2 minutes, 0.000000006 seconds",
+                "PT2M0.000000006S",
+            ]),
+        ),
+    ] {
+        let result = session.submit(source);
+        assert_eq!(
+            result,
+            Ok(Some(expected)),
+            "{source}; diagnostic={}",
+            result.as_ref().err().map_or("none", |error| error.code())
+        );
+    }
+}
+
+#[test]
 fn clock_output_bound_keeps_elapsed_hours_and_fractional_tail() {
     let limits = Limits {
         max_string_bytes: 129,
