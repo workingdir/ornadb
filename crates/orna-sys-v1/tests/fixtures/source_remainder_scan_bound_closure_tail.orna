@@ -1,0 +1,3 @@
+pub table SourceRemainderBoundSource(id: Int) { value: Int, }
+pub table SourceRemainderBoundRows(id: Int) { value: Int, }
+pub table SourceRemainderBoundUnknown(id: Int) { value: Int, }
