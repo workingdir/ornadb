@@ -665,7 +665,7 @@ fn checkpoint_delete_update_budget_tail_reports_identity_for_either_deleted_side
 #[test]
 fn positionless_delete_update_conflict_keeps_impact_at_shared_budget_tail() {
     for delete_on_left in [true, false] {
-        for max_conflicts in [1, 2] {
+        for max_conflicts in [0, 1, 2] {
             let (mut base, mut left, mut right, mut source) = row_checkpoint_conflict_inputs();
             base.checkpoints.clear();
             left.checkpoints.clear();
@@ -684,8 +684,9 @@ fn positionless_delete_update_conflict_keeps_impact_at_shared_budget_tail() {
                 .checkpoints
                 .insert(checkpoint_id.clone(), advanced_positionless.clone());
 
-            // The fixture row conflict consumes the first detail. At budget 1,
-            // the positionless delete/update conflict crosses the shared tail;
+            // The fixture row conflict is first in the ordered impact stream.
+            // At budget 0 it alone crosses the boundary; at budget 1 the
+            // positionless delete/update conflict crosses the shared tail;
             // budget 2 retains that checkpoint conflict with its full states.
             let error = merge_three_way_snapshots(
                 &base,
@@ -697,6 +698,12 @@ fn positionless_delete_update_conflict_keeps_impact_at_shared_budget_tail() {
             .unwrap_err();
 
             match error {
+                BranchMergeError::BudgetExceeded { report } if max_conflicts == 0 => {
+                    assert_eq!(report.conflicts_lower_bound, 1);
+                    assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+                    assert!(report.affected_checkpoints.is_empty());
+                    assert_eq!(source.visited.len(), 3);
+                }
                 BranchMergeError::BudgetExceeded { report } if max_conflicts == 1 => {
                     assert_eq!(report.conflicts_lower_bound, 2);
                     assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
