@@ -1555,7 +1555,7 @@ fn build_plan(
         .collect::<Vec<_>>();
 
     let root = references[positions[root_index]].clone();
-    let mut total_work_overflow = false;
+    let mut known_work_overflow = false;
     let mut known_work_total = Some(0u64);
     let mut total_work = Some(0u64);
     let mut nodes = Vec::with_capacity(order.len());
@@ -1572,16 +1572,12 @@ fn build_plan(
         // total; if a local estimate is unknown or the exact sum overflows,
         // omit only the plan total and keep known node contributions.
         total_work = match (total_work, operator.work) {
-            (Some(total), Some(work)) => {
-                let sum = total.checked_add(work);
-                total_work_overflow |= sum.is_none();
-                sum
-            }
+            (Some(total), Some(work)) => total.checked_add(work),
             _ => None,
         };
         if let Some(work) = operator.work {
             known_work_total = known_work_total.and_then(|known| known.checked_add(work));
-            total_work_overflow |= known_work_total.is_none();
+            known_work_overflow |= known_work_total.is_none();
         }
         let mut details = operator.details.clone();
         if let Some(work) = operator.work {
@@ -1605,10 +1601,11 @@ fn build_plan(
             details,
         });
     }
-    if total_work_overflow {
+    if known_work_overflow {
         // The portable plan has a nullable total but no cost-status field.
-        // Even when some work is unknown, nonnegative known contributions
-        // alone exceeding u64 prove the total is unrepresentable.
+        // An unknown operator does not erase overflow already proven by the
+        // nonnegative known-work lower bound; later known tails can prove it
+        // too. Preserve the marker even when the displayed total is unknown.
         nodes[positions[root_index]].details.insert(
             "estimated_cost_overflow".to_owned(),
             PlanDetail::Boolean(true),
