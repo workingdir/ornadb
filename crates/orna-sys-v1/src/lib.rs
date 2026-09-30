@@ -24,7 +24,7 @@ use serde::{
     ser::{SerializeSeq, SerializeStruct},
 };
 use sha2::{Digest, Sha256};
-use orna_security_v1::SecretMetadata;
+use orna_security_v1::{SecretMetadata, SecretRef};
 
 mod introspection;
 pub use introspection::{
@@ -300,6 +300,7 @@ pub struct TypedValue {
     static_type: TypeId,
     canonical: Vec<u8>,
     redacted: bool,
+    protected_identity: Option<Vec<u8>>,
 }
 impl fmt::Debug for TypedValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -317,6 +318,7 @@ impl TypedValue {
             static_type,
             canonical: canonical.into(),
             redacted: false,
+            protected_identity: None,
         }
     }
     pub fn protected(static_type: TypeId, canonical: impl Into<Vec<u8>>) -> Self {
@@ -324,6 +326,22 @@ impl TypedValue {
             static_type,
             canonical: canonical.into(),
             redacted: true,
+            protected_identity: None,
+        }
+    }
+    /// Creates a protected value with its stable `SecretRef` identity. The
+    /// reference name may participate in idempotency matching; protected
+    /// canonical bytes never do.
+    pub fn protected_with_secret_ref(
+        static_type: TypeId,
+        canonical: impl Into<Vec<u8>>,
+        reference: &SecretRef,
+    ) -> Self {
+        Self {
+            static_type,
+            canonical: canonical.into(),
+            redacted: true,
+            protected_identity: Some(reference.as_str().as_bytes().to_vec()),
         }
     }
     pub fn static_type(&self) -> &TypeId {
@@ -338,10 +356,20 @@ impl TypedValue {
     pub fn canonical(&self) -> Option<&[u8]> {
         (!self.redacted).then_some(self.canonical.as_slice())
     }
+    fn has_protected_identity(&self) -> bool {
+        self.protected_identity.is_some()
+    }
     fn append_identity(&self, out: &mut Vec<u8>) {
         append(out, self.static_type.as_str().as_bytes());
         out.push(u8::from(self.redacted));
-        append(out, &self.canonical);
+        // Hash only a caller-supplied stable identity for protected values:
+        // a digest of low-entropy plaintext remains dictionary-testable.
+        let identity = if self.redacted {
+            self.protected_identity.as_deref().unwrap_or_default()
+        } else {
+            &self.canonical
+        };
+        append(out, identity);
     }
 }
 
@@ -911,6 +939,7 @@ impl RetainedValue {
             static_type,
             canonical,
             redacted,
+            ..
         } = value;
         Self {
             static_type,
@@ -1029,6 +1058,16 @@ impl Runtime {
         validate_target(&request)?;
         let bound = bind(&request.function, &request.arguments)?;
         validate_execution(&request)?;
+        if request.idempotency_key.is_some()
+            && let Some((name, _)) = bound
+                .entries()
+                .find(|(_, value)| value.is_redacted() && !value.has_protected_identity())
+        {
+            return Err(AdmissionError::ArgumentType {
+                name: name.to_owned(),
+                detail: ArgumentTypeDetail::ProtectedValueNeedsIdentity,
+            });
+        }
         let identity = identity(&request, &bound);
         if let Some(key) = &request.idempotency_key
             && let Some(entry) = self.idempotency.get(key)
@@ -2286,6 +2325,7 @@ fn malformed_completion_failure() -> RetainedInvocationResult {
 pub enum ArgumentTypeDetail {
     Duplicate,
     Mismatch,
+    ProtectedValueNeedsIdentity,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AdmissionError {
@@ -2934,7 +2974,8 @@ mod tests {
         }
 
         let type_id = ty("app.Credential");
-        let value = TypedValue::protected(type_id.clone(), b"do-not-disclose".to_vec());
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let value = TypedValue::protected(type_id.clone(), fixture.as_bytes().to_vec());
         let facts = ValueMetadataFacts::new(
             Some(ty("app.Credential")),
             [ty("protocol.Z"), ty("protocol.A")],
@@ -2962,7 +3003,7 @@ mod tests {
         assert_eq!(value.canonical(), None);
 
         let projection = serde_json::to_vec(&metadata).unwrap();
-        assert!(!String::from_utf8_lossy(&projection).contains("do-not-disclose"));
+        assert!(!String::from_utf8_lossy(&projection).contains(fixture));
 
         let public_value = TypedValue::public(type_id, b"canonical-ovb-bytes".to_vec());
         let canonical_before = public_value.canonical().unwrap().to_vec();
@@ -3200,13 +3241,14 @@ mod tests {
         assert!(runtime.invocations.is_empty());
     }
     #[test]
-    fn protected_argument_identities_remain_private_but_enforce_idempotency() {
+    fn protected_argument_identity_uses_only_explicit_stable_nonsecret_metadata() {
         let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let reference = SecretRef::new("account").unwrap();
         let mut first = request(
             None,
             args(vec![Argument {
                 name: "a".into(),
-                value: TypedValue::protected(ty("Int"), "1234"),
+                value: TypedValue::protected_with_secret_ref(ty("Int"), "secret-one", &reference),
             }]),
         );
         first.idempotency_key = Some("key".into());
@@ -3217,18 +3259,44 @@ mod tests {
         };
         let rendered = format!("{boundary:?}");
         assert!(rendered.contains("InvocationIdentity(<withheld>)"));
-        assert!(!rendered.contains("1234"));
+        assert!(!rendered.contains("secret-one"));
         assert!(!rendered.contains(boundary.identity.0.as_str()));
 
-        let mut different_secret = first;
-        different_secret.arguments = args(vec![Argument {
+        let mut rotated_secret = first;
+        rotated_secret.arguments = args(vec![Argument {
             name: "a".into(),
-            value: TypedValue::protected(ty("Int"), "5678"),
+            value: TypedValue::protected_with_secret_ref(
+                ty("Int"),
+                "rotated-secret",
+                &reference,
+            ),
         }]);
+        assert!(matches!(runtime.admit(rotated_secret), Ok(Admission::Active { .. })));
+    }
+
+    #[test]
+    fn protected_argument_without_safe_identity_is_rejected_for_idempotency() {
+        let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let mut request = request(
+            None,
+            args(vec![Argument {
+                name: "a".into(),
+                value: TypedValue::protected(
+                    ty("Int"),
+                    include_str!("../tests/fixtures/secret-surface.orna").as_bytes(),
+                ),
+            }]),
+        );
+        request.idempotency_key = Some("key".into());
+
         assert!(matches!(
-            runtime.admit(different_secret),
-            Err(AdmissionError::IdempotencyMismatch)
+            runtime.admit(request),
+            Err(AdmissionError::ArgumentType {
+                detail: ArgumentTypeDetail::ProtectedValueNeedsIdentity,
+                ..
+            })
         ));
+        assert!(runtime.invocations.is_empty());
     }
 
     #[test]
@@ -3239,7 +3307,10 @@ mod tests {
             args(vec![
                 Argument {
                     name: "b".into(),
-                    value: TypedValue::protected(ty("Str"), "super-secret"),
+                    value: TypedValue::protected(
+                        ty("Str"),
+                        include_str!("../tests/fixtures/secret-surface.orna").trim().as_bytes(),
+                    ),
                 },
                 Argument {
                     name: "a".into(),
@@ -3285,7 +3356,11 @@ mod tests {
         assert!(metadata[1].redacted);
 
         let rendered = format!("{metadata:?}");
-        assert!(!rendered.contains("super-secret"));
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        assert!(!rendered.contains(fixture));
+        let serialized = serde_json::to_string(&metadata).unwrap();
+        assert!(serialized.contains("\"redacted\":true"));
+        assert!(!serialized.contains(fixture));
         assert!(!format!("{runtime:?}").contains("digest:"));
 
         let projection = runtime
@@ -3302,7 +3377,41 @@ mod tests {
         assert_eq!(projection.arguments()[1].name(), "b");
         assert_eq!(projection.arguments()[1].canonical(), None);
         assert!(projection.arguments()[1].is_redacted());
-        assert!(!format!("{projection:?}").contains("super-secret"));
+        assert!(!format!("{projection:?}").contains(fixture));
+    }
+
+    #[test]
+    fn secret_surface_fixture_stays_redacted_across_sys_value_projections() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let protected = TypedValue::protected(ty("app.Credential"), fixture.as_bytes());
+
+        let arguments = args(vec![Argument {
+            name: "credential".into(),
+            value: protected.clone(),
+        }]);
+        let metadata = arguments.metadata();
+        assert_eq!(metadata[0].canonical(), None);
+        assert!(metadata[0].is_redacted());
+        let json = serde_json::to_string(&metadata).unwrap();
+        assert!(json.contains("\"redacted\":true"));
+        assert!(!json.contains(fixture));
+
+        let retained = RetainedValue::new(protected);
+        assert!(retained.is_redacted());
+        assert_eq!(retained.canonical(), None);
+        assert!(!format!("{retained:?}").contains(fixture));
+
+        let metadata = SecretMetadata::new(
+            orna_security_v1::SecretRef::new("fixture.credential").unwrap(),
+            "sops",
+            true,
+        );
+        let secret_projection = system_secret_projection(&metadata);
+        let json = serde_json::to_string(&secret_projection).unwrap();
+        assert!(json.contains("fixture.credential"));
+        assert!(json.contains("sops"));
+        assert!(json.contains("true"));
+        assert!(!json.contains(fixture));
     }
 
     #[test]
@@ -5207,7 +5316,10 @@ mod tests {
         runtime
             .retain_terminal(
                 &handle,
-                InvocationResult::Success(TypedValue::protected(ty("Str"), "super-secret")),
+                InvocationResult::Success(TypedValue::protected(
+                    ty("Str"),
+                    include_str!("../tests/fixtures/secret-surface.orna").as_bytes(),
+                )),
             )
             .unwrap();
         let state = runtime.invocation_state(&handle).unwrap();
@@ -5216,7 +5328,9 @@ mod tests {
         };
         assert!(value.is_redacted());
         assert_eq!(value.canonical(), None);
-        assert!(!format!("{state:?}").contains("super-secret"));
+        assert!(!format!("{state:?}").contains(include_str!(
+            "../tests/fixtures/secret-surface.orna"
+        )));
     }
     #[test]
     fn serialized_diagnostics_redact_secrets() {
