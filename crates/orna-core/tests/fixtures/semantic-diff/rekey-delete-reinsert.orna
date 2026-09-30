@@ -1,0 +1,9 @@
+pub table Note(id: Int) {
+    text: Str,
+}
+
+fn replace_after_rekey() {
+    Note.rekey(1, 2);
+    Note.delete(2);
+    Note.insert({ id: 1, text: "replacement" });
+}
