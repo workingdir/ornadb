@@ -1,6 +1,6 @@
 use orna_syntax_v1::{
-    Declaration, Expr, Pattern, Statement, SyntaxDiagnostic, parse_expression, parse_module,
-    parse_repl, parse_row,
+    Declaration, Expr, Pattern, Statement, StringSegment, SyntaxDiagnostic, parse_expression,
+    parse_module, parse_repl, parse_row,
 };
 
 fn assert_postfix_question(diagnostics: &[SyntaxDiagnostic], source: &str) {
@@ -463,6 +463,65 @@ fn case_recovery_keeps_nested_case_scrutinee_and_pattern_interpolations_local_at
             body: Expr::Literal { text: body, .. },
             ..
         }] if text == "true" && body == "8"
+    ));
+}
+
+#[test]
+fn recovered_case_keeps_nested_interpolation_cases_as_the_final_tail() {
+    let source = include_str!("fixtures/malformed-case-arm-max-depth-interpolation-final-tail.orna");
+    let parsed = parse_module(source);
+
+    assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+    let diagnostic = &parsed.diagnostics[0];
+    assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+    assert_eq!(diagnostic.message, "expected pattern");
+    let invalid_pattern = source.find("\"layer").expect("fixture has a string pattern");
+    assert_eq!(diagnostic.span.start, invalid_pattern);
+    assert_eq!(diagnostic.span.end, invalid_pattern + 1);
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block { statements, tail, .. } = body else {
+        panic!("expected a function block");
+    };
+    assert!(statements.is_empty(), "{statements:?}");
+    let Some(Expr::Control {
+        arms: outer_arms, ..
+    }) = tail.as_deref()
+    else {
+        panic!("expected a case expression tail, got {tail:?}");
+    };
+    assert_eq!(outer_arms.len(), 1, "{outer_arms:?}");
+
+    let Expr::Control {
+        condition: Some(scrutinee),
+        arms: nested_arms,
+        ..
+    } = &outer_arms[0].body
+    else {
+        panic!("expected the recovered arm body to be a nested case");
+    };
+    assert_eq!(nested_arms.len(), 2, "{nested_arms:?}");
+    assert!(matches!(
+        &nested_arms[1].body,
+        Expr::Literal { text, .. } if text == "8"
+    ));
+
+    let Expr::InterpolatedString { segments, .. } = scrutinee.as_ref() else {
+        panic!("expected an interpolated case scrutinee");
+    };
+    assert!(matches!(
+        segments.as_slice(),
+        [
+            StringSegment::Text { text, .. },
+            StringSegment::Expression {
+                value: Expr::Control { arms, .. },
+                ..
+            }
+        ] if text == "subject "
+            && arms.len() == 2
+            && matches!(&arms[1].body, Expr::Literal { text, .. } if text == "0")
     ));
 }
 
