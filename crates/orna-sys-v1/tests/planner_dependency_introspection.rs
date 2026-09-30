@@ -3697,3 +3697,85 @@ fn explain_closes_max_byte_remainder_at_exact_scan_work_boundary() {
         node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
     }));
 }
+
+#[test]
+fn explain_closes_max_byte_remainder_through_final_write_tail() {
+    let parsed = orna_syntax_v1::parse_module(ROUNDING_TAIL_INTERPLAY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the existing 4-KiB
+    // rule, MAX bytes round to 2^52 blocks; these rows close the scan at MAX.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    let closing_rows = u64::MAX - MAX_BYTE_BLOCKS;
+    let explain_with_write_bytes = |write_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:max-byte-remainder-write-tail"),
+            source: obj("table:RoundingFirst"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(closing_rows),
+                estimated_bytes: Some(u64::MAX),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:RoundingWrite"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(0),
+                estimated_write_bytes: Some(write_bytes),
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: None,
+        })
+        .expect("max-byte scan remainder followed by a final write tail")
+    };
+
+    let exact = explain_with_write_bytes(0);
+    let max_cost = u64::MAX.to_string();
+    assert_eq!(exact.plan().estimated_cost(), Some(max_cost.as_str()));
+    let source_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| node.object() == Some(&obj("table:RoundingFirst")))
+        .expect("max-byte source scan");
+    assert_eq!(source_scan.estimated_work(), Some(u64::MAX));
+    let exact_write = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("zero-byte final write");
+    assert_eq!(exact_write.estimated_bytes(), Some(0));
+    assert_eq!(exact_write.estimated_work(), Some(0));
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+
+    let overflow = explain_with_write_bytes(1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().estimated_work(), Some(1));
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the first rounded write byte exceeds the exact MAX scan subtotal"
+    );
+    let overflow_write = overflow
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("one-byte final write");
+    assert_eq!(overflow_write.estimated_bytes(), Some(1));
+    assert_eq!(overflow_write.estimated_work(), Some(1));
+    let surface = serde_json::to_value(&overflow).expect("rounded final write surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
