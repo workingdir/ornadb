@@ -2184,6 +2184,158 @@ mod tests {
     }
 
     #[test]
+    fn nested_pin_cycle_keeps_equal_alias_routes_distinct_to_historical_terminals() {
+        let app_source = include_str!("../tests/fixtures/attached-incompatible-main.orna");
+        let package_source = include_str!("../tests/fixtures/attached-equivalent-main.orna");
+        let (app_dir, app_repository, _) = repository(app_source);
+        let (shared_dir, shared_repository, _) = repository(package_source);
+        let (leaf_dir, leaf_repository, leaf_base_commit) = repository(package_source);
+
+        let shared_historical_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive {leaf_base_commit}\nterminal {leaf_base_commit}\n"),
+        );
+        let leaf_current_commit = write_commit(
+            leaf_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("backup {shared_historical_commit}\nmirror {shared_historical_commit}\n"),
+        );
+        let shared_current_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive {leaf_current_commit}\nterminal {leaf_current_commit}\n"),
+        );
+        let app_current_commit = write_commit(
+            app_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("backup {shared_current_commit}\nmirror {shared_current_commit}\n"),
+        );
+
+        let loader = ProjectLoader::default();
+        let app = PinnedDatabase::resolve(
+            "app",
+            app_repository.clone(),
+            &app_current_commit,
+            loader,
+        )
+        .unwrap();
+        let resolver = PackageResolver::new(
+            [
+                ("app".to_owned(), app_repository),
+                ("backup".to_owned(), shared_repository.clone()),
+                ("mirror".to_owned(), shared_repository),
+                ("archive".to_owned(), leaf_repository.clone()),
+                ("terminal".to_owned(), leaf_repository),
+            ],
+            loader,
+        )
+        .unwrap();
+
+        let root_session = resolver.resolve_for_parent(app).unwrap();
+        let backup = root_session.database("backup").unwrap();
+        let mirror = root_session.database("mirror").unwrap();
+        assert_eq!(backup.pin().commit(), mirror.pin().commit());
+        assert_ne!(backup.pin(), mirror.pin());
+
+        // The reference fixes each parent's exact pins but does not specify
+        // recursive equal-alias cycle behavior. V1 follows one manifest edge
+        // at a time and preserves the selected alias through historical pins.
+        let mut terminal_pins = Vec::new();
+        for (outer_alias, child_alias, repeated_alias, terminal_alias) in [
+            ("backup", "archive", "mirror", "terminal"),
+            ("mirror", "terminal", "backup", "archive"),
+        ] {
+            let current_closure = resolver
+                .resolve_for_parent(root_session.database(outer_alias).unwrap().clone())
+                .unwrap();
+            assert_eq!(current_closure.primary().pin().name(), outer_alias);
+            let child = current_closure.database(child_alias).unwrap();
+            let sibling_alias = if child_alias == "archive" {
+                "terminal"
+            } else {
+                "archive"
+            };
+            let sibling = current_closure.database(sibling_alias).unwrap();
+            assert_eq!(child.pin().commit().as_str(), leaf_current_commit);
+            assert_eq!(sibling.pin().commit().as_str(), leaf_current_commit);
+            assert_ne!(child.pin(), sibling.pin());
+
+            let leaf_closure = resolver.resolve_for_parent(child.clone()).unwrap();
+            assert_eq!(leaf_closure.primary().pin().name(), child_alias);
+            assert_eq!(leaf_closure.primary().pin().commit().as_str(), leaf_current_commit);
+            let historical_shared = leaf_closure.database(repeated_alias).unwrap();
+            let repeated_sibling_alias = if repeated_alias == "backup" {
+                "mirror"
+            } else {
+                "backup"
+            };
+            let repeated_sibling = leaf_closure
+                .database(repeated_sibling_alias)
+                .unwrap();
+            assert_eq!(
+                historical_shared.pin().commit().as_str(),
+                shared_historical_commit
+            );
+            assert_eq!(
+                repeated_sibling.pin().commit(),
+                historical_shared.pin().commit()
+            );
+            assert_ne!(historical_shared.pin(), repeated_sibling.pin());
+
+            let historical_closure =
+                resolver.resolve_for_parent(historical_shared.clone()).unwrap();
+            assert_eq!(historical_closure.primary().pin().name(), repeated_alias);
+            assert_eq!(
+                historical_closure.primary().pin().commit().as_str(),
+                shared_historical_commit
+            );
+            let terminal = historical_closure
+                .database(terminal_alias)
+                .unwrap()
+                .clone();
+            let terminal_sibling_alias = if terminal_alias == "archive" {
+                "terminal"
+            } else {
+                "archive"
+            };
+            let terminal_sibling = historical_closure
+                .database(terminal_sibling_alias)
+                .unwrap();
+            assert_eq!(terminal.pin().commit().as_str(), leaf_base_commit);
+            assert_eq!(terminal_sibling.pin().commit(), terminal.pin().commit());
+            assert_ne!(terminal_sibling.pin(), terminal.pin());
+
+            let closed = resolver.resolve_for_parent(terminal).unwrap();
+            assert_eq!(closed.primary().pin().name(), terminal_alias);
+            assert_eq!(closed.primary().pin().commit().as_str(), leaf_base_commit);
+            assert_eq!(closed.attached().count(), 0);
+            terminal_pins.push(closed.primary().pin().clone());
+        }
+
+        assert_ne!(terminal_pins[0], terminal_pins[1]);
+        assert_eq!(terminal_pins[0].commit(), terminal_pins[1].commit());
+        assert_eq!(
+            root_session
+                .database("backup")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            shared_current_commit
+        );
+        assert_eq!(
+            root_session
+                .database("mirror")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            shared_current_commit
+        );
+    }
+
+    #[test]
     fn equivalent_units_interoperate_across_attachments_but_name_match_is_not_enough() {
         let primary_source = include_str!("fixtures/attached-primary-main.orna");
         let (_primary_dir, primary_repository, primary_commit) = repository(&primary_source);
