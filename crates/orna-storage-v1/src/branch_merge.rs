@@ -8,7 +8,8 @@
 
 use orna_evolution_v1::{
     CanonicalValue, CheckpointGeneration, CheckpointMergeConflict, KeyedRow, ObjectId, RowMergeConflict,
-    Schema, SchemaMergeConflict, merge_checkpoint_generation, merge_keyed_row, merge_schema_bounded,
+    RowMergeOperation, RowSnapshotMergeError, RowSnapshotState, Schema, SchemaMergeConflict,
+    merge_checkpoint_generation, merge_keyed_row_states, merge_schema_bounded,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -426,14 +427,31 @@ fn merge_range_rows(
     let mut merged = Vec::new();
     let mut tombstones = Vec::new();
     for key in keys {
-        match merge_keyed_row(base.get(&key), left.get(&key), right.get(&key)) {
-            Ok(Some(row)) => merged.push(row),
-            Ok(None) => {
-                if let Some(deleted) = base.get(&key) {
-                    tombstones.push(deleted.key.clone());
-                }
+        let base_state = base
+            .get(&key)
+            .map(RowSnapshotState::Present)
+            .unwrap_or(RowSnapshotState::Absent);
+        let left_state = left
+            .get(&key)
+            .map(RowSnapshotState::Present)
+            .unwrap_or(RowSnapshotState::Absent);
+        let right_state = right
+            .get(&key)
+            .map(RowSnapshotState::Present)
+            .unwrap_or(RowSnapshotState::Absent);
+        match merge_keyed_row_states(base_state, left_state, right_state) {
+            Ok(RowMergeOperation::Upsert(row)) => merged.push(row),
+            Ok(RowMergeOperation::Tombstone { key, .. }) => tombstones.push(key),
+            Ok(RowMergeOperation::Absent) => {}
+            Err(RowSnapshotMergeError::PrunedInput { .. }) => {
+                // `read_segment` must fail before producing an incomplete
+                // map. Keep this guard fail-closed if a future caller adds
+                // an unavailable row state to the decoded merge input.
+                return Err(BranchMergeError::RowRead {
+                    message: "pruned row state reached the semantic merge".into(),
+                });
             }
-            Err(conflict) => {
+            Err(RowSnapshotMergeError::Conflict(conflict)) => {
                 if record_conflict(
                     BranchMergeConflict::Row { range: range.clone(), conflict },
                     Some(table),
