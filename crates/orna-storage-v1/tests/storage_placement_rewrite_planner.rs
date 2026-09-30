@@ -24,6 +24,10 @@ const ESCAPED_BOUNDARY_UPPER_ROW: &str =
     include_str!("fixtures/storage-placement-escaped-boundary-upper.orna");
 const ESCAPED_BOUNDARY_LOWER_ROW: &str =
     include_str!("fixtures/storage-placement-escaped-boundary-lower.orna");
+const ESCAPED_PARENT_UPPER_ROW: &str =
+    include_str!("fixtures/storage-placement-escaped-parent-upper.orna");
+const ESCAPED_PARENT_LOWER_ROW: &str =
+    include_str!("fixtures/storage-placement-escaped-parent-lower.orna");
 const REWRITE_TAIL_FIRST: &str = include_str!("fixtures/storage-rewrite-tail-first.orna");
 const REWRITE_TAIL_LAST: &str = include_str!("fixtures/storage-rewrite-tail-last.orna");
 const KEY_FIELD: Uuid = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
@@ -760,6 +764,94 @@ fn escaped_component_boundary_still_enforces_portable_alias_fallback() {
         .iter()
         .filter(|decision| decision.action() == PlacementAction::Insert)
         .all(|decision| decision.placement() == PhysicalPlacement::Compact));
+}
+
+#[test]
+fn escaped_parent_case_alias_falls_back_even_when_leaf_paths_differ() {
+    let upper_components = text_key_components_from_fixture(ESCAPED_PARENT_UPPER_ROW);
+    let lower_components = text_key_components_from_fixture(ESCAPED_PARENT_LOWER_ROW);
+    let upper_path = editable_path_components(&upper_components).unwrap();
+    let lower_path = editable_path_components(&lower_components).unwrap();
+    let upper_relative = encoded_table_relative_path(&upper_path);
+    let lower_relative = encoded_table_relative_path(&lower_path);
+    let upper_parts = upper_relative.split('/').collect::<Vec<_>>();
+    let lower_parts = lower_relative.split('/').collect::<Vec<_>>();
+    assert_eq!(upper_parts[0].len(), 200);
+    assert_eq!(
+        upper_parts[0].to_ascii_lowercase(),
+        lower_parts[0].to_ascii_lowercase()
+    );
+    assert_ne!(
+        upper_relative.to_ascii_lowercase(),
+        lower_relative.to_ascii_lowercase()
+    );
+
+    let profile = profile_for_str_key_arity(Uuid::from_u128(12), 2);
+    let ordinary_components = vec!["safe".to_owned(); 2];
+    let plan = plan_storage_placement(
+        &profile,
+        StoragePreference::Automatic,
+        1,
+        false,
+        vec![upper_path.clone()],
+        [
+            PlacementCandidate::update(
+                composite_text_key(&upper_components),
+                ESCAPED_PARENT_UPPER_ROW.len(),
+                PhysicalPlacement::Editable,
+                Some(upper_path.clone()),
+            ),
+            PlacementCandidate::insert(
+                composite_text_key(&lower_components),
+                ESCAPED_PARENT_LOWER_ROW.len(),
+                Some(lower_path),
+            ),
+            PlacementCandidate::insert(
+                composite_text_key(&ordinary_components),
+                PATH_ORDINARY_ROW.len(),
+                Some(editable_path_components(&ordinary_components).unwrap()),
+            ),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(plan.new_row_placement(), PhysicalPlacement::Compact);
+    let existing = plan
+        .decisions()
+        .iter()
+        .find(|decision| decision.key().encoded() == composite_text_key(&upper_components))
+        .unwrap();
+    assert_eq!(existing.placement(), PhysicalPlacement::Editable);
+    assert_eq!(existing.editable_path(), Some(&upper_path));
+    assert!(plan
+        .decisions()
+        .iter()
+        .filter(|decision| decision.action() == PlacementAction::Insert)
+        .all(|decision| decision.placement() == PhysicalPlacement::Compact));
+
+    assert_eq!(
+        plan_storage_placement(
+            &profile,
+            StoragePreference::Editable,
+            1,
+            false,
+            vec![upper_path.clone()],
+            [
+                PlacementCandidate::update(
+                    composite_text_key(&upper_components),
+                    ESCAPED_PARENT_UPPER_ROW.len(),
+                    PhysicalPlacement::Editable,
+                    Some(upper_path),
+                ),
+                PlacementCandidate::insert(
+                    composite_text_key(&lower_components),
+                    ESCAPED_PARENT_LOWER_ROW.len(),
+                    Some(editable_path_components(&lower_components).unwrap()),
+                ),
+            ],
+        ),
+        Err(StoragePlacementError::PathCollision)
+    );
 }
 
 #[test]
