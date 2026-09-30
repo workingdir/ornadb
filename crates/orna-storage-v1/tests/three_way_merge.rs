@@ -704,7 +704,7 @@ fn both_delete_update_orientations_survive_the_checkpoint_budget_tail() {
 }
 
 #[test]
-fn segment_batch_conflicts_keep_checkpoint_delete_update_impact_at_budget_boundary() {
+fn segmented_checkpoint_delete_update_impacts_cross_the_shared_budget_boundary() {
     let candidate_a = integer(10);
     let candidate_b = integer(20);
     let (low_key, high_key) = if candidate_a.encode().unwrap() < candidate_b.encode().unwrap() {
@@ -732,54 +732,92 @@ fn segment_batch_conflicts_keep_checkpoint_delete_update_impact_at_budget_bounda
             ],
         }
     };
-    let mut source = FixtureRows::default();
     let fixture_row = |fixture: &str, key: CanonicalValue| {
         let mut row = parse_fixture(fixture, RowKeyKind::Explicit);
         row.key = key;
         row
     };
-    source.add(MergeSide::Base, b"base-low", vec![fixture_row(BASE, low_key.clone())]);
-    source.add(MergeSide::Left, b"left-low", vec![fixture_row(LEFT, low_key.clone())]);
-    source.add(MergeSide::Right, b"right-low", vec![fixture_row(CONFLICT, low_key.clone())]);
-    source.add(MergeSide::Base, b"base-high", vec![fixture_row(BASE, high_key.clone())]);
-    source.add(MergeSide::Left, b"left-high", vec![fixture_row(LEFT, high_key.clone())]);
-    source.add(MergeSide::Right, b"right-high", vec![fixture_row(CONFLICT, high_key)]);
-
     let checkpoint = |generation, token: &[u8]| CheckpointGeneration {
         generation,
         position: Some(token.to_vec()),
     };
-    let base = snapshot(
-        schema(true, FieldType::Str),
-        split_manifest(10, 1, 4, b"base-low", b"base-high"),
-        Some(checkpoint(4, b"base-token")),
-    );
-    let left = snapshot(
-        schema(true, FieldType::Str),
-        split_manifest(11, 2, 5, b"left-low", b"left-high"),
-        None,
-    );
-    let right = snapshot(
-        schema(true, FieldType::Str),
-        split_manifest(12, 3, 6, b"right-low", b"right-high"),
-        Some(checkpoint(5, b"right-token")),
-    );
+    let build_inputs = |delete_on_left: bool| {
+        let mut source = FixtureRows::default();
+        source.add(MergeSide::Base, b"base-low", vec![fixture_row(BASE, low_key.clone())]);
+        source.add(MergeSide::Left, b"left-low", vec![fixture_row(LEFT, low_key.clone())]);
+        source.add(MergeSide::Right, b"right-low", vec![fixture_row(CONFLICT, low_key.clone())]);
+        source.add(MergeSide::Base, b"base-high", vec![fixture_row(BASE, high_key.clone())]);
+        source.add(MergeSide::Left, b"left-high", vec![fixture_row(LEFT, high_key.clone())]);
+        source.add(MergeSide::Right, b"right-high", vec![fixture_row(CONFLICT, high_key.clone())]);
 
-    // Aligned segment ranges are separate row batches; their conflicts share
-    // the same budget with the later checkpoint delete/update phase.
-    let two_row_details = BranchMergeBudget { max_rows_examined: 100, max_conflicts: 2 };
-    let error = merge_three_way_snapshots(&base, &left, &right, &mut source, two_row_details)
-        .unwrap_err();
-    let BranchMergeError::BudgetExceeded { report } = error else {
-        panic!("the checkpoint delete/update conflict crosses the two-row budget")
+        let left_checkpoint = (!delete_on_left).then(|| checkpoint(5, b"left-token"));
+        let right_checkpoint = delete_on_left.then(|| checkpoint(6, b"right-token"));
+        let base = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(10, 1, 4, b"base-low", b"base-high"),
+            Some(checkpoint(4, b"base-token")),
+        );
+        let left = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(11, 2, 5, b"left-low", b"left-high"),
+            left_checkpoint,
+        );
+        let right = snapshot(
+            schema(true, FieldType::Str),
+            split_manifest(12, 3, 6, b"right-low", b"right-high"),
+            right_checkpoint,
+        );
+        (base, left, right, source)
     };
-    assert_eq!(report.conflicts_lower_bound, 3);
-    assert_eq!(report.rows_examined, 6);
-    assert!(report.affected_tables.contains(&id(1)));
-    assert!(report.affected_ranges.contains(&(id(1), low_range)));
-    assert!(report.affected_ranges.contains(&(id(1), high_range)));
-    assert!(report.affected_checkpoints.contains(b"consumer/source".as_slice()));
-    assert_eq!(source.visited.len(), 6);
+
+    // The reference requires affected-range evidence and a conflict lower
+    // bound, but leaves cross-phase traversal and checkpoint-impact summaries
+    // open. Resolve ordered ranges before bytewise checkpoint IDs for stable
+    // impact tails across both delete/update orientations.
+    for delete_on_left in [true, false] {
+        for max_conflicts in [2, 3] {
+            let (base, left, right, mut source) = build_inputs(delete_on_left);
+            let error = merge_three_way_snapshots(
+                &base,
+                &left,
+                &right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 100, max_conflicts },
+            )
+            .unwrap_err();
+            let (report, exact_conflicts) = match (max_conflicts, error) {
+                (2, BranchMergeError::BudgetExceeded { report }) => (report, None),
+                (3, BranchMergeError::Conflicts { conflicts, report }) => {
+                    assert_eq!(conflicts.len(), 3);
+                    assert!(matches!(conflicts[0], BranchMergeConflict::Row { .. }));
+                    assert!(matches!(conflicts[1], BranchMergeConflict::Row { .. }));
+                    let BranchMergeConflict::CheckpointConflict { id: checkpoint_id, conflict } =
+                        &conflicts[2]
+                    else {
+                        panic!("checkpoint tail follows both segmented row conflicts")
+                    };
+                    assert_eq!(checkpoint_id.as_slice(), b"consumer/source");
+                    assert!(conflict.base.is_some());
+                    assert_eq!(conflict.left.is_none(), delete_on_left);
+                    assert_eq!(conflict.right.is_none(), !delete_on_left);
+                    (report, Some(conflicts))
+                }
+                (_, error) => panic!("unexpected budget result: {error:?}"),
+            };
+            assert_eq!(report.conflicts_lower_bound, 3);
+            assert_eq!(report.rows_examined, 6);
+            assert!(report.affected_tables.contains(&id(1)));
+            assert!(report.affected_ranges.contains(&(id(1), low_range.clone())));
+            assert!(report.affected_ranges.contains(&(id(1), high_range.clone())));
+            assert!(report.affected_checkpoints.contains(b"consumer/source".as_slice()));
+            assert_eq!(source.visited.len(), 6);
+            if max_conflicts == 2 {
+                assert!(exact_conflicts.is_none());
+            } else {
+                assert!(exact_conflicts.is_some());
+            }
+        }
+    }
 }
 
 #[test]
