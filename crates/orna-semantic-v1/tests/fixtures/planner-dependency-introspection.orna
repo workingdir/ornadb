@@ -1,0 +1,21 @@
+pub fn outgoing(object: sys.Object) =
+    sys.dependencies(object.reference, transitive: true);
+
+pub fn incoming_calls(object: sys.Object) =
+    sys.dependents(
+        object.reference,
+        transitive: true,
+        kinds: [sys.DependencyKind.call],
+    );
+
+pub fn explain_query(query: Query<Int>) =
+    sys.explain(query);
+
+pub fn explain_query_explicit(query: Query<Int>) =
+    sys.explain<Int>(query);
+
+pub fn explain_query_piped(query: Query<Int>) =
+    query | sys.explain();
+
+pub fn explain_function(function: sys.FunctionRef) =
+    sys.explain(function);
