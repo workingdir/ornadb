@@ -498,6 +498,14 @@ fn clock_output_bound_keeps_elapsed_hours_and_fractional_tail() {
         session.submit(include_str!("fixtures/stdlib-time-duration-clock-scaled-after-24h-tail-auorn.orna")),
         Ok(Some(text("24:00:00.00012")))
     );
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-time-duration-clock-scaled-negative-before-24h-tail-8g41m.orna")),
+        Ok(Some(text("-23:59:59.99988")))
+    );
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-time-duration-clock-scaled-negative-after-24h-tail-8g41m.orna")),
+        Ok(Some(text("-24:00:00.00012")))
+    );
     let source = include_str!("fixtures/stdlib-time-duration-clock-max-hours-h4ei4.orna");
     let result = session.submit(source);
     let expected = format!("1{}:00:00.000000001", "0".repeat(112));
