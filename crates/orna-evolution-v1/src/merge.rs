@@ -383,6 +383,10 @@ pub enum RowMergeConflict {
 pub enum RowSnapshotState<'a> {
     Present(&'a KeyedRow),
     Absent,
+    /// A retained storage deletion marker. It is logically absent for merge
+    /// comparison; the output needs a marker only when the common base had a
+    /// live row that must remain deleted.
+    Tombstone,
     Pruned,
 }
 
@@ -426,7 +430,7 @@ pub fn merge_keyed_row_states(
         (RowSnapshotSide::Left, left),
         (RowSnapshotSide::Right, right),
     ] {
-        if state == RowSnapshotState::Pruned {
+        if matches!(state, RowSnapshotState::Pruned) {
             pruned_sides.push(side);
         }
     }
@@ -436,7 +440,7 @@ pub fn merge_keyed_row_states(
 
     let row = |state| match state {
         RowSnapshotState::Present(row) => Some(row),
-        RowSnapshotState::Absent | RowSnapshotState::Pruned => None,
+        RowSnapshotState::Absent | RowSnapshotState::Tombstone | RowSnapshotState::Pruned => None,
     };
     let base_row = row(base);
     let merged = merge_keyed_row(base_row, row(left), row(right))
