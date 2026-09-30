@@ -7455,7 +7455,12 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
     // follows a clean tombstone, proving tail closure keeps it out of impacts.
     // A final one-sided full-base reset likewise resolves without adding an
     // impact or consuming conflict detail.
-    let build_inputs = |row_delete_left: bool, checkpoint_delete_left: bool, reset_left: bool| {
+    let build_inputs = |
+        row_delete_left: bool,
+        checkpoint_delete_left: bool,
+        reset_left: bool,
+        tail_reset_left: bool,
+    | {
         let mut source = FixtureRows::default();
         source.add(MergeSide::Base, b"base", vec![deleted_row.clone()]);
         source.add(
@@ -7533,10 +7538,9 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
             one_sided_full_base_reset_tail_id.clone(),
             full_checkpoint.clone(),
         );
-        // Keep the final one-sided reset opposite the terminal conflict's
-        // reset branch. The reference leaves this shared tail traversal open,
-        // so cover both cross-branch orientations at the stable final ID.
-        if reset_left {
+        // The reference leaves shared checkpoint traversal open. Exercise the
+        // tail reset on either branch independently of the terminal conflict.
+        if tail_reset_left {
             left.checkpoints.insert(
                 one_sided_full_base_reset_tail_id.clone(),
                 full_checkpoint.clone(),
@@ -7602,10 +7606,15 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
 
     for row_delete_left in [true, false] {
         for checkpoint_delete_left in [true, false] {
-            for reset_left in [true, false] {
+            for (reset_left, tail_reset_left) in [
+                (true, true),
+                (true, false),
+                (false, true),
+                (false, false),
+            ] {
                 for max_conflicts in 0..=2 {
                     let (base, left, right, mut source) =
-                        build_inputs(row_delete_left, checkpoint_delete_left, reset_left);
+                        build_inputs(row_delete_left, checkpoint_delete_left, reset_left, tail_reset_left);
                     let error = merge_three_way_snapshots(
                         &base,
                         &left,
@@ -7645,7 +7654,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
                 }
 
                 let (base, left, right, mut source) =
-                    build_inputs(row_delete_left, checkpoint_delete_left, reset_left);
+                    build_inputs(row_delete_left, checkpoint_delete_left, reset_left, tail_reset_left);
                 let error = merge_three_way_snapshots(
                     &base,
                     &left,
