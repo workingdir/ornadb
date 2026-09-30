@@ -111,6 +111,26 @@ fn edge_interplay_fixture_closes_nullable_expression_projection_edges() {
 }
 
 #[test]
+fn edge_interplay_fixture_preserves_nullable_sibling_projection() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The frozen schema does not say that documented Columns have a default expression;
+    // filtering on docs must leave the sibling nullable field nullable in the projection.
+    assert!(
+        analysis.is_ok(),
+        "filtering a nullable Column field must preserve the nullable sibling projection: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn runtime_publication_counters_do_not_leak_into_frozen_sys_types() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-internal-publication-metadata.orna",
