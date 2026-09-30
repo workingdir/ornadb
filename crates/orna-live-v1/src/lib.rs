@@ -2771,9 +2771,14 @@ impl LiveHost {
         let response = match response {
             Ok(response) => response,
             Err(error) => {
-                if !matches!(error, Error::ApplicationDeferred)
-                    && !self.deleted_sessions.contains_key(&session)
-                {
+                // An async callback can reject after the session has been
+                // deleted or its request has already reached a terminal
+                // state. Apply the same session/request fence as successful
+                // results before the transport turns this error into a wire
+                // diagnostic; stale work must not speak for a retired session.
+                self.validate_application_completion_parts(session, request, fingerprint)
+                    .await?;
+                if !matches!(error, Error::ApplicationDeferred) {
                     self.retain_failure(session, request, fingerprint).await?;
                 }
                 return Err(error);
