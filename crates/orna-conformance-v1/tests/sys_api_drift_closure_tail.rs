@@ -131,6 +131,26 @@ fn edge_interplay_fixture_preserves_nullable_sibling_projection() {
 }
 
 #[test]
+fn edge_interplay_fixture_keeps_nullable_docs_after_default_filter() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The frozen schema does not say that a defaulted Column has docs; filtering by one
+    // nullable sibling must leave the projected sibling nullable.
+    assert!(
+        analysis.is_ok(),
+        "filtering by default_expression must preserve nullable Column.docs in projection: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn runtime_publication_counters_do_not_leak_into_frozen_sys_types() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-internal-publication-metadata.orna",
