@@ -82,8 +82,13 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
         loader,
     )
     .unwrap();
-    let standard = PinnedDatabase::resolve("std", history_repository, &history_commit, loader)
-        .unwrap();
+    let standard = PinnedDatabase::resolve(
+        "std",
+        history_repository.clone(),
+        &history_commit,
+        loader,
+    )
+    .unwrap();
     let mut session = AttachedDatabaseSession::new(primary).unwrap();
     session.attach_database(history).unwrap();
     session.attach_database(standard).unwrap();
@@ -115,10 +120,37 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
         .modules()
         .iter()
         .any(|module| module.source.contains("= 42")));
+    assert!(matches!(
+        session.detach_database("app"),
+        Err(AttachmentError::PrimaryDatabaseCannotDetach)
+    ));
+    assert!(matches!(
+        session.validate_write_target("archive"),
+        Err(AttachmentError::AttachedSnapshotReadOnly)
+    ));
+    assert!(matches!(
+        session.detach_database("sys"),
+        Err(AttachmentError::SystemDatabaseCannotDetach)
+    ));
+    assert!(matches!(
+        session.validate_write_target("sys"),
+        Err(AttachmentError::SystemDatabaseReadOnly)
+    ));
     session.detach_database("archive").unwrap();
     assert!(matches!(
         session.validate_write_target("archive"),
         Err(AttachmentError::DatabaseUnavailable)
+    ));
+    let replacement =
+        PinnedDatabase::resolve("archive", history_repository, &moved_head, loader).unwrap();
+    session.attach_database(replacement).unwrap();
+    assert_eq!(
+        session.database("archive").unwrap().pin().commit().as_str(),
+        moved_head
+    );
+    assert!(matches!(
+        session.validate_write_target("archive"),
+        Err(AttachmentError::AttachedSnapshotReadOnly)
     ));
     assert_eq!(git(history_dir.path(), &["rev-parse", "HEAD"]), head_before);
     assert_eq!(git(history_dir.path(), &["status", "--porcelain"]), status_before);
@@ -207,4 +239,56 @@ fn package_pin_failures_are_redacted_and_fail_before_a_session_is_returned() {
     );
     assert!(!format!("{error:?}").contains(&invalid_repository_path));
     assert!(Error::source(&error).is_none());
+}
+
+#[test]
+fn failed_later_pin_does_not_return_a_partial_writable_session() {
+    let (package_dir, package_repository, package_commit) = repository(&[(
+        "main.orna",
+        include_str!("fixtures/attach-package.orna"),
+    )]);
+    let missing_commit = "a".repeat(40);
+    let manifest = format!("widgets {package_commit}\nmissing {missing_commit}\n");
+    let (primary_dir, primary_repository, primary_commit) = repository(&[
+        (
+            "main.orna",
+            include_str!("fixtures/attach-primary.orna"),
+        ),
+        (PACKAGE_PIN_MANIFEST_PATH, &manifest),
+    ]);
+    let parent_head_before = git(primary_dir.path(), &["rev-parse", "HEAD"]);
+    let parent_status_before = git(primary_dir.path(), &["status", "--porcelain"]);
+    let package_head_before = git(package_dir.path(), &["rev-parse", "HEAD"]);
+    let package_status_before = git(package_dir.path(), &["status", "--porcelain"]);
+
+    let loader = ProjectLoader::default();
+    let primary = PinnedDatabase::resolve(
+        "app",
+        primary_repository,
+        &primary_commit,
+        loader,
+    )
+    .unwrap();
+    let resolver =
+        PackageResolver::new([("widgets".to_owned(), package_repository.clone())], loader)
+            .unwrap();
+    let error = resolver.resolve_for_parent(primary).unwrap_err();
+
+    assert!(matches!(error, AttachmentError::RepositoryUnavailable));
+    assert_eq!(
+        git(primary_dir.path(), &["rev-parse", "HEAD"]),
+        parent_head_before
+    );
+    assert_eq!(
+        git(primary_dir.path(), &["status", "--porcelain"]),
+        parent_status_before
+    );
+    assert_eq!(
+        git(package_dir.path(), &["rev-parse", "HEAD"]),
+        package_head_before
+    );
+    assert_eq!(
+        git(package_dir.path(), &["status", "--porcelain"]),
+        package_status_before
+    );
 }
