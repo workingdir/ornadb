@@ -468,6 +468,14 @@ fn duration_clock_format_keeps_fractional_minute_and_sign_boundaries() {
             "-00:01:00.00012",
         ),
         (
+            include_str!("fixtures/stdlib-time-duration-clock-negative-factor-before-minute-1lj0e.orna"),
+            "-00:00:59.99988",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-clock-negative-factor-after-minute-1lj0e.orna"),
+            "-00:01:00.00012",
+        ),
+        (
             include_str!("fixtures/stdlib-time-duration-negative-nanosecond-vfh0m.orna"),
             "-00:00:00.000000001",
         ),
