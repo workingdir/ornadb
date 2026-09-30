@@ -1557,7 +1557,7 @@ fn load_project_without_standard_rejection(
             "run the command inside a Git worktree or provide a local project path",
         )
     })?;
-    orna_project_v1::ProjectLoader::default()
+    let project = orna_project_v1::ProjectLoader::default()
         .load(&repository)
         .map_err(|_| {
             Diagnostic::target(
@@ -1565,13 +1565,14 @@ fn load_project_without_standard_rejection(
                 "project source could not be loaded",
                 "fix the project module graph and source boundaries, then run check again",
             )
-        })
+        })?;
+    Ok(project)
 }
 
 fn reject_uncaptured_standard_modules(
     project: &orna_project_v1::LoadedProject,
 ) -> Result<(), Diagnostic> {
-    if project.standard_modules().is_empty() {
+    if project.standard_modules().is_empty() || project.standard_profile().is_some() {
         return Ok(());
     }
     Err(Diagnostic::target(
@@ -1581,13 +1582,27 @@ fn reject_uncaptured_standard_modules(
     ))
 }
 
-fn semantic_catalogue() -> orna_semantic_v1::Catalogue {
-    orna_semantic_v1::Catalogue::authoritative_core()
+fn semantic_catalogue(
+    project: &orna_project_v1::LoadedProject,
+) -> Result<orna_semantic_v1::Catalogue, Diagnostic> {
+    let catalogue = orna_semantic_v1::Catalogue::authoritative_core();
+    let Some(profile) = project.standard_profile() else {
+        return Ok(catalogue);
+    };
+    catalogue
+        .with_standard_sources(profile, project.standard_sources().iter().cloned())
+        .map_err(|_| {
+            Diagnostic::target(
+                "ORNA-S010-IMPORT",
+                "imported module is unavailable",
+                "use a captured standard dependency or remove the import",
+            )
+        })
 }
 
 fn check_project(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
-    let catalogue = semantic_catalogue();
+    let catalogue = semantic_catalogue(&project)?;
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
     if analysis.is_ok() {
         write_success_line("project valid", color_enabled)
@@ -1606,7 +1621,7 @@ fn check_project(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnos
 }
 
 fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
-    let modules: Vec<SourceUnit> = project
+    let mut modules: Vec<SourceUnit> = project
         .modules()
         .iter()
         .zip(project.identities())
@@ -1627,6 +1642,20 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
             source: row.source().into(),
         })
         .collect();
+    modules.extend(
+        project
+            .standard_sources()
+            .iter()
+            .filter(|(logical_path, _)| {
+                project.standard_runtime_modules().contains(logical_path)
+            })
+            .map(|(logical_path, source)| SourceUnit {
+                fixture_id: "cli-project".into(),
+                source_id: logical_path.clone(),
+                parse_as: "module_unit".into(),
+                source: source.clone(),
+            }),
+    );
     ProjectUnit {
         fixture_id: "cli-project".into(),
         project_id: "cli-project".into(),
@@ -1638,7 +1667,14 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
                 network: false,
                 credentials: false,
                 intrinsics: "Orna 1.0.0 core".into(),
-                stdlib: None,
+                stdlib: project.standard_profile().map(|profile| {
+                    // Verify the full graph-bound bundle in the durable
+                    // evaluator while loading only import-reachable modules.
+                    serde_json::json!({
+                        "snapshot": profile.snapshot(),
+                        "sources": project.standard_sources().iter().cloned().collect::<BTreeMap<_, _>>(),
+                    })
+                }),
                 initial_tables: "empty".into(),
             },
             steps: Vec::new(),
@@ -1749,7 +1785,7 @@ fn run_project_function(
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
-    let catalogue = semantic_catalogue();
+    let catalogue = semantic_catalogue(&project)?;
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
@@ -1788,7 +1824,7 @@ fn run_project_stream_invocation(
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
-    let catalogue = semantic_catalogue();
+    let catalogue = semantic_catalogue(&project)?;
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
@@ -1815,7 +1851,7 @@ fn run_project_invocation_with_arguments(
             )
         })?;
     let project = load_project(endpoint)?;
-    let catalogue = semantic_catalogue();
+    let catalogue = semantic_catalogue(&project)?;
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
@@ -1968,7 +2004,7 @@ fn run_pure_invocation(
         };
         if identity.namespace() == namespace {
             let authority =
-                ApplicationAuthority::new(semantic_catalogue(), Limits::default());
+                ApplicationAuthority::new(semantic_catalogue(&project)?, Limits::default());
             let admitted = authority
                 .admit_module(identity.logical_path(), module.source.clone(), function)
                 .map_err(|error| {
@@ -2017,7 +2053,7 @@ fn run_pure_invocation(
             return Ok(());
         }
     }
-    let catalogue = semantic_catalogue();
+    let catalogue = semantic_catalogue(&project)?;
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(

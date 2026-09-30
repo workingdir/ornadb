@@ -57,6 +57,32 @@ fn initialize_project(directory: &std::path::Path) {
     assert!(output.stderr.is_empty());
 }
 
+fn git_output_at(directory: &std::path::Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(arguments)
+        .current_dir(directory)
+        .output()
+        .expect("Git process");
+    assert!(
+        output.status.success(),
+        "git {arguments:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("UTF-8 Git output")
+        .trim()
+        .to_owned()
+}
+
+fn commit_directory(directory: &std::path::Path, message: &str) {
+    git_output_at(directory, &["config", "user.email", "kieran@drewett.dev"]);
+    git_output_at(directory, &["config", "user.name", "kierandrewett"]);
+    git_output_at(directory, &["config", "commit.gpgsign", "false"]);
+    git_output_at(directory, &["add", "-A"]);
+    git_output_at(directory, &["commit", "--quiet", "-m", message]);
+}
+
 fn function_fixture_project() -> TempDir {
     let directory = tempfile::tempdir().expect("function fixture project");
     std::fs::write(
@@ -1360,6 +1386,121 @@ async fn binary_generic_run_executes_a_renamed_finite_list_stream_root() {
             .len(),
         3
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn core_transactions_and_assertions_work_without_std() {
+    let directory = tempfile::tempdir().expect("core-only project");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/lib002-core-only.orna"),
+    )
+    .expect("core-only source");
+    initialize_project(directory.path());
+
+    let repository = Repository::discover(directory.path()).expect("repository");
+    let project = orna_project_v1::ProjectLoader::default()
+        .load(&repository)
+        .expect("load without a standard module");
+    assert!(!project.has_standard_imports());
+    assert!(project.standard_profile().is_none());
+
+    let seed = invoke(directory.path(), "run", "main.seed");
+    assert!(seed.status.success(), "seed stderr: {:?}", seed.stderr);
+    assert_eq!(seed.stdout, b"invocation completed\n");
+    assert!(seed.stderr.is_empty());
+
+    let violation = invoke(directory.path(), "run", "main.violate");
+    assert!(!violation.status.success());
+    assert!(violation.stdout.is_empty());
+
+    let (runtime_identity, initial_digest) = identity(directory.path());
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("open core-only runtime");
+    let committed = state
+        .committed_table_rows("Note")
+        .await
+        .expect("read committed row");
+    assert_eq!(committed.len(), 1);
+}
+
+#[test]
+fn binary_checks_and_runs_an_import_from_the_pinned_standard_git_module() {
+    let directory = tempfile::tempdir().expect("project");
+    let module_path = directory.path().join("stdlib/std");
+    std::fs::create_dir_all(&module_path).expect("standard module path");
+    initialize_project(&module_path);
+    std::fs::write(
+        module_path.join("main.orna"),
+        include_str!("fixtures/captured-standard-main.orna"),
+    )
+    .expect("standard database root");
+    std::fs::write(
+        module_path.join("math.orna"),
+        include_str!("fixtures/captured-standard-math.orna"),
+    )
+    .expect("standard source module");
+    commit_directory(&module_path, "standard module snapshot");
+    let module_commit = git_output_at(&module_path, &["rev-parse", "HEAD"]);
+
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/captured-standard-parent.orna"),
+    )
+    .expect("importing project root");
+    std::fs::write(
+        directory.path().join(".gitmodules"),
+        "[submodule \"std\"]\n\tpath = stdlib/std\n\turl = https://github.com/workingdir/ornadb-std.git\n",
+    )
+    .expect("pinned module declaration");
+    initialize_project(directory.path());
+    git_output_at(directory.path(), &["config", "user.email", "kieran@drewett.dev"]);
+    git_output_at(directory.path(), &["config", "user.name", "kierandrewett"]);
+    git_output_at(directory.path(), &["add", "main.orna", ".gitmodules", ".orna"]);
+    let link = format!("160000,{module_commit},stdlib/std");
+    git_output_at(
+        directory.path(),
+        &["update-index", "--add", "--cacheinfo", &link],
+    );
+    git_output_at(directory.path(), &["commit", "--quiet", "-m", "capture std snapshot"]);
+
+    let repository = Repository::discover(directory.path()).expect("project repository");
+    let project = orna_project_v1::ProjectLoader::default()
+        .load(&repository)
+        .expect("load pinned module");
+    assert_eq!(project.standard_profile().unwrap().snapshot(), module_commit);
+    assert!(
+        project
+            .standard_runtime_modules()
+            .contains("std/math.orna")
+    );
+    orna_semantic_v1::Catalogue::authoritative_core()
+        .with_standard_sources(
+            project.standard_profile().unwrap(),
+            project.standard_sources().iter().cloned(),
+        )
+        .expect("build captured standard catalogue");
+
+    let check = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(directory.path())
+        .args(["check"])
+        .output()
+        .expect("CLI check");
+    assert!(check.status.success(), "check stderr: {:?}", check.stderr);
+    assert_eq!(check.stdout, b"project valid\n");
+    assert!(check.stderr.is_empty());
+
+    let run = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(directory.path())
+        .args(["--debug", "run", "main.answer"])
+        .output()
+        .expect("CLI invocation");
+    assert!(run.status.success(), "run stderr: {:?}", run.stderr);
+    assert_eq!(run.stdout, b"invocation completed\n");
+    assert!(run.stderr.is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
