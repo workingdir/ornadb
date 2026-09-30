@@ -24270,6 +24270,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sys_invocation_terminal_tracking_survives_same_id_admin_receipt_reopen() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(215)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let shared_id = id(216);
+        let idempotency_hash = digest(218);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: shared_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(217)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: Some(idempotency_hash),
+                },
+            )
+            .await
+            .unwrap();
+        let admitted = state.invocation_observation_tail(None, 1).await.unwrap();
+        assert_eq!(admitted.entries[0].sequence, 1);
+        assert_eq!(admitted.entries[0].invocation_id, shared_id);
+        let cursor = admitted.next_cursor.expect("admission has a tail cursor");
+
+        let key = stream_delivery("terminal-shared-receipt", "terminal-shared-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key,
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("terminal-shared:reset").unwrap(),
+            },
+            reason: "terminal invocation and admin receipt ID remain independent".into(),
+        };
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request.clone(), shared_id)
+            .await
+            .unwrap();
+        assert!(state
+            .admin_invocation_receipt(shared_id)
+            .await
+            .unwrap()
+            .is_some());
+        state
+            .finish_invocation_observation(writer, shared_id, InvocationCompletion::Succeeded)
+            .await
+            .unwrap();
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert!(reopened
+            .admin_invocation_receipt(shared_id)
+            .await
+            .unwrap()
+            .is_some());
+        let retained = reopened
+            .invocation_observation(shared_id)
+            .await
+            .unwrap()
+            .expect("terminal sys.Invocation survives reopen independently");
+        assert_eq!(retained.status, InvocationObservationStatus::Succeeded);
+        assert_eq!(retained.idempotency_key_hash, Some(idempotency_hash));
+        assert_eq!(
+            reopened
+                .reset_checkpoint_with_invocation_id(writer, request, shared_id)
+                .await,
+            Ok(receipt)
+        );
+
+        let terminal = reopened
+            .invocation_observation_tail(Some(cursor), 1)
+            .await
+            .unwrap();
+        assert_eq!(terminal.entries.len(), 1);
+        assert!(!terminal.has_more);
+        assert_eq!(terminal.entries[0].sequence, 2);
+        assert_eq!(terminal.entries[0].invocation_id, shared_id);
+        assert_eq!(terminal.entries[0].status, InvocationObservationStatus::Succeeded);
+        let whole_tail = reopened.invocation_observation_tail(None, 4).await.unwrap();
+        assert_eq!(
+            whole_tail
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            whole_tail.entries[0].observation.status,
+            InvocationObservationStatus::Succeeded,
+            "the admission event retains its transition while linking the current tracking row"
+        );
+    }
+
+    #[tokio::test]
     async fn sys_invocation_tail_partial_cursor_tracks_admission_between_polls() {
         assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
         let (_temp, repo) = repository();
