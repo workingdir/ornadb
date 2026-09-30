@@ -818,6 +818,53 @@ fn segmented_checkpoint_delete_update_impacts_cross_the_shared_budget_boundary()
             }
         }
     }
+
+    for delete_on_left in [true, false] {
+        let (mut base, mut left, mut right, mut source) = build_inputs(delete_on_left);
+        base.checkpoints.clear();
+        left.checkpoints.clear();
+        right.checkpoints.clear();
+
+        let clean_id = b"consumer/a-clean".to_vec();
+        let clean = checkpoint(1, b"clean-token");
+        for snapshot in [&mut base, &mut left, &mut right] {
+            snapshot.checkpoints.insert(clean_id.clone(), clean.clone());
+        }
+
+        let crossing_id = b"consumer/m-delete-update".to_vec();
+        base.checkpoints.insert(crossing_id.clone(), checkpoint(4, b"base-token"));
+        let edited_side = if delete_on_left { &mut right } else { &mut left };
+        edited_side.checkpoints.insert(crossing_id.clone(), checkpoint(5, b"edited-token"));
+
+        let unvisited_id = b"consumer/z-unvisited".to_vec();
+        base.checkpoints.insert(unvisited_id.clone(), checkpoint(7, b"z-base"));
+        left.checkpoints.insert(unvisited_id.clone(), checkpoint(8, b"z-left"));
+        right.checkpoints.insert(unvisited_id.clone(), checkpoint(9, b"z-right"));
+
+        // Equal earlier checkpoint IDs do not consume conflict budget. Once
+        // the middle delete/update crosses the segment-conflict budget, the
+        // later ID remains unvisited and is absent from the impact tail.
+        let error = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 2 },
+        )
+        .unwrap_err();
+        let BranchMergeError::BudgetExceeded { report } = error else {
+            panic!("the middle checkpoint crosses the segmented conflict budget")
+        };
+        assert_eq!(report.conflicts_lower_bound, 3);
+        assert_eq!(report.rows_examined, 6);
+        assert!(report.affected_ranges.contains(&(id(1), low_range.clone())));
+        assert!(report.affected_ranges.contains(&(id(1), high_range.clone())));
+        assert_eq!(report.affected_checkpoints.len(), 1);
+        assert!(report.affected_checkpoints.contains(crossing_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(clean_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(unvisited_id.as_slice()));
+        assert_eq!(source.visited.len(), 6);
+    }
 }
 
 #[test]
