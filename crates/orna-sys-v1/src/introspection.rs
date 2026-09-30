@@ -1568,9 +1568,9 @@ fn build_plan(
             .iter()
             .map(|child| references[positions[*child]].clone())
             .collect();
-        // Work is reported as exact integer units. If a local estimate is
-        // unknown or the exact total overflows, omit only the plan total;
-        // known per-node contributions remain available in `details`.
+        // Work is reported as exact integer units. `u64::MAX` is a valid
+        // total; if a local estimate is unknown or the exact sum overflows,
+        // omit only the plan total and keep known node contributions.
         total_work = match (total_work, operator.work) {
             (Some(total), Some(work)) => {
                 let sum = total.checked_add(work);
