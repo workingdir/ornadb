@@ -120,6 +120,15 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
         .modules()
         .iter()
         .any(|module| module.source.contains("= 42")));
+    let in_flight = session.clone();
+    assert!(matches!(
+        session.detach_database("../outside"),
+        Err(AttachmentError::InvalidName)
+    ));
+    assert!(matches!(
+        session.validate_write_target("archive"),
+        Err(AttachmentError::AttachedSnapshotReadOnly)
+    ));
     assert!(matches!(
         session.detach_database("app"),
         Err(AttachmentError::PrimaryDatabaseCannotDetach)
@@ -137,9 +146,23 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
         Err(AttachmentError::SystemDatabaseReadOnly)
     ));
     session.detach_database("archive").unwrap();
+    assert!(session.database("archive").is_none());
     assert!(matches!(
         session.validate_write_target("archive"),
         Err(AttachmentError::DatabaseUnavailable)
+    ));
+    assert_eq!(
+        in_flight
+            .database("archive")
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        history_commit
+    );
+    assert!(matches!(
+        in_flight.validate_write_target("archive"),
+        Err(AttachmentError::AttachedSnapshotReadOnly)
     ));
     let replacement =
         PinnedDatabase::resolve("archive", history_repository, &moved_head, loader).unwrap();
@@ -152,6 +175,15 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
         session.validate_write_target("archive"),
         Err(AttachmentError::AttachedSnapshotReadOnly)
     ));
+    assert_eq!(
+        in_flight
+            .database("archive")
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        history_commit
+    );
     assert_eq!(git(history_dir.path(), &["rev-parse", "HEAD"]), head_before);
     assert_eq!(git(history_dir.path(), &["status", "--porcelain"]), status_before);
     assert_eq!(
