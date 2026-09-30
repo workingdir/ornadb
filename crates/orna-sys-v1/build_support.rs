@@ -814,7 +814,7 @@ impl TypeExpressionParser<'_, '_, '_> {
                     self.parse_type()?;
                     let argument_end = self.offset;
                     let argument = self.source[argument_start..argument_end].trim();
-                    let argument_base = generic_declaration(argument).0;
+                    let argument_base = generic_declaration(argument).0.trim();
                     if name == "Relation"
                         && !self.names.relation_row_types.contains(argument_base)
                         && !self.parameters.contains(argument)

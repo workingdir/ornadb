@@ -971,6 +971,7 @@ fn parse_and_validate_type(
 }
 
 fn parse_type(source: &str) -> Result<SystemType, SystemApiError> {
+    let source = source.trim();
     if let Some(inner) = source.strip_suffix('?') {
         return Ok(SystemType::Optional(Box::new(parse_type(inner)?)));
     }
@@ -985,7 +986,7 @@ fn parse_type(source: &str) -> Result<SystemType, SystemApiError> {
         if close + 1 != source.len() {
             return Err(SystemApiError::InvalidType);
         }
-        let base = &source[..open];
+        let base = source[..open].trim();
         validate_path(base)?;
         let arguments = split_top_level(&source[open + 1..close], ',')
             .into_iter()
@@ -2882,6 +2883,25 @@ mod tests {
         assert!(
             SystemApi::from_json(&record_result.to_string()).is_ok(),
             "record value types published in Relation<T> fields are valid row types"
+        );
+
+        let mut generic_record_result = document();
+        let history = &mut generic_record_result["functions"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|function| {
+                function["signature"]
+                    .as_str()
+                    .is_some_and(|signature| signature.starts_with("fn sys.history("))
+            })
+            .unwrap()["signature"];
+        *history = serde_json::json!(
+            "fn sys.history(object: sys.ObjectRef): Relation<sys.ValueMetadata <sys.Value>>"
+        );
+        assert!(
+            SystemApi::from_json(&generic_record_result.to_string()).is_ok(),
+            "record-generic relation rows resolve with whitespace before their type arguments"
         );
 
         let mut function_result = document();
