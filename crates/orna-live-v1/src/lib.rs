@@ -2772,11 +2772,25 @@ impl LiveHost {
                 // An async callback can reject after the session has been
                 // deleted or its request has already reached a terminal
                 // state. Apply the same session/request fence as successful
-                // results before the transport turns this error into a wire
-                // diagnostic; stale work must not speak for a retired session.
+                // results before turning this error into a wire diagnostic;
+                // stale work must not speak for a retired session.
                 self.validate_application_completion_parts(session, request, fingerprint)
                     .await?;
                 if !matches!(error, Error::ApplicationDeferred) {
+                    let envelope = Envelope {
+                        request: Some(request),
+                        watch,
+                        message: message.clone(),
+                        extensions: BTreeMap::new(),
+                    };
+                    // Retain mapped rejections at the host boundary so a
+                    // retry on a resumed attachment replays the same
+                    // correlated diagnostic instead of a generic failure.
+                    if let Some(outcome) =
+                        self.operational_error_outcome(Some(session), &envelope, error)?
+                    {
+                        return self.complete(session, request, &envelope, outcome).await;
+                    }
                     self.retain_failure(session, request, fingerprint).await?;
                 }
                 return Err(error);
@@ -2980,6 +2994,58 @@ impl LiveHost {
             }
         }
         Ok(())
+    }
+
+    /// Converts an admitted operation's portable rejection into its retained
+    /// diagnostic response. Session identity comes from the admission ticket,
+    /// so a socket retired by resume cannot erase a still-live watch's
+    /// correlation from the terminal outcome.
+    fn operational_error_outcome(
+        &self,
+        session: Option<[u8; 16]>,
+        envelope: &Envelope,
+        error: Error,
+    ) -> Result<Option<DispatchOutcome>> {
+        let Some(request) = envelope.request else {
+            return Ok(None);
+        };
+        let known_watch = session.and_then(|session| {
+            envelope
+                .watch
+                .filter(|watch| self.watches.contains(&(session, *watch)))
+        });
+        let (code, watch) = match error {
+            Error::RequestMismatch => (Error::RequestMismatch.code(), None),
+            Error::UnsupportedOperation => ("wire.unsupported", None),
+            Error::AdminBusy => (Error::AdminBusy.code(), None),
+            // A denied event on a live watch is an action-handle rejection;
+            // one without a live watch (including resync) is an unknown
+            // operational handle. Only these request shapes use Denied for
+            // handle validation, keeping attachment-boundary denials outside
+            // the protocol diagnostic path.
+            Error::Denied if matches!(envelope.message, Message::Event { .. }) => {
+                if let Some(watch) = known_watch {
+                    ("wire.stale_action", Some(watch))
+                } else {
+                    ("wire.unknown_handle", None)
+                }
+            }
+            Error::Denied if matches!(envelope.message, Message::Resync) => {
+                ("wire.unknown_handle", None)
+            }
+            Error::Denied
+                if matches!(envelope.message, Message::Eval { .. } | Message::Watch { .. }) =>
+            {
+                // DatabaseContext is client supplied; keep the session's
+                // trusted database/runtime selection authoritative.
+                ("wire.database_context_mismatch", None)
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(DispatchOutcome {
+            outcome: FrameOutcome::Accepted,
+            response: Some(portable_diagnostic(request, watch, code)?),
+        }))
     }
 
     /// Dispatches one complete client frame through the full client registry.
@@ -6120,7 +6186,7 @@ impl LiveTransport {
                         // while framing and attachment failures stay transport
                         // errors owned by the caller.
                         if let Some(envelope) = decoded.as_ref()
-                            && let Some(outcome) = self.operational_error_outcome(
+                            && let Some(outcome) = self.host.operational_error_outcome(
                                 self.host.attachments.get(&socket.attachment).copied(),
                                 envelope,
                                 error,
@@ -6200,7 +6266,8 @@ impl LiveTransport {
                 // while framing, attachment, and stale-completion failures
                 // remain transport errors owned by the caller.
                 if let Some(outcome) =
-                    self.operational_error_outcome(Some(session), &envelope, error)?
+                    self.host
+                        .operational_error_outcome(Some(session), &envelope, error)?
                 {
                     self.websocket_output(outcome)
                 } else {
@@ -7500,7 +7567,7 @@ impl LiveTransport {
                     Err(error) => {
                         if let Some(envelope) = decoded.as_ref()
                             && let Some(outcome) =
-                                self.operational_error_outcome(
+                                self.host.operational_error_outcome(
                                     self.host.attachments.get(&socket.attachment).copied(),
                                     envelope,
                                     error,
@@ -7525,62 +7592,6 @@ impl LiveTransport {
                 Ok(Some(WebSocketOutput::Close { code, reason }))
             }
         }
-    }
-
-    /// Converts decoded operational rejections into their portable diagnostic
-    /// form. This is intentionally narrower than the generic error mapping:
-    /// transport/framing failures must still close the socket, and attachment
-    /// boundary failures must not be misrepresented as a handle rejection.
-    fn operational_error_outcome(
-        &self,
-        session: Option<[u8; 16]>,
-        envelope: &Envelope,
-        error: Error,
-    ) -> Result<Option<DispatchOutcome>> {
-        let Some(request) = envelope.request else {
-            return Ok(None);
-        };
-        // Completions can outlive the socket attachment that admitted them:
-        // resume retires that attachment while preserving the session's
-        // request and watch identities. Correlate against the admitted
-        // session, not a reverse lookup through a possibly retired socket.
-        let known_watch = session.and_then(|session| {
-            envelope
-                .watch
-                .filter(|watch| self.host.watches.contains(&(session, *watch)))
-        });
-        let (code, watch) = match error {
-            Error::RequestMismatch => (Error::RequestMismatch.code(), None),
-            Error::UnsupportedOperation => ("wire.unsupported", None),
-            Error::AdminBusy => (Error::AdminBusy.code(), None),
-            // A denied event on a live watch is an action-handle rejection;
-            // one without a live watch (including resync) is an unknown
-            // operational handle. Only these request shapes use Denied for
-            // handle validation, keeping attachment-boundary denials outside
-            // the protocol diagnostic path.
-            Error::Denied if matches!(envelope.message, Message::Event { .. }) => {
-                if let Some(watch) = known_watch {
-                    ("wire.stale_action", Some(watch))
-                } else {
-                    ("wire.unknown_handle", None)
-                }
-            }
-            Error::Denied if matches!(envelope.message, Message::Resync) => {
-                ("wire.unknown_handle", None)
-            }
-            Error::Denied
-                if matches!(envelope.message, Message::Eval { .. } | Message::Watch { .. }) =>
-            {
-                // DatabaseContext is client supplied; keep the session's
-                // trusted database/runtime selection authoritative.
-                ("wire.database_context_mismatch", None)
-            }
-            _ => return Ok(None),
-        };
-        Ok(Some(DispatchOutcome {
-            outcome: FrameOutcome::Accepted,
-            response: Some(portable_diagnostic(request, watch, code)?),
-        }))
     }
 
     async fn close_socket(
@@ -8765,6 +8776,12 @@ mod tests {
     }
 
     fn subscribed_host(runtime: Option<RuntimeState>) -> LiveHost {
+        subscribed_host_with_credential(runtime).0
+    }
+
+    fn subscribed_host_with_credential(
+        runtime: Option<RuntimeState>,
+    ) -> (LiveHost, Origin, SessionCredential) {
         let origin = Origin::parse("https://app.example").unwrap();
         let mut host = match runtime {
             Some(runtime) => LiveHost::with_runtime_state_and_owner(
@@ -8825,7 +8842,7 @@ mod tests {
             now: 1,
         }))
         .unwrap();
-        host
+        (host, origin, credential)
     }
 
     #[test]
@@ -8935,11 +8952,15 @@ mod tests {
     }
 
     fn eval_frame(request: [u8; 16]) -> Vec<u8> {
+        eval_source_frame(request, "1")
+    }
+
+    fn eval_source_frame(request: [u8; 16], source: &str) -> Vec<u8> {
         let mut envelope = Envelope {
             request: Some(request),
             watch: None,
             message: Message::Eval {
-                source: "1".into(),
+                source: source.into(),
                 database: orna_protocol_v1::DatabaseContext {
                     database: [2; 16],
                     snapshot: None,
@@ -9140,6 +9161,89 @@ mod tests {
             portable_diagnostic([14; 16], None, "wire.unsupported").unwrap()
         );
         assert!(!socket.closed);
+    }
+
+    #[test]
+    fn async_rejection_replays_watch_diagnostic_after_session_resume() {
+        const FIXTURE: &str = include_str!("../tests/fixtures/live-runtime-boundary.orna");
+
+        let (mut host, origin, credential) = subscribed_host_with_credential(None);
+        let watch = [11; 16];
+        host.watches.insert(([1; 16], watch));
+
+        // Keep a real crate-local source request in this session before the
+        // event is admitted; application scheduling remains explicit.
+        let fixture = futures::executor::block_on(host.prepare_application_frame(
+            [4; 16],
+            2,
+            Frame::Binary(eval_source_frame([40; 16], FIXTURE)),
+        ))
+        .unwrap();
+        let ApplicationPreparation::Work(fixture_ticket) = fixture else {
+            panic!("fixture evaluation must be admitted as application work");
+        };
+        assert!(matches!(
+            fixture_ticket.message(),
+            Message::Eval { source, .. } if source == FIXTURE
+        ));
+        let fixture_completion = fixture_ticket.reject(Error::ApplicationDeferred);
+        assert_eq!(
+            futures::executor::block_on(host.complete_application(fixture_completion)),
+            Err(Error::ApplicationDeferred)
+        );
+
+        let event = event_frame([41; 16], watch);
+        let prepared = futures::executor::block_on(host.prepare_application_frame(
+            [4; 16],
+            2,
+            Frame::Binary(event.clone()),
+        ))
+        .unwrap();
+        let ApplicationPreparation::Work(ticket) = prepared else {
+            panic!("the live watched event should be admitted as application work");
+        };
+        let completion = ticket.reject(Error::Denied);
+
+        let mut issuer = FixedIssuer(None);
+        let (replacement, retired) = futures::executor::block_on(host.rotate_and_retire(
+            [1; 16],
+            &origin,
+            &credential,
+            3,
+            &mut issuer,
+        ))
+        .unwrap();
+        assert_eq!(retired, Some([4; 16]));
+        assert_eq!(
+            futures::executor::block_on(host.resume(ResumeRequest {
+                id: [1; 16],
+                origin: &origin,
+                credential: &replacement,
+                attachment: [6; 16],
+                now: 4,
+            })),
+            Ok(orna_security_v1::AttachOutcome::Reconnected)
+        );
+
+        let first = futures::executor::block_on(host.complete_application(completion)).unwrap();
+        let response = first
+            .response
+            .as_ref()
+            .expect("a denied live event retains a diagnostic");
+        assert_eq!(response.request, Some([41; 16]));
+        assert_eq!(response.watch, Some(watch));
+        assert!(matches!(response.message, Message::Diagnostic { .. }));
+
+        let replay = futures::executor::block_on(host.prepare_application_frame(
+            [6; 16],
+            5,
+            Frame::Binary(event),
+        ))
+        .unwrap();
+        let ApplicationPreparation::Completed(replayed) = replay else {
+            panic!("a resumed retry must replay the retained diagnostic");
+        };
+        assert_eq!(replayed, first);
     }
 
     fn request_status_frame(request: [u8; 16], target: [u8; 16], fingerprint: [u8; 32]) -> Vec<u8> {
