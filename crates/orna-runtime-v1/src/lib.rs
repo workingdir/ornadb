@@ -20501,6 +20501,26 @@ mod tests {
             "the first matching right-child row satisfies demand before its failing tail"
         );
 
+        // The reference fixes union order and bounded results but does not
+        // detail stop propagation through a nested union after a later child
+        // row matches. After the first row is rejected, the second match
+        // satisfies take(1); do not enter the nested union's failing tail.
+        let (nested_right_match, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-nested-right-filter-second-match-stops.orna"
+            ),
+        );
+        assert_eq!(
+            nested_right_match.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "the second nested-child row satisfies demand before its failing union tail"
+        );
+
         // The reference fixes left-to-right union order and bounded
         // enumeration but leaves projection failures across a child-local
         // take boundary implicit. Keep the left child lazy: its excluded
