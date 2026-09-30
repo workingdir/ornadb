@@ -1012,6 +1012,60 @@ fn disjoint_segment_edits_merge_with_positionless_checkpoint_agreement_and_delet
 }
 
 #[test]
+fn positionless_checkpoint_delete_vs_change_conflicts_in_both_orientations() {
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"base", vec![parse_fixture(BASE, RowKeyKind::Explicit)]);
+    source.add(MergeSide::Left, b"left", vec![parse_fixture(LEFT, RowKeyKind::Explicit)]);
+    source.add(MergeSide::Right, b"right", vec![parse_fixture(RIGHT, RowKeyKind::Explicit)]);
+
+    let mut base = snapshot(schema(true, FieldType::Str), manifest(20, 20, b"base"), None);
+    let mut left = snapshot(schema(true, FieldType::Str), manifest(21, 21, b"left"), None);
+    let mut right = snapshot(schema(true, FieldType::Str), manifest(22, 22, b"right"), None);
+
+    // A cursorless checkpoint remains present state. Deleting it on one side
+    // while the other side changes its generation or cursor is divergent.
+    let generation_id = b"consumer/positionless-delete-vs-generation".to_vec();
+    let generation_base = CheckpointGeneration { generation: 40, position: None };
+    let generation_update = CheckpointGeneration { generation: 41, position: None };
+    base.checkpoints.insert(generation_id.clone(), generation_base.clone());
+    right.checkpoints.insert(generation_id.clone(), generation_update.clone());
+
+    let cursor_id = b"consumer/positionless-cursor-vs-delete".to_vec();
+    let cursor_base = CheckpointGeneration { generation: 50, position: None };
+    let cursor_update = CheckpointGeneration { generation: 50, position: Some(b"cursor".to_vec()) };
+    base.checkpoints.insert(cursor_id.clone(), cursor_base.clone());
+    left.checkpoints.insert(cursor_id.clone(), cursor_update.clone());
+
+    let error = merge_three_way_snapshots(&base, &left, &right, &mut source, budget()).unwrap_err();
+    let BranchMergeError::Conflicts { conflicts, report } = error else {
+        panic!("deleting a cursorless checkpoint against a changed value must conflict")
+    };
+    assert_eq!(report.conflicts_lower_bound, 2);
+    assert_eq!(source.visited.len(), 3);
+    assert!(report.affected_checkpoints.contains(generation_id.as_slice()));
+    assert!(report.affected_checkpoints.contains(cursor_id.as_slice()));
+
+    let checkpoint_conflicts: BTreeMap<_, _> = conflicts
+        .into_iter()
+        .map(|conflict| match conflict {
+            BranchMergeConflict::CheckpointConflict { id, conflict } => (id, conflict),
+            other => panic!("fixture row edits should merge cleanly: {other:?}"),
+        })
+        .collect();
+    assert_eq!(checkpoint_conflicts.len(), 2);
+
+    let generation_conflict = &checkpoint_conflicts[generation_id.as_slice()];
+    assert_eq!(generation_conflict.base.as_ref(), Some(&generation_base));
+    assert_eq!(generation_conflict.left, None);
+    assert_eq!(generation_conflict.right.as_ref(), Some(&generation_update));
+
+    let cursor_conflict = &checkpoint_conflicts[cursor_id.as_slice()];
+    assert_eq!(cursor_conflict.base.as_ref(), Some(&cursor_base));
+    assert_eq!(cursor_conflict.left.as_ref(), Some(&cursor_update));
+    assert_eq!(cursor_conflict.right, None);
+}
+
+#[test]
 fn schema_conflict_is_a_boundary_before_row_reads_and_checkpoint_resolution() {
     let base_checkpoint = CheckpointGeneration {
         generation: 4,

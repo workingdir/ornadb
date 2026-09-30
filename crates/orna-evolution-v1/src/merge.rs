@@ -608,6 +608,9 @@ pub fn merge_checkpoint_generation(
     left: Option<&CheckpointGeneration>,
     right: Option<&CheckpointGeneration>,
 ) -> Result<Option<CheckpointGeneration>, CheckpointMergeConflict> {
+    // The outer Option represents checkpoint existence; `position: None` is
+    // still a present opaque checkpoint (for example, after a cursor reset).
+    // Keep that state distinct from deletion so delete-versus-change conflicts.
     if left == right {
         Ok(left.cloned())
     } else if left == base {
