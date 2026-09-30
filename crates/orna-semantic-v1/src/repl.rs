@@ -190,6 +190,7 @@ impl ReplContext {
                 public: false,
                 effects: EffectSummary::default(),
                 generic_parameters: Vec::new(),
+                enum_variants: BTreeSet::new(),
                 table_schema: None,
             },
         );
@@ -211,6 +212,7 @@ impl ReplContext {
                     public: false,
                     effects: EffectSummary::default(),
                     generic_parameters: Vec::new(),
+                    enum_variants: BTreeSet::new(),
                     table_schema: None,
                 },
             );
@@ -232,6 +234,7 @@ impl ReplContext {
                 effects: EffectSummary::default(),
                 table_schema: None,
                 generic_parameters: Vec::new(),
+                enum_variants: BTreeSet::new(),
             },
         );
         let header = ModuleHeader {
