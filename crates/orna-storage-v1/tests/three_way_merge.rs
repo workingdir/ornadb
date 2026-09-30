@@ -6767,28 +6767,28 @@ fn row_delete_edit_checkpoint_delete_reset_tail_closes_at_shared_budgets() {
         }
         for checkpoint_id in [
             &left_delete_before_id,
-            &unchanged_id,
             &right_delete_between_id,
             &right_delete_after_id,
         ] {
             base.checkpoints.insert(
                 checkpoint_id.to_vec(),
-                parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS),
+                parse_checkpoint_fixture(CHECKPOINT_BASE),
             );
         }
-        // One-sided deletes resolve cleanly on both sides of the conflict tail:
-        // base state remains on Right before the tail, and on Left after it.
+        // One-sided deletes of a full generation/position resolve cleanly on
+        // both sides of the conflict tail: base state remains on Right before
+        // the tail and on Left between and after its conflicts.
         right.checkpoints.insert(
             left_delete_before_id.clone(),
-            parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS),
+            parse_checkpoint_fixture(CHECKPOINT_BASE),
         );
         left.checkpoints.insert(
             right_delete_between_id.clone(),
-            parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS),
+            parse_checkpoint_fixture(CHECKPOINT_BASE),
         );
         left.checkpoints.insert(
             right_delete_after_id.clone(),
-            parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS),
+            parse_checkpoint_fixture(CHECKPOINT_BASE),
         );
         base.checkpoints.insert(
             unchanged_id.clone(),
