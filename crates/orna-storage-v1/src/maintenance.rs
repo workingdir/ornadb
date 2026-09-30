@@ -183,7 +183,11 @@ impl ConsolidationVerification {
 
 /// Builds a reviewable consolidation preview from one verified manifest and
 /// its fully folded logical base. Calling this function is the explicit
-/// maintenance request; it refuses routine data-only rewrites.
+/// maintenance request; it refuses routine data-only rewrites. The preview
+/// emits every live row in the folded base, with no age-based rolling window.
+/// A deletion tombstone may disappear from the new complete snapshot once its
+/// effect is folded, while the older immutable manifests and rows stay in
+/// ancestor Git commits. History rewriting is a separate destructive action.
 pub fn plan_compact_consolidation(
     profile: &CompactOvbProfile,
     manifest: &CompactManifest,
@@ -238,7 +242,11 @@ pub fn plan_compact_consolidation(
 
     let mut expected_rows = Vec::new();
     for row in base.rows() {
-        let Some(value) = row.value() else { continue };
+        let Some(value) = row.value() else {
+            // This tombstone is represented by absence in the new complete
+            // snapshot. The input manifest and its prior snapshot are retained.
+            continue;
+        };
         let key = row
             .key()
             .encode()

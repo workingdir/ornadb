@@ -1,0 +1,5 @@
+sys.Storage
+    | project(storage => { pending_rows: storage.pending_rows })
+    | take(2)
+    | window(2)
+    | first()

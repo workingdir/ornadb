@@ -17133,6 +17133,9 @@ fn decode_row_key_path(components: &[String]) -> Option<Vec<String>> {
 }
 
 fn row_key_component_types(admission: &TableAdmission, analysis: &Analysis) -> Option<Vec<Type>> {
+    // Editable paths contain scalar key leaves in declaration order. Flatten
+    // tuple and table-reference types recursively: a reference contributes
+    // its target key path, never target-row data or a table identity segment.
     fn append(
         ty: &Type,
         analysis: &Analysis,

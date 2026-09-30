@@ -7,7 +7,7 @@
 //! so callers cannot partially apply this operation to the CWD.
 
 use orna_evolution_v1::{
-    CheckpointGeneration, CheckpointMergeConflict, KeyedRow, ObjectId, RowMergeConflict,
+    CanonicalValue, CheckpointGeneration, CheckpointMergeConflict, KeyedRow, ObjectId, RowMergeConflict,
     Schema, SchemaMergeConflict, merge_checkpoint_generation, merge_keyed_row, merge_schema_bounded,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -73,6 +73,11 @@ pub struct ThreeWaySnapshot {
 /// The decoder is called only for a range whose three manifest digests differ
 /// (or when segment layouts cannot be aligned). Implementations should decode
 /// incrementally and stop immediately when the visitor returns `false`.
+///
+/// A successful visit must be complete for the requested snapshot and range:
+/// an omitted key means the row is known absent in that snapshot. Missing,
+/// pruned, or unhydrated segment data must return an error instead, because
+/// treating unavailable history as an empty range would manufacture deletes.
 pub trait BranchRowSource {
     fn visit_rows(
         &mut self,
@@ -139,7 +144,14 @@ pub enum MergedSegment {
     /// Reuse an immutable segment without decompressing or comparing rows.
     Reuse { from: MergeSide, manifest: RowSegmentManifest },
     /// Materialized logical rows for a range where all three sides changed.
-    Rows { range: KeyRange, rows: Vec<KeyedRow> },
+    /// `tombstones` are canonical keys present in the common base but absent
+    /// from the merged live rows. They describe this snapshot's versioned
+    /// deletions; they do not authorize removing older Git snapshots.
+    Rows {
+        range: KeyRange,
+        rows: Vec<KeyedRow>,
+        tombstones: Vec<CanonicalValue>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -300,7 +312,11 @@ fn merge_table<R: BranchRowSource>(
                         let left_rows = read_segment(rows, MergeSide::Left, table, Some(ls), &range, budget, report)?;
                         let right_rows = read_segment(rows, MergeSide::Right, table, Some(rs), &range, budget, report)?;
                         let merged = merge_range_rows(table, range.clone(), base_rows, left_rows, right_rows, budget, conflicts, report)?;
-                        segments.push(MergedSegment::Rows { range, rows: merged });
+                        segments.push(MergedSegment::Rows {
+                            range,
+                            rows: merged.rows,
+                            tombstones: merged.tombstones,
+                        });
                     }
                 }
             } else {
@@ -309,7 +325,11 @@ fn merge_table<R: BranchRowSource>(
                 let left_rows = read_segment(rows, MergeSide::Left, table, None, &range, budget, report)?;
                 let right_rows = read_segment(rows, MergeSide::Right, table, None, &range, budget, report)?;
                 let merged = merge_range_rows(table, range.clone(), base_rows, left_rows, right_rows, budget, conflicts, report)?;
-                segments.push(MergedSegment::Rows { range, rows: merged });
+                segments.push(MergedSegment::Rows {
+                    range,
+                    rows: merged.rows,
+                    tombstones: merged.tombstones,
+                });
             }
             Ok(Some(MergedTable { id: table, whole_table_reuse: None, segments }))
         }
@@ -387,6 +407,11 @@ fn read_segment<R: BranchRowSource>(
     Ok(decoded)
 }
 
+struct MergedRangeRows {
+    rows: Vec<KeyedRow>,
+    tombstones: Vec<CanonicalValue>,
+}
+
 fn merge_range_rows(
     table: ObjectId,
     range: KeyRange,
@@ -396,13 +421,18 @@ fn merge_range_rows(
     budget: BranchMergeBudget,
     conflicts: &mut Vec<BranchMergeConflict>,
     report: &mut BranchMergeReport,
-) -> Result<Vec<KeyedRow>, BranchMergeError> {
+) -> Result<MergedRangeRows, BranchMergeError> {
     let keys: BTreeSet<_> = base.keys().chain(left.keys()).chain(right.keys()).cloned().collect();
     let mut merged = Vec::new();
+    let mut tombstones = Vec::new();
     for key in keys {
         match merge_keyed_row(base.get(&key), left.get(&key), right.get(&key)) {
             Ok(Some(row)) => merged.push(row),
-            Ok(None) => {}
+            Ok(None) => {
+                if let Some(deleted) = base.get(&key) {
+                    tombstones.push(deleted.key.clone());
+                }
+            }
             Err(conflict) => {
                 if record_conflict(
                     BranchMergeConflict::Row { range: range.clone(), conflict },
@@ -417,7 +447,7 @@ fn merge_range_rows(
             }
         }
     }
-    Ok(merged)
+    Ok(MergedRangeRows { rows: merged, tombstones })
 }
 
 fn record_conflict(

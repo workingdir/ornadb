@@ -1,0 +1,7 @@
+pub table FloatKey(value: Float) {
+    label: Str,
+}
+
+pub table RangeKey(period: Range<Date>) {
+    label: Str,
+}

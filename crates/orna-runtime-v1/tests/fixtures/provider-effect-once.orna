@@ -1,0 +1,1 @@
+pub fn archive_event(event: Str) = event;
