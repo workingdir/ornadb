@@ -11741,3 +11741,250 @@ fn duplicate_reused_deep_tail_edges_survive_sibling_recovery() {
     let decoded_causes = decoded["causes"].as_array().unwrap();
     assert_eq!(decoded_causes, causes);
 }
+
+#[test]
+fn duplicate_closures_keep_same_deep_recovery_across_parent_replacements() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    fn cause_shape(diagnostic: &serde_json::Value) -> Vec<usize> {
+        let causes = diagnostic["causes"].as_array().unwrap();
+        let mut shape = vec![causes.len()];
+        for cause in causes {
+            shape.extend(cause_shape(cause));
+        }
+        shape
+    }
+    fn deep_tail_codes(diagnostic: &serde_json::Value) -> Vec<String> {
+        let mut terminal = diagnostic;
+        for _ in 0..4 {
+            terminal = &terminal["causes"][0];
+        }
+        terminal["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tail| tail["code"].as_str().unwrap().to_owned())
+            .collect()
+    }
+    fn deep_parent_codes(diagnostic: &serde_json::Value) -> Vec<String> {
+        let mut parent = diagnostic;
+        let mut codes = Vec::new();
+        for depth in 0..5 {
+            codes.push(parent["code"].as_str().unwrap().to_owned());
+            if depth < 4 {
+                parent = &parent["causes"][0];
+            }
+        }
+        codes
+    }
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let make_chain = |generation: &str, tails: Vec<Diagnostic>| {
+        let message = format!("{generation} deep recovery payload");
+        let terminal = tails.into_iter().fold(
+            admitted("ORNA-E-DUPLICATE-DEEP-TERMINAL", &message),
+            |terminal, tail| terminal.with_cause(tail),
+        );
+        let nested = admitted("ORNA-E-DUPLICATE-DEEP-NESTED", &message).with_cause(terminal);
+        let parent = admitted("ORNA-E-DUPLICATE-DEEP-PARENT", &message).with_cause(nested);
+        let branch = admitted("ORNA-E-DUPLICATE-DEEP-BRANCH", &message).with_cause(parent);
+        admitted("ORNA-E-DUPLICATE-DEEP-ROOT", &message).with_cause(branch)
+    };
+    let recover = |diagnostic: &Diagnostic| {
+        Diagnostic::decode_ovb(&diagnostic.encode_ovb().unwrap()).unwrap()
+    };
+    let capture = |snapshot: Diagnostic| move || snapshot.clone();
+
+    let base_recovery = recover(&make_chain(
+        "base generation",
+        vec![
+            admitted("ORNA-E-DUPLICATE-BASE-A", "base first deep tail payload"),
+            admitted("ORNA-E-DUPLICATE-BASE-B", "base final deep tail payload"),
+        ],
+    ));
+    let replacement_recovery = recover(&make_chain(
+        "replacement generation",
+        vec![admitted(
+            "ORNA-E-DUPLICATE-REPLACEMENT",
+            "replacement deep tail payload",
+        )],
+    ));
+    let empty_recovery = recover(&make_chain("empty generation", vec![]));
+
+    // ORNA-SECRET-002 defines recursive redaction but does not specify whether
+    // two closures capturing clones of one decoded deep tree retain duplicate
+    // generations independently while their receivers cross replacements.
+    let capture_base = capture(base_recovery.clone());
+    let capture_replacement = capture(replacement_recovery.clone());
+    let capture_empty = capture(empty_recovery.clone());
+    let mut left = base_recovery.clone();
+    let mut right = base_recovery.clone();
+    let capture_left_initial = capture(left.clone());
+    let capture_right_initial = capture(right.clone());
+
+    left.clone_from(&capture_empty());
+    right.clone_from(&capture_replacement());
+    let capture_left_empty = capture(left.clone());
+    let capture_right_replacement = capture(right.clone());
+
+    left.clone_from(&capture_replacement());
+    right.clone_from(&capture_base());
+    let capture_left_replacement = capture(left.clone());
+    let capture_right_restored = capture(right.clone());
+
+    left.clone_from(&capture_base());
+    right.clone_from(&capture_empty());
+    let capture_left_restored = capture(left.clone());
+    let capture_right_empty = capture(right.clone());
+
+    assert_eq!(capture_left_initial(), base_recovery);
+    assert_eq!(capture_right_initial(), base_recovery);
+    assert_eq!(capture_left_empty(), empty_recovery);
+    assert_eq!(capture_right_replacement(), replacement_recovery);
+    assert_eq!(capture_left_replacement(), replacement_recovery);
+    assert_eq!(capture_right_restored(), base_recovery);
+    assert_eq!(capture_left_restored(), base_recovery);
+    assert_eq!(capture_right_empty(), empty_recovery);
+
+    let compose_generations = {
+        let capture_left_initial = capture_left_initial;
+        let capture_right_initial = capture_right_initial;
+        let capture_left_empty = capture_left_empty;
+        let capture_right_replacement = capture_right_replacement;
+        let capture_left_replacement = capture_left_replacement;
+        let capture_right_restored = capture_right_restored;
+        let capture_left_restored = capture_left_restored;
+        let capture_right_empty = capture_right_empty;
+        move || {
+            admitted("ORNA-E-DUPLICATE-DEEP-OUTER", "duplicate closure outer admission")
+                .with_cause(capture_left_initial())
+                .with_cause(capture_right_initial())
+                .with_cause(capture_left_empty())
+                .with_cause(capture_right_replacement())
+                .with_cause(capture_left_replacement())
+                .with_cause(capture_right_restored())
+                .with_cause(capture_left_restored())
+                .with_cause(capture_right_empty())
+        }
+    };
+    left.clone_from(&capture_empty());
+    right.clone_from(&capture_empty());
+    let outer = compose_generations();
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["message"], "duplicate closure outer admission");
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 8);
+    for cause in causes {
+        assert_redacted_tree(cause);
+    }
+    let expected_causes = [
+        base_recovery.clone(),
+        base_recovery.clone(),
+        empty_recovery.clone(),
+        replacement_recovery.clone(),
+        replacement_recovery.clone(),
+        base_recovery.clone(),
+        base_recovery.clone(),
+        empty_recovery.clone(),
+    ]
+    .into_iter()
+    .map(|generation| serde_json::to_value(generation).unwrap())
+    .collect::<Vec<_>>();
+    assert_eq!(causes, expected_causes.as_slice());
+    assert_eq!(causes[0], causes[1]);
+    assert_eq!(causes[5], causes[6]);
+    assert_eq!(
+        causes.iter().map(deep_parent_codes).collect::<Vec<_>>(),
+        vec![
+            vec![
+                "ORNA-E-DUPLICATE-DEEP-ROOT".to_owned(),
+                "ORNA-E-DUPLICATE-DEEP-BRANCH".to_owned(),
+                "ORNA-E-DUPLICATE-DEEP-PARENT".to_owned(),
+                "ORNA-E-DUPLICATE-DEEP-NESTED".to_owned(),
+                "ORNA-E-DUPLICATE-DEEP-TERMINAL".to_owned(),
+            ];
+            8
+        ],
+    );
+    assert_eq!(
+        causes.iter().map(cause_shape).collect::<Vec<_>>(),
+        vec![
+            vec![1, 1, 1, 1, 2, 0, 0],
+            vec![1, 1, 1, 1, 2, 0, 0],
+            vec![1, 1, 1, 1, 0],
+            vec![1, 1, 1, 1, 1, 0],
+            vec![1, 1, 1, 1, 1, 0],
+            vec![1, 1, 1, 1, 2, 0, 0],
+            vec![1, 1, 1, 1, 2, 0, 0],
+            vec![1, 1, 1, 1, 0],
+        ],
+    );
+    assert_eq!(
+        causes.iter().map(deep_tail_codes).collect::<Vec<_>>(),
+        vec![
+            vec![
+                "ORNA-E-DUPLICATE-BASE-A".to_owned(),
+                "ORNA-E-DUPLICATE-BASE-B".to_owned(),
+            ],
+            vec![
+                "ORNA-E-DUPLICATE-BASE-A".to_owned(),
+                "ORNA-E-DUPLICATE-BASE-B".to_owned(),
+            ],
+            vec![],
+            vec!["ORNA-E-DUPLICATE-REPLACEMENT".to_owned()],
+            vec!["ORNA-E-DUPLICATE-REPLACEMENT".to_owned()],
+            vec![
+                "ORNA-E-DUPLICATE-BASE-A".to_owned(),
+                "ORNA-E-DUPLICATE-BASE-B".to_owned(),
+            ],
+            vec![
+                "ORNA-E-DUPLICATE-BASE-A".to_owned(),
+                "ORNA-E-DUPLICATE-BASE-B".to_owned(),
+            ],
+            vec![],
+        ],
+    );
+
+    let json = serde_json::to_vec(&outer).unwrap();
+    let wire = outer.encode_ovb().unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"base generation deep recovery payload".as_slice(),
+            b"base first deep tail payload".as_slice(),
+            b"base final deep tail payload".as_slice(),
+            b"replacement generation deep recovery payload".as_slice(),
+            b"replacement deep tail payload".as_slice(),
+            b"empty generation deep recovery payload".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
+    assert_redacted_tree(&decoded);
+    let decoded_causes = decoded["causes"].as_array().unwrap();
+    assert_eq!(decoded_causes, causes);
+}
