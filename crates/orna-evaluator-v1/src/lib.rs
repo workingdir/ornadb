@@ -3038,6 +3038,43 @@ impl Context<'_, '_> {
                 })
             }
             (
+                Value::Duration {
+                    seconds,
+                    nanosecond,
+                },
+                Value::Int(factor),
+            ) if op == "*" => self.duration_from_total_nanoseconds(
+                elapsed_total_nanoseconds(&seconds, nanosecond) * factor,
+            ),
+            (
+                Value::Int(factor),
+                Value::Duration {
+                    seconds,
+                    nanosecond,
+                },
+            ) if op == "*" => self.duration_from_total_nanoseconds(
+                factor * elapsed_total_nanoseconds(&seconds, nanosecond),
+            ),
+            (
+                Value::Duration {
+                    seconds,
+                    nanosecond,
+                },
+                Value::Int(divisor),
+            ) if op == "/" => {
+                if divisor.is_zero() {
+                    return Err(error("ORNA-EVAL-DIVIDE-BY-ZERO"));
+                }
+                let total = elapsed_total_nanoseconds(&seconds, nanosecond);
+                let (quotient, remainder) = total.div_rem(&divisor);
+                // Orna does not prescribe Duration scaling. Keep it exact on
+                // the stored nanosecond grid instead of silently rounding.
+                if !remainder.is_zero() {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                self.duration_from_total_nanoseconds(quotient)
+            }
+            (
                 Value::Money { amount: a, currency: ac },
                 Value::Money { amount: b, currency: bc },
             ) => self.money_binary(op, a, ac, b, bc),

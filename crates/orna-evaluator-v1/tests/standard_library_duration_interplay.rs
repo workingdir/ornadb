@@ -155,6 +155,74 @@ fn integer_duration_units_enforce_limit_after_seconds_scaling() {
 }
 
 #[test]
+fn elapsed_duration_integer_scaling_keeps_nanosecond_precision_and_sign() {
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna")),
+        Ok(None)
+    );
+
+    for (source, expected) in [
+        (
+            include_str!("fixtures/stdlib-time-duration-scale-multiply-mbiom.orna"),
+            "PT0.75S",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scale-commuted-mbiom.orna"),
+            "-PT1.5S",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scale-divide-mbiom.orna"),
+            "PT0.5S",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scale-negative-divide-mbiom.orna"),
+            "-PT0.5S",
+        ),
+    ] {
+        let result = session.submit(source);
+        assert_eq!(
+            result,
+            Ok(Some(text(expected))),
+            "{source}; diagnostic={}",
+            result.as_ref().err().map_or("none", |error| error.code())
+        );
+    }
+
+    assert_eq!(
+        session
+            .submit(include_str!("fixtures/stdlib-time-duration-scale-inexact-mbiom.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-VALUE"
+    );
+    assert_eq!(
+        session
+            .submit(include_str!("fixtures/stdlib-time-duration-scale-zero-mbiom.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-DIVIDE-BY-ZERO"
+    );
+
+    let limits = Limits {
+        max_integer_digits: 4,
+        ..Limits::default()
+    };
+    let mut bounded = AdmittedReplSession::with_reference_standard(limits).unwrap();
+    assert_eq!(
+        bounded.submit(include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna")),
+        Ok(None)
+    );
+    assert_eq!(
+        bounded
+            .submit(include_str!("fixtures/stdlib-time-duration-scale-overflow-mbiom.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
+#[test]
 fn duration_clock_format_keeps_fractional_minute_and_sign_boundaries() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
     assert_eq!(
