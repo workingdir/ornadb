@@ -629,6 +629,39 @@ pub fn validate_api_document(api: &Value) -> Result<(), String> {
     let object = api
         .as_object()
         .ok_or_else(|| "system API document must be a JSON object".to_owned())?;
+    const TOP_LEVEL_FIELDS: [&str; 15] = [
+        "title",
+        "language_version",
+        "sys_version",
+        "status",
+        "source_of_truth",
+        "removed_names",
+        "singletons",
+        "opaque_identifiers",
+        "reference_aliases",
+        "value_types",
+        "enums",
+        "relations",
+        "functions",
+        "failure_codes",
+        "counts",
+    ];
+    if object.len() != TOP_LEVEL_FIELDS.len()
+        || object
+            .keys()
+            .any(|field| !TOP_LEVEL_FIELDS.contains(&field.as_str()))
+    {
+        return Err("system API document must contain exactly the published top-level fields".to_owned());
+    }
+    for field in ["title", "language_version", "sys_version", "status", "source_of_truth"] {
+        if object
+            .get(field)
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(format!("system API `{field}` must be a nonblank string"));
+        }
+    }
     let counts = object
         .get("counts")
         .and_then(Value::as_object)
