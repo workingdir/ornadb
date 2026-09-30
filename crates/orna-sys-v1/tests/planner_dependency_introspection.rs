@@ -1691,6 +1691,91 @@ fn explain_partial_scan_bounds_accumulate_across_unknown_join_chain() {
 }
 
 #[test]
+fn explain_partial_scan_byte_rounding_boundary_through_unknown_tail() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_with_bytes = |partial_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-byte-rounding-boundary"),
+            source: obj("table:row-bound"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 1),
+                estimated_bytes: None,
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:partial-byte-scan"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(partial_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:unknown-final-scan"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:partial-byte-rounding")),
+        })
+        .expect("partial byte scan around the 4-KiB boundary")
+    };
+
+    // Partial scan bytes round up to work blocks: 1 through 4096 bytes adds
+    // one, while 4097 bytes adds two. An unknown final scan does not alter it.
+    for bytes in [4_095, 4_096] {
+        let exact = explain_with_bytes(bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let partial_scan = exact
+            .nodes()
+            .iter()
+            .find(|node| node.object() == Some(&obj("table:partial-byte-scan")))
+            .expect("partial byte scan at exact cost boundary");
+        assert_eq!(partial_scan.estimated_rows(), None);
+        assert_eq!(partial_scan.estimated_bytes(), Some(bytes));
+        assert_eq!(partial_scan.estimated_work(), None);
+    }
+
+    let overflow = explain_with_bytes(4_097);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the second rounded block crosses the exact boundary"
+    );
+    let nodes = overflow.nodes();
+    let partial_scan_position = nodes
+        .iter()
+        .position(|node| node.object() == Some(&obj("table:partial-byte-scan")))
+        .expect("partial byte scan that proves overflow");
+    assert_eq!(nodes[partial_scan_position].estimated_bytes(), Some(4_097));
+    assert_eq!(nodes[partial_scan_position].estimated_work(), None);
+    let unknown_scan_position = nodes
+        .iter()
+        .position(|node| node.object() == Some(&obj("table:unknown-final-scan")))
+        .expect("unknown final scan");
+    assert!(unknown_scan_position > partial_scan_position);
+    assert_eq!(nodes[unknown_scan_position].estimated_work(), None);
+    let surface = serde_json::to_value(&overflow).expect("rounded byte overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
 fn explain_partial_byte_scan_boundary_survives_unknown_final_scan() {
     let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
