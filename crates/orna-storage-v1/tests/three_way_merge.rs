@@ -3110,6 +3110,53 @@ fn conflict_budget_closes_fixture_row_tombstone_checkpoint_tail() {
         assert!(!report.affected_checkpoints.contains(closure_id.as_slice()));
         assert_eq!(source.visited.len(), 9);
     }
+
+    // ORNA-MERGE-005 requires both limits but leaves their boundary precedence
+    // open. With four rows read, a second row conflict crossing a one-detail
+    // cap stops before the tombstone range; allowing exactly two conflict
+    // details reaches that range, where the fifth row crosses the row cap.
+    let (base, left, right, mut source, _, _, _) = build_inputs();
+    let error = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 4, max_conflicts: 1 },
+    )
+    .unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("the second row conflict crosses the one-detail cap at the row boundary")
+    };
+    assert_eq!(report.rows_examined, 4);
+    assert_eq!(report.conflicts_lower_bound, 2);
+    assert_eq!(report.affected_ranges.len(), 2);
+    assert!(report.affected_checkpoints.is_empty());
+    let visits_through_second_conflict = segment_visits
+        .iter()
+        .take(2)
+        .flat_map(|visits| visits.iter().cloned())
+        .collect::<Vec<_>>();
+    assert_eq!(source.visited, visits_through_second_conflict);
+
+    let (base, left, right, mut source, _, _, _) = build_inputs();
+    let error = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 4, max_conflicts: 2 },
+    )
+    .unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("the fifth row crosses the row cap after both conflicts fit exactly")
+    };
+    assert_eq!(report.rows_examined, 5);
+    assert_eq!(report.conflicts_lower_bound, 2);
+    assert_eq!(report.affected_ranges.len(), 3);
+    assert!(report.affected_checkpoints.is_empty());
+    let mut visits_before_tombstone = visits_through_second_conflict;
+    visits_before_tombstone.push((MergeSide::Base, b"base-tombstone".to_vec()));
+    assert_eq!(source.visited, visits_before_tombstone);
 }
 
 #[test]
