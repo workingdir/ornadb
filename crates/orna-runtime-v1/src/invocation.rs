@@ -793,8 +793,8 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         let capture = crate::capture_tx(&tx).await?;
-        // Receipt reconciliation can run between pages without changing CWD;
-        // a real CWD generation change must reject the old continuation.
+        // Receipt replay or a rolled-back CWD write leaves this capture
+        // unchanged; only a committed CWD generation change invalidates pages.
         if after
             .as_ref()
             .is_some_and(|cursor| cursor.capture != capture)
