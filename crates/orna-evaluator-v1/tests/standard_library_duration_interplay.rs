@@ -1353,6 +1353,40 @@ fn positive_factor_rescaled_tails_close_after_twelfth_doubling() {
 }
 
 #[test]
+fn positive_factor_rescaled_tails_close_after_thirteenth_doubling() {
+    // The reference is silent on closing the tail after another scaling
+    // step. Thirteen doublings carry the 3 ns tail to 24,576 ns around 8,192
+    // minutes; correcting by 24,576 ns closes both sides at 5d 16h 32m.
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
+    ] {
+        assert_eq!(session.submit(source), Ok(None), "{source}");
+    }
+
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirteenth-doubling-from-below-2tfji.orna"),
+        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirteenth-doubling-from-above-2tfji.orna"),
+    ] {
+        let result = session.submit(source);
+        assert_eq!(
+            result,
+            Ok(Some(texts(&[
+                "5d 16h 32m",
+                "136:32:00",
+                "5 days, 16 hours, 32 minutes",
+                "P5DT16H32M",
+            ]))),
+            "{source}; diagnostic={}",
+            result.as_ref().err().map_or("none", |error| error.code())
+        );
+    }
+}
+
+#[test]
 fn clock_output_bound_keeps_elapsed_hours_and_fractional_tail() {
     let limits = Limits {
         max_string_bytes: 129,
