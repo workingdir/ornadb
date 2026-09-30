@@ -1270,6 +1270,7 @@ fn map_compact_runtime_error(error: RuntimeError) -> Error {
         | RuntimeError::InvalidDigest
         | RuntimeError::InvalidObservationReference
         | RuntimeError::ObservationCoordinateMismatch
+        | RuntimeError::AdminInvocationConflict
         | RuntimeError::ConflictingPublicationIntent
         | RuntimeError::ConflictingPublicationCommit
         | RuntimeError::InvalidPublicationCommit
@@ -1658,6 +1659,14 @@ mod tests {
         assert_eq!(
             map_compact_runtime_error(RuntimeError::AdminBusy),
             Error::RuntimeUnavailable
+        );
+    }
+
+    #[test]
+    fn admin_invocation_identity_conflict_maps_to_invalid_transition() {
+        assert_eq!(
+            map_compact_runtime_error(RuntimeError::AdminInvocationConflict),
+            Error::InvalidTransition
         );
     }
 
