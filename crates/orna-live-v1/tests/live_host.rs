@@ -8992,9 +8992,9 @@ fn deletion_failure_closes_fail_closed_without_sensitive_diagnostics() {
 #[test]
 fn delete_cancels_durable_session_work_before_returning_success() {
     let (root, repository) = durable_repository();
-    // The reference scopes request identity by session but leaves the same-ID
-    // status-after-neighbor-deletion case unspecified; preserve each session's
-    // durable status while closing only the deleted session's work.
+    // The reference requires DELETE to cancel session-owned work, but leaves
+    // the same-ID running-status behavior across sessions unspecified. Prove
+    // the neighbor's active row survives closure and can still complete.
     let first_target_request = eval_with_context([1; 16], [91; 16], [2; 16], None);
     let first_fingerprint = request_fingerprint(&first_target_request, [1; 16]);
     let second_target_request = eval_with_context([2; 16], [91; 16], [2; 16], None);
@@ -9002,17 +9002,22 @@ fn delete_cancels_durable_session_work_before_returning_success() {
     assert_ne!(first_fingerprint, second_fingerprint);
 
     let runtime = open_durable_state(&repository);
+    let owner = [93; 16];
+    let lease = block_on(runtime.acquire_lease(owner)).unwrap();
     let second_identity = RequestIdentity {
         session_id: [2; 16],
         request_id: [91; 16],
     };
     let second_result = unit_result([91; 16], second_fingerprint);
-    block_on(runtime.reserve_request(second_identity, second_fingerprint)).unwrap();
-    block_on(runtime.start_request(second_identity, second_fingerprint)).unwrap();
-    block_on(runtime.complete_request(
+    let (_, second_capability) =
+        block_on(runtime.reserve_request_with_admission(second_identity, second_fingerprint))
+            .unwrap();
+    let second_capability = second_capability.expect("fresh owner-bound capability");
+    block_on(runtime.start_request_with_owner_and_admission(
         second_identity,
         second_fingerprint,
-        TerminalOutcome::new(second_result.encode(Limits::default().protocol).unwrap()).unwrap(),
+        lease,
+        second_capability,
     ))
     .unwrap();
 
@@ -9021,8 +9026,6 @@ fn delete_cancels_durable_session_work_before_returning_success() {
         request_id: [91; 16],
     };
     let fingerprint = first_fingerprint;
-    let owner = [93; 16];
-    let lease = block_on(runtime.acquire_lease(owner)).unwrap();
     let (_, capability) =
         block_on(runtime.reserve_request_with_admission(identity, fingerprint)).unwrap();
     let capability = capability.expect("fresh owner-bound capability");
@@ -9120,8 +9123,50 @@ fn delete_cancels_durable_session_work_before_returning_success() {
     assert_eq!(children.calls, 1);
     assert_eq!(children.requests, vec![identity]);
 
-    let second_status_request = Envelope {
+    let second_running_status_request = Envelope {
         request: Some([44; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint: second_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let second_running_status = block_on(host.dispatch_frame(
+        [7; 16],
+        2,
+        Frame::Binary(second_running_status_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the other session keeps its same-ID request status after deletion");
+    assert!(matches!(
+        &second_running_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Running,
+            fingerprint: Some(returned),
+            result: None,
+        } if *target == [91; 16] && *returned == second_fingerprint
+    ));
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status(second_identity, second_fingerprint))
+            .unwrap(),
+        Some(status) if status.state == orna_runtime_v1::RequestState::Running
+    ));
+
+    block_on(open_durable_state(&repository).complete_request_with_owner(
+        second_identity,
+        second_fingerprint,
+        lease,
+        TerminalOutcome::new(second_result.encode(Limits::default().protocol).unwrap()).unwrap(),
+    ))
+    .unwrap();
+    let second_status_request = Envelope {
+        request: Some([45; 16]),
         watch: None,
         message: Message::RequestStatus {
             target: [91; 16],
@@ -9133,13 +9178,13 @@ fn delete_cancels_durable_session_work_before_returning_success() {
     .unwrap();
     let second_status = block_on(host.dispatch_frame(
         [7; 16],
-        2,
+        3,
         Frame::Binary(second_status_request.clone()),
         &mut application,
     ))
     .unwrap()
     .response
-    .expect("the other session keeps its same-ID request status after deletion");
+    .expect("the surviving session can recover its completion after deletion");
     let expected_result =
         ResultBody::from_result(&second_result, Limits::default().protocol).unwrap();
     assert!(matches!(
@@ -9191,7 +9236,7 @@ fn delete_cancels_durable_session_work_before_returning_success() {
 
     let second_status_retry = block_on(host.dispatch_frame(
         [7; 16],
-        3,
+        4,
         Frame::Binary(second_status_request),
         &mut application,
     ))
