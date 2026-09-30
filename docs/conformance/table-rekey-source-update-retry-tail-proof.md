@@ -271,3 +271,8 @@ The third handoff again uses a destination released by a prior move. The
 competitor moves there while the inserted row retries into its target, then
 returns to the inserted row's vacated source. This repeated target-reuse retry
 ordering is documented as a local choice where the reference is silent.
+
+The extension continues with a retry through an earlier released destination:
+the inserted row moves aside into it, the competitor retries at the freed key,
+and the inserted row reuses the competitor's source. This continuation pins the
+local handoff order because the reference is silent.
