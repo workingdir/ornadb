@@ -2,3 +2,5 @@ pub fn diff_change_area(entry: sys.DiffEntry): sys.ChangeArea = entry.change.are
 pub fn diff_change_target(entry: sys.DiffEntry): sys.ChangeTarget = entry.change.target;
 pub fn diff_change_target_kind(entry: sys.DiffEntry): sys.ChangeTargetKind = entry.change.target.kind;
 pub fn diff_rows(from: sys.SnapshotRef, to: sys.SnapshotRef): Relation<sys.DiffEntry> = sys.diff(from, to);
+pub fn dependency_rows(object: sys.ObjectRef): Relation<sys.Dependency> = sys.dependencies(object);
+pub fn source_map_rows(document: sys.SourceDocument): Relation<sys.SourceMapEntry> = document.maps;
