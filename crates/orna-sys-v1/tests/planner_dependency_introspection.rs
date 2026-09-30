@@ -3389,3 +3389,85 @@ fn explain_rounds_complete_scan_bytes_independently_before_materialization() {
         node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
     }));
 }
+
+#[test]
+fn explain_closes_per_scan_rounding_at_zero_and_one_byte_join_tails() {
+    let parsed = orna_syntax_v1::parse_module(ROUNDING_TAIL_INTERPLAY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    for (tail_bytes, tail_work, joined_bytes, expected_cost) in
+        [(0, 1, 4_095, 7), (1, 2, 4_096, 8)]
+    {
+        let explained = explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:rounding-closure-edge"),
+            source: obj("table:RoundingFirst"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(1),
+                estimated_bytes: Some(4_095),
+                mutable_branch: None,
+            }),
+            joins: vec![QueryJoinDescription {
+                source: obj("table:RoundingTail"),
+                statistics: Some(QuerySourceStatistics {
+                    estimated_rows: Some(1),
+                    estimated_bytes: Some(tail_bytes),
+                    mutable_branch: None,
+                }),
+                predicate: None,
+            }],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:rounding-closure-edge")),
+        })
+        .expect("complete scan estimates at the positive-byte boundary");
+
+        // ORNA-PLAN leaves byte-cost units unspecified. Under the existing
+        // 4-KiB rule, a positive byte adds one block to that scan on its own;
+        // 4095+1 bytes across scans therefore charge two blocks. Join output
+        // is priced from its own combined cardinality before materialization.
+        for (table, bytes, work) in [
+            ("table:RoundingFirst", 4_095, 2),
+            ("table:RoundingTail", tail_bytes, tail_work),
+        ] {
+            let scan = explained
+                .nodes()
+                .iter()
+                .find(|node| {
+                    node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table))
+                })
+                .expect("fixture scan in closure proof");
+            assert_eq!(scan.estimated_rows(), Some(1));
+            assert_eq!(scan.estimated_bytes(), Some(bytes));
+            assert_eq!(scan.estimated_work(), Some(work));
+        }
+        let join = explained
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Join)
+            .expect("fixture scan join");
+        assert_eq!(join.estimated_rows(), Some(1));
+        assert_eq!(join.estimated_bytes(), Some(joined_bytes));
+        assert_eq!(join.estimated_work(), Some(2));
+        let materialize = explained
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Materialize)
+            .expect("materialization tail");
+        assert_eq!(materialize.estimated_rows(), Some(1));
+        assert_eq!(materialize.estimated_bytes(), Some(joined_bytes));
+        assert_eq!(materialize.estimated_work(), Some(2));
+        let expected_cost = expected_cost.to_string();
+        assert_eq!(explained.plan().estimated_cost(), Some(expected_cost.as_str()));
+
+        let surface = serde_json::to_value(&explained).expect("rounded closure surface");
+        assert_eq!(surface["plan"]["estimated_cost"], expected_cost);
+        assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+            node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+        }));
+    }
+}
