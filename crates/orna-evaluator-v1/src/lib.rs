@@ -2840,6 +2840,15 @@ impl Context<'_, '_> {
             ) => self
                 .checked_decimal(DecimalValue::new(-amount.coefficient, amount.exponent10)?)
                 .map(|amount| Value::Money { amount, currency }),
+            (
+                "-",
+                Value::Duration {
+                    seconds,
+                    nanosecond,
+                },
+            ) => self.duration_from_total_nanoseconds(
+                -elapsed_total_nanoseconds(&seconds, nanosecond),
+            ),
             ("-", Value::Float(value)) => finite_float(-f64::from_bits(value)),
             _ => Err(error("ORNA-EVAL-TYPE")),
         }
@@ -2966,6 +2975,69 @@ impl Context<'_, '_> {
             (Value::Int(a), Value::Int(b)) => self.int_binary(op, a, b),
             (Value::Decimal(a), Value::Decimal(b)) => self.decimal_binary(op, a, b),
             (
+                Value::Instant {
+                    unix_seconds,
+                    nanosecond,
+                },
+                Value::Duration {
+                    seconds,
+                    nanosecond: duration_nanosecond,
+                },
+            ) if matches!(op, "+" | "-") => self.instant_duration_binary(
+                unix_seconds,
+                nanosecond,
+                seconds,
+                duration_nanosecond,
+                op == "-",
+            ),
+            (
+                Value::Duration {
+                    seconds,
+                    nanosecond: duration_nanosecond,
+                },
+                Value::Instant {
+                    unix_seconds,
+                    nanosecond,
+                },
+            ) if op == "+" => self.instant_duration_binary(
+                unix_seconds,
+                nanosecond,
+                seconds,
+                duration_nanosecond,
+                false,
+            ),
+            (
+                Value::Instant {
+                    unix_seconds: left_seconds,
+                    nanosecond: left_nanosecond,
+                },
+                Value::Instant {
+                    unix_seconds: right_seconds,
+                    nanosecond: right_nanosecond,
+                },
+            ) if op == "-" => self.duration_from_total_nanoseconds(
+                elapsed_total_nanoseconds(&BigInt::from(left_seconds), left_nanosecond)
+                    - elapsed_total_nanoseconds(&BigInt::from(right_seconds), right_nanosecond),
+            ),
+            (
+                Value::Duration {
+                    seconds: left_seconds,
+                    nanosecond: left_nanosecond,
+                },
+                Value::Duration {
+                    seconds: right_seconds,
+                    nanosecond: right_nanosecond,
+                },
+            ) if matches!(op, "+" | "-") => {
+                let left = elapsed_total_nanoseconds(&left_seconds, left_nanosecond);
+                let right = elapsed_total_nanoseconds(&right_seconds, right_nanosecond);
+                self.duration_from_total_nanoseconds(if op == "+" {
+                    left + right
+                } else {
+                    left - right
+                })
+            }
+            (
                 Value::Money { amount: a, currency: ac },
                 Value::Money { amount: b, currency: bc },
             ) => self.money_binary(op, a, ac, b, bc),
@@ -3011,6 +3083,54 @@ impl Context<'_, '_> {
             (Value::Bool(a), Value::Bool(b)) => compare(op, a.cmp(&b)),
             _ => Err(error("ORNA-EVAL-TYPE")),
         }
+    }
+    fn duration_from_total_nanoseconds(
+        &self,
+        total_nanoseconds: BigInt,
+    ) -> Result<Value, EvaluationError> {
+        // Normalize on the stored Duration grid so negative values keep a
+        // floor-normalized seconds field and a nonnegative nanosecond tail.
+        let (seconds, nanosecond) =
+            total_nanoseconds.div_mod_floor(&BigInt::from(1_000_000_000u32));
+        let nanosecond = nanosecond
+            .to_u32()
+            .filter(|nanosecond| *nanosecond < 1_000_000_000)
+            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        Ok(Value::Duration {
+            seconds: self.integer(seconds)?,
+            nanosecond,
+        })
+    }
+    fn instant_duration_binary(
+        &self,
+        instant_seconds: i64,
+        instant_nanosecond: u32,
+        duration_seconds: BigInt,
+        duration_nanosecond: u32,
+        subtract: bool,
+    ) -> Result<Value, EvaluationError> {
+        let instant = elapsed_total_nanoseconds(
+            &BigInt::from(instant_seconds),
+            instant_nanosecond,
+        );
+        let duration = elapsed_total_nanoseconds(&duration_seconds, duration_nanosecond);
+        let total = if subtract {
+            instant - duration
+        } else {
+            instant + duration
+        };
+        let (seconds, nanosecond) = total.div_mod_floor(&BigInt::from(1_000_000_000u32));
+        // Instant has a fixed i64 seconds axis; out-of-range arithmetic is a
+        // value error rather than wrapping or borrowing calendar policy.
+        let unix_seconds = seconds.to_i64().ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+        let nanosecond = nanosecond
+            .to_u32()
+            .filter(|nanosecond| *nanosecond < 1_000_000_000)
+            .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+        Ok(Value::Instant {
+            unix_seconds,
+            nanosecond,
+        })
     }
     fn ordered_range(
         &self,
@@ -7037,6 +7157,10 @@ fn format_duration_context(context: Option<&Value>) -> Result<(), EvaluationErro
     }
     resolve_time_zone(zone).map_err(|_| error("ORNA-EVAL-VALUE"))?;
     Ok(())
+}
+
+fn elapsed_total_nanoseconds(seconds: &BigInt, nanosecond: u32) -> BigInt {
+    seconds * BigInt::from(1_000_000_000u32) + BigInt::from(nanosecond)
 }
 
 fn format_duration(name: &str, seconds: &BigInt, nanosecond: u32) -> String {
