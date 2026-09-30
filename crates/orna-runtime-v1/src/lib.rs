@@ -20073,6 +20073,45 @@ mod tests {
             "unadmitted take(0) reports visibility without enumerating rows"
         );
 
+        // Even a sorted union must preserve each source's admission boundary
+        // before the zero-row shortcut skips scans and sort-key evaluation.
+        let (union_zero, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-take-zero-union-sorted.orna"),
+        );
+        assert_eq!(
+            union_zero.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 0), "admitted zero-take union does no query work");
+
+        let storage_only = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let storage_only = storage_only.query_session();
+        let (missing_right, lookups, scans) = invoke_query_fixture_with_counts(
+            &storage_only,
+            include_str!("../tests/fixtures/query-session-take-zero-union-sorted.orna"),
+        );
+        assert_eq!(
+            missing_right.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 0), "unadmitted right source fails before scanning");
+
+        let maintenance_only = state
+            .begin_table_activation(&["sys.MaintenanceJob"])
+            .await
+            .unwrap();
+        let maintenance_only = maintenance_only.query_session();
+        let (missing_left, lookups, scans) = invoke_query_fixture_with_counts(
+            &maintenance_only,
+            include_str!("../tests/fixtures/query-session-take-zero-union-sorted.orna"),
+        );
+        assert_eq!(
+            missing_left.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 0), "unadmitted left source fails before scanning");
+
         let (missing, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
             include_str!("../tests/fixtures/query-session-projection-missing.orna"),
