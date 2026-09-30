@@ -20946,6 +20946,26 @@ mod tests {
             "last() propagates a final tail failure after its last match"
         );
 
+        // The reference leaves closure just after a nonmatching row
+        // following last()'s match implicit. The next row would fail its
+        // lookup, but it is outside the four-row prefix and must stay unseen.
+        let (last_closes_after_final_match_nonmatch, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-final-match-edge-excludes-next-failure.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_after_final_match_nonmatch.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (6, 5),
+            "last() returns its final match after the bounded nonmatch without evaluating the failing next row"
+        );
+
         // The reference is silent when the bounded tail continues past a
         // nonmatch to a predicate failure, with another match after that
         // failure. Preserve the error instead of allowing last() to evaluate
