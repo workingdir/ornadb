@@ -7,12 +7,18 @@ use orna_storage_v1::{
     StoragePlacementError, StoragePreference, StorageProfile, StorageRewriteError,
     StorageRewriteTarget, AUTOMATIC_EDITABLE_MAX_PUBLICATION_BYTES,
 };
+use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 
 const EDITABLE_ROW: &str = include_str!("fixtures/storage-placement-row.orna");
+const REWRITE_TAIL_FIRST: &str = include_str!("fixtures/storage-rewrite-tail-first.orna");
+const REWRITE_TAIL_LAST: &str = include_str!("fixtures/storage-rewrite-tail-last.orna");
 const KEY_FIELD: Uuid = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
 
 fn profile() -> CompactOvbProfile {
-    let table = Uuid::from_u128(1);
+    profile_for_table(Uuid::from_u128(1))
+}
+
+fn profile_for_table(table: Uuid) -> CompactOvbProfile {
     CompactOvbProfile::new(
         SchemaDescriptor::new(OvbRaw::Map(vec![
             (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
@@ -49,6 +55,27 @@ fn key(value: i64) -> Vec<u8> {
         .unwrap()
         .encode()
         .unwrap()
+}
+
+fn rewrite_tail_fixture_key(source: &str) -> i64 {
+    let parsed = parse_row(source);
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    let Expr::Record { fields, .. } = parsed.value else {
+        panic!("rewrite tail fixture is a row record")
+    };
+    let [field] = fields.as_slice() else {
+        panic!("rewrite tail fixture has one key field")
+    };
+    assert_eq!(field.name, "id");
+    let Expr::Literal {
+        text,
+        kind: LiteralKind::Integer,
+        ..
+    } = &field.value
+    else {
+        panic!("rewrite tail fixture key is an integer")
+    };
+    text.parse().unwrap()
 }
 
 fn row(value: i64) -> CanonicalValue {
@@ -198,6 +225,70 @@ fn rewrite_preview_is_generation_bound_and_proves_an_empty_logical_diff() {
     assert_eq!(
         plan.verify_candidate(&profile, [(key(17), row(18).encode().unwrap())]),
         Err(StorageRewriteError::CandidateMismatch)
+    );
+}
+
+#[test]
+fn rewrite_source_fence_preserves_the_full_editable_tail_at_repeated_generations() {
+    let profile = profile();
+    let compact = orna_storage_v1::fold_compact_committed_base(&profile, [], 1).unwrap();
+    let hybrid = HybridBaseState::new(
+        &profile,
+        compact,
+        [REWRITE_TAIL_FIRST, REWRITE_TAIL_LAST].map(|source| {
+            let value = rewrite_tail_fixture_key(source);
+            EditableBaseRow {
+                key: CanonicalValue::decode(&key(value)).unwrap(),
+                value: row(value),
+            }
+        }),
+    )
+    .unwrap();
+    let plan = plan_storage_rewrite(
+        &profile,
+        &hybrid,
+        StorageRewriteTarget::Compact,
+        |_| panic!("compact target does not need loose paths"),
+        |_, _| panic!("compact target does not need loose row encoding"),
+        |_| panic!("compact target does not need loose row decoding"),
+    )
+    .unwrap();
+    let source_rows: Vec<_> = plan
+        .rows()
+        .iter()
+        .map(|rewrite_row| {
+            (
+                rewrite_row.key().to_vec(),
+                rewrite_row.canonical_value().to_vec(),
+            )
+        })
+        .collect();
+    let fixture_rows = [REWRITE_TAIL_FIRST, REWRITE_TAIL_LAST]
+        .map(|source| rewrite_tail_fixture_key(source))
+        .map(|value| (key(value), row(value).encode().unwrap()));
+
+    assert_eq!(plan.previous_generation(), 0);
+    assert_eq!(plan.generation(), 1);
+    assert_eq!(source_rows.len(), 2);
+    assert_eq!(source_rows, fixture_rows);
+    assert_eq!(
+        plan.verify_source_snapshot(&profile, 0, source_rows.clone()),
+        Ok(())
+    );
+    assert_eq!(
+        plan.verify_source_snapshot(&profile, 0, [source_rows[1].clone()]),
+        Err(StorageRewriteError::StaleInput)
+    );
+    assert_eq!(
+        plan.verify_source_snapshot(&profile, 1, source_rows.clone()),
+        Err(StorageRewriteError::StaleInput)
+    );
+    assert_eq!(
+        plan.verify_candidate(
+            &profile_for_table(Uuid::from_u128(2)),
+            source_rows,
+        ),
+        Err(StorageRewriteError::WrongProfile)
     );
 }
 
