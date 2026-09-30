@@ -735,6 +735,10 @@ struct WatchEventApplication {
     events: usize,
 }
 
+struct DeferredWatchEventApplication {
+    events: usize,
+}
+
 struct IdentityWatchApplication {
     next_revision: u64,
     next_present: PresentNode,
@@ -3931,6 +3935,181 @@ fn durable_status_retry_replays_unknown_after_target_completes_and_host_recovers
 }
 
 #[test]
+fn durable_unknown_status_retry_replays_after_target_becomes_orphaned() {
+    let (root, repository) = durable_repository();
+    let runtime = open_durable_state(&repository);
+    let old_owner = RequestOwner::from(block_on(runtime.acquire_lease([77; 16])).unwrap());
+    let mut host = durable_host_with_owner(runtime, [77; 16]);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
+    let mut socket = WebSocketState::new([5; 16]);
+    let mut application = DeferredWatchEventApplication { events: 0 };
+
+    let fixture_eval = eval_with_context([1; 16], [36; 16], [2; 16], None);
+    let fixture_output = block_on(transport.receive_with_application(
+        &mut socket,
+        2,
+        &masked_binary_payload(&fixture_eval),
+        &mut application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &fixture_output[0] else {
+        panic!("the in-crate ORNA fixture receives a host response");
+    };
+    assert!(matches!(
+        Envelope::decode(payload, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Diagnostic { .. }
+    ));
+
+    let subscribe_request = subscribe_request([35; 16]);
+    let subscribed = block_on(transport.receive_with_application(
+        &mut socket,
+        3,
+        &masked_binary_payload(&subscribe_request),
+        &mut application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &subscribed[0] else {
+        panic!("the session establishes the Event watch");
+    };
+    let watch = Envelope::decode(payload, Limits::default().protocol)
+        .unwrap()
+        .watch
+        .expect("subscription returns its watch identity");
+
+    let event_request = event([1; 16], [37; 16], watch);
+    let event_fingerprint = request_fingerprint(&event_request, [1; 16]);
+    let unknown_status_request = Envelope {
+        request: Some([38; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [37; 16],
+            fingerprint: event_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let unknown_output = block_on(transport.receive_with_application(
+        &mut socket,
+        4,
+        &masked_binary_payload(&unknown_status_request),
+        &mut application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &unknown_output[0] else {
+        panic!("an unknown target returns a status snapshot");
+    };
+    let unknown_status = Envelope::decode(payload, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        &unknown_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Unknown,
+            fingerprint: None,
+            result: None,
+        } if *target == [37; 16]
+    ));
+
+    assert!(matches!(
+        block_on(transport.receive_with_application(
+            &mut socket,
+            5,
+            &masked_binary_payload(&event_request),
+            &mut application,
+        )),
+        Err(Error::ApplicationDeferred)
+    ));
+    assert_eq!(application.events, 1);
+    drop(transport);
+
+    let recovery_runtime = open_durable_state(&repository);
+    block_on(recovery_runtime.recover_abandoned(old_owner.owner_id, [78; 16])).unwrap();
+    drop(recovery_runtime);
+    let mut recovered = durable_host_after_takeover(
+        open_durable_state(&repository),
+        [78; 16],
+        old_owner,
+    );
+    let mut recovered_issuer = Issuer(2, None);
+    let recovered_credential = create(&mut recovered, &mut recovered_issuer);
+    block_on(recovered.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &recovered_credential,
+        attachment: [6; 16],
+        now: 6,
+    }))
+    .unwrap();
+    let mut recovered_transport =
+        LiveTransport::new(recovered, TransportLimits::default()).unwrap();
+    let mut recovered_socket = WebSocketState::new([6; 16]);
+    let mut recovered_application = UnitApplication::default();
+
+    let orphan_status_request = Envelope {
+        request: Some([39; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [37; 16],
+            fingerprint: event_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let orphan_status_output = block_on(recovered_transport.receive_with_application(
+        &mut recovered_socket,
+        7,
+        &masked_binary_payload(&orphan_status_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &orphan_status_output[0] else {
+        panic!("a fresh status query observes the recovered running Event");
+    };
+    let orphan_status = Envelope::decode(payload, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        orphan_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Orphaned,
+            fingerprint: Some(fingerprint),
+            ..
+        } if target == [37; 16] && fingerprint == event_fingerprint
+    ));
+
+    let unknown_retry = block_on(recovered_transport.receive_with_application(
+        &mut recovered_socket,
+        8,
+        &masked_binary_payload(&unknown_status_request),
+        &mut recovered_application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &unknown_retry[0] else {
+        panic!("the exact status retry preserves its original Unknown snapshot");
+    };
+    assert_eq!(
+        Envelope::decode(payload, Limits::default().protocol).unwrap(),
+        unknown_status
+    );
+    assert_eq!(recovered_application.calls, 0);
+
+    drop(recovered_transport);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn websocket_commit_without_completed_delivery_aborts_candidate_and_preserves_incumbent() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
     let mut issuer = Issuer(1, None);
@@ -5264,6 +5443,47 @@ fn dispatch_computes_fingerprints_and_replays_terminal_results() {
         Err(Error::RequestMismatch)
     );
     assert_eq!(application.calls, 1);
+}
+
+impl LiveApplication for DeferredWatchEventApplication {
+    fn eval(
+        &mut self,
+        _: [u8; 16],
+        _: [u8; 16],
+        _: &Message,
+    ) -> Result<Envelope, Error> {
+        Err(Error::UnsupportedOperation)
+    }
+
+    fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
+        Err(Error::UnsupportedOperation)
+    }
+
+    fn subscribe(
+        &mut self,
+        _: [u8; 16],
+        request: [u8; 16],
+        _: &Message,
+    ) -> Result<Envelope, Error> {
+        Ok(WatchEventApplication::snapshot(request, [11; 16]))
+    }
+
+    fn dispatch_event_with_work<'a>(
+        &'a mut self,
+        _: [u8; 16],
+        _: [u8; 16],
+        message: &'a Message,
+        _: Option<[u8; 16]>,
+        _: [u8; 32],
+        _: Option<&'a orna_runtime_v1::RuntimeActivationContext>,
+        _: &'a mut orna_live_v1::LiveApplicationWorkLease,
+    ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
+        if !matches!(message, Message::Event { .. }) {
+            return Box::pin(async { Err(Error::ApplicationRejected) });
+        }
+        self.events += 1;
+        Box::pin(async { Err(Error::ApplicationDeferred) })
+    }
 }
 
 #[test]
