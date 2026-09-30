@@ -302,6 +302,14 @@ fn decimal_duration_scaling_chains_preserve_exact_tails_across_instants() {
         Ok(Some(text("PT0.000000001S")))
     );
     assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-time-duration-scale-multistep-chain-opffs.orna")),
+        Ok(Some(text("PT0.000000001S")))
+    );
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-time-duration-scale-cancel-negative-chain-opffs.orna")),
+        Ok(Some(text("PT0S")))
+    );
+    assert_eq!(
         session.submit(include_str!("fixtures/stdlib-time-duration-scale-instant-boundary-7agp9.orna")),
         Ok(Some(boolean(true)))
     );
@@ -311,6 +319,23 @@ fn decimal_duration_scaling_chains_preserve_exact_tails_across_instants() {
             .unwrap_err()
             .code(),
         "ORNA-EVAL-VALUE"
+    );
+
+    let limits = Limits {
+        max_integer_digits: 4,
+        ..Limits::default()
+    };
+    let mut bounded = AdmittedReplSession::with_reference_standard(limits).unwrap();
+    assert_eq!(
+        bounded.submit(include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna")),
+        Ok(None)
+    );
+    assert_eq!(
+        bounded
+            .submit(include_str!("fixtures/stdlib-time-duration-scale-overflow-chain-opffs.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-LIMIT"
     );
 }
 
