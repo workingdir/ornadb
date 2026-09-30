@@ -793,8 +793,9 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         let capture = crate::capture_tx(&tx).await?;
-        // Receipt replay or a rolled-back CWD write leaves this capture
-        // unchanged; only a committed CWD generation change invalidates pages.
+        // CWD captures include generation as well as digest, so repeating an
+        // old digest cannot revive its cursors. Receipt replay or a rolled-back
+        // write leaves the capture unchanged; committed generations invalidate.
         if after
             .as_ref()
             .is_some_and(|cursor| cursor.capture != capture)
