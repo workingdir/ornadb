@@ -1,0 +1,3 @@
+pub table SourceRemainderRowPrefix(id: Int) { value: Int, }
+pub table SourceRemainderRowPrefixUnknown(id: Int) { value: Int, }
+pub table SourceRemainderRowPrefixRemainder(id: Int) { value: Int, }
