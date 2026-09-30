@@ -1429,6 +1429,8 @@ impl Diagnostic {
         // Admission is record-local: cause edges discard a child's trust mark
         // whether the child or parent was admitted first, including nested
         // cause slots reused, appended, or dropped by Clone::clone_from.
+        // Re-admitting a cloned root remains local if it is later composed as
+        // a cause; the containing diagnostic does not inherit that authority.
         let mut projection = if self.root_message_admitted {
             self.clone()
         } else {
