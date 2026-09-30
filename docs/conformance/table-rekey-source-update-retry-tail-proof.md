@@ -30,3 +30,9 @@ delete edge: a retry-created replacement is deleted, the moved source reclaims
 its original key, and a later retry lets another source reuse that key. It
 asserts the complete ordered log, including the deletion and post-reclaim
 updates, to make row identity through each key owner change explicit.
+
+`deleting_moved_source_preserves_later_retry_key_owners` covers the final
+deletion edge: a moved source is deleted while blocking another retry, then a
+replacement and a third source successively own the released keys. The fixture
+checks the full log so updates and re-keys remain associated with the current
+row identity after each deletion and reuse.
