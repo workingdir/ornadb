@@ -59,11 +59,17 @@ pub use activation::{
 };
 mod checkpoint_bootstrap;
 mod catalogue;
+mod invocation;
 pub use catalogue::{
     CatalogueAdmission, CatalogueAdmissionResult, CatalogueDeclaration, CatalogueError,
     CatalogueFunction, CatalogueFunctionDeclaration, CatalogueModule, CatalogueModuleDeclaration,
     CatalogueObject, CatalogueObjectKind, CatalogueParameterDeclaration, CatalogueParameterHandle,
     CatalogueTypeDeclaration, CatalogueTypeForm, CatalogueTypeHandle, CatalogueTypeSpec,
+};
+pub use invocation::{
+    InvocationArgumentInput, InvocationArgumentObservation, InvocationCompletion,
+    InvocationLaunchOwner, InvocationObservation, InvocationObservationRegistration,
+    InvocationObservationStatus, MaterializedProcedure, MaterializedProcedureParameter,
 };
 
 const SCHEMA: &str = r#"
@@ -392,6 +398,50 @@ CREATE TABLE IF NOT EXISTS sys_run_observation (
     diagnostic_class INTEGER,
     CHECK ((diagnostic_code IS NULL) = (diagnostic_class IS NULL))
 );
+CREATE TABLE IF NOT EXISTS sys_invocation_observation (
+    invocation_id BLOB PRIMARY KEY CHECK (length(invocation_id) = 16),
+    function_object_id BLOB NOT NULL CHECK (length(function_object_id) = 16),
+    snapshot BLOB NOT NULL CHECK (length(snapshot) > 0),
+    generation_digest BLOB NOT NULL CHECK (length(generation_digest) = 32),
+    runtime_id BLOB NOT NULL CHECK (length(runtime_id) = 16),
+    runtime_generation INTEGER NOT NULL CHECK (runtime_generation >= 0),
+    owner_kind INTEGER NOT NULL CHECK (owner_kind IN (1, 2, 3)),
+    parent_invocation_id BLOB REFERENCES sys_invocation_observation(invocation_id),
+    run_id BLOB REFERENCES sys_run_observation(run_id),
+    owner_session_id BLOB,
+    owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
+    owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0),
+    started_ms INTEGER NOT NULL,
+    ended_ms INTEGER,
+    observed_ms INTEGER NOT NULL,
+    status INTEGER NOT NULL CHECK (status BETWEEN 1 AND 6),
+    result_type_object_id BLOB NOT NULL CHECK (length(result_type_object_id) = 16),
+    failure_code TEXT,
+    idempotency_key_hash BLOB CHECK (idempotency_key_hash IS NULL OR length(idempotency_key_hash) = 32),
+    CHECK ((parent_invocation_id IS NOT NULL AND owner_kind = 1 AND owner_session_id IS NULL)
+        OR (parent_invocation_id IS NULL AND owner_kind = 2 AND owner_session_id IS NOT NULL AND length(owner_session_id) = 16)
+        OR (parent_invocation_id IS NULL AND owner_kind = 3 AND owner_session_id IS NULL AND run_id IS NOT NULL)),
+    CHECK ((status IN (1, 2) AND ended_ms IS NULL AND failure_code IS NULL)
+        OR (status = 3 AND ended_ms IS NOT NULL AND failure_code IS NULL)
+        OR (status = 4 AND ended_ms IS NOT NULL AND failure_code IS NOT NULL)
+        OR (status IN (5, 6) AND ended_ms IS NOT NULL)),
+    CHECK (started_ms <= observed_ms AND (ended_ms IS NULL OR (started_ms <= ended_ms AND ended_ms <= observed_ms))),
+    FOREIGN KEY (function_object_id, snapshot)
+        REFERENCES sys_procedure_materialization(function_object_id, snapshot),
+    FOREIGN KEY (result_type_object_id, snapshot)
+        REFERENCES runtime_catalogue_type(object_id, snapshot)
+);
+CREATE TABLE IF NOT EXISTS sys_invocation_argument (
+    invocation_id BLOB NOT NULL REFERENCES sys_invocation_observation(invocation_id),
+    position INTEGER NOT NULL CHECK (position >= 0),
+    name TEXT NOT NULL CHECK (length(name) > 0),
+    type_object_id BLOB NOT NULL CHECK (length(type_object_id) = 16),
+    value_digest BLOB CHECK (value_digest IS NULL OR length(value_digest) = 32),
+    redacted INTEGER NOT NULL CHECK (redacted IN (0, 1)),
+    PRIMARY KEY (invocation_id, position),
+    UNIQUE (invocation_id, name),
+    CHECK (redacted = 0 OR value_digest IS NULL)
+);
 CREATE TABLE IF NOT EXISTS runtime_catalogue_identity (
     object_id BLOB PRIMARY KEY CHECK (length(object_id) = 16),
     kind INTEGER NOT NULL CHECK (kind IN (1, 2, 3)),
@@ -456,6 +506,37 @@ CREATE TABLE IF NOT EXISTS runtime_catalogue_parameter (
     PRIMARY KEY (object_id, snapshot, position),
     FOREIGN KEY (object_id, snapshot)
         REFERENCES runtime_catalogue_function(object_id, snapshot)
+);
+-- A procedure is a runtime materialization of one exact catalogue function.
+-- Orna 1.0 exposes the portable declaration as sys.Function; this cache adds
+-- no second source identity and is always pinned to that function revision.
+CREATE TABLE IF NOT EXISTS sys_procedure_materialization (
+    function_object_id BLOB NOT NULL CHECK (length(function_object_id) = 16),
+    snapshot BLOB NOT NULL CHECK (length(snapshot) > 0),
+    qualified_name TEXT NOT NULL CHECK (length(qualified_name) > 0),
+    revision_id BLOB NOT NULL CHECK (length(revision_id) = 32),
+    semantic_hash BLOB NOT NULL CHECK (length(semantic_hash) = 32),
+    result_type_object_id BLOB NOT NULL CHECK (length(result_type_object_id) = 16),
+    materialized_ms INTEGER NOT NULL CHECK (materialized_ms >= 0),
+    PRIMARY KEY (function_object_id, snapshot),
+    UNIQUE (snapshot, qualified_name),
+    FOREIGN KEY (function_object_id, snapshot)
+        REFERENCES runtime_catalogue_function(object_id, snapshot),
+    FOREIGN KEY (result_type_object_id, snapshot)
+        REFERENCES runtime_catalogue_type(object_id, snapshot)
+);
+CREATE TABLE IF NOT EXISTS sys_procedure_parameter_materialization (
+    function_object_id BLOB NOT NULL,
+    snapshot BLOB NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    name TEXT NOT NULL CHECK (length(name) > 0),
+    type_object_id BLOB NOT NULL CHECK (length(type_object_id) = 16),
+    PRIMARY KEY (function_object_id, snapshot, position),
+    UNIQUE (function_object_id, snapshot, name),
+    FOREIGN KEY (function_object_id, snapshot)
+        REFERENCES sys_procedure_materialization(function_object_id, snapshot),
+    FOREIGN KEY (type_object_id, snapshot)
+        REFERENCES runtime_catalogue_type(object_id, snapshot)
 );
 CREATE TABLE IF NOT EXISTS sys_stream_observation (
     stream_id BLOB PRIMARY KEY CHECK (length(stream_id) = 16),
@@ -1695,6 +1776,11 @@ pub enum RuntimeError {
     InvalidDigest,
     InvalidObservationReference,
     ObservationCoordinateMismatch,
+    ProcedureMaterializationConflict,
+    InvocationObservationConflict,
+    InvocationStateConflict,
+    InvocationChildrenActive,
+    InvocationOwnerInvalid,
     StreamIdentityMismatch,
     StreamSourceNotReplayable,
     StreamCheckpointStale,
@@ -1757,6 +1843,11 @@ impl fmt::Display for RuntimeError {
             Self::InvalidDigest => "invalid durable digest",
             Self::InvalidObservationReference => "invalid runtime observation reference",
             Self::ObservationCoordinateMismatch => "runtime observation coordinates do not match",
+            Self::ProcedureMaterializationConflict => "runtime procedure materialization conflicts with its catalogue row",
+            Self::InvocationObservationConflict => "runtime invocation observation conflicts with retained state",
+            Self::InvocationStateConflict => "runtime invocation state transition conflicts",
+            Self::InvocationChildrenActive => "runtime invocation has active child invocations",
+            Self::InvocationOwnerInvalid => "runtime invocation owner or arguments are invalid",
             Self::StreamIdentityMismatch => "stream source identity mismatch",
             Self::StreamSourceNotReplayable => "stream source does not support durable recovery",
             Self::StreamCheckpointStale => "stream checkpoint is stale",
@@ -3209,6 +3300,17 @@ pub struct CheckpointResetRequest {
 /// Successful state-changing calls are committed with their transition in one
 /// local transaction. Failed calls are retained after the transition rolls
 /// back, so an audit never claims that a requested state change occurred.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdminLifecycleEffect {
+    CheckpointReset,
+    StreamPaused { changed: bool },
+    StreamPausePending { changed: bool },
+    StreamResumed { changed: bool },
+    Busy,
+    BlockingFailure,
+    Failed,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdminInvocationAudit {
     pub sequence: u64,
@@ -3218,6 +3320,8 @@ pub struct AdminInvocationAudit {
     pub owner: WriterLease,
     pub observed_generation: u64,
     pub terminal_outcome: String,
+    /// Typed runtime effect decoded from the durable terminal outcome.
+    pub effect: AdminLifecycleEffect,
     pub succeeded: bool,
     pub redacted: bool,
 }
@@ -13792,6 +13896,22 @@ fn admin_operation_succeeded(result: &AdminOperationResult) -> bool {
     )
 }
 
+fn decode_admin_lifecycle_effect(value: &str) -> Result<AdminLifecycleEffect, RuntimeError> {
+    Ok(match value {
+        "checkpoint_reset" => AdminLifecycleEffect::CheckpointReset,
+        "paused" => AdminLifecycleEffect::StreamPaused { changed: true },
+        "paused_noop" => AdminLifecycleEffect::StreamPaused { changed: false },
+        "pause_pending" => AdminLifecycleEffect::StreamPausePending { changed: true },
+        "pause_pending_noop" => AdminLifecycleEffect::StreamPausePending { changed: false },
+        "resumed" => AdminLifecycleEffect::StreamResumed { changed: true },
+        "resumed_noop" => AdminLifecycleEffect::StreamResumed { changed: false },
+        "busy" => AdminLifecycleEffect::Busy,
+        "blocking_failure" => AdminLifecycleEffect::BlockingFailure,
+        value if value.starts_with("failure:") => AdminLifecycleEffect::Failed,
+        _ => return Err(RuntimeError::RecoveryInvalid),
+    })
+}
+
 async fn store_admin_invocation_audit(
     connection: &Connection,
     descriptor: &AdminInvocationDescriptor,
@@ -13858,6 +13978,7 @@ async fn load_admin_invocation_audits(
             decode_u64(row.get::<i64>(6).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
         let terminal_outcome: String = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
         validate_observation_text(&terminal_outcome)?;
+        let effect = decode_admin_lifecycle_effect(&terminal_outcome)?;
         audits.push(AdminInvocationAudit {
             sequence,
             invocation_id,
@@ -13866,6 +13987,7 @@ async fn load_admin_invocation_audits(
             owner,
             observed_generation,
             terminal_outcome,
+            effect,
             succeeded: decode_bool(
                 row.get::<i64>(8).map_err(|_| RuntimeError::RecoveryInvalid)?,
             )?,
@@ -13914,6 +14036,7 @@ async fn load_admin_invocation_receipt(
         decode_u64(row.get::<i64>(6).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     let terminal_outcome: String = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
     validate_observation_text(&terminal_outcome)?;
+    let effect = decode_admin_lifecycle_effect(&terminal_outcome)?;
     Ok(Some(AdminInvocationAudit {
         sequence,
         invocation_id,
@@ -13922,6 +14045,7 @@ async fn load_admin_invocation_receipt(
         owner,
         observed_generation,
         terminal_outcome,
+        effect,
         succeeded: decode_bool(row.get::<i64>(8).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
         redacted: decode_bool(row.get::<i64>(9).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
     }))
@@ -17081,6 +17205,8 @@ mod tests {
 
     const PROVIDER_EFFECT_FIXTURE: &str =
         include_str!("../tests/fixtures/provider-effect-once.orna");
+    const PROCEDURE_INVOCATION_FIXTURE: &str =
+        include_str!("../tests/fixtures/procedure-invocation-lifecycle.orna");
 
     fn checkpoint_snapshot_component(value: &str) -> Component {
         Component::new(value).expect("test checkpoint component is valid")
@@ -21551,6 +21677,259 @@ mod tests {
         );
     }
 
+    async fn materialize_echo_procedure(
+        state: &RuntimeState,
+        writer: WriterLease,
+    ) -> MaterializedProcedure {
+        let capture = state.capture().await.unwrap();
+        let admission = CatalogueAdmission {
+            predecessor_capture: None,
+            types: vec![CatalogueTypeDeclaration {
+                declaration: CatalogueDeclaration {
+                    qualified_name: "Str".into(),
+                    kind: CatalogueObjectKind::Type,
+                    revision_id: digest(61),
+                    semantic_hash: digest(62),
+                    rename_from: None,
+                },
+                form: CatalogueTypeSpec::Named,
+            }],
+            functions: vec![CatalogueFunctionDeclaration {
+                declaration: CatalogueDeclaration {
+                    qualified_name: "app.echo".into(),
+                    kind: CatalogueObjectKind::Function,
+                    revision_id: digest(63),
+                    semantic_hash: digest(64),
+                    rename_from: None,
+                },
+                parameters: vec![CatalogueParameterDeclaration {
+                    name: "message".into(),
+                    position: 0,
+                    type_name: "Str".into(),
+                }],
+                result_type_name: "Str".into(),
+            }],
+        };
+        let admitted = state
+            .admit_catalogue_at(writer, &capture, admission)
+            .await
+            .unwrap();
+        state
+            .materialize_procedure_at(writer, "app.echo", &admitted.capture)
+            .await
+            .unwrap()
+            .expect("admitted function materializes as a procedure")
+    }
+
+    fn echo_invocation_input(procedure: &MaterializedProcedure) -> InvocationArgumentInput {
+        InvocationArgumentInput {
+            name: "message".into(),
+            type_reference: procedure.parameters()[0].type_reference.clone(),
+            value_digest: Some(digest(65)),
+            redacted: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn sys_lifecycle_procedure_materialization_admits_durable_invocation() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(66)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        assert_eq!(procedure.qualified_name(), "app.echo");
+        assert_eq!(procedure.parameters()[0].name, "message");
+        assert_eq!(procedure.parameters()[0].position, 0);
+        assert_eq!(
+            state
+                .materialize_procedure_at(writer, "app.echo", procedure.capture())
+                .await
+                .unwrap(),
+            Some(procedure.clone())
+        );
+
+        let invocation_id = id(67);
+        let started = state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(68)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: Some(digest(69)),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(started.status, InvocationObservationStatus::Running);
+        assert!(started.live);
+        assert_eq!(started.arguments.len(), 1);
+        assert_eq!(started.arguments[0].value_digest, Some(digest(65)));
+        assert!(!started.arguments[0].redacted);
+
+        let terminal = state
+            .finish_invocation_observation(writer, invocation_id, InvocationCompletion::Succeeded)
+            .await
+            .unwrap();
+        assert_eq!(terminal.status, InvocationObservationStatus::Succeeded);
+        assert!(terminal.ended_ms.is_some());
+        assert!(!terminal.live);
+        assert_eq!(
+            state
+                .finish_invocation_observation(
+                    writer,
+                    invocation_id,
+                    InvocationCompletion::Succeeded,
+                )
+                .await,
+            Err(RuntimeError::InvocationStateConflict)
+        );
+        let mut protected_argument = echo_invocation_input(&procedure);
+        protected_argument.value_digest = None;
+        protected_argument.redacted = true;
+        let cancelled = state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: id(75),
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(68)),
+                    run: None,
+                    arguments: vec![protected_argument],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(cancelled.arguments[0].redacted);
+        assert_eq!(cancelled.arguments[0].value_digest, None);
+        let cancelled = state
+            .finish_invocation_observation(
+                writer,
+                cancelled.id,
+                InvocationCompletion::Cancelled {
+                    diagnostic_code: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status, InvocationObservationStatus::Cancelled);
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        let retained = reopened
+            .invocation_observation(invocation_id)
+            .await
+            .unwrap()
+            .expect("terminal invocation survives reopening runtime state");
+        assert_eq!(retained.status, InvocationObservationStatus::Succeeded);
+        assert_eq!(retained.procedure.function(), procedure.function());
+        assert_eq!(retained.arguments[0].value_digest, Some(digest(65)));
+        let all = reopened.invocation_observations().await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.contains(&retained));
+        let cancelled = all.iter().find(|row| row.id == id(75)).unwrap();
+        assert_eq!(cancelled.status, InvocationObservationStatus::Cancelled);
+        assert!(cancelled.arguments[0].redacted);
+        assert_eq!(cancelled.arguments[0].value_digest, None);
+    }
+
+    #[tokio::test]
+    async fn sys_lifecycle_parent_waits_for_children_and_replacement_orphans_old_owner() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(70)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let parent_id = id(71);
+        let child_id = id(72);
+        let parent = state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: parent_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(73)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        let child = state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: child_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::Parent(parent_id),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(child.owner, InvocationLaunchOwner::Parent(parent_id));
+        assert_eq!(
+            state
+                .finish_invocation_observation(
+                    writer,
+                    parent_id,
+                    InvocationCompletion::Succeeded,
+                )
+                .await,
+            Err(RuntimeError::InvocationChildrenActive)
+        );
+
+        let replacement = state.takeover_lease(writer, id(74)).await.unwrap();
+        assert_eq!(state.orphan_abandoned_invocations(replacement).await.unwrap(), 2);
+        assert_eq!(
+            state
+                .invocation_observation(parent.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            InvocationObservationStatus::Orphaned
+        );
+        let orphaned_child = state
+            .invocation_observation(child.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(orphaned_child.status, InvocationObservationStatus::Orphaned);
+        assert_eq!(orphaned_child.failure_code.as_deref(), Some("sys.invoke.orphaned"));
+        assert!(!orphaned_child.live);
+    }
+
+    #[test]
+    fn sys_lifecycle_admin_effect_projection_keeps_terminal_effects_typed() {
+        assert_eq!(
+            decode_admin_lifecycle_effect("paused"),
+            Ok(AdminLifecycleEffect::StreamPaused { changed: true })
+        );
+        assert_eq!(
+            decode_admin_lifecycle_effect("pause_pending_noop"),
+            Ok(AdminLifecycleEffect::StreamPausePending { changed: false })
+        );
+        assert_eq!(
+            decode_admin_lifecycle_effect("resumed"),
+            Ok(AdminLifecycleEffect::StreamResumed { changed: true })
+        );
+        assert_eq!(
+            decode_admin_lifecycle_effect("failure:runtime writer is held"),
+            Ok(AdminLifecycleEffect::Failed)
+        );
+        assert_eq!(
+            decode_admin_lifecycle_effect("unrecognized-effect"),
+            Err(RuntimeError::RecoveryInvalid)
+        );
+    }
+
     #[tokio::test]
     async fn stream_provider_effect_retry_is_bounded_and_reuses_provider_receipt() {
         assert!(orna_syntax_v1::parse_module(PROVIDER_EFFECT_FIXTURE).is_ok());
@@ -23258,6 +23637,10 @@ mod tests {
             .expect("the terminal admin receipt is durable");
         assert_eq!(receipt.function, "sys.admin.pause_stream_with_reason");
         assert_eq!(receipt.terminal_outcome, "paused");
+        assert_eq!(
+            receipt.effect,
+            AdminLifecycleEffect::StreamPaused { changed: true }
+        );
         assert!(receipt.succeeded);
         drop(state);
 
@@ -23405,6 +23788,10 @@ mod tests {
             .expect("the terminal effect retains its request receipt");
         assert!(receipt.succeeded);
         assert_eq!(receipt.terminal_outcome, "paused");
+        assert_eq!(
+            receipt.effect,
+            AdminLifecycleEffect::StreamPaused { changed: true }
+        );
         let rejected_receipt = reopened
             .admin_invocation_receipt(rejected_invocation_id)
             .await
@@ -23412,6 +23799,7 @@ mod tests {
             .expect("the staged-write rejection retains the request receipt");
         assert!(!rejected_receipt.succeeded);
         assert_eq!(rejected_receipt.terminal_outcome, "failure:admin_busy");
+        assert_eq!(rejected_receipt.effect, AdminLifecycleEffect::Failed);
     }
 
     #[tokio::test]
