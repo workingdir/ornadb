@@ -174,6 +174,47 @@ fn composed_json_and_codec_projections_redact_fixture_tails() {
 }
 
 #[test]
+fn local_message_admission_does_not_transfer_to_nested_diagnostics() {
+    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let admitted_cause = Diagnostic::new(
+        SafeText::new("ORNA-E-ADMITTED-CAUSE").unwrap(),
+        DiagnosticSeverity::Warning,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .redacted_with_message(SafeText::new(fixture).unwrap());
+    let diagnostic = Diagnostic::new(
+        SafeText::new("ORNA-E-ADMITTED-ROOT").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .redacted_with_message(SafeText::new("operation denied").unwrap())
+    // Composition after admission cannot pass the root trust mark to a cause.
+    .with_cause(admitted_cause);
+
+    let json = serde_json::to_value(&diagnostic).unwrap();
+    assert_eq!(json["message"], "operation denied");
+    assert_eq!(json["causes"][0]["message"], "<redacted>");
+    let serialized = serde_json::to_vec(&json).unwrap();
+    assert!(
+        !serialized
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+
+    let encoded = diagnostic.encode_ovb().unwrap();
+    assert!(
+        !encoded
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    assert_eq!(decoded["causes"][0]["message"], "<redacted>");
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
