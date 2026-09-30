@@ -5,7 +5,8 @@ use orna_storage_v1::{
     plan_storage_rewrite, CompactKeyRange, CompactOvbProfile,
     EditableBaseRow, HybridBaseState, PhysicalPlacement, PlacementAction, PlacementCandidate,
     StoragePlacementError, StoragePreference, StorageProfile, StorageRewriteError,
-    StorageRewriteTarget, PlacementReason, AUTOMATIC_EDITABLE_MAX_PUBLICATION_BYTES,
+    StorageRewriteTarget, PlacementReason, FrozenBatch, LooseMutation, LooseProjection, LooseRow,
+    MutationId, AUTOMATIC_EDITABLE_MAX_PUBLICATION_BYTES,
 };
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 
@@ -300,6 +301,76 @@ fn automatic_placement_falls_back_for_case_only_aliases_and_keeps_existing_rows(
         ),
         Err(StoragePlacementError::PathCollision)
     );
+}
+
+#[test]
+fn automatic_placement_compacts_every_new_row_when_insert_paths_alias() {
+    let upper = parse_row(CASE_COLLISION_UPPER_ROW);
+    let lower = parse_row(CASE_COLLISION_LOWER_ROW);
+    assert!(upper.diagnostics.is_empty(), "{:#?}", upper.diagnostics);
+    assert!(lower.diagnostics.is_empty(), "{:#?}", lower.diagnostics);
+
+    let profile = profile_for_key_type(Uuid::from_u128(4), "Str");
+    let plan = plan_storage_placement(
+        &profile,
+        StoragePreference::Automatic,
+        0,
+        false,
+        [
+            PlacementCandidate::insert(
+                text_key("Alice"),
+                CASE_COLLISION_UPPER_ROW.len(),
+                Some(editable_path("Alice")),
+            ),
+            PlacementCandidate::insert(
+                text_key("alice"),
+                CASE_COLLISION_LOWER_ROW.len(),
+                Some(editable_path("alice")),
+            ),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(plan.reason(), PlacementReason::AutomaticUnrepresentablePath);
+    assert!(plan
+        .decisions()
+        .iter()
+        .all(|decision| decision.placement() == PhysicalPlacement::Compact));
+    assert!(plan
+        .decisions()
+        .iter()
+        .all(|decision| decision.editable_path().is_none()));
+}
+
+#[test]
+fn loose_projection_rejects_fixture_aliases_without_partial_application() {
+    let upper = parse_row(CASE_COLLISION_UPPER_ROW);
+    let lower = parse_row(CASE_COLLISION_LOWER_ROW);
+    assert!(upper.diagnostics.is_empty(), "{:#?}", upper.diagnostics);
+    assert!(lower.diagnostics.is_empty(), "{:#?}", lower.diagnostics);
+
+    let mutation = |mutation_id: &str, key: &str, body: &str| LooseMutation {
+        id: MutationId::new(mutation_id).unwrap(),
+        path: orna_storage_v1::LoosePath::for_key("Placement", &[key.to_owned()]).unwrap(),
+        expected: None,
+        next: Some(LooseRow::new(body.as_bytes().to_vec()).unwrap()),
+    };
+    let batch = FrozenBatch::new(
+        MutationId::new("case-alias-batch").unwrap(),
+        vec![
+            mutation("upper-row", "Alice", CASE_COLLISION_UPPER_ROW),
+            mutation("lower-row", "alice", CASE_COLLISION_LOWER_ROW),
+        ],
+        1,
+    )
+    .unwrap();
+    let mut projection = LooseProjection::default();
+
+    assert_eq!(
+        projection.project(&batch),
+        Err(orna_storage_v1::Error::PathCollision)
+    );
+    assert_eq!(projection.entries().count(), 0);
 }
 
 #[test]
