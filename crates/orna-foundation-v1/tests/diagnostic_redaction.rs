@@ -330,6 +330,51 @@ fn explicit_redaction_revokes_admission_before_clone_composition() {
 }
 
 #[test]
+fn redacting_one_clone_preserves_sibling_local_admission() {
+    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture_credential = fixture.split('"').nth(1).unwrap();
+    let admitted = Diagnostic::new(
+        SafeText::new("ORNA-E-CLONED-ADMISSION").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .with_note(SafeText::new(fixture).unwrap())
+    .redacted_with_message(SafeText::new(fixture).unwrap());
+    let revoked = admitted.clone().redacted();
+
+    let envelope = serde_json::json!({"diagnostics": [admitted.clone(), revoked.clone()]});
+    let json = serde_json::to_vec(&envelope).unwrap();
+    let admitted_projection = &envelope["diagnostics"][0];
+    let revoked_projection = &envelope["diagnostics"][1];
+    assert_eq!(admitted_projection["message"], fixture);
+    assert_eq!(admitted_projection["notes"][0], "<redacted>");
+    assert_eq!(revoked_projection["message"], "<redacted>");
+    assert_eq!(revoked_projection["notes"][0], "<redacted>");
+    assert_eq!(
+        json.windows(fixture_credential.len())
+            .filter(|window| *window == fixture_credential.as_bytes())
+            .count(),
+        1
+    );
+
+    let admitted_wire = admitted.encode_ovb().unwrap();
+    let revoked_wire = revoked.encode_ovb().unwrap();
+    assert!(
+        admitted_wire
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+    assert!(
+        !revoked_wire
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&admitted_wire).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);

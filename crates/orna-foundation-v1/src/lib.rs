@@ -1403,6 +1403,8 @@ impl Diagnostic {
         self.causes = self.causes.into_iter().map(Diagnostic::redacted).collect();
         self.redacted = true;
         // Explicit redaction revokes any earlier local root-message admission.
+        // Admission is value-local: revoking this owned value does not mutate
+        // a sibling clone that still carries its own local admission.
         self.root_message_admitted = false;
         self
     }
