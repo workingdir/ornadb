@@ -758,6 +758,14 @@ fn inspect_raw(raw: &Raw, depth: usize) -> (String, &'static str) {
         // subtree before rendering so even nested inspect fallbacks cannot
         // turn a secret payload into printable structure.
         Raw::Tag(0, _) => ("<redacted>".into(), "Secret"),
+        // This generic display has no field-level disclosure proof. Diagnostic
+        // text, Error payloads, renderer properties, and typed sys.Value data
+        // therefore remain opaque here; callers needing a privileged view must
+        // use a separately authorized projection.
+        Raw::Tag(60011, _) => ("<redacted>".into(), "Diagnostic"),
+        Raw::Tag(60012, _) => ("<redacted>".into(), "Present"),
+        Raw::Tag(60016, _) => ("<redacted>".into(), "Error"),
+        Raw::Tag(60026, _) => ("<redacted>".into(), "sys.Value"),
         // OVB tag 37 is the closed 1.0 UUID representation. Keep its
         // structural fallback human-readable without turning presentation
         // into an alternate persistence encoding.
@@ -868,17 +876,85 @@ mod tests {
     #[test]
     fn inspect_redacts_payload_bearing_protected_values_inside_collections() {
         let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
-        let raw = Raw::Map(vec![(
-            Raw::Text("credential".into()),
-            Raw::Array(vec![Raw::Tag(
-                0,
-                Box::new(Raw::Text(fixture.to_owned())),
-            )]),
-        )]);
+        let raw = Raw::Map(vec![
+            (
+                Raw::Text("credential".into()),
+                Raw::Array(vec![Raw::Tag(
+                    0,
+                    Box::new(Raw::Text(fixture.to_owned())),
+                )]),
+            ),
+            (
+                Raw::Tag(0, Box::new(Raw::Text(fixture.to_owned()))),
+                Raw::Text("keyed payload".into()),
+            ),
+        ]);
 
         let rendered = inspect_raw(&raw, 0).0;
         assert!(rendered.contains("<redacted>"), "{rendered}");
         assert!(!rendered.contains(fixture), "{rendered}");
+    }
+
+    #[test]
+    fn inspect_redacts_payloads_in_diagnostic_present_error_and_sys_value_tags() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let tagged = |number, payload| Raw::Tag(number, Box::new(payload));
+        let diagnostic = tagged(
+            60011,
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Text("ORNA-E-TEST".into())),
+                (Raw::Int(1.into()), Raw::Int(3.into())),
+                (Raw::Int(2.into()), Raw::Text(fixture.into())),
+                (Raw::Int(3.into()), Raw::Array(vec![])),
+                (
+                    Raw::Int(4.into()),
+                    Raw::Array(vec![Raw::Text(fixture.into())]),
+                ),
+                (Raw::Int(5.into()), Raw::Array(vec![])),
+                (Raw::Int(6.into()), Raw::Bool(false)),
+            ]),
+        );
+        let present = tagged(
+            60012,
+            Raw::Array(vec![
+                Raw::Text("value".into()),
+                Raw::Null,
+                Raw::Map(vec![(
+                    Raw::Text("credential".into()),
+                    Raw::Text(fixture.into()),
+                )]),
+                Raw::Array(vec![]),
+            ]),
+        );
+        let error = tagged(
+            60016,
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Text("ORNA-E-TEST".into())),
+                (Raw::Int(1.into()), Raw::Text(fixture.into())),
+                (Raw::Int(2.into()), Raw::Array(vec![])),
+                (
+                    Raw::Int(3.into()),
+                    Raw::Map(vec![(
+                        Raw::Text("credential".into()),
+                        Raw::Text(fixture.into()),
+                    )]),
+                ),
+            ]),
+        );
+        let sys_value = tagged(
+            60026,
+            Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".into())]),
+                Raw::Text(fixture.into()),
+            ]),
+        );
+
+        for raw in [diagnostic, present, error, sys_value] {
+            let value = CanonicalValue::new(raw).expect("fixture wrapper is canonical");
+            let display = inspect(&value);
+            assert!(display.starts_with("<redacted> : "), "{display}");
+            assert!(!display.contains(fixture), "{display}");
+        }
     }
 
     #[test]

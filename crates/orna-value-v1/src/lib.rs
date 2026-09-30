@@ -1201,10 +1201,11 @@ fn raw_debug_value(raw: &Raw, depth: usize, errors_redacted: bool) -> Result<Raw
     if depth > MAX_DEPTH {
         return Err(Error::Limit);
     }
-    if let Raw::Tag(0, _) = raw {
-        // Tag 0 is the in-memory protected-value marker. Raw intermediates
-        // can carry its payload before canonical validation rejects it, so a
-        // Debug trace must not print that payload.
+    if matches!(raw, Raw::Tag(0 | 60011 | 60012 | 60026, _)) {
+        // Debug has no disclosure grant. Protected markers can carry plaintext
+        // before wire validation, and generic Diagnostic, Present, and sys.Value
+        // wrappers have no field classifier here, so hide their whole payload.
+        // The closed wrappers are redacted as a pragmatic fail-closed projection.
         return Ok(RawDebugValue::Text("<redacted>".into()));
     }
     if !errors_redacted && matches!(raw, Raw::Tag(60016, _)) {
@@ -4109,6 +4110,52 @@ mod tests {
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains(fixture));
         assert_eq!(Value::new(raw), Err(Error::ProtectedValue));
+    }
+
+    #[test]
+    fn raw_debug_redacts_diagnostic_present_and_sys_value_payloads() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let diagnostic = tag(
+            60011,
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Text("ORNA-E-TEST".into())),
+                (Raw::Int(1.into()), Raw::Int(3.into())),
+                (Raw::Int(2.into()), Raw::Text(fixture.into())),
+                (Raw::Int(3.into()), Raw::Array(vec![])),
+                (
+                    Raw::Int(4.into()),
+                    Raw::Array(vec![Raw::Text(fixture.into())]),
+                ),
+                (Raw::Int(5.into()), Raw::Array(vec![])),
+                (Raw::Int(6.into()), Raw::Bool(false)),
+            ]),
+        );
+        let present = tag(
+            60012,
+            Raw::Array(vec![
+                Raw::Text("value".into()),
+                Raw::Null,
+                Raw::Map(vec![(
+                    Raw::Text("credential".into()),
+                    Raw::Text(fixture.into()),
+                )]),
+                Raw::Array(vec![]),
+            ]),
+        );
+        let sys_value = tag(
+            60026,
+            Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".into())]),
+                Raw::Text(fixture.into()),
+            ]),
+        );
+
+        for raw in [diagnostic, present, sys_value] {
+            let value = Value::new(raw.clone()).expect("fixture wrapper is canonical");
+            let debug = format!("{raw:?} {:?}", value);
+            assert!(debug.contains("<redacted>"));
+            assert!(!debug.contains(fixture));
+        }
     }
 
     #[test]
