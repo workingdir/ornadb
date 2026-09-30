@@ -955,6 +955,15 @@ fn validate_api_type_graph(api: &Value, names: &ApiTypeNames) -> Result<(), Stri
         let name = function["name"].as_str().expect("validated function name");
         let signature = function["signature"].as_str().expect("validated signature");
         let parsed = parse_signature_identity(signature)?;
+        let mut saw_default = false;
+        for (index, (_, has_default)) in parsed.parameters.iter().enumerate() {
+            if !has_default && saw_default {
+                return Err(format!(
+                    "function `{name}` parameter {index} is required after a defaulted parameter"
+                ));
+            }
+            saw_default |= has_default;
+        }
         let open = signature.find('(').expect("validated function signature");
         let close = matching_delimiter(signature, open, '(', ')')
             .expect("validated function signature delimiters");
@@ -965,22 +974,14 @@ fn validate_api_type_graph(api: &Value, names: &ApiTypeNames) -> Result<(), Stri
             let (parameter_name, parameter_type) = declaration
                 .split_once(": ")
                 .expect("validated parameter declaration");
-            let Some((enum_name, variant)) = default.rsplit_once('.') else {
-                continue;
-            };
-            let Some(variants) = api["enums"].get(enum_name).and_then(Value::as_array) else {
-                continue;
-            };
-            if !variants.iter().any(|candidate| candidate.as_str() == Some(variant)) {
-                return Err(format!(
-                    "function `{name}` default for `{parameter_name}` references unknown `{enum_name}.{variant}`"
-                ));
-            }
-            if parameter_type != enum_name {
-                return Err(format!(
-                    "function `{name}` default `{enum_name}.{variant}` does not match parameter type `{parameter_type}`"
-                ));
-            }
+            validate_function_default(
+                api,
+                names,
+                name,
+                parameter_name,
+                parameter_type.trim(),
+                default,
+            )?;
         }
         for (index, (parameter, _)) in parsed.parameters.iter().enumerate() {
             names
@@ -992,6 +993,104 @@ fn validate_api_type_graph(api: &Value, names: &ApiTypeNames) -> Result<(), Stri
             .map_err(|error| format!("function `{name}` result: {error}"))?;
     }
     Ok(())
+}
+
+fn validate_function_default(
+    api: &Value,
+    names: &ApiTypeNames,
+    function: &str,
+    parameter: &str,
+    parameter_type: &str,
+    default: &str,
+) -> Result<(), String> {
+    if default == "null" {
+        return if parameter_type.ends_with('?') {
+            Ok(())
+        } else {
+            Err(format!(
+                "function `{function}` default for `{parameter}` uses `null` with non-optional type `{parameter_type}`"
+            ))
+        };
+    }
+
+    let actual_type = match default {
+        "true" | "false" => "Bool".to_owned(),
+        _ => {
+            if let Some((enum_name, variant)) = default.rsplit_once('.')
+                && let Some(variants) = api["enums"].get(enum_name).and_then(Value::as_array)
+            {
+                if !variants
+                    .iter()
+                    .any(|candidate| candidate.as_str() == Some(variant))
+                {
+                    return Err(format!(
+                        "function `{function}` default for `{parameter}` references unknown `{enum_name}.{variant}`"
+                    ));
+                }
+                enum_name.to_owned()
+            } else {
+                resolve_singleton_default_type(api, names, default).map_err(|error| {
+                    format!("function `{function}` default for `{parameter}` {error}")
+                })?
+            }
+        }
+    };
+
+    if actual_type != parameter_type {
+        return Err(format!(
+            "function `{function}` default `{default}` has type `{actual_type}`, not parameter type `{parameter_type}`"
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_singleton_default_type(
+    api: &Value,
+    names: &ApiTypeNames,
+    path: &str,
+) -> Result<String, String> {
+    let singleton = api["singletons"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|singleton| {
+            let name = singleton["name"].as_str()?;
+            (path == name || path.strip_prefix(name).is_some_and(|suffix| suffix.starts_with('.')))
+                .then_some((name, singleton))
+        })
+        .max_by_key(|(name, _)| name.len());
+    let Some((singleton_name, singleton)) = singleton else {
+        return Err(format!("does not resolve to an enum variant or singleton path `{path}`"));
+    };
+
+    let mut actual_type = singleton["type"]
+        .as_str()
+        .expect("validated singleton type")
+        .to_owned();
+    let suffix = path.strip_prefix(singleton_name).expect("singleton prefix matched");
+    if !suffix.is_empty() {
+        let fields = suffix
+            .strip_prefix('.')
+            .expect("singleton suffix has a field separator");
+        for field_name in fields.split('.') {
+            if actual_type.ends_with('?') {
+                return Err(format!("cannot resolve singleton field path `{path}`"));
+            }
+            let field = names
+                .value_fields
+                .get(generic_declaration(&actual_type).0)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .find(|field| field["name"] == field_name)
+                .ok_or_else(|| format!("cannot resolve singleton field path `{path}`"))?;
+            actual_type = field["type"]
+                .as_str()
+                .expect("validated field type")
+                .to_owned();
+        }
+    }
+    Ok(actual_type)
 }
 
 fn valid_function_label(label: &str, signature: &SignatureIdentity) -> bool {
