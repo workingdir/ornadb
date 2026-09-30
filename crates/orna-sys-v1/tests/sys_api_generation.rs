@@ -226,6 +226,64 @@ fn annotation_metadata_and_generated_inventory_fail_closed() {
         "the generator's provenance field must remain populated"
     );
 
+    let mut extra_singleton_field = generated.clone();
+    extra_singleton_field["singletons"][0]["legacy_name"] = serde_json::json!("sys.old_database");
+    assert!(
+        build_support::validate_api_document(&extra_singleton_field)
+            .unwrap_err()
+            .contains("singletons[0] has unknown field `legacy_name`"),
+        "nested inventory rows must reject schema drift"
+    );
+
+    let mut duplicate_nested_field = generated.clone();
+    let value_type_index = duplicate_nested_field["value_types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|value_type| {
+            value_type["fields"]
+                .as_array()
+                .is_some_and(|fields| !fields.is_empty())
+        })
+        .expect("a published value type has fields");
+    let first_field = duplicate_nested_field["value_types"][value_type_index]["fields"][0].clone();
+    duplicate_nested_field["value_types"][value_type_index]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push(first_field);
+    assert!(
+        build_support::validate_api_document(&duplicate_nested_field)
+            .unwrap_err()
+            .contains("duplicates field"),
+        "nested field inventories must reject duplicate names"
+    );
+
+    let mut duplicate_enum_member = generated.clone();
+    let enum_members = duplicate_enum_member["enums"]["sys.AssertionOwnerKind"]
+        .as_array_mut()
+        .unwrap();
+    let duplicate_member = enum_members[0].clone();
+    enum_members.push(duplicate_member);
+    assert!(
+        build_support::validate_api_document(&duplicate_enum_member)
+            .unwrap_err()
+            .contains("contains duplicate"),
+        "enum members must remain unique"
+    );
+
+    let mut duplicate_failure_code = generated.clone();
+    let codes = duplicate_failure_code["failure_codes"].as_array_mut().unwrap();
+    let duplicate_code = codes[0].clone();
+    codes.push(duplicate_code);
+    let code_count = codes.len();
+    duplicate_failure_code["counts"]["failure_codes"] = serde_json::json!(code_count);
+    assert!(
+        build_support::validate_api_document(&duplicate_failure_code)
+            .unwrap_err()
+            .contains("failure_codes contains duplicate"),
+        "failure-code declarations must remain unique"
+    );
+
     let mut wrong_effect = generated.clone();
     let invoke = wrong_effect["functions"]
         .as_array_mut()
