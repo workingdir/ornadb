@@ -6,8 +6,8 @@ use orna_core::{
     },
     semantic_diff::{
         CompactStorageObservation, DependencyChangeKind, DependencyEdge, KeyedRow,
-        ResultChangeKind, ResultObservation, RowChangeKind, SemanticEntityId, SemanticSnapshot,
-        semantic_snapshot_diff,
+        ResultChangeKind, ResultObservation, RowChangeKind, RowRekey, SemanticEntityId,
+        SemanticSnapshot, semantic_snapshot_diff,
     },
     types::{ResolvedType, StandardScalar},
 };
@@ -175,6 +175,38 @@ fn semantic_diff_reports_catalogue_rows_results_dependencies_and_storage() {
     assert_eq!(report.physical().unwrap().representation_changed, Some(true));
     assert!(report.physical().unwrap().logical_changes_present);
     assert!(!report.is_physical_only());
+}
+
+#[test]
+fn semantic_diff_coalesces_only_an_explicit_rekey_intent() {
+    let base = SemanticSnapshot::new(
+        catalogue(1, false),
+        [KeyedRow::new(TABLE, &integer(7), &text("same row")).unwrap()],
+        [],
+        [],
+        None,
+    )
+    .unwrap();
+    let candidate_rows = [KeyedRow::new(TABLE, &integer(8), &text("same row")).unwrap()];
+    let candidate = SemanticSnapshot::new(catalogue(1, false), candidate_rows.clone(), [], [], None)
+        .unwrap()
+        .with_rekeys([RowRekey::new(TABLE, &integer(7), &integer(8)).unwrap()])
+        .unwrap();
+
+    let report = semantic_snapshot_diff(&base, &candidate);
+    assert_eq!(report.rows().len(), 1);
+    assert_eq!(report.rows()[0].kind(), RowChangeKind::Rekeyed);
+    let old_key = integer(7).encode().unwrap();
+    let new_key = integer(8).encode().unwrap();
+    assert_eq!(report.rows()[0].key_bytes(), new_key);
+    assert_eq!(report.rows()[0].previous_key_bytes(), Some(old_key.as_slice()));
+
+    let without_intent = SemanticSnapshot::new(catalogue(1, false), candidate_rows, [], [], None)
+        .unwrap();
+    let conservative = semantic_snapshot_diff(&base, &without_intent);
+    assert_eq!(conservative.rows().len(), 2);
+    assert!(conservative.rows().iter().any(|row| row.kind() == RowChangeKind::Added));
+    assert!(conservative.rows().iter().any(|row| row.kind() == RowChangeKind::Removed));
 }
 
 #[test]

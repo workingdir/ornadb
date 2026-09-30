@@ -64,6 +64,7 @@ impl DependencyEdge {
 }
 
 /// One persisted row identified by its stable table identity and canonical key.
+#[derive(Clone)]
 pub struct KeyedRow {
     table: TypeId,
     key: Vec<u8>,
@@ -102,6 +103,67 @@ impl fmt::Debug for KeyedRow {
             .field("table", &self.table)
             .field("key", &"<redacted>")
             .field("value_digest", &self.value_digest)
+            .finish()
+    }
+}
+
+/// An explicit semantic re-key intent for one stable table identity.
+///
+/// Re-key intent is supplied by the activation ledger. The diff never infers
+/// identity continuity from a matching row body or a raw path rename.
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub struct RowRekey {
+    table: TypeId,
+    old_key: Vec<u8>,
+    new_key: Vec<u8>,
+}
+
+impl RowRekey {
+    /// Creates a re-key intent from canonical logical key values.
+    pub fn new(
+        table: TypeId,
+        old_key: &CanonicalValue,
+        new_key: &CanonicalValue,
+    ) -> Result<Self, SemanticSnapshotError> {
+        let old_key = old_key
+            .encode()
+            .map_err(SemanticSnapshotError::ValueEncoding)?;
+        let new_key = new_key
+            .encode()
+            .map_err(SemanticSnapshotError::ValueEncoding)?;
+        if old_key == new_key {
+            return Err(SemanticSnapshotError::IdentityRekey);
+        }
+        Ok(Self {
+            table,
+            old_key,
+            new_key,
+        })
+    }
+
+    /// Returns the stable table identity.
+    pub const fn table(&self) -> TypeId {
+        self.table
+    }
+
+    /// Returns the old canonical key bytes.
+    pub fn old_key_bytes(&self) -> &[u8] {
+        &self.old_key
+    }
+
+    /// Returns the new canonical key bytes.
+    pub fn new_key_bytes(&self) -> &[u8] {
+        &self.new_key
+    }
+}
+
+impl fmt::Debug for RowRekey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RowRekey")
+            .field("table", &self.table)
+            .field("old_key", &"<redacted>")
+            .field("new_key", &"<redacted>")
             .finish()
     }
 }
@@ -154,6 +216,7 @@ pub struct SemanticSnapshot {
     results: BTreeMap<(FunctionId, [u8; 32]), [u8; 32]>,
     dependencies: BTreeSet<DependencyEdge>,
     compact_storage: Option<CompactStorageObservation>,
+    rekeys: BTreeSet<RowRekey>,
 }
 
 impl SemanticSnapshot {
@@ -191,11 +254,29 @@ impl SemanticSnapshot {
             results: result_map,
             dependencies,
             compact_storage,
+            rekeys: BTreeSet::new(),
         })
+    }
+
+    /// Attaches exact re-key intents retained by the candidate activation.
+    pub fn with_rekeys(
+        mut self,
+        rekeys: impl IntoIterator<Item = RowRekey>,
+    ) -> Result<Self, SemanticSnapshotError> {
+        for rekey in rekeys {
+            if self.rekeys.iter().any(|existing| {
+                existing.table == rekey.table
+                    && (existing.old_key == rekey.old_key || existing.new_key == rekey.new_key)
+            }) || !self.rekeys.insert(rekey)
+            {
+                return Err(SemanticSnapshotError::DuplicateRekey);
+            }
+        }
+        Ok(self)
     }
 }
 
-/// Whether a keyed row was added, removed, or had its value changed.
+/// Whether a keyed row was added, removed, updated, or explicitly re-keyed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RowChangeKind {
     /// The key appears only in the candidate snapshot.
@@ -204,6 +285,8 @@ pub enum RowChangeKind {
     Removed,
     /// The key appears in both snapshots with different canonical values.
     Updated,
+    /// An explicit pending re-key moved the same row from `previous_key`.
+    Rekeyed,
 }
 
 /// A row change retaining the stable table identity and canonical natural key.
@@ -211,6 +294,7 @@ pub enum RowChangeKind {
 pub struct RowChange {
     table: TypeId,
     key: Vec<u8>,
+    previous_key: Option<Vec<u8>>,
     kind: RowChangeKind,
 }
 
@@ -225,6 +309,11 @@ impl RowChange {
         &self.key
     }
 
+    /// Returns the old canonical key for an explicit re-key change.
+    pub fn previous_key_bytes(&self) -> Option<&[u8]> {
+        self.previous_key.as_deref()
+    }
+
     /// Returns the row change category.
     pub const fn kind(&self) -> RowChangeKind {
         self.kind
@@ -237,6 +326,7 @@ impl fmt::Debug for RowChange {
             .debug_struct("RowChange")
             .field("table", &self.table)
             .field("key", &"<redacted>")
+            .field("previous_key", &self.previous_key.as_ref().map(|_| "<redacted>"))
             .field("kind", &self.kind)
             .finish()
     }
@@ -385,7 +475,7 @@ pub fn semantic_snapshot_diff(
     candidate: &SemanticSnapshot,
 ) -> SemanticDiffReport {
     let catalogue = catalogue_diff(&base.catalogue, &candidate.catalogue);
-    let rows = diff_rows(&base.rows, &candidate.rows);
+    let rows = diff_rows(&base.rows, &candidate.rows, &candidate.rekeys);
     let results = diff_results(&base.results, &candidate.results);
     let dependencies = diff_dependencies(&base.dependencies, &candidate.dependencies);
     let logical_changes_present = !catalogue.is_empty()
@@ -427,24 +517,60 @@ pub fn semantic_snapshot_diff(
 fn diff_rows(
     base: &BTreeMap<(TypeId, Vec<u8>), [u8; 32]>,
     candidate: &BTreeMap<(TypeId, Vec<u8>), [u8; 32]>,
+    rekeys: &BTreeSet<RowRekey>,
 ) -> Vec<RowChange> {
+    let mut consumed = BTreeSet::new();
+    let mut changes = Vec::new();
+    for rekey in rekeys {
+        let old = (rekey.table, rekey.old_key.clone());
+        let new = (rekey.table, rekey.new_key.clone());
+        // Only honor explicit intent when it exactly explains an old-row
+        // removal and a new-row addition. Invalid or stale intent stays a
+        // conservative ordinary add/remove diff.
+        if base.contains_key(&old)
+            && !candidate.contains_key(&old)
+            && !base.contains_key(&new)
+            && candidate.contains_key(&new)
+        {
+            consumed.insert(old);
+            consumed.insert(new.clone());
+            changes.push(RowChange {
+                table: rekey.table,
+                key: rekey.new_key.clone(),
+                previous_key: Some(rekey.old_key.clone()),
+                kind: RowChangeKind::Rekeyed,
+            });
+        }
+    }
     let keys = base
         .keys()
         .chain(candidate.keys())
         .cloned()
         .collect::<BTreeSet<_>>();
 
-    keys.into_iter()
+    let ordinary = keys
+        .into_iter()
         .filter_map(|(table, key)| {
+            if consumed.contains(&(table, key.clone())) {
+                return None;
+            }
             let kind = match (base.get(&(table, key.clone())), candidate.get(&(table, key.clone()))) {
                 (None, Some(_)) => Some(RowChangeKind::Added),
                 (Some(_), None) => Some(RowChangeKind::Removed),
                 (Some(before), Some(after)) if before != after => Some(RowChangeKind::Updated),
                 _ => None,
             }?;
-            Some(RowChange { table, key, kind })
+            Some(RowChange {
+                table,
+                key,
+                previous_key: None,
+                kind,
+            })
         })
-        .collect()
+        .collect::<Vec<_>>();
+    changes.extend(ordinary);
+    changes.sort_by(|left, right| (left.table, &left.key).cmp(&(right.table, &right.key)));
+    changes
 }
 
 fn diff_results(
@@ -520,6 +646,10 @@ pub enum SemanticSnapshotError {
     DuplicateRow,
     /// A function and canonical argument identity appeared more than once.
     DuplicateResult,
+    /// A re-key intent mapped a row to its existing key.
+    IdentityRekey,
+    /// The same re-key intent appeared more than once.
+    DuplicateRekey,
 }
 
 impl fmt::Display for SemanticSnapshotError {
@@ -530,6 +660,8 @@ impl fmt::Display for SemanticSnapshotError {
             Self::DuplicateResult => {
                 formatter.write_str("semantic snapshot repeats a function result identity")
             }
+            Self::IdentityRekey => formatter.write_str("semantic snapshot re-key kept its key"),
+            Self::DuplicateRekey => formatter.write_str("semantic snapshot repeats a re-key intent"),
         }
     }
 }
@@ -538,7 +670,10 @@ impl Error for SemanticSnapshotError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::ValueEncoding(error) => Some(error),
-            Self::DuplicateRow | Self::DuplicateResult => None,
+            Self::DuplicateRow
+            | Self::DuplicateResult
+            | Self::IdentityRekey
+            | Self::DuplicateRekey => None,
         }
     }
 }
