@@ -1,0 +1,69 @@
+pub table Note(id: Int) {
+    text: Str,
+    quantity: Int,
+}
+
+fn main() {
+    Note.rekey(1, 2) |? (failure => {
+        Note.rekey(2, 4);
+        Note.rekey(1, 2);
+        Note.insert({ id: 1, text: "replacement", quantity: 30 });
+        Note.update(2, { quantity: 11 });
+        Note.update(1, { quantity: 31 })
+    });
+    Note.rekey(3, 2) |? (failure => {
+        Note.update(2, { quantity: 12 });
+        Note.delete(1);
+        Note.rekey(2, 1);
+        Note.update(1, { quantity: 13 });
+        Note.rekey(3, 2);
+        Note.update(2, { quantity: 31 })
+    });
+    Note.rekey(4, 1) |? (failure => {
+        Note.update(1, { quantity: 14 });
+        Note.delete(1);
+        Note.rekey(2, 1);
+        Note.update(1, { quantity: 32 })
+    });
+    Note.rekey(4, 1) |? (failure => {
+        Note.update(1, { quantity: 33 });
+        Note.rekey(1, 2);
+        Note.update(2, { quantity: 34 });
+        Note.rekey(4, 1)
+    });
+    Note.update(1, { quantity: 21 });
+    Note.rekey(2, 1) |? (failure => {
+        Note.update(1, { quantity: 22 });
+        Note.rekey(1, 5);
+        Note.update(5, { quantity: 23 });
+        Note.rekey(2, 1);
+        Note.update(1, { quantity: 35 })
+    });
+    Note.rekey(1, 4);
+    Note.update(4, { quantity: 36 });
+    Note.rekey(5, 4) |? (failure => {
+        Note.update(4, { quantity: 37 });
+        Note.rekey(4, 6) |? (move_failure => {
+            Note.update(6, { quantity: 41 });
+            Note.delete(6);
+            Note.rekey(4, 6);
+            Note.update(6, { quantity: 38 })
+        });
+        Note.rekey(5, 4);
+        Note.update(4, { quantity: 25 })
+    });
+    Note.rekey(6, 4) |? (failure => {
+        Note.update(4, { quantity: 26 });
+        Note.rekey(4, 5);
+        Note.update(5, { quantity: 27 });
+        Note.rekey(6, 4);
+        Note.update(4, { quantity: 39 });
+        Note.rekey(5, 4) |? (return_failure => {
+            Note.update(4, { quantity: 40 });
+            Note.rekey(4, 6);
+            Note.update(6, { quantity: 41 });
+            Note.rekey(5, 4);
+            Note.update(4, { quantity: 28 })
+        })
+    });
+}
