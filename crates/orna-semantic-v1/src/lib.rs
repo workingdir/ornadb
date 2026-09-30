@@ -2156,6 +2156,13 @@ fn type_of(ty: &TypeExpr) -> Type {
         }
         TypeExpr::Name {
             path, arguments, ..
+        } if path.as_slice() == ["Query"] && arguments.len() == 1 => {
+            // Query<T> is the read-only planner handle for the same typed row
+            // stream represented by Relation<T> in the current evaluator.
+            Type::Relation(Box::new(type_of(&arguments[0])))
+        }
+        TypeExpr::Name {
+            path, arguments, ..
         } if path.as_slice() == ["Range"] && arguments.len() == 1 => {
             Type::Range(Box::new(type_of(&arguments[0])))
         }
@@ -4256,7 +4263,7 @@ fn static_type_is_known(ty: &Type, scope: &Scope) -> bool {
         Type::Applied { base, arguments } => {
             (matches!(
                 base.as_str(),
-                "List" | "Range" | "Relation" | "Stream" | "Money" | "Float" | "Decimal"
+                "List" | "Range" | "Relation" | "Query" | "Stream" | "Money" | "Float" | "Decimal"
             ) || system_api::embedded_system_api().describes_type(base))
                 && arguments
                     .iter()
@@ -5484,7 +5491,7 @@ fn annotation_type_name_is_declared(
             || system_api::embedded_system_api().describes_type(last)
             || matches!(
                 last.as_str(),
-                "List" | "Range" | "Relation" | "Stream" | "Money" | "Locale"
+                "List" | "Range" | "Relation" | "Query" | "Stream" | "Money" | "Locale"
             )
             || scope.names.get(last).is_some_and(|symbol| {
                 matches!(
@@ -11234,6 +11241,31 @@ fn infer_success_pipeline(
     if let Expr::Call {
         callee, arguments, ..
     } = rhs
+        && qualified_path(callee).as_deref() == Some(["sys", "explain"].as_slice())
+    {
+        let functions = system_api::embedded_system_api()
+            .function("sys.explain")
+            .expect("descriptor-driven sys.explain path has a descriptor");
+        let stage = infer_query_explain_system_call(
+            functions,
+            arguments,
+            None,
+            Some(&input.ty),
+            scope,
+            local,
+            diagnostics,
+        )
+        .expect("sys.explain has a query-plan overload");
+        let mut effects = input.effects;
+        effects.join(&stage.effects);
+        return Inferred {
+            ty: stage.ty,
+            effects,
+        };
+    }
+    if let Expr::Call {
+        callee, arguments, ..
+    } = rhs
         && qualified_path(callee).as_deref() == Some(["sys", "cancel"].as_slice())
     {
         let functions = system_api::embedded_system_api()
@@ -12324,7 +12356,8 @@ fn infer_generic_pipeline_stage(
             effects,
         };
     };
-    if path == ["sys", "meta"]
+    if path == ["sys", "explain"]
+        || path == ["sys", "meta"]
         || path == ["sys", "await"]
         || path == ["sys", "cancel"]
         || path == ["sys", "invoke"]
@@ -13135,6 +13168,9 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
     }
     match (expected, actual) {
         (Type::Optional(_), Type::Null) => true,
+        // Optional parameters accept their non-null payload directly; callers
+        // do not need to wrap ordinary values in a nullable constructor.
+        (Type::Optional(expected), actual) => types_match(expected, actual),
         (
             Type::Applied {
                 base: expected_base,
@@ -13542,6 +13578,19 @@ fn infer_descriptor_system_call(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Inferred> {
     let functions = system_api::embedded_system_api().function(&path.join("."))?;
+    if path == ["sys", "explain"] {
+        if let Some(explained) = infer_query_explain_system_call(
+            functions,
+            arguments,
+            type_arguments,
+            None,
+            scope,
+            local,
+            diagnostics,
+        ) {
+            return Some(explained);
+        }
+    }
     if path == ["sys", "meta"] {
         return Some(infer_meta_system_call(
             functions,
@@ -14241,6 +14290,13 @@ fn substitute_generic_descriptor_type(
             .get(name)
             .cloned()
             .or_else(|| Some(descriptor_type(ty))),
+        system_api::SystemType::Applied { base, arguments } if base == "Query" => {
+            let element = arguments.first()?;
+            Some(Type::Relation(Box::new(substitute_generic_descriptor_type(
+                element,
+                substitutions,
+            )?)))
+        }
         system_api::SystemType::Applied { base, arguments } => Some(Type::Applied {
             base: base.clone(),
             arguments: arguments
@@ -14255,6 +14311,203 @@ fn substitute_generic_descriptor_type(
             substitute_generic_descriptor_type(element, substitutions)?,
         ))),
     }
+}
+
+/// `sys.explain(Query<T>)` is the generic planner overload. The v1 evaluator
+/// currently represents a typed query handle as `Relation<T>`, so the
+/// semantic layer specializes this descriptor without exposing a second
+/// runtime type. The actual planner adapter still resolves the query against
+/// the pinned catalogue snapshot.
+fn infer_query_explain_system_call(
+    functions: &[system_api::FunctionDescriptor],
+    arguments: &[orna_syntax_v1::Argument],
+    type_arguments: Option<&[TypeExpr]>,
+    input: Option<&Type>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let query_descriptor = functions.iter().find(|function| {
+        let [parameter] = function.parameters.as_slice() else {
+            return false;
+        };
+        if function.type_parameters.len() != 1 {
+            return false;
+        }
+        let generic = function
+            .type_parameters
+            .iter()
+            .next()
+            .expect("one type parameter was checked above");
+        function.name == "sys.explain"
+            && function.label == "sys.explain(Query)"
+            && function.effect == system_api::SystemEffect::Read
+            && parameter.name == "query"
+            && !parameter.has_default
+            && parameter.ty
+                == system_api::SystemType::Applied {
+                    base: "Query".into(),
+                    arguments: vec![system_api::SystemType::Named(generic.clone())],
+                }
+            && function.result == system_api::SystemType::Named("sys.Plan".into())
+    })?;
+
+    let has_input = input.is_some();
+    let mut effects = EffectSummary::default();
+    let mut values = Vec::with_capacity(arguments.len() + usize::from(has_input));
+    if let Some(input) = input {
+        values.push(input.clone());
+    }
+    for argument in arguments {
+        let value = infer(&argument.value, scope, local, diagnostics);
+        effects.join(&value.effects);
+        values.push(value.ty);
+    }
+
+    let query_shape = if has_input {
+        arguments.is_empty()
+    } else {
+        arguments.len() == 1
+            && arguments[0]
+                .name
+                .as_deref()
+                .is_none_or(|name| name == "query")
+    };
+    let generic_requested = type_arguments.is_some_and(|arguments| !arguments.is_empty());
+    let query_named = arguments
+        .iter()
+        .any(|argument| argument.name.as_deref() == Some("query"));
+    let query_value = values.first();
+    let is_query = query_value.is_some_and(|ty| match ty {
+        Type::Relation(_) => true,
+        Type::Applied { base, .. } => base == "Query",
+        _ => false,
+    });
+    let wants_query = query_shape && (query_named || is_query || generic_requested);
+
+    if wants_query {
+        effects.join(&descriptor_effects(query_descriptor.effect));
+        if query_value.is_some_and(|ty| matches!(ty, Type::Error)) {
+            return Some(Inferred {
+                ty: Type::Error,
+                effects,
+            });
+        }
+        let query_element = match query_value.expect("query shape contains a value") {
+            Type::Relation(element) => element.as_ref(),
+            Type::Applied { base, arguments } if base == "Query" => {
+                let Some(element) = arguments.first() else {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "sys.explain(Query) requires a typed query value",
+                    ));
+                    return Some(Inferred {
+                        ty: Type::Error,
+                        effects,
+                    });
+                };
+                element
+            }
+            _ => {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "sys.explain(Query) requires a typed query value",
+                ));
+                return Some(Inferred {
+                    ty: Type::Error,
+                    effects,
+                });
+            }
+        };
+
+        if let Some(type_arguments) = type_arguments.filter(|arguments| !arguments.is_empty()) {
+            let explicit = type_arguments
+                .iter()
+                .map(|argument| valid_static_type(argument, scope))
+                .collect::<Option<Vec<_>>>();
+            let Some([explicit]) = explicit.as_deref() else {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "sys.explain requires exactly one valid explicit query element type",
+                ));
+                return Some(Inferred {
+                    ty: Type::Error,
+                    effects,
+                });
+            };
+            if !types_match(explicit, query_element) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "sys.explain explicit query element type must match the query value",
+                ));
+                return Some(Inferred {
+                    ty: Type::Error,
+                    effects,
+                });
+            }
+        }
+
+        let generic = query_descriptor
+            .type_parameters
+            .iter()
+            .next()
+            .expect("validated query descriptor has one type parameter");
+        let substitutions = BTreeMap::from([(generic.clone(), query_element.clone())]);
+        return Some(Inferred {
+            ty: substitute_generic_descriptor_type(&query_descriptor.result, &substitutions)
+                .unwrap_or(Type::Error),
+            effects,
+        });
+    }
+
+    if values.iter().any(|ty| matches!(ty, Type::Error)) {
+        return Some(Inferred {
+            ty: Type::Error,
+            effects,
+        });
+    }
+
+    if has_input {
+        if arguments.is_empty()
+            && let Some(function) = functions.iter().find(|function| {
+                function.name == "sys.explain"
+                    && function.label != "sys.explain(Query)"
+                    && function.type_parameters.is_empty()
+                    && function.parameters.len() == 1
+                    && types_match(&descriptor_type(&function.parameters[0].ty), &values[0])
+            })
+        {
+            effects.join(&descriptor_effects(function.effect));
+            return Some(Inferred {
+                ty: descriptor_type(&function.result),
+                effects,
+            });
+        }
+    } else if type_arguments.is_none() {
+        if let Some(function) = functions
+            .iter()
+            .filter(|function| {
+                function.name == "sys.explain"
+                    && descriptor_function_is_staticly_supported(function)
+            })
+            .find(|function| descriptor_arguments_match(function, arguments, &values))
+        {
+            effects.join(&descriptor_effects(function.effect));
+            return Some(Inferred {
+                ty: descriptor_type(&function.result),
+                effects,
+            });
+        }
+    }
+
+    diagnostics.push(diag(
+        DIAG_TYPE,
+        "arguments do not match a portable sys.explain overload",
+    ));
+    Some(Inferred {
+        ty: Type::Error,
+        effects,
+    })
 }
 
 /// `sys.meta<T>` is the one generic system operation whose type parameter is
@@ -14369,6 +14622,15 @@ fn infer_descriptor_system_call_with_input(
 ) -> Option<Inferred> {
     let functions = system_api::embedded_system_api().function(&path.join("."))?;
     match path {
+        ["sys", "explain"] => infer_query_explain_system_call(
+            functions,
+            arguments,
+            (!type_arguments.is_empty()).then_some(type_arguments),
+            Some(input),
+            scope,
+            local,
+            diagnostics,
+        ),
         ["sys", "meta"] => Some(infer_meta_system_call(
             functions,
             arguments,
@@ -14872,7 +15134,9 @@ fn descriptor_type(ty: &system_api::SystemType) -> Type {
             "Duration" => Type::Named("std.DURATION".into()),
             other => Type::Named(other.into()),
         },
-        system_api::SystemType::Applied { base, arguments } if base == "Relation" => {
+        system_api::SystemType::Applied { base, arguments }
+            if matches!(base.as_str(), "Relation" | "Query") =>
+        {
             Type::Relation(Box::new(
                 arguments
                     .first()
