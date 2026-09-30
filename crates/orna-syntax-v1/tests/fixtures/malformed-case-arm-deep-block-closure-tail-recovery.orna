@@ -1,0 +1,14 @@
+pub fn bad(flag: Bool): Int { case flag {
+true: outer => { let outer_value = outer; case outer {
+true: outer_value,
+false: "wrap {inner => { let inner_value = inner; case inner {
+true: inner_value,
+false 0 { value: 6 },
+false: final => { let final_value = final; case final {
+true: final_value,
+false: "done {flag} tail"
+} }
+} }} end"
+} },
+false: "fallback {flag} done"
+}}
