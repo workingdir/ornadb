@@ -1697,7 +1697,103 @@ impl RuntimeTableActivationSnapshot {
     pub fn table_rows(&self) -> &RuntimeTableRows {
         &self.table_rows
     }
+
+    /// Starts a query session over this activation's captured table rows.
+    ///
+    /// The reference defines live-query and read-your-writes semantics but
+    /// does not prescribe a runtime API shape. This API uses the canonical
+    /// encoded primary key as its exact-match identity and gives each session
+    /// a private mutation overlay.
+    pub fn query_session(&self) -> RuntimeQuerySession<'_> {
+        RuntimeQuerySession {
+            snapshot: self,
+            overlay: BTreeMap::new(),
+            mutations: Vec::new(),
+        }
+    }
+
+    /// Returns the captured row whose encoded primary key exactly matches
+    /// `key`. Keys are canonical OVB bytes, so schema-aware callers normalize
+    /// logical aliases before entering this schema-independent runtime API.
+    pub fn query_exact(&self, table: &str, key: &[u8]) -> Result<Option<&[u8]>, RuntimeQueryError> {
+        let rows = self
+            .table_rows
+            .get(table)
+            .ok_or(RuntimeQueryError::TableNotAdmitted)?;
+        Ok(rows
+            .binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key))
+            .ok()
+            .map(|index| rows[index].1.as_slice()))
+    }
 }
+
+/// A private exact-query view over one activation snapshot.
+///
+/// Staged writes shadow captured rows immediately and disappear when the
+/// session is dropped. The owner passes [`Self::staged_mutations`] to the
+/// existing atomic activation commit when evaluation succeeds.
+pub struct RuntimeQuerySession<'snapshot> {
+    snapshot: &'snapshot RuntimeTableActivationSnapshot,
+    overlay: BTreeMap<String, BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
+    mutations: Vec<TableMutation>,
+}
+
+impl RuntimeQuerySession<'_> {
+    /// Returns the session's current row for the exact canonical key.
+    ///
+    /// Every call checks the current overlay before the immutable base rows;
+    /// query results are deliberately not memoized, preserving independent
+    /// call semantics and making preceding writes visible immediately.
+    pub fn query_exact(&self, table: &str, key: &[u8]) -> Result<Option<&[u8]>, RuntimeQueryError> {
+        if !self.snapshot.table_rows.contains_key(table) {
+            return Err(RuntimeQueryError::TableNotAdmitted);
+        }
+        if let Some(value) = self.overlay.get(table).and_then(|rows| rows.get(key)) {
+            return Ok(value.as_deref());
+        }
+        self.snapshot.query_exact(table, key)
+    }
+
+    /// Adds one already validated mutation to this private session.
+    ///
+    /// A repeated key replaces the session's query view in order of staging,
+    /// while all operations remain in the returned commit batch.
+    pub fn stage_mutation(&mut self, mutation: TableMutation) -> Result<(), RuntimeQueryError> {
+        if !self.snapshot.table_rows.contains_key(mutation.table()) {
+            return Err(RuntimeQueryError::TableNotAdmitted);
+        }
+        self.overlay
+            .entry(mutation.table().to_owned())
+            .or_default()
+            .insert(mutation.key().to_vec(), mutation.value().map(<[u8]>::to_vec));
+        self.mutations.push(mutation);
+        Ok(())
+    }
+
+    /// Returns the mutations staged in source order for an atomic runtime commit.
+    pub fn staged_mutations(&self) -> &[TableMutation] {
+        &self.mutations
+    }
+
+    /// Consumes the session and returns its mutations in staging order.
+    pub fn into_mutations(self) -> Vec<TableMutation> {
+        self.mutations
+    }
+}
+
+/// A query requested a relation that was not included in its activation snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeQueryError {
+    TableNotAdmitted,
+}
+
+impl fmt::Display for RuntimeQueryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("table was not admitted to this query session")
+    }
+}
+
+impl std::error::Error for RuntimeQueryError {}
 
 impl RuntimeActivationContext {
     pub fn capture(&self) -> &CwdCapture {
@@ -16412,6 +16508,166 @@ mod tests {
         );
         assert_eq!(snapshot.table_rows().get("unused"), Some(&Vec::new()));
         assert_eq!(snapshot.table_rows().len(), 2);
+    }
+
+    struct QuerySessionEffects<'session, 'snapshot> {
+        session: &'session RuntimeQuerySession<'snapshot>,
+    }
+
+    impl orna_evaluator_v1::EffectHandler for QuerySessionEffects<'_, '_> {
+        fn handle(
+            &mut self,
+            callee: &orna_syntax_v1::Expr,
+            arguments: &[CanonicalValue],
+        ) -> Result<Option<CanonicalValue>, orna_evaluator_v1::EvaluationError> {
+            let failure = || {
+                orna_evaluator_v1::EvaluationError::redacted(
+                    SafeText::new("ORNA-EVAL-QUERY").expect("static diagnostic code"),
+                )
+            };
+            let orna_syntax_v1::Expr::Field { base, name, .. } = callee else {
+                return Ok(None);
+            };
+            let orna_syntax_v1::Expr::Name { text: table, .. } = base.as_ref() else {
+                return Ok(None);
+            };
+            if name != "lookup" {
+                return Ok(None);
+            }
+            let [key] = arguments else {
+                return Err(failure());
+            };
+            let encoded_key = key.encode().map_err(|_| failure())?;
+            let Some(row) = self
+                .session
+                .query_exact(table, &encoded_key)
+                .map_err(|_| failure())?
+            else {
+                return Ok(None);
+            };
+            CanonicalValue::decode(row)
+                .map(Some)
+                .map_err(|_| failure())
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_query_session_reads_its_staged_writes_and_keeps_them_private_until_commit() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let key = CanonicalValue::new(OvbRaw::Int(BigInt::from(7u8)))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let original = CanonicalValue::new(OvbRaw::Text("original".into())).unwrap();
+        let original_bytes = original.encode().unwrap();
+        let context = state.begin_activation().await.unwrap();
+        state
+            .commit_table_activation(
+                lease,
+                &context,
+                &[TableMutation::new(
+                    id(40),
+                    "books",
+                    key.clone(),
+                    Some(original_bytes.clone()),
+                )
+                .unwrap()],
+                digest(41),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["books", "unused"]).await.unwrap();
+        assert_eq!(
+            snapshot.query_exact("books", &key).unwrap(),
+            Some(&original_bytes[..])
+        );
+        assert_eq!(snapshot.query_exact("unused", &key).unwrap(), None);
+        let absent_key = CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8)))
+            .unwrap()
+            .encode()
+            .unwrap();
+        assert_eq!(snapshot.query_exact("books", &absent_key).unwrap(), None);
+        assert_eq!(
+            snapshot.query_exact("not-admitted", &key),
+            Err(RuntimeQueryError::TableNotAdmitted)
+        );
+
+        let mut session = snapshot.query_session();
+        let replacement = CanonicalValue::new(OvbRaw::Text("replacement".into())).unwrap();
+        let replacement_bytes = replacement.encode().unwrap();
+        session
+            .stage_mutation(
+                TableMutation::new(
+                    id(42),
+                    "books",
+                    key.clone(),
+                    Some(replacement_bytes.clone()),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            session.query_exact("books", &key).unwrap(),
+            Some(&replacement_bytes[..])
+        );
+
+        let parsed = orna_syntax_v1::parse_expression(include_str!(
+            "../tests/fixtures/exact-query-session.orna"
+        ));
+        assert!(parsed.is_ok(), "the in-crate exact-query fixture must parse");
+        let functions = orna_evaluator_v1::Functions::from([(
+            "read_book".into(),
+            orna_evaluator_v1::PureFunction {
+                parameters: Vec::new(),
+                body: parsed.value,
+                environment: BTreeMap::new(),
+            },
+        )]);
+        let result = {
+            let mut effects = QuerySessionEffects { session: &session };
+            orna_evaluator_v1::invoke_named_with_effects(
+                "read_book",
+                &functions,
+                &BTreeMap::new(),
+                orna_evaluator_v1::Limits::default(),
+                &mut effects,
+            )
+            .unwrap()
+        };
+        assert_eq!(result, replacement);
+
+        session
+            .stage_mutation(
+                TableMutation::new(id(43), "books", key.clone(), None).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(session.query_exact("books", &key).unwrap(), None);
+        assert_eq!(
+            snapshot.query_exact("books", &key).unwrap(),
+            Some(&original_bytes[..])
+        );
+        assert_eq!(
+            state.committed_table_row("books", &key).await.unwrap(),
+            Some(original_bytes)
+        );
+
+        state
+            .commit_table_activation(
+                lease,
+                snapshot.context(),
+                session.staged_mutations(),
+                digest(44),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert_eq!(state.committed_table_row("books", &key).await.unwrap(), None);
+        let fresh = state.begin_table_activation(&["books"]).await.unwrap();
+        assert_eq!(fresh.query_exact("books", &key).unwrap(), None);
     }
 
     #[tokio::test]
