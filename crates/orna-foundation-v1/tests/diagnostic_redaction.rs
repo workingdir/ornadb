@@ -5301,6 +5301,232 @@ fn mixed_trust_sibling_closures_restore_nested_cause_generations() {
 }
 
 #[test]
+fn mixed_trust_parent_closures_restore_resized_sibling_causes() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let untrusted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(message).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let old_parent = admitted("ORNA-E-CAUSE-OLD-PARENT", "old sibling parent admission")
+        .with_cause(
+            untrusted("ORNA-E-CAUSE-OLD-LEFT", "old sibling left cause secret")
+                .with_cause(admitted("ORNA-E-CAUSE-OLD-L0", "old sibling left leaf")),
+        )
+        .with_cause(
+            admitted("ORNA-E-CAUSE-OLD-RIGHT", "old sibling right admission")
+                .with_cause(untrusted("ORNA-E-CAUSE-OLD-R0", "old sibling right leaf zero secret"))
+                .with_cause(admitted("ORNA-E-CAUSE-OLD-R1", "old sibling right leaf one"))
+                .with_cause(untrusted("ORNA-E-CAUSE-OLD-R2", "old sibling right leaf two secret")),
+        );
+    let new_parent = untrusted("ORNA-E-CAUSE-NEW-PARENT", "new sibling parent root secret")
+        .with_cause(
+            admitted("ORNA-E-CAUSE-NEW-LEFT", "new sibling left admission")
+                .with_cause(untrusted("ORNA-E-CAUSE-NEW-L0", "new sibling left leaf zero secret"))
+                .with_cause(admitted("ORNA-E-CAUSE-NEW-L1", "new sibling left leaf one"))
+                .with_cause(untrusted("ORNA-E-CAUSE-NEW-L2", "new sibling left leaf two secret")),
+        )
+        .with_cause(
+            untrusted("ORNA-E-CAUSE-NEW-RIGHT", "new sibling right cause secret")
+                .with_cause(admitted("ORNA-E-CAUSE-NEW-R0", "new sibling right leaf admission")),
+        );
+    let source_snapshots = vec![old_parent.clone(), new_parent.clone()];
+    let source_projections = source_snapshots
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let source_wires = source_snapshots
+        .iter()
+        .map(Diagnostic::encode_ovb)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    // The reference specifies immutable closure captures and diagnostic
+    // redaction, but leaves host Clone::clone_from slot reuse open. Pin the
+    // two sibling cause generations as owned snapshots when their nested
+    // cause vectors grow and shrink in opposite directions.
+    let capture_old = {
+        let snapshot = source_snapshots[0].clone();
+        move || snapshot.clone()
+    };
+    let capture_new = {
+        let snapshot = source_snapshots[1].clone();
+        move || snapshot.clone()
+    };
+    let mut left = capture_old();
+    let mut right = capture_old();
+    left.clone_from(&capture_new());
+    let left_new_generation = left.clone();
+    let right_old_generation = right.clone();
+    assert_eq!(left_new_generation, new_parent);
+    assert_eq!(right_old_generation, old_parent);
+
+    let restore_left_new = {
+        let snapshot = left_new_generation.clone();
+        move || snapshot.clone()
+    };
+    let restore_right_old = {
+        let snapshot = right_old_generation.clone();
+        move || snapshot.clone()
+    };
+    left.clone_from(&capture_old());
+    right.clone_from(&capture_new());
+    let left_old_generation = left.clone();
+    let right_new_generation = right.clone();
+    assert_eq!(left_old_generation, old_parent);
+    assert_eq!(right_new_generation, new_parent);
+
+    left.clone_from(&restore_left_new());
+    right.clone_from(&restore_right_old());
+    assert_eq!(left, new_parent);
+    assert_eq!(right, old_parent);
+    for (index, snapshot) in source_snapshots.iter().enumerate() {
+        assert_eq!(serde_json::to_value(snapshot).unwrap(), source_projections[index]);
+        assert_eq!(snapshot.encode_ovb().unwrap(), source_wires[index]);
+    }
+
+    let compose_sibling_cause_generations = {
+        let left_after_growth = left_new_generation.clone();
+        let right_before_growth = right_old_generation.clone();
+        let left_after_shrink = left_old_generation.clone();
+        let right_after_shrink = right_new_generation.clone();
+        move || {
+            admitted("ORNA-E-CAUSE-OUTER", "sibling cause outer admission")
+                .with_cause(left_after_growth.clone())
+                .with_cause(right_before_growth.clone())
+                .with_cause(left_after_shrink.clone())
+                .with_cause(right_after_shrink.clone())
+        }
+    };
+    let empty_parent = untrusted("ORNA-E-CAUSE-EMPTY", "sibling empty parent secret");
+    left.clone_from(&empty_parent);
+    right.clone_from(&empty_parent);
+    assert_eq!(left, empty_parent);
+    assert_eq!(right, empty_parent);
+
+    let outer = compose_sibling_cause_generations();
+    assert_eq!(outer, compose_sibling_cause_generations());
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["message"], "sibling cause outer admission");
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 4);
+    let expected_leaf_counts = [[3, 1], [1, 3], [1, 3], [3, 1]];
+    for (cause, expected_siblings) in causes.iter().zip(expected_leaf_counts) {
+        assert_eq!(cause["message"], "<redacted>");
+        let siblings = cause["causes"].as_array().unwrap();
+        assert_eq!(siblings.len(), 2);
+        for (sibling, expected_leaf_count) in siblings.iter().zip(expected_siblings) {
+            assert_eq!(sibling["message"], "<redacted>");
+            let leaves = sibling["causes"].as_array().unwrap();
+            assert_eq!(leaves.len(), expected_leaf_count);
+            for leaf in leaves {
+                assert_eq!(leaf["message"], "<redacted>");
+            }
+        }
+    }
+
+    let envelope = serde_json::json!({
+        "outer": outer.clone(),
+        "old_parent": old_parent,
+    });
+    let json = serde_json::to_vec(&envelope).unwrap();
+    for message in [
+        b"sibling cause outer admission".as_slice(),
+        b"old sibling parent admission".as_slice(),
+    ] {
+        assert_eq!(
+            json.windows(message.len())
+                .filter(|window| *window == message)
+                .count(),
+            1
+        );
+    }
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"old sibling left cause secret".as_slice(),
+            b"old sibling left leaf".as_slice(),
+            b"old sibling right admission".as_slice(),
+            b"old sibling right leaf zero secret".as_slice(),
+            b"old sibling right leaf one".as_slice(),
+            b"old sibling right leaf two secret".as_slice(),
+            b"new sibling parent root secret".as_slice(),
+            b"new sibling left admission".as_slice(),
+            b"new sibling left leaf zero secret".as_slice(),
+            b"new sibling left leaf one".as_slice(),
+            b"new sibling left leaf two secret".as_slice(),
+            b"new sibling right cause secret".as_slice(),
+            b"new sibling right leaf admission".as_slice(),
+            b"sibling empty parent secret".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+
+    let wire = outer.encode_ovb().unwrap();
+    assert!(
+        wire.windows(b"sibling cause outer admission".len())
+            .any(|window| window == b"sibling cause outer admission")
+    );
+    for disclosure in [
+        fixture.as_bytes(),
+        b"old sibling parent admission".as_slice(),
+        b"old sibling right admission".as_slice(),
+        b"new sibling parent root secret".as_slice(),
+        b"new sibling left admission".as_slice(),
+        b"old sibling right leaf two secret".as_slice(),
+        b"new sibling left leaf two secret".as_slice(),
+    ]
+    .into_iter()
+    .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
+    {
+        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    assert_eq!(
+        decoded["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cause| {
+                cause["causes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|sibling| sibling["causes"].as_array().unwrap().len())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>(),
+        [[3, 1], [1, 3], [1, 3], [3, 1]]
+    );
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
