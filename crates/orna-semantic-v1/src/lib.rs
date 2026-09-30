@@ -16165,6 +16165,15 @@ fn infer_numeric_postfix(base: &Type, name: &str, scope: &Scope) -> Option<Type>
             })
         }
         Type::Int | Type::Decimal | Type::Float if name == "decimal" => Some(Type::Decimal),
+        // These postfix units are evaluated as elapsed Duration values. Keep
+        // their static type aligned with the runtime representation so the
+        // ordinary Duration APIs (including optional std formatters) accept
+        // them without requiring std to define the core temporal value.
+        Type::Int
+            if matches!(name, "hour" | "hours" | "minute" | "minutes" | "min" | "second" | "seconds" | "s") =>
+        {
+            Some(Type::Named("std.DURATION".into()))
+        }
         Type::Int | Type::Decimal | Type::Float => Some(Type::Applied {
             base: numeric_base(base)?.into(),
             arguments: vec![Type::Named(name.into())],
