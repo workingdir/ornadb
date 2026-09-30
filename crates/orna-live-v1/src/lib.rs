@@ -2521,11 +2521,28 @@ impl LiveHost {
         {
             return Err(Error::RequestMismatch);
         }
-        if matches!(envelope.message, Message::Event { .. } | Message::Resync) {
-            let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
-            if !self.watches.contains(&(session, watch)) {
-                return Err(Error::Denied);
+        // A matching local terminal result is authoritative even if the
+        // operational watch was closed after the original response.
+        if self.runtime.is_none()
+            && let Some(record) = self.requests.get(&(session, request))
+        {
+            if record.fingerprint != fingerprint {
+                if matches!(envelope.message, Message::RequestStatus { .. }) {
+                    return Ok(ApplicationPreparation::Completed(
+                        request_mismatch_outcome(request)?,
+                    ));
+                }
+                return Err(Error::RequestMismatch);
             }
+            return Ok(ApplicationPreparation::Completed(
+                record.terminal.clone().unwrap_or(DispatchOutcome {
+                    outcome: FrameOutcome::Accepted,
+                    response: None,
+                }),
+            ));
+        }
+        if self.runtime.is_none() {
+            self.validate_live_watch_reference(session, &envelope)?;
         }
         if self.runtime.is_some() {
             match self
@@ -2565,21 +2582,6 @@ impl LiveHost {
                 }
                 Err(error) => return Err(error),
             }
-        } else if let Some(record) = self.requests.get(&(session, request)) {
-            if record.fingerprint != fingerprint {
-                if matches!(envelope.message, Message::RequestStatus { .. }) {
-                    return Ok(ApplicationPreparation::Completed(request_mismatch_outcome(
-                        request,
-                    )?));
-                }
-                return Err(Error::RequestMismatch);
-            }
-            return Ok(ApplicationPreparation::Completed(
-                record.terminal.clone().unwrap_or(DispatchOutcome {
-                    outcome: FrameOutcome::Accepted,
-                    response: None,
-                }),
-            ));
         }
 
         if let Message::RequestStatus {
@@ -3170,16 +3172,6 @@ impl LiveHost {
                 {
                     return Err(Error::RequestMismatch);
                 }
-                // Validate every existing watch target before durable request
-                // admission. A rejected Event or Resync must not create a
-                // reservation that could later be mistaken for executable
-                // work after a restart.
-                if matches!(envelope.message, Message::Event { .. } | Message::Resync) {
-                    let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
-                    if !self.watches.contains(&(session, watch)) {
-                        return Err(Error::Denied);
-                    }
-                }
                 if self.runtime.is_some()
                     && matches!(
                         envelope.message,
@@ -3191,6 +3183,25 @@ impl LiveHost {
                     )
                 {
                     self.ensure_takeover_recovery().await?;
+                }
+                // Return a known local outcome before checking live handles:
+                // exact retries stay exact after a watch has been closed.
+                if self.runtime.is_none()
+                    && let Some(record) = self.requests.get(&(session, request))
+                {
+                    if record.fingerprint != fingerprint {
+                        if matches!(envelope.message, Message::RequestStatus { .. }) {
+                            return request_mismatch_outcome(request);
+                        }
+                        return Err(Error::RequestMismatch);
+                    }
+                    return Ok(record.terminal.clone().unwrap_or(DispatchOutcome {
+                        outcome: FrameOutcome::Accepted,
+                        response: None,
+                    }));
+                }
+                if self.runtime.is_none() {
+                    self.validate_live_watch_reference(session, &envelope)?;
                 }
                 if self.runtime.is_some() {
                     match self
@@ -3228,17 +3239,6 @@ impl LiveHost {
                         }
                         Err(error) => return Err(error),
                     }
-                } else if let Some(record) = self.requests.get(&(session, request)) {
-                    if record.fingerprint != fingerprint {
-                        if matches!(envelope.message, Message::RequestStatus { .. }) {
-                            return request_mismatch_outcome(request);
-                        }
-                        return Err(Error::RequestMismatch);
-                    }
-                    return Ok(record.terminal.clone().unwrap_or(DispatchOutcome {
-                        outcome: FrameOutcome::Accepted,
-                        response: None,
-                    }));
                 }
                 if let Err(error) = self.reserve_and_start(session, request, fingerprint) {
                     self.retain_failure(session, request, fingerprint).await?;
@@ -3719,6 +3719,11 @@ impl LiveHost {
                 }
             }
         }
+        // The terminal/active request identity above wins over current watch
+        // liveness. Only a genuinely new operation requires a live watch;
+        // this preserves exact diagnostics when the client retries after
+        // unsubscribe, cancellation, or watch expiry.
+        self.validate_live_watch_reference(session, envelope)?;
         let lease = self.writer_lease().await?;
         let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
         let (reserved, capability) = runtime
@@ -3779,6 +3784,16 @@ impl LiveHost {
             }
             Err(error) => Err(map_runtime(&error)),
         }
+    }
+
+    fn validate_live_watch_reference(&self, session: [u8; 16], envelope: &Envelope) -> Result<()> {
+        if matches!(envelope.message, Message::Event { .. } | Message::Resync) {
+            let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
+            if !self.watches.contains(&(session, watch)) {
+                return Err(Error::Denied);
+            }
+        }
+        Ok(())
     }
 
     /// Complete the recovery barrier established by a proven lease takeover
@@ -9276,6 +9291,9 @@ mod tests {
         assert_eq!(response.watch, Some(watch));
         assert!(matches!(response.message, Message::Diagnostic { .. }));
 
+        // A terminal retry keeps its original action diagnostic even after
+        // the watch identity stops being operational.
+        host.watches.remove(&([1; 16], watch));
         let replay = futures::executor::block_on(host.prepare_application_frame(
             [6; 16],
             5,
@@ -9387,6 +9405,9 @@ mod tests {
         assert_eq!(event_response.request, Some([41; 16]));
         assert_eq!(event_response.watch, Some(watch));
 
+        // Durable terminal replay likewise takes precedence over a watch
+        // that was closed after the diagnostic was first delivered.
+        host.watches.remove(&([1; 16], watch));
         for (frame, expected) in [(&fixture_eval, &fixture_first), (&event, &event_first)] {
             let replay = futures::executor::block_on(host.prepare_application_frame(
                 [6; 16],
