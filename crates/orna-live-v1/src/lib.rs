@@ -4147,13 +4147,16 @@ impl LiveHost {
                 self.limits.protocol,
             )
             .is_ok(),
-            Message::Event { .. } | Message::Eval { .. } => validate_result_response(
-                request,
-                fingerprint,
-                response.clone(),
-                self.limits.protocol,
-            )
-            .is_ok(),
+            Message::Event { .. } | Message::Eval { .. } => {
+                validate_application_result_response(
+                    request,
+                    fingerprint,
+                    envelope.watch,
+                    response.clone(),
+                    self.limits.protocol,
+                )
+                .is_ok()
+            }
             Message::RequestStatus { target, .. } => {
                 validate_status_response(request, *target, response, self.limits.protocol).is_ok()
                     || validate_request_mismatch_response(request, response, self.limits.protocol)
@@ -4800,6 +4803,16 @@ fn durable_result_body(
         return Ok(None);
     };
     let response = Envelope::decode(bytes, limits).map_err(|_| Error::RuntimeUnavailable)?;
+    // A terminal protocol Diagnostic is a retained outcome, not a ResultBody.
+    // REQUEST-1 permits status to expose the terminal state while omitting
+    // rich result data, so keep that distinction instead of treating a valid
+    // rejection as corrupt durable state.
+    if matches!(response.message, Message::Diagnostic { .. }) {
+        if response.request != Some(request) {
+            return Err(Error::RuntimeUnavailable);
+        }
+        return Ok(None);
+    }
     validate_result_response(request, fingerprint, response.clone(), limits)
         .map_err(|_| Error::RuntimeUnavailable)?;
     ResultBody::from_result(&response, limits)
@@ -4889,6 +4902,35 @@ fn validate_result_response(
     };
     if returned != fingerprint {
         return Err(Error::RequestMismatch);
+    }
+    Ok(DispatchOutcome {
+        outcome: FrameOutcome::Accepted,
+        response: Some(response),
+    })
+}
+
+/// Host-generated diagnostics are terminal outcomes for a small set of
+/// operational rejections even though normal Eval/Event completions are
+/// Results. Retain only a request-matched diagnostic, and only let an Event
+/// correlate it to the watch carried by that same request.
+fn validate_application_result_response(
+    request: [u8; 16],
+    fingerprint: [u8; 32],
+    request_watch: Option<[u8; 16]>,
+    response: Envelope,
+    limits: ProtocolLimits,
+) -> Result<DispatchOutcome> {
+    if matches!(response.message, Message::Result { .. }) {
+        return validate_result_response(request, fingerprint, response, limits);
+    }
+    response
+        .encode(limits)
+        .map_err(|_| Error::ApplicationRejected)?;
+    if response.request != Some(request)
+        || response.watch.is_some_and(|watch| Some(watch) != request_watch)
+        || !matches!(response.message, Message::Diagnostic { .. })
+    {
+        return Err(Error::ApplicationRejected);
     }
     Ok(DispatchOutcome {
         outcome: FrameOutcome::Accepted,
@@ -9246,6 +9288,145 @@ mod tests {
         assert_eq!(replayed, first);
     }
 
+    #[test]
+    fn durable_async_rejections_replay_after_session_resume() {
+        const FIXTURE: &str = include_str!("../tests/fixtures/live-runtime-boundary.orna");
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("orna-live-rejection-resume-{nonce}"));
+        fs::create_dir(&root).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-b", "main"])
+                .current_dir(&root)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repository = Repository::discover(&root).unwrap();
+        let runtime = futures::executor::block_on(RuntimeState::open(
+            &repository,
+            RuntimeIdentity {
+                database_id: [31; 16],
+                repository_id: [32; 16],
+            },
+            [33; 32],
+        ))
+        .unwrap();
+        let (mut host, origin, credential) = subscribed_host_with_credential(Some(runtime));
+        let watch = [11; 16];
+        host.watches.insert(([1; 16], watch));
+
+        let fixture_eval = eval_source_frame([40; 16], FIXTURE);
+        let fixture_work = futures::executor::block_on(host.prepare_application_frame(
+            [4; 16],
+            2,
+            Frame::Binary(fixture_eval.clone()),
+        ))
+        .unwrap();
+        let ApplicationPreparation::Work(fixture_ticket) = fixture_work else {
+            panic!("the fixture Eval must be admitted as application work");
+        };
+        assert!(matches!(
+            fixture_ticket.message(),
+            Message::Eval { source, .. } if source == FIXTURE
+        ));
+        let fixture_first = futures::executor::block_on(host.complete_application(
+            fixture_ticket.reject(Error::UnsupportedOperation),
+        ))
+        .unwrap();
+        assert!(matches!(
+            fixture_first.response.as_ref().map(|response| &response.message),
+            Some(Message::Diagnostic { .. })
+        ));
+
+        let event = event_frame([41; 16], watch);
+        let event_work = futures::executor::block_on(host.prepare_application_frame(
+            [4; 16],
+            2,
+            Frame::Binary(event.clone()),
+        ))
+        .unwrap();
+        let ApplicationPreparation::Work(event_ticket) = event_work else {
+            panic!("the watched Event must be admitted as application work");
+        };
+        let event_completion = event_ticket.reject(Error::Denied);
+
+        let mut issuer = FixedIssuer(None);
+        let (replacement, retired) = futures::executor::block_on(host.rotate_and_retire(
+            [1; 16],
+            &origin,
+            &credential,
+            3,
+            &mut issuer,
+        ))
+        .unwrap();
+        assert_eq!(retired, Some([4; 16]));
+        assert_eq!(
+            futures::executor::block_on(host.resume(ResumeRequest {
+                id: [1; 16],
+                origin: &origin,
+                credential: &replacement,
+                attachment: [6; 16],
+                now: 4,
+            })),
+            Ok(orna_security_v1::AttachOutcome::Reconnected)
+        );
+
+        let event_first =
+            futures::executor::block_on(host.complete_application(event_completion)).unwrap();
+        let event_response = event_first
+            .response
+            .as_ref()
+            .expect("denied Event is retained as a diagnostic");
+        assert_eq!(event_response.request, Some([41; 16]));
+        assert_eq!(event_response.watch, Some(watch));
+
+        for (frame, expected) in [(&fixture_eval, &fixture_first), (&event, &event_first)] {
+            let replay = futures::executor::block_on(host.prepare_application_frame(
+                [6; 16],
+                5,
+                Frame::Binary(frame.clone()),
+            ))
+            .unwrap();
+            let ApplicationPreparation::Completed(replayed) = replay else {
+                panic!("a terminal durable request must replay without application work");
+            };
+            assert_eq!(&replayed, expected);
+        }
+
+        drop(host);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejection_does_not_correlate_a_watch_owned_by_another_session() {
+        let mut host = subscribed_host(None);
+        let reused_watch = [11; 16];
+        host.watches.insert(([2; 16], reused_watch));
+        let envelope = Envelope::decode(
+            &event_frame([42; 16], reused_watch),
+            Limits::default().protocol,
+        )
+        .unwrap();
+
+        assert_eq!(
+            host.operational_error_outcome(Some([1; 16]), &envelope, Error::Denied)
+                .unwrap(),
+            Some(DispatchOutcome {
+                outcome: FrameOutcome::Accepted,
+                response: Some(
+                    portable_diagnostic([42; 16], None, "wire.unknown_handle").unwrap()
+                ),
+            })
+        );
+    }
+
     fn request_status_frame(request: [u8; 16], target: [u8; 16], fingerprint: [u8; 32]) -> Vec<u8> {
         Envelope {
             request: Some(request),
@@ -9783,7 +9964,7 @@ mod tests {
     }
 
     #[test]
-    fn request_status_rejects_a_durable_non_result_payload() {
+    fn request_status_surfaces_terminal_rejection_without_a_result_body() {
         let response = watch_diagnostic_response([1; 16], None);
         let terminal =
             TerminalOutcome::new(response.encode(ProtocolLimits::default()).unwrap()).unwrap();
@@ -9799,7 +9980,7 @@ mod tests {
 
         assert_eq!(
             durable_result_body([1; 16], [2; 32], &durable, ProtocolLimits::default()),
-            Err(Error::RuntimeUnavailable)
+            Ok(None)
         );
     }
 
