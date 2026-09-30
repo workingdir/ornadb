@@ -67,6 +67,45 @@ fn final_unsemicolonated_control_is_the_block_value() {
 }
 
 #[test]
+fn control_tail_keeps_postfix_field_continuation() {
+    let parsed = parse_module(include_str!("fixtures/control-tail-postfix-field.orna"));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block { tail, .. } = body else {
+        panic!("expected a function block");
+    };
+    assert!(matches!(
+        tail.as_deref(),
+        Some(Expr::Field { base, name, .. })
+            if name == "value" && matches!(base.as_ref(), Expr::Control { .. })
+    ));
+}
+
+#[test]
+fn malformed_control_continuation_keeps_primary_diagnostics_without_false_unterminated_block() {
+    let source = include_str!("fixtures/control-continuation-missing-separator.orna");
+    let parsed = parse_module(source);
+
+    assert_eq!(parsed.diagnostics.len(), 2, "{:?}", parsed.diagnostics);
+    assert_eq!(
+        parsed
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>(),
+        ["ORNA091-E-POSTFIX-QUESTION", "ORNA-PARSE-002"]
+    );
+    let question = source.find('?').expect("fixture has a postfix question");
+    assert_eq!(parsed.diagnostics[0].span.start, question);
+    let missing_separator = source.find(" 2;").expect("fixture has a following item") + 1;
+    assert_eq!(parsed.diagnostics[1].span.start, missing_separator);
+    assert_eq!(parsed.diagnostics[1].span.end, missing_separator + 1);
+    assert!(parsed.is_malformed());
+}
+
+#[test]
 fn semicolon_keeps_control_expression_as_a_statement() {
     let parsed = parse_module(include_str!("fixtures/semicolon-control-block-item.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
