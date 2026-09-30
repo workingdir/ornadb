@@ -66,8 +66,22 @@ pub enum Raw {
 }
 
 /// A validated OVB-1 value.  The inner raw value is never exposed mutably.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Value(Raw);
+
+impl fmt::Debug for Value {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match redact_error_trace_values(&self.0, 0) {
+            Ok(raw) => formatter.debug_tuple("Value").field(&raw).finish(),
+            // Invalid internal markers are never printed with their payload.
+            Err(_) => formatter
+                .debug_tuple("Value")
+                .field(&"<redacted>")
+                .finish(),
+        }
+    }
+}
+
 impl Value {
     pub fn new(raw: Raw) -> Result<Self> {
         validate_raw(&raw, 0)?;
@@ -78,6 +92,13 @@ impl Value {
     }
     pub fn encode(&self) -> Result<Vec<u8>> {
         encode_raw(&self.0)
+    }
+    /// Returns a transport/trace-safe projection with every nested Error
+    /// payload redacted. Canonical values remain lossless for local recovery;
+    /// callers crossing an unprivileged observability boundary must opt into
+    /// this projection because OVB has no field-level secrecy classifier.
+    pub fn redacted_for_trace(&self) -> Result<Self> {
+        Self::new(redact_error_trace_values(&self.0, 0)?)
     }
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         let mut r = Reader::new(bytes);
@@ -950,8 +971,20 @@ impl_tuple_codec!(
 /// This wrapper carries no execution or language-level error semantics.  It
 /// only provides a typed construction and inspection boundary for the
 /// canonical representation already accepted by [`Value`].
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ErrorValue(Value);
+
+impl fmt::Debug for ErrorValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ErrorValue")
+            .field("code", &"<redacted>")
+            .field("message", &"<redacted>")
+            .field("causes", &"<redacted>")
+            .field("safe_details", &"<redacted>")
+            .finish()
+    }
+}
 
 impl ErrorValue {
     /// Constructs a canonical Error value from its portable fields.
@@ -1050,6 +1083,25 @@ impl ErrorValue {
             .collect()
     }
 
+    /// Builds the fail-closed projection used by traces and wire-visible
+    /// values. Error codes and `safe_details` are caller supplied here, so
+    /// neither is treated as a disclosure grant without a classifier.
+    pub fn redacted_for_trace(&self) -> Self {
+        Self::new(
+            "<redacted>",
+            "<redacted>",
+            self.causes().iter().map(Self::redacted_for_trace),
+            BTreeMap::new(),
+        )
+        .expect("redacted Error remains canonical")
+    }
+
+    /// Encodes the redacted trace projection while `encode` continues to
+    /// preserve this Error's local recovery identity.
+    pub fn encode_for_trace(&self) -> Result<Vec<u8>> {
+        self.redacted_for_trace().encode()
+    }
+
     fn fields(&self) -> BTreeMap<u64, &Raw> {
         integer_map(self.inner(), &[0, 1, 2, 3], &[]).expect("ErrorValue invariant was violated")
     }
@@ -1060,6 +1112,46 @@ impl ErrorValue {
         };
         inner
     }
+}
+
+fn redact_error_trace_values(raw: &Raw, depth: usize) -> Result<Raw> {
+    if depth > MAX_DEPTH {
+        return Err(Error::Limit);
+    }
+    Ok(match raw {
+        Raw::Tag(60016, _) => ErrorValue::from_value(Value::new(raw.clone())?)?
+            .redacted_for_trace()
+            .0
+            .0,
+        Raw::Array(values) => Raw::Array(
+            values
+                .iter()
+                .map(|value| redact_error_trace_values(value, depth + 1))
+                .collect::<Result<_>>()?,
+        ),
+        Raw::Map(entries) => {
+            let mut redacted = entries
+                .iter()
+                .map(|(key, value)| {
+                    Ok((
+                        redact_error_trace_values(key, depth + 1)?,
+                        redact_error_trace_values(value, depth + 1)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            redacted.sort_by(|(left, _), (right, _)| {
+                encode_raw(left)
+                    .expect("validated map keys remain encodable")
+                    .cmp(&encode_raw(right).expect("validated map keys remain encodable"))
+            });
+            Raw::Map(redacted)
+        }
+        Raw::Tag(tag, value) => Raw::Tag(
+            *tag,
+            Box::new(redact_error_trace_values(value, depth + 1)?),
+        ),
+        value => value.clone(),
+    })
 }
 
 fn tag(n: u64, raw: Raw) -> Raw {
@@ -3955,6 +4047,53 @@ mod tests {
         let decoded = ErrorValue::decode(&encoded).unwrap();
         assert_eq!(decoded, error);
         assert_eq!(decoded.value().raw(), error.value().raw());
+    }
+
+    #[test]
+    fn error_trace_projection_redacts_nested_payloads_and_debug() {
+        let fixture = include_str!("../tests/fixtures/error-trace-secret.orna").trim();
+        let detail = Value::new(Raw::Text(fixture.into())).unwrap();
+        let cause = ErrorValue::new(
+            fixture,
+            fixture,
+            [],
+            BTreeMap::from([("credential".into(), detail.clone())]),
+        )
+        .unwrap();
+        let error = ErrorValue::new(
+            fixture,
+            fixture,
+            [cause],
+            BTreeMap::from([("credential".into(), detail)]),
+        )
+        .unwrap();
+
+        // Local recovery remains lossless; trace serialization has its own
+        // fail-closed projection because OVB cannot classify caller text.
+        assert!(error
+            .encode()
+            .unwrap()
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
+        let trace_bytes = error.encode_for_trace().unwrap();
+        assert!(!trace_bytes
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
+        let traced = ErrorValue::decode(&trace_bytes).unwrap();
+        assert_eq!(traced.code(), "<redacted>");
+        assert_eq!(traced.message(), "<redacted>");
+        assert!(traced.safe_details().is_empty());
+        assert_eq!(traced.causes()[0].code(), "<redacted>");
+        assert!(traced.causes()[0].safe_details().is_empty());
+        assert!(!format!("{error:?}").contains(fixture));
+        assert!(!format!("{:?}", error.value()).contains(fixture));
+
+        let nested = Value::new(Raw::Array(vec![error.value().raw().clone()])).unwrap();
+        let nested_bytes = nested.redacted_for_trace().unwrap().encode().unwrap();
+        assert!(!nested_bytes
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
+        assert!(!format!("{nested:?}").contains(fixture));
     }
 
     #[test]
