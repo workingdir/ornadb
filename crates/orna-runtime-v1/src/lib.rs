@@ -69,7 +69,9 @@ pub use catalogue::{
 pub use invocation::{
     InvocationArgumentInput, InvocationArgumentObservation, InvocationCompletion,
     InvocationLaunchOwner, InvocationObservation, InvocationObservationRegistration,
-    InvocationObservationStatus, MaterializedProcedure, MaterializedProcedureParameter,
+    InvocationObservationStatus, InvocationObservationTailCursor,
+    InvocationObservationTailEntry, InvocationObservationTailPage, MaterializedProcedure,
+    MaterializedProcedureParameter,
 };
 
 const SCHEMA: &str = r#"
@@ -376,6 +378,11 @@ CREATE TABLE IF NOT EXISTS admin_invocation_audit (
     succeeded INTEGER NOT NULL CHECK (succeeded IN (0, 1)),
     redacted INTEGER NOT NULL CHECK (redacted IN (0, 1))
 );
+CREATE TABLE IF NOT EXISTS admin_invocation_checkpoint_result (
+    invocation_id BLOB PRIMARY KEY REFERENCES admin_invocation_audit(invocation_id),
+    version INTEGER NOT NULL CHECK (version >= 0),
+    committed_position TEXT NOT NULL CHECK (length(committed_position) > 0)
+);
 
 CREATE TABLE IF NOT EXISTS sys_run_observation (
     run_id BLOB PRIMARY KEY CHECK (length(run_id) = 16),
@@ -442,6 +449,23 @@ CREATE TABLE IF NOT EXISTS sys_invocation_argument (
     UNIQUE (invocation_id, name),
     CHECK (redacted = 0 OR value_digest IS NULL)
 );
+-- Invocation tails are append-only change notifications. A stable sequence is
+-- used instead of wall-clock ordering so equal timestamps and later terminal
+-- transitions cannot be skipped by a continuation cursor.
+CREATE TABLE IF NOT EXISTS sys_invocation_observation_tail (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    invocation_id BLOB NOT NULL REFERENCES sys_invocation_observation(invocation_id),
+    observed_ms INTEGER NOT NULL CHECK (observed_ms >= 0),
+    status INTEGER NOT NULL CHECK (status BETWEEN 1 AND 6),
+    UNIQUE (invocation_id, observed_ms, status)
+);
+CREATE INDEX IF NOT EXISTS sys_invocation_observation_tail_by_invocation
+    ON sys_invocation_observation_tail(invocation_id, sequence);
+-- Backfill once for runtimes that already retained invocation rows before
+-- tailing was added; the unique key makes startup reconciliation idempotent.
+INSERT OR IGNORE INTO sys_invocation_observation_tail
+    (invocation_id, observed_ms, status)
+SELECT invocation_id, observed_ms, status FROM sys_invocation_observation;
 CREATE TABLE IF NOT EXISTS runtime_catalogue_identity (
     object_id BLOB PRIMARY KEY CHECK (length(object_id) = 16),
     kind INTEGER NOT NULL CHECK (kind IN (1, 2, 3)),
@@ -1781,6 +1805,8 @@ pub enum RuntimeError {
     InvocationStateConflict,
     InvocationChildrenActive,
     InvocationOwnerInvalid,
+    InvocationTailInvalid,
+    InvocationTailLimit,
     StreamIdentityMismatch,
     StreamSourceNotReplayable,
     StreamCheckpointStale,
@@ -1848,6 +1874,8 @@ impl fmt::Display for RuntimeError {
             Self::InvocationStateConflict => "runtime invocation state transition conflicts",
             Self::InvocationChildrenActive => "runtime invocation has active child invocations",
             Self::InvocationOwnerInvalid => "runtime invocation owner or arguments are invalid",
+            Self::InvocationTailInvalid => "runtime invocation tail cursor is invalid",
+            Self::InvocationTailLimit => "runtime invocation tail page limit is invalid",
             Self::StreamIdentityMismatch => "stream source identity mismatch",
             Self::StreamSourceNotReplayable => "stream source does not support durable recovery",
             Self::StreamCheckpointStale => "stream checkpoint is stale",
@@ -3311,6 +3339,13 @@ pub enum AdminLifecycleEffect {
     Failed,
 }
 
+/// The replayable result retained for a successful checkpoint reset receipt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminCheckpointResetResult {
+    pub version: u64,
+    pub committed_position: Position,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdminInvocationAudit {
     pub sequence: u64,
@@ -3322,6 +3357,8 @@ pub struct AdminInvocationAudit {
     pub terminal_outcome: String,
     /// Typed runtime effect decoded from the durable terminal outcome.
     pub effect: AdminLifecycleEffect,
+    /// Present for checkpoint-reset receipts created with result retention.
+    pub checkpoint_reset_result: Option<AdminCheckpointResetResult>,
     pub succeeded: bool,
     pub redacted: bool,
 }
@@ -3520,7 +3557,7 @@ fn admin_failure_outcome(error: &RuntimeError) -> &'static str {
 }
 
 fn admin_result_from_receipt(
-    operation: &AdminInvocationOperation,
+    operation: Option<&AdminInvocationOperation>,
     descriptor: &AdminInvocationDescriptor,
     receipt: &AdminInvocationAudit,
 ) -> Result<AdminOperationResult, RuntimeError> {
@@ -3531,10 +3568,23 @@ fn admin_result_from_receipt(
         return Err(RuntimeError::AdminInvocationConflict);
     }
     match operation {
-        AdminInvocationOperation::Pause { .. } | AdminInvocationOperation::Resume { .. } => {
-            replay_admin_stream_result(receipt)
+        Some(AdminInvocationOperation::Reset { key, .. }) => {
+            if receipt.terminal_outcome.starts_with("failure:") {
+                return replay_admin_stream_result(receipt);
+            }
+            let result = receipt
+                .checkpoint_reset_result
+                .as_ref()
+                .ok_or(RuntimeError::AdminInvocationConflict)?;
+            Ok(AdminOperationResult::Checkpoint(StreamCheckpoint {
+                key: key.clone(),
+                version: result.version,
+                committed: Some(result.committed_position.clone()),
+            }))
         }
-        AdminInvocationOperation::Reset { .. } => Err(RuntimeError::AdminInvocationConflict),
+        Some(AdminInvocationOperation::Pause { .. })
+        | Some(AdminInvocationOperation::Resume { .. })
+        | None => replay_admin_stream_result(receipt),
     }
 }
 
@@ -3607,6 +3657,7 @@ impl RuntimeState {
             .execute_batch(SCHEMA)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        migrate_admin_checkpoint_reset_receipts(&connection).await?;
         Self::initialize_runtime_meta(&connection, identity, initial_digest).await?;
         migrate_runtime_table_history(&connection).await?;
         migrate_publication_policy_schema(&connection).await?;
@@ -4578,7 +4629,7 @@ impl RuntimeState {
             reason.as_deref(),
         );
         if let Some(result) = self
-            .replay_admin_invocation_receipt(lease, &descriptor)
+            .replay_admin_invocation_receipt(lease, None, &descriptor)
             .await?
         {
             return admin_stream_result(result);
@@ -4703,7 +4754,24 @@ impl RuntimeState {
         lease: WriterLease,
         request: CheckpointResetRequest,
     ) -> Result<StreamCheckpoint, RuntimeError> {
-        self.reset_checkpoint_at_capture(lease, request, None).await
+        self.reset_checkpoint_with_invocation_id(
+            lease,
+            request,
+            Uuid::new_v4().into_bytes(),
+        )
+        .await
+    }
+
+    /// Replays a checkpoint reset receipt for a caller-stable invocation ID.
+    /// This lets a caller reconcile an admitted reset after losing its result.
+    pub async fn reset_checkpoint_with_invocation_id(
+        &self,
+        lease: WriterLease,
+        request: CheckpointResetRequest,
+        invocation_id: [u8; 16],
+    ) -> Result<StreamCheckpoint, RuntimeError> {
+        self.reset_checkpoint_at_capture_with_invocation_id(lease, request, None, invocation_id)
+            .await
     }
 
     /// Provider-gated form of [`Self::reset_checkpoint`]. The host supplies
@@ -4716,8 +4784,14 @@ impl RuntimeState {
         request: CheckpointResetRequest,
         provider: &P,
     ) -> Result<StreamCheckpoint, RuntimeError> {
-        self.reset_checkpoint_at_capture_with_provider(lease, request, None, provider)
-            .await
+        self.reset_checkpoint_at_capture_with_provider_and_invocation_id(
+            lease,
+            request,
+            None,
+            provider,
+            Uuid::new_v4().into_bytes(),
+        )
+        .await
     }
 
     /// Capture-fenced provider-gated form of the checkpoint reset boundary.
@@ -4728,24 +4802,57 @@ impl RuntimeState {
         expected_capture: Option<&CwdCapture>,
         provider: &P,
     ) -> Result<StreamCheckpoint, RuntimeError> {
+        self.reset_checkpoint_at_capture_with_provider_and_invocation_id(
+            lease,
+            request,
+            expected_capture,
+            provider,
+            Uuid::new_v4().into_bytes(),
+        )
+        .await
+    }
+
+    /// Provider-gated reset with a stable receipt identity for reconciliation.
+    pub async fn reset_checkpoint_at_capture_with_provider_and_invocation_id<
+        P: CheckpointResetProvider,
+    >(
+        &self,
+        lease: WriterLease,
+        request: CheckpointResetRequest,
+        expected_capture: Option<&CwdCapture>,
+        provider: &P,
+        invocation_id: [u8; 16],
+    ) -> Result<StreamCheckpoint, RuntimeError> {
         let operation = AdminInvocationOperation::Reset {
             key: request.key.clone(),
             expected: request.expected.clone(),
             to: request.to.clone(),
             reason: request.reason.clone(),
         };
+        let descriptor = admin_invocation_descriptor_with_id(&operation, invocation_id);
+        if let Some(result) = self
+            .replay_admin_invocation_receipt(lease, Some(&operation), &descriptor)
+            .await?
+        {
+            return admin_checkpoint_result(result);
+        }
         if provider.checkpoint_key() != request.key || !provider.supports_reset_target(&request.to)
         {
             let error = RuntimeError::CheckpointNotReplayable;
             return match self
-                .record_failed_admin_invocation(&operation, lease, &error)
+                .record_failed_admin_descriptor(&descriptor, lease, &error)
                 .await
             {
                 Ok(()) | Err(RuntimeError::OwnerLost) => Err(error),
                 Err(audit_error) => Err(audit_error),
             };
         }
-        self.apply_admin_invocation(lease, expected_capture, operation)
+        self.apply_admin_invocation_with_descriptor(
+            lease,
+            expected_capture,
+            operation,
+            descriptor,
+        )
             .await
             .and_then(admin_checkpoint_result)
     }
@@ -4758,13 +4865,31 @@ impl RuntimeState {
         request: CheckpointResetRequest,
         expected_capture: Option<&CwdCapture>,
     ) -> Result<StreamCheckpoint, RuntimeError> {
+        self.reset_checkpoint_at_capture_with_invocation_id(
+            lease,
+            request,
+            expected_capture,
+            Uuid::new_v4().into_bytes(),
+        )
+        .await
+    }
+
+    /// Capture-fenced reset with a stable receipt identity for reconciliation.
+    pub async fn reset_checkpoint_at_capture_with_invocation_id(
+        &self,
+        lease: WriterLease,
+        request: CheckpointResetRequest,
+        expected_capture: Option<&CwdCapture>,
+        invocation_id: [u8; 16],
+    ) -> Result<StreamCheckpoint, RuntimeError> {
         let operation = AdminInvocationOperation::Reset {
             key: request.key,
             expected: request.expected,
             to: request.to,
             reason: request.reason,
         };
-        self.apply_admin_invocation(lease, expected_capture, operation)
+        let descriptor = admin_invocation_descriptor_with_id(&operation, invocation_id);
+        self.apply_admin_invocation_with_descriptor(lease, expected_capture, operation, descriptor)
             .await
             .and_then(admin_checkpoint_result)
     }
@@ -4887,7 +5012,7 @@ impl RuntimeState {
             None,
         );
         if let Some(result) = self
-            .replay_admin_invocation_receipt(lease, &descriptor)
+            .replay_admin_invocation_receipt(lease, None, &descriptor)
             .await?
         {
             return admin_stream_result(result);
@@ -4947,7 +5072,7 @@ impl RuntimeState {
         descriptor: AdminInvocationDescriptor,
     ) -> Result<AdminOperationResult, RuntimeError> {
         if let Some(result) = self
-            .replay_admin_invocation_receipt(lease, &descriptor)
+            .replay_admin_invocation_receipt(lease, Some(&operation), &descriptor)
             .await?
         {
             return Ok(result);
@@ -4965,7 +5090,7 @@ impl RuntimeState {
             if let Some(receipt) =
                 load_admin_invocation_receipt(&transaction, descriptor.invocation_id).await?
             {
-                return admin_result_from_receipt(&operation, &descriptor, &receipt);
+                return admin_result_from_receipt(Some(&operation), &descriptor, &receipt);
             }
             let current_capture = capture_tx(&transaction).await?;
             if let Some(expected_capture) = expected_capture {
@@ -4985,6 +5110,10 @@ impl RuntimeState {
                 observed_generation,
                 admin_operation_outcome(&result),
                 admin_operation_succeeded(&result),
+                match &result {
+                    AdminOperationResult::Checkpoint(checkpoint) => Some(checkpoint),
+                    AdminOperationResult::Stream(_) => None,
+                },
             )
             .await?;
             Ok::<_, RuntimeError>(result)
@@ -5004,7 +5133,7 @@ impl RuntimeState {
                     load_admin_invocation_receipt(&self.connection, descriptor.invocation_id)
                         .await?
                 {
-                    return admin_result_from_receipt(&operation, &descriptor, &receipt);
+                    return admin_result_from_receipt(Some(&operation), &descriptor, &receipt);
                 }
                 match self
                     .record_failed_admin_descriptor(&descriptor, lease, &error)
@@ -5020,6 +5149,7 @@ impl RuntimeState {
     async fn replay_admin_invocation_receipt(
         &self,
         lease: WriterLease,
+        operation: Option<&AdminInvocationOperation>,
         descriptor: &AdminInvocationDescriptor,
     ) -> Result<Option<AdminOperationResult>, RuntimeError> {
         let transaction = self
@@ -5031,32 +5161,13 @@ impl RuntimeState {
         let receipt = load_admin_invocation_receipt(&transaction, descriptor.invocation_id).await?;
         let result = receipt
             .as_ref()
-            .map(|receipt| {
-                if receipt.function != descriptor.function
-                    || receipt.safe_arguments != descriptor.safe_arguments
-                    || receipt.redacted != descriptor.redacted
-                {
-                    return Err(RuntimeError::AdminInvocationConflict);
-                }
-                replay_admin_stream_result(receipt)
-            })
+            .map(|receipt| admin_result_from_receipt(operation, descriptor, receipt))
             .transpose()?;
         transaction
             .commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         Ok(result)
-    }
-
-    async fn record_failed_admin_invocation(
-        &self,
-        operation: &AdminInvocationOperation,
-        lease: WriterLease,
-        error: &RuntimeError,
-    ) -> Result<(), RuntimeError> {
-        let descriptor = admin_invocation_descriptor(operation);
-        self.record_failed_admin_descriptor(&descriptor, lease, error)
-            .await
     }
 
     async fn reentrant_admin_busy_error(
@@ -5115,6 +5226,7 @@ impl RuntimeState {
             observed_generation,
             format!("failure:{}", admin_failure_outcome(error)),
             false,
+            None,
         )
         .await?;
         transaction
@@ -11815,35 +11927,56 @@ impl RuntimeState {
         let mut rows = self
             .connection
             .query(
-                "SELECT history.key_id, history.version, history.committed_position,
-                        history.snapshot, history.generation_digest, history.transition,
-                        checkpoint.key_id, checkpoint.version, checkpoint.committed_position
-                 FROM stream_checkpoint_history AS history
-                 LEFT JOIN stream_checkpoint AS checkpoint
-                   ON checkpoint.key_id = history.key_id
-                 ORDER BY history.key_id, history.version",
+                "SELECT key_id, version, committed_position FROM stream_checkpoint",
                 (),
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let mut active_key: Option<String> = None;
-        let mut previous_version = 0_u64;
-        let mut latest_position: Option<String> = None;
-        let mut checkpoint_version = 0_u64;
-        let mut checkpoint_position: Option<String> = None;
+        let mut checkpoints = BTreeMap::new();
         while let Some(row) = rows
             .next()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?
         {
-            let key_id: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
-            if key_id.is_empty() {
+            let key: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if key.is_empty() {
                 return Err(RuntimeError::RecoveryInvalid);
             }
-            let version = decode_u64(
-                row.get::<i64>(1)
-                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
-            )?;
+            let version = decode_u64(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+            let position: Option<String> =
+                row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if (version == 0) != position.is_none() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            if let Some(position) = &position {
+                decode_position(position.clone())?;
+            }
+            if checkpoints.insert(key, (version, position)).is_some() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+        }
+
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT key_id, version, committed_position, snapshot,
+                        generation_digest, transition
+                 FROM stream_checkpoint_history ORDER BY key_id, version",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut history = BTreeMap::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let key: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if key.is_empty() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            let version = decode_u64(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
             if version == 0 {
                 return Err(RuntimeError::RecoveryInvalid);
             }
@@ -11902,73 +12035,88 @@ impl RuntimeState {
                     return Err(RuntimeError::RecoveryInvalid);
                 }
             }
-            let transition = row
-                .get::<i64>(5)
-                .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let transition = row.get::<i64>(5).map_err(|_| RuntimeError::RecoveryInvalid)?;
             if !matches!(transition, 1 | 2) {
                 return Err(RuntimeError::RecoveryInvalid);
             }
-            let joined_key: Option<String> =
-                row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?;
-            if joined_key.as_deref() != Some(key_id.as_str()) {
+            if history.insert((key, version), committed).is_some() {
                 return Err(RuntimeError::RecoveryInvalid);
             }
-            let joined_version = decode_u64(
-                row.get::<i64>(7)
-                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
-            )?;
-            let joined_position: Option<String> =
-                row.get(8).map_err(|_| RuntimeError::RecoveryInvalid)?;
-            if joined_version == 0 || joined_position.is_none() {
-                return Err(RuntimeError::RecoveryInvalid);
-            }
-            if active_key.as_deref() != Some(key_id.as_str()) {
-                if active_key.is_some()
-                    && (previous_version != checkpoint_version
-                        || latest_position != checkpoint_position)
-                {
-                    return Err(RuntimeError::RecoveryInvalid);
-                }
-                active_key = Some(key_id);
-                previous_version = 0;
-                checkpoint_version = joined_version;
-                checkpoint_position = joined_position;
-            } else if joined_version != checkpoint_version
-                || joined_position != checkpoint_position
-            {
-                return Err(RuntimeError::RecoveryInvalid);
-            }
-            if version != previous_version.saturating_add(1) {
-                return Err(RuntimeError::RecoveryInvalid);
-            }
-            previous_version = version;
-            latest_position = Some(committed);
         }
-        if active_key.is_some()
-            && (previous_version != checkpoint_version || latest_position != checkpoint_position)
-        {
-            return Err(RuntimeError::RecoveryInvalid);
-        }
-        let mut missing = self
+
+        // A reset consumes a checkpoint version without representing delivered
+        // source progress. Keep it in the CAS history chain through its
+        // durable admin audit, while stream_checkpoint_history remains scoped
+        // to completed and skipped deliveries.
+        let mut rows = self
             .connection
             .query(
-                "SELECT checkpoint.key_id
-                 FROM stream_checkpoint AS checkpoint
-                 LEFT JOIN stream_checkpoint_history AS history
-                   ON history.key_id = checkpoint.key_id
-                  AND history.version = checkpoint.version
-                 WHERE checkpoint.version > 0 AND history.key_id IS NULL
-                 LIMIT 1",
+                "SELECT key_id, old_version, old_position, new_version, new_position
+                 FROM stream_checkpoint_reset_audit ORDER BY key_id, new_version",
                 (),
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if missing
+        let mut resets = BTreeMap::new();
+        while let Some(row) = rows
             .next()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_some()
         {
+            let key: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if key.is_empty() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            let old_version =
+                decode_u64(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+            let old_position: Option<String> =
+                row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if let Some(position) = &old_position {
+                decode_position(position.clone())?;
+            }
+            let new_version =
+                decode_u64(row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+            if old_version.checked_add(1) != Some(new_version) {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            let new_position: String = row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            decode_position(new_position.clone())?;
+            if resets
+                .insert(
+                    (key, new_version),
+                    (old_version, old_position, new_position),
+                )
+                .is_some()
+            {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+        }
+
+        for (key, (checkpoint_version, checkpoint_position)) in checkpoints {
+            let mut version = 0_u64;
+            let mut position: Option<String> = None;
+            while version < checkpoint_version {
+                let next_version = version
+                    .checked_add(1)
+                    .ok_or(RuntimeError::RecoveryInvalid)?;
+                let history_position = history.remove(&(key.clone(), next_version));
+                let reset = resets.remove(&(key.clone(), next_version));
+                match (history_position, reset) {
+                    (Some(position_after), None) => position = Some(position_after),
+                    (None, Some((old_version, old_position, new_position)))
+                        if old_version == version && old_position == position =>
+                    {
+                        position = Some(new_position);
+                    }
+                    _ => return Err(RuntimeError::RecoveryInvalid),
+                }
+                version = next_version;
+            }
+            if position != checkpoint_position {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+        }
+        if !history.is_empty() || !resets.is_empty() {
             return Err(RuntimeError::RecoveryInvalid);
         }
         Ok(())
@@ -13919,6 +14067,7 @@ async fn store_admin_invocation_audit(
     observed_generation: u64,
     terminal_outcome: String,
     succeeded: bool,
+    checkpoint_result: Option<&StreamCheckpoint>,
 ) -> Result<(), RuntimeError> {
     connection
         .execute(
@@ -13940,6 +14089,24 @@ async fn store_admin_invocation_audit(
         )
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
+    if let Some(checkpoint) = checkpoint_result {
+        let position = checkpoint
+            .committed
+            .as_ref()
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        connection
+            .execute(
+                "INSERT INTO admin_invocation_checkpoint_result
+                 (invocation_id, version, committed_position) VALUES (?1, ?2, ?3)",
+                params![
+                    descriptor.invocation_id.to_vec(),
+                    i64::try_from(checkpoint.version).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    position.token.as_str(),
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
     Ok(())
 }
 
@@ -13950,8 +14117,12 @@ async fn load_admin_invocation_audits(
         .query(
             "SELECT sequence, invocation_id, function_name, safe_arguments,
                     owner_id, owner_epoch, observed_generation,
-                    terminal_outcome, succeeded, redacted
-             FROM admin_invocation_audit ORDER BY sequence",
+                    terminal_outcome, succeeded, redacted,
+                    (SELECT version FROM admin_invocation_checkpoint_result r
+                     WHERE r.invocation_id = a.invocation_id),
+                    (SELECT committed_position FROM admin_invocation_checkpoint_result r
+                     WHERE r.invocation_id = a.invocation_id)
+             FROM admin_invocation_audit a ORDER BY sequence",
             (),
         )
         .await
@@ -13979,6 +14150,10 @@ async fn load_admin_invocation_audits(
         let terminal_outcome: String = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
         validate_observation_text(&terminal_outcome)?;
         let effect = decode_admin_lifecycle_effect(&terminal_outcome)?;
+        let checkpoint_reset_result = decode_admin_checkpoint_reset_result(&row, 10, 11)?;
+        if checkpoint_reset_result.is_some() && effect != AdminLifecycleEffect::CheckpointReset {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
         audits.push(AdminInvocationAudit {
             sequence,
             invocation_id,
@@ -13988,6 +14163,7 @@ async fn load_admin_invocation_audits(
             observed_generation,
             terminal_outcome,
             effect,
+            checkpoint_reset_result,
             succeeded: decode_bool(
                 row.get::<i64>(8).map_err(|_| RuntimeError::RecoveryInvalid)?,
             )?,
@@ -14007,8 +14183,12 @@ async fn load_admin_invocation_receipt(
         .query(
             "SELECT sequence, invocation_id, function_name, safe_arguments,
                     owner_id, owner_epoch, observed_generation,
-                    terminal_outcome, succeeded, redacted
-             FROM admin_invocation_audit WHERE invocation_id = ?1",
+                    terminal_outcome, succeeded, redacted,
+                    (SELECT version FROM admin_invocation_checkpoint_result r
+                     WHERE r.invocation_id = a.invocation_id),
+                    (SELECT committed_position FROM admin_invocation_checkpoint_result r
+                     WHERE r.invocation_id = a.invocation_id)
+             FROM admin_invocation_audit a WHERE a.invocation_id = ?1",
             params![invocation_id.to_vec()],
         )
         .await
@@ -14037,6 +14217,10 @@ async fn load_admin_invocation_receipt(
     let terminal_outcome: String = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
     validate_observation_text(&terminal_outcome)?;
     let effect = decode_admin_lifecycle_effect(&terminal_outcome)?;
+    let checkpoint_reset_result = decode_admin_checkpoint_reset_result(&row, 10, 11)?;
+    if checkpoint_reset_result.is_some() && effect != AdminLifecycleEffect::CheckpointReset {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
     Ok(Some(AdminInvocationAudit {
         sequence,
         invocation_id,
@@ -14046,9 +14230,142 @@ async fn load_admin_invocation_receipt(
         observed_generation,
         terminal_outcome,
         effect,
+        checkpoint_reset_result,
         succeeded: decode_bool(row.get::<i64>(8).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
         redacted: decode_bool(row.get::<i64>(9).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
     }))
+}
+
+fn decode_admin_checkpoint_reset_result(
+    row: &libsql::Row,
+    version_index: i32,
+    position_index: i32,
+) -> Result<Option<AdminCheckpointResetResult>, RuntimeError> {
+    let version: Option<i64> = row
+        .get(version_index)
+        .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let position: Option<String> = row
+        .get(position_index)
+        .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    match (version, position) {
+        (None, None) => Ok(None),
+        (Some(version), Some(position)) => Ok(Some(AdminCheckpointResetResult {
+            version: decode_u64(version)?,
+            committed_position: decode_position(position)?,
+        })),
+        _ => Err(RuntimeError::RecoveryInvalid),
+    }
+}
+
+/// Reconstructs result payloads for successful reset receipts written before
+/// checkpoint reset results had their own receipt table. The old generic
+/// audit and specialized CAS audit share the key/version/position digests, so
+/// only a unique exact transition is eligible for backfill.
+async fn migrate_admin_checkpoint_reset_receipts(
+    connection: &Connection,
+) -> Result<(), RuntimeError> {
+    let mut receipt_rows = connection
+        .query(
+            "SELECT invocation_id, safe_arguments FROM admin_invocation_audit AS audit
+             WHERE terminal_outcome = 'checkpoint_reset' AND succeeded = 1
+               AND NOT EXISTS (
+                   SELECT 1 FROM admin_invocation_checkpoint_result AS result
+                   WHERE result.invocation_id = audit.invocation_id
+               )",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut receipts = Vec::new();
+    while let Some(row) = receipt_rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        receipts.push((
+            row.get::<Vec<u8>>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            row.get::<String>(1)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        ));
+    }
+    if receipts.is_empty() {
+        return Ok(());
+    }
+
+    let mut reset_rows = connection
+        .query(
+            "SELECT key_id, old_version, old_position, new_version, new_position
+             FROM stream_checkpoint_reset_audit ORDER BY sequence",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut resets = Vec::new();
+    while let Some(row) = reset_rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        resets.push((
+            row.get::<String>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            row.get::<i64>(1)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            row.get::<Option<String>>(2)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            row.get::<i64>(3)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            row.get::<String>(4)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        ));
+    }
+
+    for (invocation_id, safe_arguments) in receipts {
+        let fields = safe_arguments
+            .split(';')
+            .filter_map(|field| field.split_once('='))
+            .collect::<BTreeMap<_, _>>();
+        let Some(key_digest) = fields.get("stream_key_digest") else {
+            continue;
+        };
+        let Some(expected_version) = fields.get("expected_version") else {
+            continue;
+        };
+        let Some(expected_position_digest) = fields.get("expected_position_digest") else {
+            continue;
+        };
+        let Some(target_digest) = fields.get("target_digest") else {
+            continue;
+        };
+        let mut matches = resets.iter().filter(|reset| {
+            let (key, old_version, old_position, _, new_position) = *reset;
+            let old_position_digest = old_position
+                .as_deref()
+                .map(|position| admin_digest(position.as_bytes()))
+                .unwrap_or_else(|| "none".into());
+            admin_digest(key.as_bytes()).as_str() == *key_digest
+                && old_version.to_string() == *expected_version
+                && old_position_digest == *expected_position_digest
+                && admin_digest(new_position.as_bytes()).as_str() == *target_digest
+        });
+        let Some((_, _, _, version, position)) = matches.next() else {
+            continue;
+        };
+        if matches.next().is_some() {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        decode_position(position.clone())?;
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO admin_invocation_checkpoint_result
+                 (invocation_id, version, committed_position) VALUES (?1, ?2, ?3)",
+                params![invocation_id, version, position.clone()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
+    Ok(())
 }
 
 fn redact_reset_reason(reason: String) -> Result<(String, bool), RuntimeError> {
@@ -21834,6 +22151,66 @@ mod tests {
         assert_eq!(cancelled.status, InvocationObservationStatus::Cancelled);
         assert!(cancelled.arguments[0].redacted);
         assert_eq!(cancelled.arguments[0].value_digest, None);
+
+        let first_tail = reopened
+            .invocation_observation_tail(None, 2)
+            .await
+            .unwrap();
+        assert_eq!(first_tail.entries.len(), 2);
+        assert!(first_tail.has_more);
+        assert_eq!(
+            first_tail.entries[0].status,
+            InvocationObservationStatus::Running
+        );
+        assert_eq!(
+            first_tail.entries[0].observation.status,
+            InvocationObservationStatus::Succeeded,
+            "tail event records the transition while its linked row is current state"
+        );
+        let cursor = first_tail.next_cursor.expect("non-empty tail has a cursor");
+        let second_tail = reopened
+            .invocation_observation_tail(Some(cursor.clone()), 2)
+            .await
+            .unwrap();
+        assert_eq!(second_tail.entries.len(), 2);
+        assert!(!second_tail.has_more);
+        assert_eq!(
+            second_tail.entries[1].status,
+            InvocationObservationStatus::Cancelled
+        );
+        assert!(second_tail
+            .entries
+            .windows(2)
+            .all(|pair| pair[0].sequence < pair[1].sequence));
+        assert_eq!(
+            reopened
+                .invocation_observation_tail(Some(cursor.clone()), 0)
+                .await,
+            Err(RuntimeError::InvocationTailLimit)
+        );
+        let capture = reopened.capture().await.unwrap();
+        reopened
+            .commit(writer, &capture, &mutation(77), digest(78), &NoFault)
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .invocation_observation_tail(Some(cursor), 2)
+                .await,
+            Err(RuntimeError::InvocationTailInvalid),
+            "continuations cannot splice pages across CWD captures"
+        );
+        drop(reopened);
+        let reopened_again = open_state(&repo).await;
+        let durable_tail = reopened_again
+            .invocation_observation_tail(None, 8)
+            .await
+            .unwrap();
+        assert_eq!(
+            durable_tail.entries.len(),
+            4,
+            "startup reconciliation must not duplicate already-retained tail events"
+        );
     }
 
     #[tokio::test]
@@ -24064,6 +24441,93 @@ mod tests {
                 token: Component::new("opaque/provider-position").unwrap(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_reset_receipt_reconciles_after_later_reset_and_reopen() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let key = stream_delivery("reset-receipt", "reset-receipt-next").checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+
+        let invocation_id = id(86);
+        let first_request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("receipt:first").unwrap(),
+            },
+            reason: "initial receipt reset".into(),
+        };
+        let first_result = state
+            .reset_checkpoint_with_invocation_id(writer, first_request.clone(), invocation_id)
+            .await
+            .unwrap();
+        assert_eq!(first_result.version, 1);
+
+        let second_result = state
+            .reset_checkpoint_with_invocation_id(
+                writer,
+                CheckpointResetRequest {
+                    key: key.clone(),
+                    expected: CheckpointPrecondition::from(&first_result),
+                    to: Position {
+                        token: Component::new("receipt:second").unwrap(),
+                    },
+                    reason: "later reset".into(),
+                },
+                id(87),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second_result.version, 2);
+        state
+            .connection
+            .execute(
+                "DELETE FROM admin_invocation_checkpoint_result WHERE invocation_id = ?1",
+                params![invocation_id.to_vec()],
+            )
+            .await
+            .unwrap();
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        let writer = reopened.acquire_lease(id(4)).await.unwrap();
+        assert_eq!(
+            reopened
+                .reset_checkpoint_with_invocation_id(writer, first_request.clone(), invocation_id)
+                .await,
+            Ok(first_result.clone()),
+            "a lost reset response replays its committed result after restart"
+        );
+        assert_eq!(
+            reopened.stream_checkpoint(&key).await.unwrap(),
+            second_result,
+            "receipt reconciliation does not apply the old reset a second time"
+        );
+
+        let mut changed_request = first_request;
+        changed_request.reason = "different request under same ID".into();
+        assert_eq!(
+            reopened
+                .reset_checkpoint_with_invocation_id(writer, changed_request, invocation_id)
+                .await,
+            Err(RuntimeError::AdminInvocationConflict),
+            "stable IDs reject argument drift"
+        );
+        let receipt = reopened
+            .admin_invocation_receipt(invocation_id)
+            .await
+            .unwrap()
+            .expect("replayable result remains retained in its generic audit receipt");
+        assert_eq!(receipt.checkpoint_reset_result, Some(AdminCheckpointResetResult {
+            version: first_result.version,
+            committed_position: first_result.committed.unwrap(),
+        }));
     }
 
     #[tokio::test]

@@ -24,6 +24,7 @@ use crate::{
 };
 
 const MAX_INVOCATION_ARGUMENTS: usize = 512;
+const MAX_INVOCATION_TAIL_PAGE_SIZE: usize = 256;
 
 /// One resolved callable and its exact durable catalogue pin.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -185,6 +186,52 @@ pub struct InvocationObservation {
     pub failure_code: Option<String>,
     pub idempotency_key_hash: Option<[u8; 32]>,
     pub live: bool,
+}
+
+/// Opaque continuation for one append-only invocation tail page context.
+/// Snapshot pinning prevents callers from splicing pages across generations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvocationObservationTailCursor {
+    capture: CwdCapture,
+    sequence: u64,
+}
+
+impl InvocationObservationTailCursor {
+    pub fn database_id(&self) -> [u8; 16] {
+        self.capture.database_id()
+    }
+
+    pub fn runtime_id(&self) -> [u8; 16] {
+        self.capture.runtime_id()
+    }
+
+    pub fn capture(&self) -> &CwdCapture {
+        &self.capture
+    }
+
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+}
+
+/// One durable lifecycle notification plus the latest retained observation.
+/// `status` and `observed_ms` describe this sequenced event; `observation` may
+/// already reflect a later event if the row advanced before this page was read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvocationObservationTailEntry {
+    pub sequence: u64,
+    pub invocation_id: [u8; 16],
+    pub observed_ms: i64,
+    pub status: InvocationObservationStatus,
+    pub observation: InvocationObservation,
+}
+
+/// Bounded keyset page from the append-only invocation lifecycle tail.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvocationObservationTailPage {
+    pub entries: Vec<InvocationObservationTailEntry>,
+    pub next_cursor: Option<InvocationObservationTailCursor>,
+    pub has_more: bool,
 }
 
 impl RuntimeState {
@@ -460,6 +507,13 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::InvocationObservationConflict)?;
         }
+        append_invocation_tail_event(
+            &tx,
+            registration.id,
+            started_ms,
+            InvocationObservationStatus::Running,
+        )
+        .await?;
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -550,6 +604,7 @@ impl RuntimeState {
         if changed != 1 {
             return Err(RuntimeError::InvocationStateConflict);
         }
+        append_invocation_tail_event(&tx, id, ended_ms, status).await?;
         if parent.is_some() {
             // Parent ownership is recorded for readers; it does not transfer
             // child effects or permit detaching a child from its owner.
@@ -576,16 +631,13 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         self.require_owner(&tx, replacement).await?;
         let ended_ms = now_ms()?;
-        let changed = tx
-            .execute(
-                "UPDATE sys_invocation_observation
-                 SET status = ?1, failure_code = 'sys.invoke.orphaned',
-                     ended_ms = ?2, observed_ms = ?2
-                 WHERE status IN (?3, ?4)
-                   AND (owner_id <> ?5 OR owner_epoch <> ?6)",
+        let mut rows = tx
+            .query(
+                "SELECT invocation_id FROM sys_invocation_observation
+                 WHERE status IN (?1, ?2)
+                   AND (owner_id <> ?3 OR owner_epoch <> ?4)
+                 ORDER BY invocation_id",
                 params![
-                    InvocationObservationStatus::Orphaned.code(),
-                    ended_ms,
                     InvocationObservationStatus::Queued.code(),
                     InvocationObservationStatus::Running.code(),
                     replacement.owner_id.to_vec(),
@@ -594,10 +646,52 @@ impl RuntimeState {
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut ids = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            ids.push(fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?);
+        }
+        drop(rows);
+        let mut changed = 0_u64;
+        for id in ids {
+            let updated = tx
+                .execute(
+                    "UPDATE sys_invocation_observation
+                     SET status = ?1, failure_code = 'sys.invoke.orphaned',
+                         ended_ms = ?2, observed_ms = ?2
+                     WHERE invocation_id = ?3 AND status IN (?4, ?5)
+                       AND (owner_id <> ?6 OR owner_epoch <> ?7)",
+                    params![
+                        InvocationObservationStatus::Orphaned.code(),
+                        ended_ms,
+                        id.to_vec(),
+                        InvocationObservationStatus::Queued.code(),
+                        InvocationObservationStatus::Running.code(),
+                        replacement.owner_id.to_vec(),
+                        i64::try_from(replacement.epoch)
+                            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    ],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            if updated == 1 {
+                append_invocation_tail_event(
+                    &tx,
+                    id,
+                    ended_ms,
+                    InvocationObservationStatus::Orphaned,
+                )
+                .await?;
+                changed += 1;
+            }
+        }
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        u64::try_from(changed).map_err(|_| RuntimeError::RecoveryInvalid)
+        Ok(changed)
     }
 
     /// Reads one retained invocation and its redaction-safe argument rows.
@@ -639,6 +733,93 @@ impl RuntimeState {
             );
         }
         Ok(observations)
+    }
+
+    /// Reads lifecycle changes in strict durable sequence order. The token is
+    /// pinned to this exact capture, order and unfiltered projection; callers
+    /// must start a fresh page sequence after a CWD generation change.
+    pub async fn invocation_observation_tail(
+        &self,
+        after: Option<InvocationObservationTailCursor>,
+        limit: usize,
+    ) -> Result<InvocationObservationTailPage, RuntimeError> {
+        if limit == 0 || limit > MAX_INVOCATION_TAIL_PAGE_SIZE {
+            return Err(RuntimeError::InvocationTailLimit);
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let capture = crate::capture_tx(&tx).await?;
+        if after
+            .as_ref()
+            .is_some_and(|cursor| cursor.capture != capture)
+        {
+            return Err(RuntimeError::InvocationTailInvalid);
+        }
+        let after_sequence = after
+            .as_ref()
+            .map(|cursor| cursor.sequence)
+            .unwrap_or(0);
+        let row_limit = i64::try_from(limit + 1).map_err(|_| RuntimeError::InvocationTailLimit)?;
+        let mut rows = tx
+            .query(
+                "SELECT sequence, invocation_id, observed_ms, status
+                 FROM sys_invocation_observation_tail
+                 WHERE sequence > ?1 ORDER BY sequence LIMIT ?2",
+                params![
+                    i64::try_from(after_sequence).map_err(|_| RuntimeError::InvocationTailInvalid)?,
+                    row_limit,
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut events = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            events.push((
+                decode_u64(row.get::<i64>(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+                fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+                row.get::<i64>(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                decode_invocation_status(
+                    row.get::<i64>(3).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                )?,
+            ));
+        }
+        let has_more = events.len() > limit;
+        events.truncate(limit);
+        let mut entries = Vec::with_capacity(events.len());
+        for (sequence, invocation_id, observed_ms, status) in events {
+            let observation = load_invocation_observation(&tx, invocation_id)
+                .await?
+                .ok_or(RuntimeError::RecoveryInvalid)?;
+            entries.push(InvocationObservationTailEntry {
+                sequence,
+                invocation_id,
+                observed_ms,
+                status,
+                observation,
+            });
+        }
+        let next_cursor = entries
+            .last()
+            .map(|entry| InvocationObservationTailCursor {
+                capture: capture.clone(),
+                sequence: entry.sequence,
+            })
+            .or(after);
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(InvocationObservationTailPage {
+            entries,
+            next_cursor,
+            has_more,
+        })
     }
 }
 
@@ -684,6 +865,23 @@ fn catalogue_read_error(error: CatalogueError) -> RuntimeError {
         CatalogueError::StaleCapture { current } => RuntimeError::StaleCapture { current },
         _ => RuntimeError::RecoveryInvalid,
     }
+}
+
+async fn append_invocation_tail_event(
+    connection: &libsql::Connection,
+    id: [u8; 16],
+    observed_ms: i64,
+    status: InvocationObservationStatus,
+) -> Result<(), RuntimeError> {
+    connection
+        .execute(
+            "INSERT INTO sys_invocation_observation_tail
+             (invocation_id, observed_ms, status) VALUES (?1, ?2, ?3)",
+            params![id.to_vec(), observed_ms, status.code()],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(())
 }
 
 fn bind_invocation_arguments(
