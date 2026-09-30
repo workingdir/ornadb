@@ -19941,6 +19941,39 @@ mod tests {
         );
         assert_eq!(lookups, 0);
         assert_eq!(scans, 3, "the decode failure stops the following page");
+
+        // A corrupt exact-lookup target is distinct from a corrupt scanned
+        // row: the later projection fails at the lookup boundary and must not
+        // request the third source page, which contains the staged bad value.
+        session
+            .stage_mutation(
+                TableMutation::new(id(43), "sys.Storage", query_test_key(9), None).unwrap(),
+            )
+            .unwrap();
+        session
+            .stage_mutation(
+                TableMutation::new(
+                    id(44),
+                    "sys.Storage",
+                    query_test_key(99),
+                    Some(vec![0xff]),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let (corrupt_lookup, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-projection-corrupt-lookup.orna"),
+        );
+        assert_eq!(
+            corrupt_lookup.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-ROW".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "the lookup decode failure stops before the following source page"
+        );
     }
 
     #[tokio::test]
