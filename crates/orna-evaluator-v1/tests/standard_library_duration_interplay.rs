@@ -291,6 +291,30 @@ fn elapsed_duration_scaling_keeps_nanosecond_precision_and_sign() {
 }
 
 #[test]
+fn decimal_duration_scaling_chains_preserve_exact_tails_across_instants() {
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna")),
+        Ok(None)
+    );
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-time-duration-scale-chain-7agp9.orna")),
+        Ok(Some(text("PT0.000000001S")))
+    );
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-time-duration-scale-instant-boundary-7agp9.orna")),
+        Ok(Some(boolean(true)))
+    );
+    assert_eq!(
+        session
+            .submit(include_str!("fixtures/stdlib-time-duration-scale-inexact-chain-7agp9.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-VALUE"
+    );
+}
+
+#[test]
 fn duration_clock_format_keeps_fractional_minute_and_sign_boundaries() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
     assert_eq!(
