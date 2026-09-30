@@ -3392,6 +3392,31 @@ fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch()
     let mut transport = LiveTransport::new(recovered, TransportLimits::default()).unwrap();
     let mut socket = WebSocketState::new([6; 16]);
     let mut application = UnitApplication::default();
+
+    let mut stale_fingerprint = Envelope::decode(&request, Limits::default().protocol).unwrap();
+    if let Message::Event { revision, .. } = &mut stale_fingerprint.message {
+        *revision = 1;
+    } else {
+        panic!("fixture proof must retain an Event request");
+    }
+    let stale_fingerprint = stale_fingerprint
+        .encode(Limits::default().protocol)
+        .unwrap();
+    let stale_diagnostic = block_on(transport.receive_with_application(
+        &mut socket,
+        8,
+        &masked_binary_payload(&stale_fingerprint),
+        &mut application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &stale_diagnostic[0] else {
+        panic!("an invalid transmitted fingerprint gets a diagnostic");
+    };
+    let stale_diagnostic = Envelope::decode(payload, Limits::default().protocol).unwrap();
+    assert_eq!(stale_diagnostic.request, Some([37; 16]));
+    assert_eq!(stale_diagnostic.watch, None, "the old watch is not restored");
+    assert!(matches!(stale_diagnostic.message, Message::Diagnostic { .. }));
+
     let mut altered = Envelope::decode(&request, Limits::default().protocol).unwrap();
     if let Message::Event { revision, .. } = &mut altered.message {
         *revision = 1;
@@ -3406,7 +3431,7 @@ fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch()
     let altered = altered.encode(Limits::default().protocol).unwrap();
     let mismatch = block_on(transport.receive_with_application(
         &mut socket,
-        8,
+        9,
         &masked_binary_payload(&altered),
         &mut application,
     ))
@@ -3421,7 +3446,7 @@ fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch()
 
     let replay = block_on(transport.receive_with_application(
         &mut socket,
-        9,
+        10,
         &masked_binary_payload(&request),
         &mut application,
     ))
