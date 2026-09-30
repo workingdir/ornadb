@@ -921,11 +921,21 @@ impl SourceSpan {
     }
 }
 /// Exact `sys.DiagnosticLabel`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct DiagnosticLabel {
     pub span: SourceSpan,
     pub message: String,
     pub primary: bool,
+}
+impl fmt::Debug for DiagnosticLabel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DiagnosticLabel")
+            .field("span", &self.span)
+            .field("message", &"<redacted>")
+            .field("primary", &self.primary)
+            .finish()
+    }
 }
 
 /// Exact `sys.Value`: a validated tag-60026 `[closed_type_descriptor, value]`.
@@ -1004,7 +1014,7 @@ impl DiagnosticSeverity {
     }
 }
 /// Exact `api/sys.json` `sys.Diagnostic` relation shape.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct SystemDiagnostic {
     pub reference: DiagnosticRef,
     pub id: String,
@@ -1020,6 +1030,29 @@ pub struct SystemDiagnostic {
     pub data: Option<SysValue>,
     pub redacted: bool,
     pub trace: Option<TraceRef>,
+}
+impl fmt::Debug for SystemDiagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Debug has no disclosure grant. Keep stable identity and source
+        // references while hiding free-form text and arbitrary typed data.
+        formatter
+            .debug_struct("SystemDiagnostic")
+            .field("reference", &self.reference)
+            .field("id", &self.id)
+            .field("severity", &self.severity)
+            .field("code", &self.code)
+            .field("message", &"<redacted>")
+            .field("object", &self.object)
+            .field("definition", &self.definition)
+            .field("primary_span", &self.primary_span)
+            .field("labels", &self.labels)
+            .field("causes", &self.causes)
+            .field("help", &"<redacted>")
+            .field("data", &self.data.as_ref().map(|_| "<redacted>"))
+            .field("redacted", &self.redacted)
+            .field("trace", &self.trace)
+            .finish()
+    }
 }
 
 fn redact_system_diagnostic(diagnostic: &mut SystemDiagnostic) {
@@ -1094,12 +1127,25 @@ impl SystemDiagnosticExplanationInput {
 /// fields require authority owned by the system projection. A sys/runtime
 /// consumer can add them after this envelope is produced, while every field
 /// of the canonical diagnostic remains lossless.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct SystemDiagnosticExplanationOutput {
     diagnostic: SystemDiagnostic,
     summary: String,
     causes: Vec<SystemDiagnostic>,
     suggestions: Vec<String>,
+}
+impl fmt::Debug for SystemDiagnosticExplanationOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Summaries and suggestions are caller-provided free text. Their
+        // display API is intentional, but Debug alone is not authorization.
+        formatter
+            .debug_struct("SystemDiagnosticExplanationOutput")
+            .field("diagnostic", &self.diagnostic)
+            .field("summary", &"<redacted>")
+            .field("causes", &self.causes)
+            .field("suggestions", &"<redacted>")
+            .finish()
+    }
 }
 
 impl SystemDiagnosticExplanationOutput {

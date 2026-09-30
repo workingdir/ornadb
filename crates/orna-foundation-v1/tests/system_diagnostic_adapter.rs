@@ -150,9 +150,13 @@ fn diagnostic_redaction_does_not_depend_on_an_attached_trace() {
         candidate.causes[0].help[0] = fixture.to_owned();
         candidate.causes[0].redacted = false;
 
+        let debug = format!("{candidate:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains(fixture));
+
         let input = system_diagnostic_explanation_input(candidate).unwrap();
         let output = input
-            .finish("safe code-based summary", ["safe fixed suggestion".into()])
+            .finish(fixture, [fixture.to_owned()])
             .unwrap();
         assert_eq!(output.diagnostic().trace, trace);
         assert_eq!(output.diagnostic().message, "<redacted>");
@@ -161,7 +165,9 @@ fn diagnostic_redaction_does_not_depend_on_an_attached_trace() {
         assert_eq!(output.diagnostic().data, None);
         assert_eq!(output.diagnostic().causes[0].message, "<redacted>");
         assert_eq!(output.diagnostic().causes[0].help[0], "<redacted>");
-        assert!(!format!("{output:?}").contains(fixture));
+        let output_debug = format!("{output:?}");
+        assert!(output_debug.contains("<redacted>"));
+        assert!(!output_debug.contains(fixture));
     }
 }
 
