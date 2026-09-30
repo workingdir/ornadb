@@ -171,3 +171,9 @@ release path: after the primary blocker reuses the deleted owner target, its
 nested closure deletes that row, allowing the owner retry to finish before the
 competitor returns. The fixture documents this local mutation order where the
 reference is silent.
+
+`owner_target_retry_survives_repeated_delete_and_reuse_closures` follows the
+owner target through two successive reuses: the primary blocker and then the
+secondary blocker each take the freed key and are deleted in nested closures
+before the owner retry succeeds. The complete local mutation order is asserted
+because the reference is silent on this closure interplay.
