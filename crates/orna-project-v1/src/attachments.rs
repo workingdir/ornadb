@@ -701,4 +701,62 @@ mod tests {
         assert!(PackagePinManifest::parse(&format!("math {oid}\nmath {oid}\n")).is_err());
         assert!(PackagePinManifest::parse(&format!("sys {oid}\n")).is_err());
     }
+
+    #[test]
+    fn relation_sources_compose_rows_from_each_pinned_snapshot() {
+        fn committed_database(main: &str, row: &str) -> (TempDir, Repository, String) {
+            let directory = tempfile::tempdir().unwrap();
+            git(directory.path(), &["init", "--quiet"]);
+            git(directory.path(), &["config", "user.name", "kierandrewett"]);
+            git(
+                directory.path(),
+                &["config", "user.email", "kieran@drewett.dev"],
+            );
+            git(directory.path(), &["config", "commit.gpgsign", "false"]);
+            write_commit(directory.path(), "main.orna", main);
+            write_commit(
+                directory.path(),
+                "contacts.orna",
+                include_str!("fixtures/attached-read-table.orna"),
+            );
+            let commit = write_commit(directory.path(), "contacts/Contact/1.orna", row);
+            let repository = Repository::discover(directory.path()).unwrap();
+            (directory, repository, commit)
+        }
+
+        let (_primary_dir, primary_repository, primary_commit) = committed_database(
+            include_str!("fixtures/attached-read-primary-main.orna"),
+            include_str!("fixtures/attached-read-primary-row.orna"),
+        );
+        let (_archive_dir, archive_repository, archive_commit) = committed_database(
+            include_str!("fixtures/attached-read-package-main.orna"),
+            include_str!("fixtures/attached-read-package-row.orna"),
+        );
+        let loader = ProjectLoader::default();
+        let primary = PinnedDatabase::resolve(
+            "app",
+            primary_repository,
+            &primary_commit,
+            loader,
+        )
+        .unwrap();
+        let archive = PinnedDatabase::resolve(
+            "archive",
+            archive_repository,
+            &archive_commit,
+            loader,
+        )
+        .unwrap();
+        let mut session = AttachedDatabaseSession::new(primary).unwrap();
+        session.attach_database(archive).unwrap();
+
+        let sources = session.relation_sources("contacts/Contact");
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].database(), "app");
+        assert_eq!(sources[0].commit().as_str(), primary_commit);
+        assert!(sources[0].row().source().contains("value: 7"));
+        assert_eq!(sources[1].database(), "archive");
+        assert_eq!(sources[1].commit().as_str(), archive_commit);
+        assert!(sources[1].row().source().contains("value: 42"));
+    }
 }
