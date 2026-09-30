@@ -3420,7 +3420,54 @@ fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch()
     let stale_diagnostic = Envelope::decode(payload, Limits::default().protocol).unwrap();
     assert_eq!(stale_diagnostic.request, Some([37; 16]));
     assert_eq!(stale_diagnostic.watch, None, "the old watch is not restored");
-    assert!(matches!(stale_diagnostic.message, Message::Diagnostic { .. }));
+    assert!(matches!(
+        &stale_diagnostic.message,
+        Message::Diagnostic { .. }
+    ));
+
+    let mut altered = Envelope::decode(&request, Limits::default().protocol).unwrap();
+    if let Message::Event { revision, .. } = &mut altered.message {
+        *revision = 1;
+    } else {
+        panic!("fixture proof must retain an Event request");
+    }
+    let altered_fingerprint =
+        canonical_request_fingerprint([1; 16], &altered, Limits::default().protocol).unwrap();
+    if let Message::Event { fingerprint, .. } = &mut altered.message {
+        *fingerprint = altered_fingerprint;
+    }
+    let altered = altered.encode(Limits::default().protocol).unwrap();
+
+    // A status query with the competing canonical fingerprint must not reveal
+    // the recovered terminal record under the old fingerprint.
+    let competing_status = Envelope {
+        request: Some([40; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [37; 16],
+            fingerprint: altered_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let competing_status = block_on(transport.receive_with_application(
+        &mut socket,
+        9,
+        &masked_binary_payload(&competing_status),
+        &mut application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &competing_status[0] else {
+        panic!("a competing status fingerprint receives a portable diagnostic");
+    };
+    let competing_status = Envelope::decode(payload, Limits::default().protocol).unwrap();
+    assert_eq!(competing_status.request, Some([40; 16]));
+    assert_eq!(competing_status.watch, None);
+    assert!(matches!(
+        competing_status.message,
+        Message::Diagnostic { .. }
+    ));
 
     // A malformed retry is rejected before admission, so it cannot rewrite
     // the terminal record that RequestStatus exposes after host recovery.
@@ -3437,7 +3484,7 @@ fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch()
     .unwrap();
     let post_rejection_status = block_on(transport.receive_with_application(
         &mut socket,
-        9,
+        10,
         &masked_binary_payload(&post_rejection_status),
         &mut application,
     ))
@@ -3457,21 +3504,9 @@ fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch()
         } if target == [37; 16] && fingerprint == event_fingerprint
     ));
 
-    let mut altered = Envelope::decode(&request, Limits::default().protocol).unwrap();
-    if let Message::Event { revision, .. } = &mut altered.message {
-        *revision = 1;
-    } else {
-        panic!("fixture proof must retain an Event request");
-    }
-    let altered_fingerprint =
-        canonical_request_fingerprint([1; 16], &altered, Limits::default().protocol).unwrap();
-    if let Message::Event { fingerprint, .. } = &mut altered.message {
-        *fingerprint = altered_fingerprint;
-    }
-    let altered = altered.encode(Limits::default().protocol).unwrap();
     let mismatch = block_on(transport.receive_with_application(
         &mut socket,
-        10,
+        11,
         &masked_binary_payload(&altered),
         &mut application,
     ))
@@ -3486,7 +3521,7 @@ fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch()
 
     let replay = block_on(transport.receive_with_application(
         &mut socket,
-        11,
+        12,
         &masked_binary_payload(&request),
         &mut application,
     ))
