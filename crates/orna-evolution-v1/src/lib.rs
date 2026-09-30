@@ -14,9 +14,12 @@ use std::{
 
 mod merge;
 pub use merge::{
-    CheckpointGeneration, CheckpointMergeConflict, KeyedRow, RowKeyKind, RowMergeConflict,
-    SchemaMergeConflict, SchemaMergeFailure, merge_checkpoint_generation, merge_keyed_row,
-    merge_schema, merge_schema_bounded,
+    CheckpointConflictReason, CheckpointGeneration, CheckpointIdentity, CheckpointMergeConflict,
+    CheckpointPosition, CheckpointPositionError, CheckpointSnapshot, CheckpointSnapshotError,
+    CheckpointSnapshotMergeConflict, CheckpointSnapshotMergeFailure, CheckpointSnapshotRefs,
+    KeyedRow, RowKeyKind, RowMergeConflict, SchemaMergeConflict, SchemaMergeFailure,
+    merge_checkpoint_generation, merge_checkpoint_snapshots, merge_checkpoint_snapshots_bounded,
+    merge_keyed_row, merge_schema, merge_schema_bounded,
 };
 
 pub use orna_foundation_v1::CanonicalValue;
