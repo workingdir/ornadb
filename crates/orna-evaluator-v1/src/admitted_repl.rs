@@ -177,8 +177,11 @@ impl AdmittedReplSession {
         let catalogue = if standard_sources.is_empty() {
             Catalogue::authoritative_core()
         } else {
+            let snapshot = databases
+                .standard_snapshot()
+                .ok_or_else(|| ReplError::fixed("ORNA-REPL-STANDARD"))?;
             let profile = StandardDependencyProfile::from_sources(
-                "orna.attached.std/v1",
+                snapshot.as_str().to_owned(),
                 standard_sources.clone(),
             )
             .map_err(|_| ReplError::fixed("ORNA-REPL-STANDARD"))?;
