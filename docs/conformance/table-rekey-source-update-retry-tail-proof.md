@@ -36,3 +36,9 @@ deletion edge: a moved source is deleted while blocking another retry, then a
 replacement and a third source successively own the released keys. The fixture
 checks the full log so updates and re-keys remain associated with the current
 row identity after each deletion and reuse.
+
+`returned_source_delete_and_retry_reuse_key_in_order` closes the last sequence:
+the moved source returns to its original key, is deleted there, and that key is
+reused by a replacement before another retry deletes the replacement and lets
+the original destination row claim it. The fixture asserts every update,
+deletion, and re-key in order.
