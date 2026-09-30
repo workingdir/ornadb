@@ -159,3 +159,9 @@ release path: the owner's move-aside target is deleted inside its failure
 closure, then the primary blocker and competitor finish their retries before
 the owner returns. The fixture records the adapter's local caught-retry order
 where the reference is silent.
+
+`owner_move_delete_release_target_reuse_needs_nested_retry` covers reuse of the
+deleted move target: the primary blocker takes the freed key before the owner's
+retry, then moves aside under a nested closure so the owner can move and the
+remaining competitor retries can complete. Its ordered log documents local
+adapter behavior where the reference is silent.
