@@ -2210,6 +2210,8 @@ fn recovered_deep_final_else_if_keeps_suffix_interpolations_in_case_arm_tails() 
                            first: &str,
                            middle: &str,
                            second: &str,
+                           repeated: &str,
+                           third: &str,
                            trailing: &str| {
         let Expr::Block {
             statements,
@@ -2228,11 +2230,15 @@ fn recovered_deep_final_else_if_keeps_suffix_interpolations_in_case_arm_tails() 
                     StringSegment::Expression { value: Expr::Literal { text: first_value, .. }, .. },
                     StringSegment::Text { text: middle_text, .. },
                     StringSegment::Expression { value: Expr::Literal { text: second_value, .. }, .. },
+                    StringSegment::Text { text: repeated_text, .. },
+                    StringSegment::Expression { value: Expr::Literal { text: third_value, .. }, .. },
                     StringSegment::Text { text: last_text, .. }
                 ] if first_text == leading
                     && first_value == first
                     && middle_text == middle
                     && second_value == second
+                    && repeated_text == repeated
+                    && third_value == third
                     && last_text == trailing)
         ));
     };
@@ -2282,15 +2288,27 @@ fn recovered_deep_final_else_if_keeps_suffix_interpolations_in_case_arm_tails() 
                 panic!("expected the tail interpolation to contain a case");
             };
             assert_eq!(arms.len(), 2, "{arms:?}");
-            // Keep each suffix interpolation and its surrounding text within
-            // the owning case-arm tail.
-            assert_arm_tail(&arms[0].body, "then ", "true", " and ", "false", " done");
+            // Reference 1.0 defines case-arm and interpolation syntax, but not
+            // recovery at maximum parser depth; preserve repeated suffixes in
+            // source order within each owning case-arm tail.
+            assert_arm_tail(
+                &arms[0].body,
+                "then ",
+                "true",
+                " and ",
+                "false",
+                " and ",
+                "true",
+                " done",
+            );
             assert_arm_tail(
                 &arms[1].body,
                 "otherwise ",
                 "false",
                 " then ",
                 "true",
+                " then ",
+                "false",
                 " done",
             );
             assert!(alternate.is_none(), "deepest else-if unexpectedly has an else");
