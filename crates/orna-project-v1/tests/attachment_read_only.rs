@@ -63,6 +63,19 @@ fn routed_module_source(
         .map(|module| module.source)
 }
 
+fn assert_routed_module_source(
+    session: &AttachedDatabaseSession,
+    logical_path: &str,
+    expected: &str,
+) {
+    let source = routed_module_source(session, logical_path)
+        .unwrap_or_else(|| panic!("module route {logical_path} is missing"));
+    assert!(
+        source.contains(expected),
+        "module route {logical_path} did not retain {expected}: {source}"
+    );
+}
+
 fn routed_relation_source(
     session: &AttachedDatabaseSession,
     table_path: &str,
@@ -1041,15 +1054,25 @@ fn chained_primary_prefix_aliases_detach_only_the_exact_route() {
             include_str!("fixtures/attach-routing-package-row.orna"),
         ),
     ]);
-    let longer_alias_commit = write_commit(
+    write_commit(
         package_dir.path(),
         "contacts/Contact/1.orna",
         &include_str!("fixtures/attach-routing-package-row.orna").replace("42", "43"),
     );
-    let replacement_commit = write_commit(
+    let longer_alias_commit = write_commit(
+        package_dir.path(),
+        "main.orna",
+        &include_str!("fixtures/attach-routing-package.orna").replace("42", "43"),
+    );
+    write_commit(
         package_dir.path(),
         "contacts/Contact/1.orna",
         &include_str!("fixtures/attach-routing-package-row.orna").replace("42", "99"),
+    );
+    let replacement_commit = write_commit(
+        package_dir.path(),
+        "main.orna",
+        &include_str!("fixtures/attach-routing-package.orna").replace("42", "99"),
     );
 
     let loader = ProjectLoader::default();
@@ -1091,6 +1114,8 @@ fn chained_primary_prefix_aliases_detach_only_the_exact_route() {
         &longer_alias_commit,
         &[("contacts/Contact/1.orna", "value: 43")],
     );
+    assert_routed_module_source(&session, "app_copy.orna", "= 42");
+    assert_routed_module_source(&session, "app_copy_archive.orna", "= 43");
 
     assert!(matches!(
         session.detach_database("app_cop"),
@@ -1109,6 +1134,8 @@ fn chained_primary_prefix_aliases_detach_only_the_exact_route() {
         &longer_alias_commit,
         &[("contacts/Contact/1.orna", "value: 43")],
     );
+    assert_routed_module_source(&session, "app_copy.orna", "= 42");
+    assert_routed_module_source(&session, "app_copy_archive.orna", "= 43");
     let old_clone = session.clone();
     session.detach_database("app_copy").unwrap();
     assert!(session.database("app_copy").is_none());
@@ -1126,6 +1153,8 @@ fn chained_primary_prefix_aliases_detach_only_the_exact_route() {
         &longer_alias_commit,
         &[("contacts/Contact/1.orna", "value: 43")],
     );
+    assert!(routed_module_source(&session, "app_copy.orna").is_none());
+    assert_routed_module_source(&session, "app_copy_archive.orna", "= 43");
     assert!(matches!(
         session.validate_write_target("app_copy"),
         Err(AttachmentError::DatabaseUnavailable)
@@ -1156,6 +1185,8 @@ fn chained_primary_prefix_aliases_detach_only_the_exact_route() {
         &longer_alias_commit,
         &[("contacts/Contact/1.orna", "value: 43")],
     );
+    assert_routed_module_source(&session, "app_copy.orna", "= 99");
+    assert_routed_module_source(&session, "app_copy_archive.orna", "= 43");
     assert_relation_routes(
         &session,
         "app",
@@ -1174,6 +1205,8 @@ fn chained_primary_prefix_aliases_detach_only_the_exact_route() {
         &longer_alias_commit,
         &[("contacts/Contact/1.orna", "value: 43")],
     );
+    assert_routed_module_source(&old_clone, "app_copy.orna", "= 42");
+    assert_routed_module_source(&old_clone, "app_copy_archive.orna", "= 43");
     assert!(detached_clone.database("app_copy").is_none());
     assert_relation_routes(
         &detached_clone,
@@ -1181,6 +1214,8 @@ fn chained_primary_prefix_aliases_detach_only_the_exact_route() {
         &longer_alias_commit,
         &[("contacts/Contact/1.orna", "value: 43")],
     );
+    assert!(routed_module_source(&detached_clone, "app_copy.orna").is_none());
+    assert_routed_module_source(&detached_clone, "app_copy_archive.orna", "= 43");
 
     session.detach_database("app_copy_archive").unwrap();
     assert!(session.database("app_copy").is_some());
@@ -1197,6 +1232,8 @@ fn chained_primary_prefix_aliases_detach_only_the_exact_route() {
         &primary_commit,
         &[("contacts/Contact/1.orna", "value: 7")],
     );
+    assert_routed_module_source(&session, "app_copy.orna", "= 99");
+    assert!(routed_module_source(&session, "app_copy_archive.orna").is_none());
 }
 
 #[test]

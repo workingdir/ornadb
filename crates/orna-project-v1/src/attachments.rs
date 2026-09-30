@@ -404,7 +404,7 @@ impl AttachedDatabaseSession {
     }
 
     /// Source modules for typed session admission. Attached module namespaces
-    /// are prefixed with the attachment name to prevent accidental shadowing.
+    /// use each full exact alias, so prefix-related aliases stay independent.
     pub fn module_inputs(&self) -> Vec<ModuleInput> {
         let mut modules = self.primary.project.modules().to_vec();
         for (name, database) in &self.attached {
