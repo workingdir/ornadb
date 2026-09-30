@@ -6309,6 +6309,52 @@ impl RuntimeState {
         })
     }
 
+    /// Resolves one already-pinned CWD snapshot descriptor to its retained
+    /// generation. Resolution validates the canonical ID and never substitutes
+    /// the current generation for an unknown, expired, or mismatched pin.
+    /// Committed snapshots are resolved by the repository layer, which owns
+    /// their Git object lifetime rather than this runtime history store.
+    pub async fn resolve_historical_snapshot(
+        &self,
+        selected: &CanonicalSnapshot,
+    ) -> Result<HistoricalSnapshot, RuntimeError> {
+        let Snapshot::Cwd {
+            database,
+            runtime,
+            generation,
+            id,
+        } = selected
+        else {
+            return Err(RuntimeError::SnapshotNotFound);
+        };
+
+        let canonical = Snapshot::cwd(*database, *runtime, generation.clone())
+            .map_err(|_| RuntimeError::SnapshotContextMismatch)?;
+        if &canonical != selected {
+            return Err(RuntimeError::SnapshotContextMismatch);
+        }
+
+        let current = self.capture().await?;
+        if *database != current.database_id() || *runtime != current.runtime_id() {
+            return Err(RuntimeError::SnapshotContextMismatch);
+        }
+
+        let (sign, digits) = generation.to_u64_digits();
+        if sign == Sign::Minus {
+            return Err(RuntimeError::SnapshotContextMismatch);
+        }
+        let generation = match digits.as_slice() {
+            [] => 0,
+            [generation] => *generation,
+            _ => return Err(RuntimeError::SnapshotNotFound),
+        };
+        let resolved = self.select_historical_snapshot(generation).await?;
+        if resolved.capture.snapshot() != &canonical || resolved.snapshot_id() != *id {
+            return Err(RuntimeError::SnapshotContextMismatch);
+        }
+        Ok(resolved)
+    }
+
     /// Reads one table as it existed at an immutable runtime checkpoint pin.
     /// Row keys and values remain in their canonical stored byte encodings;
     /// callers must decode them using schema metadata from this same snapshot.
