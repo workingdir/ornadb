@@ -3935,6 +3935,191 @@ fn durable_status_retry_replays_unknown_after_target_completes_and_host_recovers
 }
 
 #[test]
+fn durable_request_status_identity_is_scoped_when_sessions_reuse_target_ids() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host(open_durable_state(&repository));
+
+    let mut first_issuer = Issuer(1, None);
+    let first_credential = create(&mut host, &mut first_issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &first_credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+
+    let second_subscribe = subscribe();
+    let mut second_issuer = Issuer(2, None);
+    let second_credential = block_on(host.create(
+        CreateRequest {
+            id: [2; 16],
+            origin: origin(),
+            expires_at: 100,
+            now: 0,
+            subscribe: &second_subscribe,
+        },
+        &mut second_issuer,
+    ))
+    .unwrap();
+    block_on(host.resume(ResumeRequest {
+        id: [2; 16],
+        origin: &origin(),
+        credential: &second_credential,
+        attachment: [6; 16],
+        now: 1,
+    }))
+    .unwrap();
+
+    // Both sessions admit the same fixture-backed request ID. Session identity
+    // gives the requests distinct fingerprints and independently retained results.
+    let first_target_request = eval_with_context([1; 16], [37; 16], [2; 16], None);
+    let first_target_fingerprint = request_fingerprint(&first_target_request, [1; 16]);
+    let second_target_request = eval_with_context([2; 16], [37; 16], [2; 16], None);
+    let second_target_fingerprint = request_fingerprint(&second_target_request, [2; 16]);
+
+    let mut application = UnitApplication::default();
+    let first_target = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(first_target_request),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the first session retains its fixture result");
+    application.eval_outcome = UnitEvalOutcome::SemanticFailure;
+    let second_target = block_on(host.dispatch_frame(
+        [6; 16],
+        2,
+        Frame::Binary(second_target_request),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the second session retains its own fixture result");
+    assert!(matches!(
+        &first_target.message,
+        Message::Result {
+            status: ResultStatus::Success,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &second_target.message,
+        Message::Result {
+            status: ResultStatus::Failure,
+            ..
+        }
+    ));
+
+    let status_request = |request, fingerprint| {
+        Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::RequestStatus {
+                target: [37; 16],
+                fingerprint,
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap()
+    };
+    let first_status_request = status_request([44; 16], first_target_fingerprint);
+    let second_status_request = status_request([44; 16], second_target_fingerprint);
+    let first_status = block_on(host.dispatch_frame(
+        [5; 16],
+        3,
+        Frame::Binary(first_status_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the first session reads its target status");
+    let second_status = block_on(host.dispatch_frame(
+        [6; 16],
+        3,
+        Frame::Binary(second_status_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the second session reads its target status");
+
+    let first_result = ResultBody::from_result(&first_target, Limits::default().protocol).unwrap();
+    let second_result =
+        ResultBody::from_result(&second_target, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        &first_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [37; 16]
+            && *fingerprint == first_target_fingerprint
+            && result == &first_result
+    ));
+    assert!(matches!(
+        &second_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [37; 16]
+            && *fingerprint == second_target_fingerprint
+            && result == &second_result
+    ));
+
+    // A foreign target fingerprint is rejected in each session, and the
+    // colliding query ID keeps each session's original status snapshot.
+    for (attachment, foreign_fingerprint) in [
+        ([5; 16], second_target_fingerprint),
+        ([6; 16], first_target_fingerprint),
+    ] {
+        let mismatch = block_on(host.dispatch_frame(
+            attachment,
+            4,
+            Frame::Binary(status_request([45; 16], foreign_fingerprint)),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("a foreign target fingerprint returns a diagnostic");
+        assert_eq!(mismatch.request, Some([45; 16]));
+        assert!(matches!(mismatch.message, Message::Diagnostic { .. }));
+    }
+
+    let first_retry = block_on(host.dispatch_frame(
+        [5; 16],
+        5,
+        Frame::Binary(first_status_request),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the first session replays its own status snapshot");
+    let second_retry = block_on(host.dispatch_frame(
+        [6; 16],
+        5,
+        Frame::Binary(second_status_request),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the second session replays its own status snapshot");
+    assert_eq!(first_retry, first_status);
+    assert_eq!(second_retry, second_status);
+    assert_eq!(application.calls, 2);
+
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn durable_unknown_status_retry_survives_orphan_resolution() {
     let (root, repository) = durable_repository();
     let runtime = open_durable_state(&repository);
