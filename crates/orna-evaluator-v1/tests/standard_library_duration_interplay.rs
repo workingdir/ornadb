@@ -67,6 +67,22 @@ fn pinned_duration_formatters_preserve_exact_fractional_elapsed_values() {
             include_str!("fixtures/stdlib-time-duration-chain-iso-y40kw.orna"),
             "PT0.000000001S",
         ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scaled-minute-compact-mncjs.orna"),
+            "1m 0.00012s",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scaled-minute-clock-mncjs.orna"),
+            "00:01:00.00012",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scaled-minute-words-mncjs.orna"),
+            "1 minute, 0.00012 seconds",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-scaled-minute-iso-mncjs.orna"),
+            "PT1M0.00012S",
+        ),
     ] {
         let result = session.submit(source);
         assert_eq!(
