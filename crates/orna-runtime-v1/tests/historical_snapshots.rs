@@ -412,12 +412,18 @@ async fn as_of_pins_stay_exact_across_generation_encoding_boundaries() {
         .await
         .expect("select initial generation");
     let initial_descriptor = initial.capture().snapshot().clone();
+    let encoded_initial_descriptor = initial_descriptor
+        .encode()
+        .expect("encode exact generation-zero descriptor");
+    let decoded_initial_descriptor = Snapshot::decode_bytes(&encoded_initial_descriptor)
+        .expect("decode exact generation-zero descriptor");
+    assert_eq!(decoded_initial_descriptor, initial_descriptor);
 
     commit(&state, writer, &[table_mutation(36, 1, Some(b"later"))], 37).await;
     let resolved_initial = state
-        .resolve_historical_snapshot(&initial_descriptor)
+        .resolve_historical_snapshot(&decoded_initial_descriptor)
         .await
-        .expect("resolve generation zero after a later commit");
+        .expect("resolve decoded generation zero after a later commit");
     assert_eq!(resolved_initial, initial);
     assert!(state
         .read_table_at(&resolved_initial, "records")
@@ -425,6 +431,30 @@ async fn as_of_pins_stay_exact_across_generation_encoding_boundaries() {
         .expect("read the pinned initial generation")
         .rows()
         .is_empty());
+
+    let Snapshot::Cwd {
+        database,
+        runtime,
+        generation,
+        ..
+    } = &decoded_initial_descriptor
+    else {
+        unreachable!("decoded an exact CWD pin")
+    };
+    let swapped_descriptor = Snapshot::cwd(*runtime, *database, generation.clone())
+        .expect("construct serialized pin with swapped coordinates");
+    let decoded_swapped_descriptor =
+        Snapshot::decode_bytes(&swapped_descriptor.encode().expect("encode swapped pin"))
+            .expect("decode swapped pin");
+    assert_ne!(decoded_swapped_descriptor, decoded_initial_descriptor);
+    assert_eq!(
+        state
+            .resolve_historical_snapshot(&decoded_swapped_descriptor)
+            .await
+            .unwrap_err(),
+        RuntimeError::SnapshotContextMismatch,
+        "serialized database/runtime coordinate reordering cannot rebind the pin"
+    );
 
     // CWD snapshot IDs hash the structural generation integer. Exercise the
     // neighboring small-integer and multi-byte boundaries as well as the
