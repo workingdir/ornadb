@@ -561,6 +561,426 @@ fn validate_removed_names(value: &Value) -> Result<(), String> {
     Ok(())
 }
 
+const BUILTIN_TYPES: &[&str] = &[
+    "Blob",
+    "Bool",
+    "Decimal",
+    "Digest",
+    "Duration",
+    "Instant",
+    "Int",
+    "Locale",
+    "Path",
+    "PresentContext",
+    "PresentTree",
+    "Str",
+    "TimeZone",
+];
+
+#[derive(Default)]
+struct ApiTypeNames {
+    concrete: BTreeSet<String>,
+    generic_arity: std::collections::BTreeMap<String, usize>,
+    relation_fields: std::collections::BTreeMap<String, Value>,
+    value_fields: std::collections::BTreeMap<String, Value>,
+    alias_targets: std::collections::BTreeMap<String, String>,
+}
+
+impl ApiTypeNames {
+    fn from_api(api: &Value) -> Self {
+        let mut names = Self::default();
+        for name in api["opaque_identifiers"].as_array().into_iter().flatten() {
+            if let Some(name) = name.as_str() {
+                names.concrete.insert(name.to_owned());
+            }
+        }
+        for (name, _) in api["enums"].as_object().into_iter().flatten() {
+            names.concrete.insert(name.clone());
+        }
+        for relation in api["relations"].as_array().into_iter().flatten() {
+            if let Some(name) = relation["name"].as_str() {
+                names.concrete.insert(name.to_owned());
+                names
+                    .relation_fields
+                    .insert(name.to_owned(), relation["fields"].clone());
+            }
+        }
+        for value_type in api["value_types"].as_array().into_iter().flatten() {
+            let Some(declaration) = value_type["name"].as_str() else {
+                continue;
+            };
+            let (name, arity) = generic_declaration(declaration);
+            names.concrete.insert(name.to_owned());
+            if arity > 0 {
+                names.generic_arity.insert(name.to_owned(), arity);
+            }
+            names
+                .value_fields
+                .insert(name.to_owned(), value_type["fields"].clone());
+        }
+        for alias in api["reference_aliases"].as_array().into_iter().flatten() {
+            if let (Some(name), Some(target)) =
+                (alias["name"].as_str(), alias["target"].as_str())
+            {
+                names.concrete.insert(name.to_owned());
+                names.alias_targets.insert(name.to_owned(), target.to_owned());
+            }
+        }
+        names
+    }
+
+    fn validate_type(&self, source: &str, parameters: &BTreeSet<String>) -> Result<(), String> {
+        let mut parser = TypeExpressionParser {
+            source,
+            offset: 0,
+            names: self,
+            parameters,
+        };
+        parser.parse_type()?;
+        parser.skip_space();
+        if parser.offset != source.len() {
+            return Err(format!("unexpected text in type `{source}`"));
+        }
+        Ok(())
+    }
+
+    fn fields_for(&self, type_name: &str) -> Option<&Value> {
+        let type_name = type_name.trim_end_matches('?');
+        let base = generic_declaration(type_name).0;
+        self.relation_fields
+            .get(base)
+            .or_else(|| self.value_fields.get(base))
+            .or_else(|| {
+                self.alias_targets
+                    .get(base)
+                    .and_then(|target| self.relation_fields.get(target))
+            })
+    }
+}
+
+fn generic_declaration(declaration: &str) -> (&str, usize) {
+    let Some(open) = declaration.find('<') else {
+        return (declaration, 0);
+    };
+    let Some(parameters) = declaration.strip_suffix('>').map(|_| &declaration[open + 1..declaration.len() - 1]) else {
+        return (declaration, 0);
+    };
+    let arity = parameters.split(',').filter(|parameter| !parameter.trim().is_empty()).count();
+    (&declaration[..open], arity)
+}
+
+fn generic_parameters(declaration: &str) -> Option<Vec<&str>> {
+    let open = declaration.find('<')?;
+    let parameters = declaration.strip_suffix('>')?;
+    let parameters = parameters.get(open + 1..)?;
+    Some(parameters.split(',').map(str::trim).collect())
+}
+
+fn validate_cross_inventory_names(api: &Value) -> Result<(), String> {
+    let mut type_names = std::collections::BTreeMap::<String, &'static str>::new();
+    let mut add_type = |name: &str, inventory: &'static str| -> Result<(), String> {
+        if let Some(previous) = type_names.insert(name.to_owned(), inventory) {
+            return Err(format!(
+                "system API type `{name}` is declared by both `{previous}` and `{inventory}`"
+            ));
+        }
+        Ok(())
+    };
+    // Singleton `type` entries refer to supporting value types; they do not
+    // define a second type with the same name.
+    for name in api["opaque_identifiers"].as_array().into_iter().flatten() {
+        add_type(name.as_str().expect("validated opaque identifier"), "opaque_identifiers")?;
+    }
+    for (name, _) in api["enums"].as_object().into_iter().flatten() {
+        add_type(name, "enums")?;
+    }
+    for relation in api["relations"].as_array().into_iter().flatten() {
+        add_type(relation["name"].as_str().expect("validated relation name"), "relations")?;
+    }
+    for value_type in api["value_types"].as_array().into_iter().flatten() {
+        let declaration = value_type["name"].as_str().expect("validated value type name");
+        add_type(generic_declaration(declaration).0, "value_types")?;
+    }
+    for alias in api["reference_aliases"].as_array().into_iter().flatten() {
+        add_type(alias["name"].as_str().expect("validated alias name"), "reference_aliases")?;
+    }
+
+    let mut public_values = BTreeSet::new();
+    for singleton in api["singletons"].as_array().into_iter().flatten() {
+        public_values.insert(singleton["name"].as_str().expect("validated singleton name"));
+    }
+    for function in api["functions"].as_array().into_iter().flatten() {
+        let name = function["name"].as_str().expect("validated function name");
+        if !public_values.insert(name) {
+            return Err(format!("system API public value `{name}` is declared more than once"));
+        }
+    }
+    for (removed, descriptor) in api["removed_names"].as_object().into_iter().flatten() {
+        if public_values.contains(removed.as_str()) {
+            return Err(format!("removed system API name `{removed}` is still publicly declared"));
+        }
+        let replacement = descriptor["replacement"].as_str().expect("validated replacement");
+        if !public_values.contains(replacement) {
+            return Err(format!(
+                "removed system API name `{removed}` has unresolved replacement `{replacement}`"
+            ));
+        }
+    }
+    Ok(())
+}
+
+struct TypeExpressionParser<'a, 'names, 'params> {
+    source: &'a str,
+    offset: usize,
+    names: &'names ApiTypeNames,
+    parameters: &'params BTreeSet<String>,
+}
+
+impl TypeExpressionParser<'_, '_, '_> {
+    fn skip_space(&mut self) {
+        while self
+            .source
+            .as_bytes()
+            .get(self.offset)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            self.offset += 1;
+        }
+    }
+
+    fn parse_type(&mut self) -> Result<(), String> {
+        self.skip_space();
+        if self.source.as_bytes().get(self.offset) == Some(&b'[') {
+            self.offset += 1;
+            self.parse_type()?;
+            self.skip_space();
+            if self.source.as_bytes().get(self.offset) != Some(&b']') {
+                return Err(format!("unclosed array type in `{}`", self.source));
+            }
+            self.offset += 1;
+        } else {
+            let start = self.offset;
+            while self.source.as_bytes().get(self.offset).is_some_and(|byte| {
+                byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'.'
+            }) {
+                self.offset += 1;
+            }
+            if self.offset == start {
+                return Err(format!("expected a type name in `{}`", self.source));
+            }
+            let name = &self.source[start..self.offset];
+            self.skip_space();
+            let has_arguments = self.source.as_bytes().get(self.offset) == Some(&b'<');
+            if has_arguments {
+                self.offset += 1;
+                let mut arity = 0;
+                loop {
+                    self.skip_space();
+                    self.parse_type()?;
+                    arity += 1;
+                    self.skip_space();
+                    match self.source.as_bytes().get(self.offset) {
+                        Some(b',') => self.offset += 1,
+                        Some(b'>') => {
+                            self.offset += 1;
+                            break;
+                        }
+                        _ => return Err(format!("unclosed generic type in `{}`", self.source)),
+                    }
+                }
+                let expected = match name {
+                    "Relation" | "Query" => Some(1),
+                    name => self.names.generic_arity.get(name).copied(),
+                };
+                if expected != Some(arity) {
+                    return Err(format!(
+                        "type `{name}` expects {} generic argument(s), found {arity}",
+                        expected.map_or_else(|| "no declared".to_owned(), |count| count.to_string())
+                    ));
+                }
+                if !matches!(name, "Relation" | "Query") && !self.names.concrete.contains(name) {
+                    return Err(format!("unresolved system API type `{name}`"));
+                }
+            } else if self.parameters.contains(name) {
+                // Generic witnesses are introduced by the containing declaration.
+            } else if BUILTIN_TYPES.contains(&name) {
+                // The builtin list is intentionally explicit so misspelled core types fail closed.
+            } else if name == "Relation" || name == "Query" {
+                return Err(format!("type constructor `{name}` requires one type argument"));
+            } else if self.names.generic_arity.contains_key(name) {
+                return Err(format!("generic system API type `{name}` requires arguments"));
+            } else if !self.names.concrete.contains(name) {
+                return Err(format!("unresolved system API type `{name}`"));
+            }
+        }
+        self.skip_space();
+        if self.source.as_bytes().get(self.offset) == Some(&b'?') {
+            self.offset += 1;
+        }
+        Ok(())
+    }
+}
+
+fn validate_api_type_graph(api: &Value, names: &ApiTypeNames) -> Result<(), String> {
+    validate_cross_inventory_names(api)?;
+    for singleton in api["singletons"].as_array().into_iter().flatten() {
+        names
+            .validate_type(singleton["type"].as_str().expect("validated singleton type"), &BTreeSet::new())
+            .map_err(|error| format!("singletons type: {error}"))?;
+    }
+    for alias in api["reference_aliases"].as_array().into_iter().flatten() {
+        let name = alias["name"].as_str().expect("validated alias name");
+        let target = alias["target"].as_str().expect("validated alias target");
+        let definition = alias["definition"].as_str().expect("validated alias definition");
+        if !names.relation_fields.contains_key(target) {
+            return Err(format!("reference alias `{name}` targets unknown relation `{target}`"));
+        }
+        if definition != format!("sys.RowRef<{target}>") {
+            return Err(format!(
+                "reference alias `{name}` definition does not reference its target `{target}`"
+            ));
+        }
+        names
+            .validate_type(definition, &BTreeSet::new())
+            .map_err(|error| format!("reference alias `{name}`: {error}"))?;
+    }
+    for value_type in api["value_types"].as_array().into_iter().flatten() {
+        let declaration = value_type["name"].as_str().expect("validated value type name");
+        if declaration.contains('<') && generic_parameters(declaration).is_none() {
+            return Err(format!("value type declaration `{declaration}` is malformed"));
+        }
+        let (name, arity) = generic_declaration(declaration);
+        let parameters = value_type["type_parameters"]
+            .as_array()
+            .expect("validated type parameter array")
+            .iter()
+            .map(|parameter| parameter.as_str().expect("validated type parameter").to_owned())
+            .collect::<BTreeSet<_>>();
+        let declared_parameters = generic_parameters(declaration).unwrap_or_default();
+        if arity != parameters.len()
+            || declared_parameters.len() != parameters.len()
+            || declared_parameters
+                .iter()
+                .any(|parameter| !parameters.contains(*parameter))
+        {
+            return Err(format!(
+                "value type `{name}` declaration and type_parameters disagree"
+            ));
+        }
+        if parameters.iter().any(|parameter| !valid_identifier(parameter)) {
+            return Err(format!("value type `{name}` has an invalid type parameter"));
+        }
+        for field in value_type["fields"].as_array().into_iter().flatten() {
+            let field_name = field["name"].as_str().expect("validated field name");
+            let field_type = field["type"].as_str().expect("validated field type");
+            names
+                .validate_type(field_type, &parameters)
+                .map_err(|error| format!("value type `{name}` field `{field_name}`: {error}"))?;
+        }
+    }
+    for relation in api["relations"].as_array().into_iter().flatten() {
+        let name = relation["name"].as_str().expect("validated relation name");
+        let reference_type = relation["reference_type"]
+            .as_str()
+            .expect("validated reference type");
+        if names.alias_targets.get(reference_type).map(String::as_str) != Some(name) {
+            return Err(format!(
+                "relation `{name}` reference_type `{reference_type}` must be its matching reference alias"
+            ));
+        }
+        for field in relation["fields"].as_array().into_iter().flatten() {
+            let field_name = field["name"].as_str().expect("validated field name");
+            let field_type = field["type"].as_str().expect("validated field type");
+            names
+                .validate_type(field_type, &BTreeSet::new())
+                .map_err(|error| format!("relation `{name}` field `{field_name}`: {error}"))?;
+        }
+        for (index, key_field) in relation["key_fields"]
+            .as_array()
+            .expect("validated key fields")
+            .iter()
+            .enumerate()
+        {
+            // Key paths use dotted names for fields of embedded records (for
+            // example DiffEntry.change.area); resolve each hop through the
+            // published relation/value-type graph so schema edits cannot leave
+            // a key pointing at a removed nested field.
+            let key_field = key_field.as_str().expect("validated key field");
+            let mut fields = &relation["fields"];
+            let mut resolved_type = None;
+            let segments = key_field.split('.').collect::<Vec<_>>();
+            for (segment_index, segment) in segments.iter().enumerate() {
+                let Some(field) = fields
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|field| field["name"] == *segment)
+                else {
+                    return Err(format!(
+                        "relation `{name}` key_fields[{index}] cannot resolve field path `{key_field}`"
+                    ));
+                };
+                resolved_type = field["type"].as_str();
+                if segment_index + 1 < segments.len() {
+                    fields = resolved_type
+                        .and_then(|field_type| names.fields_for(field_type))
+                        .ok_or_else(|| {
+                            format!(
+                                "relation `{name}` key_fields[{index}] cannot traverse field path `{key_field}`"
+                            )
+                        })?;
+                }
+            }
+            if resolved_type.is_none() {
+                return Err(format!(
+                    "relation `{name}` key_fields[{index}] has an invalid field path `{key_field}`"
+                ));
+            }
+        }
+    }
+    for function in api["functions"].as_array().into_iter().flatten() {
+        let name = function["name"].as_str().expect("validated function name");
+        let signature = function["signature"].as_str().expect("validated signature");
+        let parsed = parse_signature_identity(signature)?;
+        let open = signature.find('(').expect("validated function signature");
+        let close = matching_delimiter(signature, open, '(', ')')
+            .expect("validated function signature delimiters");
+        for parameter in split_top_level(&signature[open + 1..close])? {
+            let Some((declaration, default)) = parameter.split_once(" = ") else {
+                continue;
+            };
+            let (parameter_name, parameter_type) = declaration
+                .split_once(": ")
+                .expect("validated parameter declaration");
+            let Some((enum_name, variant)) = default.rsplit_once('.') else {
+                continue;
+            };
+            let Some(variants) = api["enums"].get(enum_name).and_then(Value::as_array) else {
+                continue;
+            };
+            if !variants.iter().any(|candidate| candidate.as_str() == Some(variant)) {
+                return Err(format!(
+                    "function `{name}` default for `{parameter_name}` references unknown `{enum_name}.{variant}`"
+                ));
+            }
+            if parameter_type != enum_name {
+                return Err(format!(
+                    "function `{name}` default `{enum_name}.{variant}` does not match parameter type `{parameter_type}`"
+                ));
+            }
+        }
+        for (index, (parameter, _)) in parsed.parameters.iter().enumerate() {
+            names
+                .validate_type(parameter, &parsed.type_parameters)
+                .map_err(|error| format!("function `{name}` parameter {index}: {error}"))?;
+        }
+        names
+            .validate_type(&parsed.result, &parsed.type_parameters)
+            .map_err(|error| format!("function `{name}` result: {error}"))?;
+    }
+    Ok(())
+}
+
 fn valid_function_label(label: &str, signature: &SignatureIdentity) -> bool {
     let Some(suffix) = label.strip_prefix(&signature.name) else {
         return false;
@@ -938,5 +1358,7 @@ pub fn validate_api_document(api: &Value) -> Result<(), String> {
         }
         parsed_signatures.push((name.to_owned(), parsed));
     }
-    validate_erased_generic_pairs(&parsed_signatures)
+    validate_erased_generic_pairs(&parsed_signatures)?;
+    let type_names = ApiTypeNames::from_api(api);
+    validate_api_type_graph(api, &type_names)
 }
