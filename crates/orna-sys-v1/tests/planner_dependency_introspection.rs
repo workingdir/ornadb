@@ -32,6 +32,8 @@ const MAX_SOURCE_MATERIALIZATION_TERMINAL_BYTE_TAIL: &str =
     include_str!("fixtures/max_source_materialization_terminal_byte_tail.orna");
 const MAX_SOURCE_MATERIALIZATION_FIRST_REMAINDER_TAIL: &str =
     include_str!("fixtures/max_source_materialization_first_remainder_tail.orna");
+const MAX_SOURCE_FIRST_REMAINDER_OVERFLOW_TAIL: &str =
+    include_str!("fixtures/max_source_first_remainder_overflow_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -4856,4 +4858,87 @@ fn explain_closes_max_source_materialization_at_first_remainder_byte() {
                 && node.actual_bytes().is_none()
         }));
     }
+}
+
+#[test]
+fn explain_marks_first_max_source_remainder_aggregate_closure_edge() {
+    let parsed = orna_syntax_v1::parse_module(MAX_SOURCE_FIRST_REMAINDER_OVERFLOW_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // 4-KiB heuristic, the first byte beyond the aligned MAX-4095 size rounds
+    // to 2^52 blocks. At floor(MAX/2) local work, scan plus materialization
+    // cost MAX-1; the next row overflows only the aggregate sum.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let local_work_at_boundary = u64::MAX / 2;
+    let closing_rows = local_work_at_boundary - MAX_BYTE_BLOCKS;
+    let explain_with_rows = |rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:first-max-source-remainder-aggregate-closure-edge",
+            ),
+            source: obj("table:MaxSourceFirstRemainderOverflow"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(rows),
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:first-remainder-overflow-edge")),
+        })
+        .expect("first max-source remainder aggregate closure edge")
+    };
+
+    let exact = explain_with_rows(closing_rows);
+    let max_cost_minus_one = (u64::MAX - 1).to_string();
+    assert_eq!(
+        exact.plan().estimated_cost(),
+        Some(max_cost_minus_one.as_str())
+    );
+    assert_eq!(exact.root().estimated_work(), Some(local_work_at_boundary));
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+
+    let overflow = explain_with_rows(closing_rows + 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(
+        overflow.root().estimated_rows(),
+        Some(closing_rows + 1)
+    );
+    assert_eq!(
+        overflow.root().estimated_bytes(),
+        Some(FIRST_REMAINDER_SOURCE_BYTES)
+    );
+    assert_eq!(
+        overflow.root().estimated_work(),
+        Some(local_work_at_boundary + 1)
+    );
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    for node in overflow.nodes() {
+        assert_eq!(node.estimated_work(), Some(local_work_at_boundary + 1));
+        assert_eq!(node.details().get("estimated_work_overflow"), None);
+    }
+
+    let surface = serde_json::to_value(&overflow)
+        .expect("first max-source remainder aggregate overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node["details"]["estimated_work"]
+            == serde_json::json!(local_work_at_boundary + 1)
+            && node.get("estimated_work_overflow").is_none()
+            && node.get("actual_rows").is_none()
+            && node.get("actual_bytes").is_none()
+    }));
 }
