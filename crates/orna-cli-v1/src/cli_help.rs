@@ -17,6 +17,7 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  status [--porcelain|--short|--format human|short|json]",
     "  --format human|short|json status",
     "  fetch [REMOTE] [BRANCH]",
+    "  serve [--port PORT]",
     "  diff [GIT_DIFF_ARGS...]",
     "Options: --color auto|always|never, --db ENDPOINT, --debug (show technical detail)",
 ];

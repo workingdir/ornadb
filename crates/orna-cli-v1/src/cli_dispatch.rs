@@ -24,6 +24,7 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             branch,
             parsed.color.stdout_enabled(),
         ),
+        Command::Serve { port } => cli_serve::run(&parsed.endpoint, port),
         Command::Diff(ref arguments) => run_git_diff(arguments),
         Command::Status {
             format: StatusFormat::Human,
