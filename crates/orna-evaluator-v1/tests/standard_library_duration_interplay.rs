@@ -179,6 +179,18 @@ fn elapsed_duration_integer_scaling_keeps_nanosecond_precision_and_sign() {
             include_str!("fixtures/stdlib-time-duration-scale-negative-divide-mbiom.orna"),
             "-PT0.5S",
         ),
+        (
+            include_str!("fixtures/stdlib-time-duration-decimal-scale-multiply-c57w6.orna"),
+            "PT0.125S",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-decimal-scale-commuted-c57w6.orna"),
+            "-PT0.75S",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-decimal-scale-divide-c57w6.orna"),
+            "PT2S",
+        ),
     ] {
         let result = session.submit(source);
         assert_eq!(
@@ -203,6 +215,27 @@ fn elapsed_duration_integer_scaling_keeps_nanosecond_precision_and_sign() {
             .code(),
         "ORNA-EVAL-DIVIDE-BY-ZERO"
     );
+    assert_eq!(
+        session
+            .submit(include_str!("fixtures/stdlib-time-duration-decimal-scale-inexact-c57w6.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-VALUE"
+    );
+    assert_eq!(
+        session
+            .submit(include_str!("fixtures/stdlib-time-duration-decimal-scale-subnanosecond-c57w6.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-VALUE"
+    );
+    assert_eq!(
+        session
+            .submit(include_str!("fixtures/stdlib-time-duration-decimal-scale-zero-c57w6.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-DIVIDE-BY-ZERO"
+    );
 
     let limits = Limits {
         max_integer_digits: 4,
@@ -216,6 +249,13 @@ fn elapsed_duration_integer_scaling_keeps_nanosecond_precision_and_sign() {
     assert_eq!(
         bounded
             .submit(include_str!("fixtures/stdlib-time-duration-scale-overflow-mbiom.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-LIMIT"
+    );
+    assert_eq!(
+        bounded
+            .submit(include_str!("fixtures/stdlib-time-duration-decimal-scale-overflow-c57w6.orna"))
             .unwrap_err()
             .code(),
         "ORNA-EVAL-LIMIT"
