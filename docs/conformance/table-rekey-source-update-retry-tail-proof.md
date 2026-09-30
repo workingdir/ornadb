@@ -69,3 +69,10 @@ release path: when the final owner re-keys away instead, the competitor's retry
 claims the contested key and the prior owner returns to its original source
 key. The fixture checks every update and owner transition in order, using the
 same evaluation-order choice where the reference is silent.
+
+`returned_key_owner_return_retry_after_competitor_rekeys_into_source_key`
+covers the next return conflict: the competitor claims the final owner's
+vacated source key, blocking its return re-key; when the competitor moves aside,
+the owner retries successfully. The fixture checks the collision, release, and
+retry sequence against evaluation order because the reference does not specify
+this caught-retry ordering.

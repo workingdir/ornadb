@@ -179,6 +179,18 @@ impl SystemApi {
             return Err(SystemApiError::InvalidInventory);
         }
 
+        let mut relation_row_types = raw
+            .relations
+            .iter()
+            .map(|relation| relation.name.clone())
+            .collect::<BTreeSet<_>>();
+        for value in &raw.value_types {
+            if matches!(value.kind.as_str(), "record" | "record-generic") {
+                let (name, _) = value_type_declaration(&value.name, &value.type_parameters)?;
+                relation_row_types.insert(name);
+            }
+        }
+
         let mut type_arities = language_type_arities();
         let mut types = BTreeMap::new();
         for name in raw.opaque_identifiers {
@@ -243,7 +255,7 @@ impl SystemApi {
                 value_type_declaration(&value.name, &value.type_parameters)?;
             validate_value_type_metadata(&value)?;
             let parameters = type_parameters.iter().cloned().collect();
-            let fields = fields(value.fields, &type_arities, &parameters)?;
+            let fields = fields(value.fields, &type_arities, &parameters, &relation_row_types)?;
             insert_descriptor(
                 &mut types,
                 name.clone(),
@@ -275,7 +287,12 @@ impl SystemApi {
             .map(|relation| {
                 Ok((
                     relation.name.clone(),
-                    fields(relation.fields.clone(), &type_arities, &BTreeSet::new())?,
+                    fields(
+                        relation.fields.clone(),
+                        &type_arities,
+                        &BTreeSet::new(),
+                        &relation_row_types,
+                    )?,
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, SystemApiError>>()?;
@@ -367,6 +384,7 @@ impl SystemApi {
         for singleton in raw.singletons {
             validate_path(&singleton.name)?;
             let ty = parse_and_validate_type(&singleton.ty, &type_arities, &BTreeSet::new())?;
+            validate_relation_rows(&ty, &relation_row_types, &BTreeSet::new())?;
             insert_descriptor(
                 &mut singletons,
                 singleton.name.clone(),
@@ -384,6 +402,18 @@ impl SystemApi {
         for raw_function in raw.functions {
             let descriptor =
                 parse_function(&raw_function, &type_arities, &singletons, &types, &enums)?;
+            validate_relation_rows(
+                &descriptor.result,
+                &relation_row_types,
+                &descriptor.type_parameters,
+            )?;
+            for parameter in &descriptor.parameters {
+                validate_relation_rows(
+                    &parameter.ty,
+                    &relation_row_types,
+                    &descriptor.type_parameters,
+                )?;
+            }
             if singletons.contains_key(&descriptor.name) {
                 return Err(SystemApiError::DuplicateName);
             }
@@ -613,6 +643,7 @@ fn fields(
     raw: Vec<RawField>,
     type_arities: &BTreeMap<String, usize>,
     parameters: &BTreeSet<String>,
+    relation_row_types: &BTreeSet<String>,
 ) -> Result<BTreeMap<String, SystemType>, SystemApiError> {
     let mut result = BTreeMap::new();
     for field in raw {
@@ -620,11 +651,47 @@ fn fields(
             return Err(SystemApiError::InvalidName);
         }
         let ty = parse_and_validate_type(&field.ty, type_arities, parameters)?;
+        validate_relation_rows(&ty, relation_row_types, parameters)?;
         if result.insert(field.name, ty).is_some() {
             return Err(SystemApiError::DuplicateName);
         }
     }
     Ok(result)
+}
+
+fn validate_relation_rows(
+    ty: &SystemType,
+    relation_row_types: &BTreeSet<String>,
+    parameters: &BTreeSet<String>,
+) -> Result<(), SystemApiError> {
+    match ty {
+        SystemType::Applied { base, arguments } => {
+            if base == "Relation"
+                && !matches!(arguments.as_slice(), [row]
+                    if relation_row_type_name(row)
+                        .is_some_and(|name| relation_row_types.contains(name))
+                        || matches!(row, SystemType::Named(name) if parameters.contains(name)))
+            {
+                return Err(SystemApiError::InvalidType);
+            }
+            for argument in arguments {
+                validate_relation_rows(argument, relation_row_types, parameters)?;
+            }
+        }
+        SystemType::List(inner) | SystemType::Optional(inner) => {
+            validate_relation_rows(inner, relation_row_types, parameters)?;
+        }
+        SystemType::Named(_) => {}
+    }
+    Ok(())
+}
+
+fn relation_row_type_name(ty: &SystemType) -> Option<&str> {
+    match ty {
+        SystemType::Named(name) => Some(name),
+        SystemType::Applied { base, .. } => Some(base),
+        SystemType::List(_) | SystemType::Optional(_) => None,
+    }
 }
 
 fn relation_key_path_exists(
@@ -2793,6 +2860,67 @@ mod tests {
         assert_eq!(
             SystemApi::from_json(&system_arity.to_string()),
             Err(SystemApiError::InvalidType)
+        );
+    }
+
+    #[test]
+    fn relation_constructors_require_published_relation_or_record_rows() {
+        let mut record_result = document();
+        let history = &mut record_result["functions"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|function| {
+                function["signature"]
+                    .as_str()
+                    .is_some_and(|signature| signature.starts_with("fn sys.history("))
+            })
+            .unwrap()["signature"];
+        *history = serde_json::json!(
+            "fn sys.history(object: sys.ObjectRef): Relation<sys.SourceMapEntry>"
+        );
+        assert!(
+            SystemApi::from_json(&record_result.to_string()).is_ok(),
+            "record value types published in Relation<T> fields are valid row types"
+        );
+
+        let mut function_result = document();
+        let history = &mut function_result["functions"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|function| {
+                function["signature"]
+                    .as_str()
+                    .is_some_and(|signature| signature.starts_with("fn sys.history("))
+            })
+            .unwrap()["signature"];
+        *history = serde_json::json!(
+            "fn sys.history(object: sys.ObjectRef): Relation<sys.DiffScope>"
+        );
+        assert_eq!(
+            SystemApi::from_json(&function_result.to_string()),
+            Err(SystemApiError::InvalidType),
+            "an enum cannot serve as a relation row type"
+        );
+
+        let mut value_field = document();
+        let value_type = value_field["value_types"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|value_type| {
+                value_type["fields"]
+                    .as_array()
+                    .is_some_and(|fields| !fields.is_empty())
+            })
+            .unwrap();
+        value_type["fields"][0]["type"] =
+            serde_json::Value::String("Relation<sys.DiffScope>".into());
+        assert_eq!(
+            SystemApi::from_json(&value_field.to_string()),
+            Err(SystemApiError::InvalidType),
+            "value-type relation fields must also use a relation or record row type"
         );
     }
 
