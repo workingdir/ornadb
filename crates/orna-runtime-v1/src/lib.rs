@@ -23988,6 +23988,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sys_invocation_tail_end_cursor_observes_admission_after_reset_replay() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(193)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let first_invocation_id = id(194);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: first_invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(195)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .finish_invocation_observation(
+                writer,
+                first_invocation_id,
+                InvocationCompletion::Succeeded,
+            )
+            .await
+            .unwrap();
+
+        let end_page = state.invocation_observation_tail(None, 2).await.unwrap();
+        assert_eq!(
+            end_page
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(!end_page.has_more);
+        let cursor = end_page.next_cursor.expect("tail end has a cursor");
+
+        let key = stream_delivery("tail-admission-reset", "tail-admission-reset-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key,
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("tail-admission:reset").unwrap(),
+            },
+            reason: "invocation tail cursor admission boundary".into(),
+        };
+        let receipt_id = id(196);
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request.clone(), receipt_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(writer, request.clone(), receipt_id)
+                .await,
+            Ok(receipt.clone())
+        );
+        let empty = state
+            .invocation_observation_tail(Some(cursor.clone()), 1)
+            .await
+            .unwrap();
+        assert!(empty.entries.is_empty());
+        assert_eq!(empty.next_cursor, Some(cursor.clone()));
+
+        let registration = InvocationObservationRegistration {
+            id: id(197),
+            procedure: procedure.clone(),
+            owner: InvocationLaunchOwner::OwnerSession(id(198)),
+            run: None,
+            arguments: vec![echo_invocation_input(&procedure)],
+            idempotency_key_hash: None,
+        };
+        state
+            .begin_invocation_observation(writer, registration.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .begin_invocation_observation(writer, registration.clone())
+                .await,
+            Err(RuntimeError::InvocationObservationConflict),
+            "a duplicate admission does not append another lifecycle event"
+        );
+        let admitted = state
+            .invocation_observation_tail(Some(cursor), 1)
+            .await
+            .unwrap();
+        assert_eq!(admitted.entries.len(), 1);
+        assert!(!admitted.has_more);
+        assert_eq!(admitted.entries[0].sequence, 3);
+        assert_eq!(admitted.entries[0].invocation_id, registration.id);
+        assert_eq!(admitted.entries[0].status, InvocationObservationStatus::Running);
+
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(writer, request, receipt_id)
+                .await,
+            Ok(receipt)
+        );
+        let after_replay = state
+            .invocation_observation_tail(admitted.next_cursor, 1)
+            .await
+            .unwrap();
+        assert!(after_replay.entries.is_empty());
+        let whole_tail = state.invocation_observation_tail(None, 4).await.unwrap();
+        assert_eq!(
+            whole_tail
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[tokio::test]
     async fn sys_invocation_tail_end_cursor_rejects_cwd_write_after_receipt_replay() {
         assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
         let (_temp, repo) = repository();
