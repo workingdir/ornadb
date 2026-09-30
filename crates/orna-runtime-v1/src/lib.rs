@@ -20689,6 +20689,26 @@ mod tests {
             "downstream take(1) stops after the first filtered match before the bad sibling"
         );
 
+        // `first()` is itself a bounded consumer. After its filter finds a
+        // row within a still-open outer take, observation must stop the
+        // nested source before the following projection failure.
+        let (first_consumer_stops_filtered_outer_tail, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-first-stops-tail.orna"
+                ),
+            );
+        assert_eq!(
+            first_consumer_stops_filtered_outer_tail.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "first() stops after the filtered match without opening the failing sibling"
+        );
+
         // The reference fixes left-to-right union order and bounded
         // enumeration but leaves projection failures across a child-local
         // take boundary implicit. Keep the left child lazy: its excluded
