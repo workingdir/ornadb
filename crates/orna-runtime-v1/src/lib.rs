@@ -20423,6 +20423,26 @@ mod tests {
             "a right child's take(1) caps its effects even when outer take asks for more"
         );
 
+        // The reference fixes left-to-right union order and bounded
+        // enumeration but leaves projection failures across a child-local
+        // take boundary implicit. Keep the left child lazy: its excluded
+        // failing row stays unevaluated, then the right sibling can run.
+        let (left_child_bound_tail, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-project-left-child-bound-tail.orna"
+            ),
+        );
+        assert_eq!(
+            left_child_bound_tail.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(3u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "the left child caps its failing tail before the right sibling's two projections"
+        );
+
         let (missing, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
             include_str!("../tests/fixtures/query-session-projection-missing.orna"),
