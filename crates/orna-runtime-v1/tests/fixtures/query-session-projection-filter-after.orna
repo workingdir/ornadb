@@ -1,0 +1,5 @@
+sys.Storage
+    | project(storage => sys.Storage.lookup(storage.target).title)
+    | filter(title => title == "keep-none")
+    | count()
+    |? (failure => failure.code)
