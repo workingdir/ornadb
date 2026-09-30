@@ -87,3 +87,9 @@ that closure: the competitor retries into the returned key, the owner moves
 aside, and the competitor succeeds; then the owner retries after the competitor
 moves away again. The fixture asserts every owner transition and attached
 update. The reference is silent on the resulting caught-retry log order.
+
+`original_owner_key_retries_after_competitor_closure` follows the original
+owner back to its first key after the alternating cycle. It records the
+competitor taking that key, the owner moving aside, and both rows taking turns
+retrying into the released key. This full log uses the same adapter evaluation
+order because the reference does not specify caught-retry mutation sequencing.
