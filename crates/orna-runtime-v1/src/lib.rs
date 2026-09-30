@@ -20648,6 +20648,26 @@ mod tests {
             "the rejected outer bounded row prevents any nested sibling projection"
         );
 
+        // With a larger take bound, one rejected row does not exhaust the
+        // parent relation. Continue in order until a later match consumes the
+        // bound, then stop before the following nested projection failure.
+        let (outer_take_two_filter_stops_tail, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-take-two-filter-stops-tail.orna"
+                ),
+            );
+        assert_eq!(
+            outer_take_two_filter_stops_tail.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "the second in-bound match stops before the nested failing sibling"
+        );
+
         // The reference fixes left-to-right union order and bounded
         // enumeration but leaves projection failures across a child-local
         // take boundary implicit. Keep the left child lazy: its excluded
