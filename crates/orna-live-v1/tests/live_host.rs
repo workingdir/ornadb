@@ -11532,6 +11532,35 @@ fn mismatch_query_replay_survives_colliding_eval_completion() {
     .response
     .expect("completion of the colliding Eval does not retarget the replay");
     assert_eq!(terminal_retry, first_mismatch);
+
+    let conflicting_eval = eval_with_context([1; 16], [91; 16], [3; 16], None);
+    assert!(matches!(
+        Envelope::decode(&conflicting_eval, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    // The reference requires different input under this Eval ID to mismatch,
+    // but leaves repeated collisions after terminal completion unspecified.
+    // Keep both attempts rejected without replacing the retained Eval result.
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            5,
+            Frame::Binary(conflicting_eval.clone()),
+            &mut application,
+        )),
+        Err(Error::RequestMismatch)
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            6,
+            Frame::Binary(conflicting_eval),
+            &mut application,
+        )),
+        Err(Error::RequestMismatch)
+    );
     assert!(matches!(
         block_on(open_durable_state(&repository).request_status_for_identity(target_identity))
             .unwrap(),
@@ -11553,7 +11582,7 @@ fn mismatch_query_replay_survives_colliding_eval_completion() {
     .unwrap();
     let terminal_status = block_on(host.dispatch_frame(
         [6; 16],
-        5,
+        7,
         Frame::Binary(fresh_status_query),
         &mut application,
     ))
