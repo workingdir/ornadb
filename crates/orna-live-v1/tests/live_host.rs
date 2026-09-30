@@ -11000,6 +11000,34 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
                 && status.fingerprint == tenth_query_fingerprint
     ));
 
+    let tenth_same_scope_eval = eval_with_context([10; 16], [91; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&tenth_same_scope_eval, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [15; 16],
+            3,
+            Frame::Binary(tenth_same_scope_eval),
+            &mut application,
+        )),
+        Err(Error::RequestMismatch),
+        "a same-scope Eval cannot replace the status query identity"
+    );
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [10; 16],
+            request_id: [91; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == tenth_query_fingerprint
+    ));
+
     let runtime = open_durable_state(&repository);
     let (_, capability) = block_on(runtime.reserve_request_with_admission(
         tenth_identity,
@@ -11018,7 +11046,7 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
 
     let tenth_unknown_retry = block_on(host.dispatch_frame(
         [15; 16],
-        3,
+        4,
         Frame::Binary(tenth_query_request.clone()),
         &mut application,
     ))
@@ -11039,7 +11067,7 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     .unwrap();
     let tenth_fresh = block_on(host.dispatch_frame(
         [15; 16],
-        4,
+        5,
         Frame::Binary(tenth_fresh_request.clone()),
         &mut application,
     ))
@@ -11099,7 +11127,7 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     assert!(matches!(
         block_on(host.dispatch_frame(
             [15; 16],
-            5,
+            6,
             Frame::Binary(tenth_query_request),
             &mut application,
         )),
