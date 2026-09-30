@@ -6549,6 +6549,189 @@ fn mixed_trust_empty_sibling_cause_closures_preserve_admission() {
 }
 
 #[test]
+fn mixed_trust_empty_cause_closures_preserve_pre_revocation_admission() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let untrusted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(message).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let admitted_generation = admitted("ORNA-E-REVOKE-ADMITTED", "pre-revocation admission");
+    let capture_admitted = {
+        let snapshot = admitted_generation.clone();
+        move || snapshot.clone()
+    };
+    // Orna closures capture immutable values, while explicit redaction revokes
+    // only the value it consumes. Host Clone::clone_from behavior for empty
+    // cause trees is unspecified, so retain the pre-revocation value as a
+    // separate closure generation.
+    let revoked_generation = capture_admitted().redacted();
+    let capture_revoked = {
+        let snapshot = revoked_generation.clone();
+        move || snapshot.clone()
+    };
+    let raw_generation = untrusted("ORNA-E-REVOKE-RAW", "raw sibling generation secret");
+    let capture_raw = {
+        let snapshot = raw_generation.clone();
+        move || snapshot.clone()
+    };
+    assert_eq!(
+        serde_json::to_value(capture_admitted()).unwrap()["message"],
+        "pre-revocation admission"
+    );
+    assert_eq!(
+        serde_json::to_value(capture_revoked()).unwrap()["message"],
+        "<redacted>"
+    );
+
+    let mut left = capture_admitted();
+    let mut right = capture_raw();
+    left.clone_from(&capture_revoked());
+    right.clone_from(&capture_admitted());
+    let left_revoked = left.clone();
+    let right_admitted = right.clone();
+    assert_eq!(left_revoked, revoked_generation);
+    assert_eq!(right_admitted, admitted_generation);
+
+    left.clone_from(&capture_admitted());
+    right.clone_from(&capture_revoked());
+    let left_admitted = left.clone();
+    let right_revoked = right.clone();
+    assert_eq!(left_admitted, admitted_generation);
+    assert_eq!(right_revoked, revoked_generation);
+
+    let restore_left_revoked = {
+        let snapshot = left_revoked.clone();
+        move || snapshot.clone()
+    };
+    let restore_right_admitted = {
+        let snapshot = right_admitted.clone();
+        move || snapshot.clone()
+    };
+    left.clone_from(&restore_left_revoked());
+    right.clone_from(&restore_right_admitted());
+    assert_eq!(left, revoked_generation);
+    assert_eq!(right, admitted_generation);
+    let pre_revocation_value = capture_admitted();
+    let revoked_value = capture_revoked();
+    let raw_value = capture_raw();
+
+    let compose_captured_admission_generations = {
+        let left_revoked = left_revoked.clone();
+        let right_admitted = right_admitted.clone();
+        let left_admitted = left_admitted.clone();
+        let right_revoked = right_revoked.clone();
+        let capture_admitted = capture_admitted;
+        let capture_revoked = capture_revoked;
+        let capture_raw = capture_raw;
+        move || {
+            admitted("ORNA-E-REVOKE-OUTER", "revocation closure outer admission")
+                .with_cause(left_revoked.clone())
+                .with_cause(right_admitted.clone())
+                .with_cause(left_admitted.clone())
+                .with_cause(right_revoked.clone())
+                .with_cause(capture_admitted())
+                .with_cause(capture_revoked())
+                .with_cause(capture_raw())
+        }
+    };
+    let empty_live = untrusted("ORNA-E-REVOKE-LIVE", "revocation live replacement secret");
+    left.clone_from(&empty_live);
+    right.clone_from(&empty_live);
+    assert_eq!(left, empty_live);
+    assert_eq!(right, empty_live);
+
+    let outer = compose_captured_admission_generations();
+    assert_eq!(outer, compose_captured_admission_generations());
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["message"], "revocation closure outer admission");
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 7);
+    for cause in causes {
+        assert_eq!(cause["message"], "<redacted>");
+        assert!(cause["causes"].as_array().unwrap().is_empty());
+    }
+
+    let envelope = serde_json::json!({
+        "outer": outer.clone(),
+        "pre_revocation": pre_revocation_value,
+        "revoked": revoked_value,
+        "raw": raw_value,
+    });
+    let json = serde_json::to_vec(&envelope).unwrap();
+    for message in [
+        b"revocation closure outer admission".as_slice(),
+        b"pre-revocation admission".as_slice(),
+    ] {
+        assert_eq!(
+            json.windows(message.len())
+                .filter(|window| *window == message)
+                .count(),
+            1
+        );
+    }
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"raw sibling generation secret".as_slice(),
+            b"revocation live replacement secret".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+
+    let wire = outer.encode_ovb().unwrap();
+    assert!(
+        wire.windows(b"revocation closure outer admission".len())
+            .any(|window| window == b"revocation closure outer admission")
+    );
+    for disclosure in [
+        fixture.as_bytes(),
+        b"pre-revocation admission".as_slice(),
+        b"raw sibling generation secret".as_slice(),
+    ]
+    .into_iter()
+    .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
+    {
+        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    assert_eq!(
+        decoded["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cause| cause["causes"].as_array().unwrap().len())
+            .collect::<Vec<_>>(),
+        [0, 0, 0, 0, 0, 0, 0]
+    );
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
