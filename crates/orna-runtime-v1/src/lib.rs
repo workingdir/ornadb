@@ -21110,6 +21110,25 @@ mod tests {
             "last() propagates the third predicate failure after two matches leave the take short"
         );
 
+        // A rejected row between matches must not make the short prefix look
+        // complete: continue in source order and preserve a later predicate
+        // failure while take(3) still lacks its third match.
+        let (last_surfaces_interleaved_failure_after_multirow_short_post_filter_take, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-short-multi-match-interleaved-nonmatch-failing-tail.orna"
+                ),
+            );
+        let predicate_failure =
+            last_surfaces_interleaved_failure_after_multirow_short_post_filter_take.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (4, 6),
+            "last() skips an interleaved nonmatch and propagates the next predicate failure"
+        );
+
         // The reference is silent when the bounded tail continues past a
         // nonmatch to a predicate failure, with another match after that
         // failure. Preserve the error instead of allowing last() to evaluate
