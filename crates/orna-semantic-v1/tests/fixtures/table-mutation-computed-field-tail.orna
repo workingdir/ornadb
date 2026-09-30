@@ -1,4 +1,5 @@
 fn change() {
-    Person.update("a", { name: "updated" });
-    Person.update("a", { label: "caller supplied" });
+    Person.rekey("a", "b");
+    Person.update("b", { name: "updated" });
+    Person.update("b", { label: "caller supplied" });
 }
