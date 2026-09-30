@@ -1,0 +1,5 @@
+sys.Storage
+    | project(storage => sys.Storage.lookup(storage.target).title)
+    | union(sys.MaintenanceJob | take(0))
+    | count()
+    |? (failure => failure.code)
