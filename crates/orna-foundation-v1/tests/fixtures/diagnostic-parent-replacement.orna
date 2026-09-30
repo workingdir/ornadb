@@ -1,0 +1,2 @@
+let original_credential = "ornadb-test-only-secret-parent-original-avwwk";
+let replacement_credential = "ornadb-test-only-secret-parent-replacement-avwwk";
