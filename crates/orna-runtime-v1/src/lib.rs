@@ -20987,6 +20987,28 @@ mod tests {
             "last() closes on its final matching row without evaluating the failing union tail"
         );
 
+        // The reference specifies filter order, bounded take, and callback
+        // failure propagation separately, but leaves this post-filter
+        // boundary interaction with last() implicit. Once take(1) receives
+        // its match, the later failing predicate is outside the demanded
+        // prefix and must remain unevaluated.
+        let (last_closes_after_post_filter_match, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-closes-failing-tail.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_after_post_filter_match.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "last() returns the post-filter boundary match without evaluating the failing tail"
+        );
+
         // The reference is silent when the bounded tail continues past a
         // nonmatch to a predicate failure, with another match after that
         // failure. Preserve the error instead of allowing last() to evaluate
