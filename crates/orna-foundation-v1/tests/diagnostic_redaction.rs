@@ -9618,3 +9618,146 @@ fn diagnostic_decode_rejects_invalid_utf8_in_a_span_path() {
 
     assert!(Diagnostic::decode_ovb(&encoded).is_err());
 }
+
+#[test]
+fn decoded_empty_parent_replacement_restores_chain_closure_snapshots() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    fn cause_shape(diagnostic: &serde_json::Value) -> Vec<usize> {
+        let causes = diagnostic["causes"].as_array().unwrap();
+        let mut shape = vec![causes.len()];
+        for cause in causes {
+            shape.extend(cause_shape(cause));
+        }
+        shape
+    }
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let full_source = admitted("ORNA-E-EMPTY-PARENT", "populated parent payload").with_cause(
+        admitted("ORNA-E-EMPTY-BRANCH", "populated branch payload")
+            .with_cause(admitted("ORNA-E-EMPTY-A", "first cause payload"))
+            .with_cause(admitted("ORNA-E-EMPTY-B", "last cause payload")),
+    );
+    let empty_source = admitted("ORNA-E-EMPTY-PARENT", "empty parent payload");
+    let recover = |diagnostic: &Diagnostic| {
+        Diagnostic::decode_ovb(&diagnostic.encode_ovb().unwrap()).unwrap()
+    };
+    let capture = |snapshot: Diagnostic| move || snapshot.clone();
+    let full_recovery = recover(&full_source);
+    let empty_recovery = recover(&empty_source);
+
+    // ORNA-SECRET-002 requires diagnostic redaction, but is silent on closure
+    // snapshots when Clone::clone_from replaces a decoded parent's entire
+    // cause vector with an empty generation and later restores its chain.
+    let capture_full = capture(full_recovery.clone());
+    let capture_empty = capture(empty_recovery.clone());
+    let empty_readmission = empty_recovery
+        .clone()
+        .redacted_with_message(SafeText::new("empty root readmission").unwrap());
+    let capture_empty_readmission = capture(empty_readmission.clone());
+
+    let mut receiver = full_recovery.clone();
+    let capture_initial_full = capture(receiver.clone());
+    receiver.clone_from(&capture_empty());
+    let capture_empty_parent = capture(receiver.clone());
+    receiver.clone_from(&capture_full());
+    let capture_restored_full = capture(receiver.clone());
+    receiver.clone_from(&capture_empty_readmission());
+    let capture_admitted_empty = capture(receiver.clone());
+    receiver.clone_from(&capture_full());
+    let capture_final_full = capture(receiver.clone());
+
+    assert_eq!(capture_initial_full(), full_recovery);
+    assert_eq!(capture_empty_parent(), empty_recovery);
+    assert_eq!(capture_restored_full(), full_recovery);
+    assert_eq!(capture_admitted_empty(), empty_readmission);
+    assert_eq!(capture_final_full(), full_recovery);
+    let empty_projection = serde_json::to_value(capture_admitted_empty()).unwrap();
+    assert_eq!(empty_projection["message"], "empty root readmission");
+    assert_eq!(cause_shape(&empty_projection), [0]);
+
+    let compose_generations = {
+        let capture_initial_full = capture_initial_full;
+        let capture_empty_parent = capture_empty_parent;
+        let capture_restored_full = capture_restored_full;
+        let capture_admitted_empty = capture_admitted_empty;
+        let capture_final_full = capture_final_full;
+        move || {
+            admitted("ORNA-E-EMPTY-OUTER", "empty parent closure admission")
+                .with_cause(capture_initial_full())
+                .with_cause(capture_empty_parent())
+                .with_cause(capture_restored_full())
+                .with_cause(capture_admitted_empty())
+                .with_cause(capture_final_full())
+        }
+    };
+    receiver.clone_from(&capture_empty());
+    let outer = compose_generations();
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["message"], "empty parent closure admission");
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 5);
+    for cause in causes {
+        assert_redacted_tree(cause);
+    }
+    assert_eq!(
+        causes.iter().map(cause_shape).collect::<Vec<_>>(),
+        vec![
+            vec![1, 2, 0, 0],
+            vec![0],
+            vec![1, 2, 0, 0],
+            vec![0],
+            vec![1, 2, 0, 0],
+        ],
+    );
+
+    let json = serde_json::to_vec(&outer).unwrap();
+    let wire = outer.encode_ovb().unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"populated parent payload".as_slice(),
+            b"populated branch payload".as_slice(),
+            b"first cause payload".as_slice(),
+            b"last cause payload".as_slice(),
+            b"empty parent payload".as_slice(),
+            b"empty root readmission".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
+    assert_redacted_tree(&decoded);
+    assert_eq!(
+        decoded["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(cause_shape)
+            .collect::<Vec<_>>(),
+        causes.iter().map(cause_shape).collect::<Vec<_>>(),
+    );
+}
