@@ -581,6 +581,7 @@ const BUILTIN_TYPES: &[&str] = &[
 struct ApiTypeNames {
     concrete: BTreeSet<String>,
     generic_arity: std::collections::BTreeMap<String, usize>,
+    relation_row_types: BTreeSet<String>,
     relation_fields: std::collections::BTreeMap<String, Value>,
     value_fields: std::collections::BTreeMap<String, Value>,
     alias_targets: std::collections::BTreeMap<String, String>,
@@ -600,6 +601,7 @@ impl ApiTypeNames {
         for relation in api["relations"].as_array().into_iter().flatten() {
             if let Some(name) = relation["name"].as_str() {
                 names.concrete.insert(name.to_owned());
+                names.relation_row_types.insert(name.to_owned());
                 names
                     .relation_fields
                     .insert(name.to_owned(), relation["fields"].clone());
@@ -611,6 +613,9 @@ impl ApiTypeNames {
             };
             let (name, arity) = generic_declaration(declaration);
             names.concrete.insert(name.to_owned());
+            if matches!(value_type["kind"].as_str(), Some("record" | "record-generic")) {
+                names.relation_row_types.insert(name.to_owned());
+            }
             if arity > 0 {
                 names.generic_arity.insert(name.to_owned(), arity);
             }
@@ -805,7 +810,19 @@ impl TypeExpressionParser<'_, '_, '_> {
                 let mut arity = 0;
                 loop {
                     self.skip_space();
+                    let argument_start = self.offset;
                     self.parse_type()?;
+                    let argument_end = self.offset;
+                    let argument = self.source[argument_start..argument_end].trim();
+                    let argument_base = generic_declaration(argument).0;
+                    if name == "Relation"
+                        && !self.names.relation_row_types.contains(argument_base)
+                        && !self.parameters.contains(argument)
+                    {
+                        return Err(format!(
+                            "type constructor `Relation` requires a declared relation or record row type, found `{argument}`"
+                        ));
+                    }
                     arity += 1;
                     self.skip_space();
                     match self.source.as_bytes().get(self.offset) {
