@@ -831,6 +831,65 @@ fn zero_budget_stops_at_first_of_oppositely_oriented_checkpoint_delete_conflicts
 }
 
 #[test]
+fn zero_conflict_budget_allows_row_tombstone_and_checkpoint_deletes() {
+    for delete_checkpoint_on_left in [true, false] {
+        let mut source = FixtureRows::default();
+        source.add(MergeSide::Base, b"base", vec![parse_fixture(BASE, RowKeyKind::Explicit)]);
+        source.add(MergeSide::Left, b"left", Vec::new());
+        source.add(MergeSide::Right, b"right", Vec::new());
+
+        let mut base = snapshot(schema(true, FieldType::Str), manifest(1, 1, b"base"), None);
+        let mut left = snapshot(schema(true, FieldType::Str), manifest(2, 2, b"left"), None);
+        let mut right = snapshot(schema(true, FieldType::Str), manifest(3, 3, b"right"), None);
+
+        let agreed_delete_id = b"consumer/a-agreed-delete".to_vec();
+        base.checkpoints.insert(
+            agreed_delete_id.clone(),
+            CheckpointGeneration { generation: 1, position: None },
+        );
+
+        let unilateral_delete_id = b"consumer/b-delete-against-unchanged".to_vec();
+        let retained_checkpoint = CheckpointGeneration { generation: 2, position: None };
+        base.checkpoints.insert(unilateral_delete_id.clone(), retained_checkpoint.clone());
+        let unchanged_side = if delete_checkpoint_on_left { &mut right } else { &mut left };
+        unchanged_side
+            .checkpoints
+            .insert(unilateral_delete_id.clone(), retained_checkpoint);
+
+        let retained_id = b"consumer/z-retained".to_vec();
+        let retained = CheckpointGeneration { generation: 3, position: None };
+        for snapshot in [&mut base, &mut left, &mut right] {
+            snapshot.checkpoints.insert(retained_id.clone(), retained.clone());
+        }
+
+        // Agreeing deletes and delete-versus-unchanged resolution add no
+        // conflicts, so they remain valid under a zero conflict-detail budget.
+        let plan = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 0 },
+        )
+        .unwrap();
+
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        assert_eq!(plan.report.rows_examined, 1);
+        assert!(plan.report.affected_checkpoints.is_empty());
+        assert_eq!(source.visited.len(), 3);
+        assert!(!plan.checkpoints.contains_key(agreed_delete_id.as_slice()));
+        assert!(!plan.checkpoints.contains_key(unilateral_delete_id.as_slice()));
+        assert_eq!(plan.checkpoints.get(retained_id.as_slice()), Some(&retained));
+
+        let MergedSegment::Rows { rows, tombstones, .. } = &plan.tables[&id(1)].segments[0] else {
+            panic!("the fixture-backed agreed row deletion materializes as a tombstone")
+        };
+        assert!(rows.is_empty());
+        assert_eq!(tombstones, &[integer(1)]);
+    }
+}
+
+#[test]
 fn checkpoint_delete_update_budget_tail_reports_identity_for_either_deleted_side() {
     for delete_on_left in [true, false] {
         let (mut base, mut left, mut right, mut source) = row_checkpoint_conflict_inputs();
