@@ -2075,6 +2075,115 @@ mod tests {
     }
 
     #[test]
+    fn nested_pin_closure_resolves_all_equal_alias_edge_routes_independently() {
+        let app_source = include_str!("../tests/fixtures/attached-incompatible-main.orna");
+        let shared_source = include_str!("../tests/fixtures/attached-equivalent-main.orna");
+        let (app_dir, app_repository, _) = repository(app_source);
+        let (shared_dir, shared_repository, _) = repository(shared_source);
+        let (leaf_dir, leaf_repository, _) = repository(shared_source);
+        let (_end_dir, end_repository, end_commit) = repository(shared_source);
+
+        let leaf_commit = write_commit(
+            leaf_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("end {end_commit}\n"),
+        );
+        let shared_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive {leaf_commit}\nterminal {leaf_commit}\n"),
+        );
+        let app_commit = write_commit(
+            app_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("backup {shared_commit}\nmirror {shared_commit}\n"),
+        );
+
+        let loader = ProjectLoader::default();
+        let app = PinnedDatabase::resolve(
+            "app",
+            app_repository.clone(),
+            &app_commit,
+            loader,
+        )
+        .unwrap();
+        let resolver = PackageResolver::new(
+            [
+                ("app".to_owned(), app_repository),
+                ("backup".to_owned(), shared_repository.clone()),
+                ("mirror".to_owned(), shared_repository),
+                ("archive".to_owned(), leaf_repository.clone()),
+                ("terminal".to_owned(), leaf_repository),
+                ("end".to_owned(), end_repository),
+            ],
+            loader,
+        )
+        .unwrap();
+
+        let root_session = resolver.resolve_for_parent(app).unwrap();
+        let backup = root_session.database("backup").unwrap();
+        let mirror = root_session.database("mirror").unwrap();
+        assert_eq!(backup.pin().commit(), mirror.pin().commit());
+        assert_ne!(backup.pin(), mirror.pin());
+
+        // The reference fixes exact pins but does not prescribe traversal
+        // order for recursive shared-repository aliases. V1 resolves every
+        // alias path independently while retaining each manifest edge name.
+        let mut route_pins = Vec::new();
+        let mut expected_end_pin = None;
+        for outer_alias in ["mirror", "backup"] {
+            let closure = resolver
+                .resolve_for_parent(root_session.database(outer_alias).unwrap().clone())
+                .unwrap();
+            assert_eq!(closure.primary().pin().name(), outer_alias);
+
+            for child_alias in ["terminal", "archive"] {
+                let sibling_alias = if child_alias == "archive" {
+                    "terminal"
+                } else {
+                    "archive"
+                };
+                let child = closure.database(child_alias).unwrap();
+                let sibling = closure.database(sibling_alias).unwrap();
+                assert_eq!(child.pin().commit().as_str(), leaf_commit);
+                assert_eq!(sibling.pin().commit().as_str(), leaf_commit);
+                assert_ne!(child.pin(), sibling.pin());
+
+                let tail = resolver.resolve_for_parent(child.clone()).unwrap();
+                assert_eq!(tail.primary().pin().name(), child_alias);
+                assert_eq!(tail.primary().pin().commit().as_str(), leaf_commit);
+                let end = tail.database("end").unwrap();
+                assert_eq!(end.pin().commit().as_str(), end_commit);
+                if let Some(expected) = &expected_end_pin {
+                    assert_eq!(end.pin(), expected);
+                } else {
+                    expected_end_pin = Some(end.pin().clone());
+                }
+                assert!(tail.units_structurally_equivalent(
+                    child_alias,
+                    "meter",
+                    "end",
+                    "meter"
+                ));
+                route_pins.push(tail.primary().pin().clone());
+            }
+        }
+
+        assert_eq!(route_pins[0], route_pins[2]);
+        assert_eq!(route_pins[1], route_pins[3]);
+        assert_ne!(route_pins[0], route_pins[1]);
+        assert_eq!(route_pins[0].commit(), route_pins[1].commit());
+        assert_eq!(
+            root_session
+                .database("backup")
+                .unwrap()
+                .pin()
+                .commit(),
+            root_session.database("mirror").unwrap().pin().commit()
+        );
+    }
+
+    #[test]
     fn equivalent_units_interoperate_across_attachments_but_name_match_is_not_enough() {
         let primary_source = include_str!("fixtures/attached-primary-main.orna");
         let (_primary_dir, primary_repository, primary_commit) = repository(&primary_source);
