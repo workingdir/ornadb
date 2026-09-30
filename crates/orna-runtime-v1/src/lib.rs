@@ -24134,6 +24134,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sys_invocation_admission_shares_admin_receipt_id_without_tail_collision() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(210)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let first_invocation_id = id(211);
+        let shared_id = id(213);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: first_invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(212)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        let first_page = state.invocation_observation_tail(None, 1).await.unwrap();
+        assert_eq!(first_page.entries[0].sequence, 1);
+        let cursor = first_page.next_cursor.expect("end cursor after initial admission");
+
+        let key = stream_delivery("shared-admission-receipt", "shared-admission-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key,
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("shared-admission:reset").unwrap(),
+            },
+            reason: "separate admin and invocation tracking journals".into(),
+        };
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request.clone(), shared_id)
+            .await
+            .unwrap();
+        assert!(state
+            .admin_invocation_receipt(shared_id)
+            .await
+            .unwrap()
+            .is_some());
+        let no_admin_tail = state
+            .invocation_observation_tail(Some(cursor.clone()), 1)
+            .await
+            .unwrap();
+        assert!(no_admin_tail.entries.is_empty());
+
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: shared_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(214)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(state
+            .admin_invocation_receipt(shared_id)
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            state
+                .invocation_observation(shared_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            InvocationObservationStatus::Running
+        );
+        let admission = state
+            .invocation_observation_tail(Some(cursor), 1)
+            .await
+            .unwrap();
+        assert_eq!(admission.entries.len(), 1);
+        assert!(!admission.has_more);
+        assert_eq!(admission.entries[0].sequence, 2);
+        assert_eq!(admission.entries[0].invocation_id, shared_id);
+        assert_eq!(admission.entries[0].status, InvocationObservationStatus::Running);
+
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(writer, request, shared_id)
+                .await,
+            Ok(receipt)
+        );
+        let after_receipt_replay = state
+            .invocation_observation_tail(admission.next_cursor, 1)
+            .await
+            .unwrap();
+        assert!(after_receipt_replay.entries.is_empty());
+        let whole_tail = state.invocation_observation_tail(None, 4).await.unwrap();
+        assert_eq!(
+            whole_tail
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[tokio::test]
     async fn sys_invocation_tail_partial_cursor_tracks_admission_between_polls() {
         assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
         let (_temp, repo) = repository();
