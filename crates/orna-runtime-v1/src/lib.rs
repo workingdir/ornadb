@@ -625,6 +625,8 @@ pub struct TableMutation {
     table: String,
     key: Vec<u8>,
     value: Option<Vec<u8>>,
+    rekey_to: Option<Vec<u8>>,
+    insert_only: bool,
 }
 
 impl TableMutation {
@@ -641,6 +643,54 @@ impl TableMutation {
             table,
             key,
             value,
+            rekey_to: None,
+            insert_only: false,
+        })
+    }
+
+    /// Creates an insert-only operation. Commit rejects an occupied key
+    /// instead of replacing the row as the generic replacement constructor does.
+    pub fn insert(
+        id: [u8; 16],
+        table: impl Into<String>,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> Result<Self, RuntimeError> {
+        let table = table.into();
+        validate_table_mutation(id, &table, &key, Some(&value))?;
+        Ok(Self {
+            id,
+            table,
+            key,
+            value: Some(value),
+            rekey_to: None,
+            insert_only: true,
+        })
+    }
+
+    /// Creates one explicit primary-key move, retaining the semantic intent
+    /// through the durable mutation ledger. The replacement row is supplied
+    /// because the application layer owns the admitted key-field schema.
+    pub fn rekey(
+        id: [u8; 16],
+        table: impl Into<String>,
+        old_key: Vec<u8>,
+        new_key: Vec<u8>,
+        replacement: Vec<u8>,
+    ) -> Result<Self, RuntimeError> {
+        let table = table.into();
+        validate_table_mutation(id, &table, &old_key, Some(&replacement))?;
+        validate_table_identity(&table, &new_key)?;
+        if old_key == new_key {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        Ok(Self {
+            id,
+            table,
+            key: old_key,
+            value: Some(replacement),
+            rekey_to: Some(new_key),
+            insert_only: false,
         })
     }
 
@@ -660,6 +710,16 @@ impl TableMutation {
         self.value.as_deref()
     }
 
+    /// Returns the destination key for an explicit semantic re-key.
+    pub fn rekey_to(&self) -> Option<&[u8]> {
+        self.rekey_to.as_deref()
+    }
+
+    /// Whether this mutation requires its destination key to be absent.
+    pub fn is_insert(&self) -> bool {
+        self.insert_only
+    }
+
     /// Decodes a mutation previously produced by this typed boundary.
     /// Generic runtime mutations are rejected unless their payload, digest,
     /// and canonical table operation all validate together.
@@ -669,16 +729,38 @@ impl TableMutation {
         if digest != mutation.digest {
             return Err(RuntimeError::InvalidTableMutation);
         }
-        let mut cursor = 0;
-        let prefix = b"ORNA-TABLE-MUTATION\0";
-        if mutation.payload.get(..prefix.len()) != Some(prefix) {
+        let (mut cursor, version_two) = if mutation
+            .payload
+            .starts_with(b"ORNA-TABLE-MUTATION-2\0")
+        {
+            (b"ORNA-TABLE-MUTATION-2\0".len(), true)
+        } else if mutation.payload.starts_with(b"ORNA-TABLE-MUTATION\0") {
+            (b"ORNA-TABLE-MUTATION\0".len(), false)
+        } else {
             return Err(RuntimeError::InvalidTableMutation);
-        }
-        cursor += prefix.len();
+        };
         let table =
             String::from_utf8(read_length_prefixed(&mutation.payload, &mut cursor)?.to_vec())
                 .map_err(|_| RuntimeError::InvalidTableMutation)?;
         let key = read_length_prefixed(&mutation.payload, &mut cursor)?.to_vec();
+        let operation = if version_two {
+            Some(
+                *mutation
+                    .payload
+                    .get(cursor)
+                    .ok_or(RuntimeError::InvalidTableMutation)?,
+            )
+        } else {
+            None
+        };
+        if version_two {
+            cursor += 1;
+        }
+        let rekey_to = if operation == Some(2) {
+            Some(read_length_prefixed(&mutation.payload, &mut cursor)?.to_vec())
+        } else {
+            None
+        };
         let value = match mutation.payload.get(cursor).copied() {
             Some(0) => {
                 cursor += 1;
@@ -693,11 +775,31 @@ impl TableMutation {
         if cursor != mutation.payload.len() {
             return Err(RuntimeError::InvalidTableMutation);
         }
-        Self::new(mutation.id, table, key, value)
+        match (operation, rekey_to) {
+            (Some(1), None) => Self::insert(
+                mutation.id,
+                table,
+                key,
+                value.ok_or(RuntimeError::InvalidTableMutation)?,
+            ),
+            (Some(2), Some(new_key)) => Self::rekey(
+                mutation.id,
+                table,
+                key,
+                new_key,
+                value.ok_or(RuntimeError::InvalidTableMutation)?,
+            ),
+            (None, None) => Self::new(mutation.id, table, key, value),
+            _ => Err(RuntimeError::InvalidTableMutation),
+        }
     }
 
     fn runtime_mutation(&self) -> Result<Mutation, RuntimeError> {
-        let payload = encode_table_mutation(self)?;
+        let payload = if self.rekey_to.is_some() || self.insert_only {
+            encode_v2_table_mutation(self)?
+        } else {
+            encode_table_mutation(self)?
+        };
         Ok(Mutation {
             id: self.id,
             digest: Sha256::digest(&payload).into(),
@@ -16036,6 +16138,30 @@ fn encode_table_mutation(mutation: &TableMutation) -> Result<Vec<u8>, RuntimeErr
     Ok(payload)
 }
 
+fn encode_v2_table_mutation(mutation: &TableMutation) -> Result<Vec<u8>, RuntimeError> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"ORNA-TABLE-MUTATION-2\0");
+    append_length_prefixed(&mut payload, mutation.table().as_bytes())?;
+    append_length_prefixed(&mut payload, mutation.key())?;
+    if let Some(new_key) = mutation.rekey_to() {
+        payload.push(2);
+        append_length_prefixed(&mut payload, new_key)?;
+    } else if mutation.is_insert() {
+        payload.push(1);
+    } else {
+        return Err(RuntimeError::InvalidTableMutation);
+    }
+    payload.push(1);
+    append_length_prefixed(
+        &mut payload,
+        mutation.value().ok_or(RuntimeError::InvalidTableMutation)?,
+    )?;
+    if payload.len() > MAX_TABLE_MUTATION_BYTES {
+        return Err(RuntimeError::InvalidTableMutation);
+    }
+    Ok(payload)
+}
+
 fn append_length_prefixed(target: &mut Vec<u8>, value: &[u8]) -> Result<(), RuntimeError> {
     target.extend_from_slice(
         &u32::try_from(value.len())
@@ -16072,6 +16198,96 @@ async fn apply_table_mutation_tx(
     connection: &Connection,
     mutation: &TableMutation,
 ) -> Result<(), RuntimeError> {
+    if let Some(new_key) = mutation.rekey_to() {
+        let mut rows = connection
+            .query(
+                "SELECT 1 FROM table_row WHERE table_id = ?1 AND row_key = ?2 LIMIT 1",
+                params![mutation.table().to_owned(), mutation.key().to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .is_none()
+        {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        let mut rows = connection
+            .query(
+                "SELECT 1 FROM table_row WHERE table_id = ?1 AND row_key = ?2 LIMIT 1",
+                params![mutation.table().to_owned(), new_key.to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .is_some()
+        {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        let value = mutation
+            .value()
+            .ok_or(RuntimeError::InvalidTableMutation)?;
+        let digest: [u8; 32] = Sha256::digest(value).into();
+        connection
+            .execute(
+                "DELETE FROM table_row WHERE table_id = ?1 AND row_key = ?2",
+                params![mutation.table().to_owned(), mutation.key().to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        connection
+            .execute(
+                "INSERT INTO table_row (table_id, row_key, row_value, row_digest)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    mutation.table().to_owned(),
+                    new_key.to_vec(),
+                    value.to_vec(),
+                    digest.to_vec()
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        return Ok(());
+    }
+    if mutation.is_insert() {
+        let value = mutation.value().ok_or(RuntimeError::InvalidTableMutation)?;
+        let mut rows = connection
+            .query(
+                "SELECT 1 FROM table_row WHERE table_id = ?1 AND row_key = ?2 LIMIT 1",
+                params![mutation.table().to_owned(), mutation.key().to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .is_some()
+        {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        let digest: [u8; 32] = Sha256::digest(value).into();
+        connection
+            .execute(
+                "INSERT INTO table_row (table_id, row_key, row_value, row_digest)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    mutation.table().to_owned(),
+                    mutation.key().to_vec(),
+                    value.to_vec(),
+                    digest.to_vec()
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        return Ok(());
+    }
     match &mutation.value {
         Some(value) => {
             let digest: [u8; 32] = Sha256::digest(value).into();
@@ -16228,33 +16444,65 @@ async fn append_mutations_with_catalogue_tx(
                 .get(0)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
         );
-        if mutation.payload.starts_with(b"ORNA-TABLE-MUTATION\0") {
+        if mutation.payload.starts_with(b"ORNA-TABLE-MUTATION\0")
+            || mutation.payload.starts_with(b"ORNA-TABLE-MUTATION-2\0")
+        {
             let table_mutation = TableMutation::decode(mutation)?;
             let sequence = sequence.ok_or(RuntimeError::RecoveryInvalid)?;
-            let (value, row_digest, deleted) = match table_mutation.value() {
-                Some(value) => (
-                    Some(value.to_vec()),
-                    Some(Sha256::digest(value).to_vec()),
-                    0_i64,
-                ),
-                None => (None, None, 1_i64),
-            };
-            connection
-                .execute(
-                    "INSERT INTO runtime_table_history
-                     (mutation_sequence, table_id, row_key, row_value, row_digest, deleted)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![
-                        sequence,
-                        table_mutation.table().to_owned(),
-                        table_mutation.key().to_vec(),
-                        value,
-                        row_digest,
-                        deleted,
-                    ],
-                )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            if let Some(new_key) = table_mutation.rekey_to() {
+                connection
+                    .execute(
+                        "INSERT INTO runtime_table_history
+                         (mutation_sequence, table_id, row_key, row_value, row_digest, deleted)
+                         VALUES (?1, ?2, ?3, NULL, NULL, 1)",
+                        params![sequence, table_mutation.table().to_owned(), table_mutation.key()],
+                    )
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                let value = table_mutation
+                    .value()
+                    .ok_or(RuntimeError::RecoveryInvalid)?;
+                connection
+                    .execute(
+                        "INSERT INTO runtime_table_history
+                         (mutation_sequence, table_id, row_key, row_value, row_digest, deleted)
+                         VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                        params![
+                            sequence,
+                            table_mutation.table().to_owned(),
+                            new_key,
+                            value,
+                            Sha256::digest(value).to_vec()
+                        ],
+                    )
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+            } else {
+                let (value, row_digest, deleted) = match table_mutation.value() {
+                    Some(value) => (
+                        Some(value.to_vec()),
+                        Some(Sha256::digest(value).to_vec()),
+                        0_i64,
+                    ),
+                    None => (None, None, 1_i64),
+                };
+                connection
+                    .execute(
+                        "INSERT INTO runtime_table_history
+                         (mutation_sequence, table_id, row_key, row_value, row_digest, deleted)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![
+                            sequence,
+                            table_mutation.table().to_owned(),
+                            table_mutation.key().to_vec(),
+                            value,
+                            row_digest,
+                            deleted,
+                        ],
+                    )
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+            }
         }
     }
     faults.check(FaultPoint::AfterMutation)?;
@@ -17899,6 +18147,78 @@ mod tests {
             state.committed_table_row("books", &[1]).await.unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn explicit_rekey_is_atomic_and_retained_as_one_mutation() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        state
+            .commit_table_activation(
+                lease,
+                &context,
+                &[table_mutation(5, 1, Some(9)), table_mutation(6, 2, Some(8))],
+                digest(7),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+
+        let context = state.begin_activation().await.unwrap();
+        let duplicate_insert =
+            TableMutation::insert(id(12), "books", vec![1], vec![11]).unwrap();
+        let before = context.capture().clone();
+        assert_eq!(
+            state
+                .commit_table_activation(
+                    lease,
+                    &context,
+                    &[duplicate_insert],
+                    digest(12),
+                    &NoFault,
+                )
+                .await,
+            Err(RuntimeError::InvalidTableMutation)
+        );
+        assert_eq!(state.capture().await.unwrap(), before);
+        assert_eq!(state.committed_table_row("books", &[1]).await.unwrap(), Some(vec![9]));
+
+        let insert = TableMutation::insert(id(13), "books", vec![3], vec![7]).unwrap();
+        state
+            .commit_table_activation(lease, &context, &[insert], digest(13), &NoFault)
+            .await
+            .unwrap();
+        assert_eq!(state.committed_table_row("books", &[3]).await.unwrap(), Some(vec![7]));
+
+        let context = state.begin_activation().await.unwrap();
+        let occupied = TableMutation::rekey(id(8), "books", vec![1], vec![2], vec![10])
+            .unwrap();
+        let before = context.capture().clone();
+        assert_eq!(
+            state
+                .commit_table_activation(lease, &context, &[occupied], digest(9), &NoFault)
+                .await,
+            Err(RuntimeError::InvalidTableMutation)
+        );
+        assert_eq!(state.capture().await.unwrap(), before);
+        assert_eq!(state.committed_table_row("books", &[1]).await.unwrap(), Some(vec![9]));
+        assert_eq!(state.committed_table_row("books", &[2]).await.unwrap(), Some(vec![8]));
+
+        let rekey = TableMutation::rekey(id(10), "books", vec![1], vec![4], vec![10]).unwrap();
+        state
+            .commit_table_activation(lease, &context, &[rekey], digest(11), &NoFault)
+            .await
+            .unwrap();
+        assert_eq!(state.committed_table_row("books", &[1]).await.unwrap(), None);
+        assert_eq!(state.committed_table_row("books", &[4]).await.unwrap(), Some(vec![10]));
+
+        let pending = state.pending().await.unwrap();
+        let retained = TableMutation::decode(pending.last().unwrap()).unwrap();
+        assert_eq!(retained.key(), &[1]);
+        assert_eq!(retained.rekey_to(), Some(&[4][..]));
+        assert!(pending.last().unwrap().payload.starts_with(b"ORNA-TABLE-MUTATION-2\0"));
     }
 
     #[tokio::test]
