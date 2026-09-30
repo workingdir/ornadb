@@ -402,6 +402,7 @@ fn schema_type_graph_rejects_dangling_and_misaligned_inventory_edges() {
         .find(|relation| relation["name"] == "sys.DiffEntry")
         .unwrap();
     diff_entry["key_fields"][2] = serde_json::json!("change.unknown");
+    diff_entry["key"] = serde_json::json!("from + to + change.unknown + change.target");
     let error = build_support::validate_api_document(&broken_nested_key).unwrap_err();
     assert!(
         error.contains("cannot resolve field path `change.unknown`"),
@@ -431,6 +432,40 @@ fn schema_type_graph_rejects_dangling_and_misaligned_inventory_edges() {
     assert!(
         error.contains("has unresolved replacement `sys.unknown`"),
         "removed names must point at a live public replacement: {error}"
+    );
+}
+
+#[test]
+fn relation_natural_key_summary_stays_aligned_with_key_paths() {
+    let generated: Value = serde_json::from_str(&orna_sys_v1::system_api_json()).unwrap();
+    build_support::validate_api_document(&generated).expect("published relation keys are aligned");
+
+    let mut stale_summary = generated.clone();
+    let storage = stale_summary["relations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|relation| relation["name"] == "sys.Storage")
+        .unwrap();
+    storage["key"] = serde_json::json!("profile");
+    let error = build_support::validate_api_document(&stale_summary).unwrap_err();
+    assert!(
+        error.contains("relation `sys.Storage` key `profile` does not match key_fields `object`"),
+        "human-readable natural keys must describe their structured key paths: {error}"
+    );
+
+    let mut stale_paths = generated;
+    let storage = stale_paths["relations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|relation| relation["name"] == "sys.Storage")
+        .unwrap();
+    storage["key_fields"][0] = serde_json::json!("profile");
+    let error = build_support::validate_api_document(&stale_paths).unwrap_err();
+    assert!(
+        error.contains("relation `sys.Storage` key `object` does not match key_fields `profile`"),
+        "structured key paths must not drift from their published summary: {error}"
     );
 }
 
