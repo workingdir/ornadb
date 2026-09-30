@@ -66,6 +66,8 @@ const SOURCE_REMAINDER_SCAN_BOUNDARY_TAIL: &str =
     include_str!("fixtures/source_remainder_scan_boundary_tail.orna");
 const SOURCE_REMAINDER_SCAN_BOUND_CLOSURE_TAIL: &str =
     include_str!("fixtures/source_remainder_scan_bound_closure_tail.orna");
+const SOURCE_REMAINDER_MIXED_SCAN_BOUNDS_TAIL: &str =
+    include_str!("fixtures/source_remainder_mixed_scan_bounds_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -7026,6 +7028,151 @@ fn explain_closes_source_remainder_with_partial_scan_bound() {
 
     let surface = serde_json::to_value(&overflow)
         .expect("source remainder partial-scan-bound overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_source_remainder_across_mixed_scan_bounds() {
+    let parsed = orna_syntax_v1::parse_module(SOURCE_REMAINDER_MIXED_SCAN_BOUNDS_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 4);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Following the existing
+    // pragmatic 4-KiB-per-scan lower bound, the source's first remainder
+    // contributes 2^52; a rows-only scan and a bytes-only scan contribute
+    // independent partial bounds. Their 2^52 + rows + one-byte tail closes
+    // exactly at MAX, and 4097 bytes or one more row crosses it. The unknown
+    // fourth scan must not discard the known lower bound.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let rows_to_close_source_and_byte_tail = u64::MAX - MAX_BYTE_BLOCKS - 1;
+    let explain = |tail_bytes, row_bound| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:source-remainder-mixed-scan-bounds-tail",
+            ),
+            source: obj("table:SourceRemainderMixedBoundsSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderMixedBoundsRows"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(row_bound),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderMixedBoundsBytes"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderMixedBoundsUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:source-remainder-mixed-scan-bounds")),
+        })
+        .expect("source remainder and mixed partial scan bounds through unknown tail")
+    };
+
+    let one_below = explain(0, rows_to_close_source_and_byte_tail);
+    assert_eq!(one_below.plan().estimated_cost(), None);
+    assert_eq!(one_below.root().details().get("estimated_cost_overflow"), None);
+
+    let exact = explain(1, rows_to_close_source_and_byte_tail);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None,
+        "the source remainder and two independent scan bounds close at MAX"
+    );
+
+    let row_overflow = explain(1, rows_to_close_source_and_byte_tail + 1);
+    let byte_overflow = explain(4_097, rows_to_close_source_and_byte_tail);
+    for overflow in [&row_overflow, &byte_overflow] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "either partial scan bound crosses MAX through the unknown suffix"
+        );
+    }
+
+    let nodes = byte_overflow.nodes();
+    let source_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderMixedBoundsSource"))
+        })
+        .expect("near-MAX source remainder scan");
+    assert_eq!(source_scan.estimated_bytes(), Some(FIRST_REMAINDER_SOURCE_BYTES));
+    assert_eq!(source_scan.estimated_work(), None);
+    let rows_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderMixedBoundsRows"))
+        })
+        .expect("rows-only scan bound");
+    assert_eq!(
+        rows_scan.estimated_rows(),
+        Some(rows_to_close_source_and_byte_tail)
+    );
+    assert_eq!(rows_scan.estimated_bytes(), None);
+    assert_eq!(rows_scan.estimated_work(), None);
+    let bytes_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderMixedBoundsBytes"))
+        })
+        .expect("bytes-only scan bound one byte over its block");
+    assert_eq!(bytes_scan.estimated_rows(), None);
+    assert_eq!(bytes_scan.estimated_bytes(), Some(4_097));
+    assert_eq!(bytes_scan.estimated_work(), None);
+    let unknown_scan_position = nodes
+        .iter()
+        .position(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderMixedBoundsUnknown"))
+        })
+        .expect("unknown fourth scan");
+    let bytes_scan_position = nodes
+        .iter()
+        .position(|node| node.reference() == bytes_scan.reference())
+        .expect("bytes-only scan position");
+    assert!(unknown_scan_position > bytes_scan_position);
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&byte_overflow)
+        .expect("mixed scan-bound overflow surface");
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
