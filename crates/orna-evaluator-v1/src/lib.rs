@@ -2064,20 +2064,28 @@ impl Context<'_, '_> {
                 .checked_decimal(DecimalValue::new(value, BigInt::zero())?)
                 .map(Value::Decimal),
             "day" | "days" => Ok(Value::Period { days: value }),
-            "hour" | "hours" => Ok(Value::Duration {
-                seconds: value
+            "hour" | "hours" => {
+                let seconds = value
                     .checked_mul(&BigInt::from(3_600u32))
-                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?,
-                nanosecond: 0,
-            }),
-            "minute" | "minutes" | "min" => Ok(Value::Duration {
-                seconds: value
+                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                // Enforce the integer budget after conversion to the stored
+                // seconds unit, as decimal duration postfixes do.
+                Ok(Value::Duration {
+                    seconds: self.integer(seconds)?,
+                    nanosecond: 0,
+                })
+            }
+            "minute" | "minutes" | "min" => {
+                let seconds = value
                     .checked_mul(&BigInt::from(60u32))
-                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?,
-                nanosecond: 0,
-            }),
+                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                Ok(Value::Duration {
+                    seconds: self.integer(seconds)?,
+                    nanosecond: 0,
+                })
+            }
             "second" | "seconds" | "s" => Ok(Value::Duration {
-                seconds: value,
+                seconds: self.integer(value)?,
                 nanosecond: 0,
             }),
             _ => Err(error("ORNA-EVAL-TYPE")),
@@ -7086,7 +7094,16 @@ fn format_duration(name: &str, seconds: &BigInt, nanosecond: u32) -> String {
             } else {
                 total_hours
             };
-            format!("{sign}{total_hours}:{minutes:02}:{fractional_seconds:0>2}")
+            // Pad the integral seconds field before its decimal tail; padding
+            // the combined fractional text leaves single-digit seconds short.
+            let clock_seconds = if fraction == 0 {
+                format!("{whole_seconds:02}")
+            } else {
+                format!("{whole_seconds:02}.{fraction:09}")
+                    .trim_end_matches('0')
+                    .to_owned()
+            };
+            format!("{sign}{total_hours}:{minutes:02}:{clock_seconds}")
         }
         "duration.words.format" => {
             let mut parts = Vec::new();
