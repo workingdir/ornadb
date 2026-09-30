@@ -2506,6 +2506,41 @@ mod tests {
             );
         }
 
+        let mut singleton_enum_collision = document();
+        singleton_enum_collision["singletons"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "availability": "fixture singleton",
+                "name": "sys.DiffScope",
+                "type": "sys.DatabaseView"
+            }));
+        let singleton_count = singleton_enum_collision["singletons"]
+            .as_array()
+            .unwrap()
+            .len();
+        singleton_enum_collision["counts"]["singletons"] = serde_json::json!(singleton_count);
+        assert_eq!(
+            SystemApi::from_json(&singleton_enum_collision.to_string()),
+            Err(SystemApiError::InvalidDefault),
+            "a singleton path prefix takes precedence over a matching enum name"
+        );
+
+        let mut singleton_field_default = singleton_enum_collision;
+        let diff = function_index(&singleton_field_default, "sys.diff");
+        let signature = singleton_field_default["functions"][diff]["signature"]
+            .as_str()
+            .unwrap()
+            .replace(
+                "scope: sys.DiffScope = sys.DiffScope.all",
+                "scope: sys.SnapshotRef = sys.DiffScope.cwd",
+            );
+        singleton_field_default["functions"][diff]["signature"] = serde_json::json!(signature);
+        assert!(
+            SystemApi::from_json(&singleton_field_default.to_string()).is_ok(),
+            "a colliding path that resolves to a correctly typed singleton field is valid"
+        );
+
         let mut required_after_default = document();
         let resolve = function_index(&required_after_default, "sys.resolve");
         let signature = required_after_default["functions"][resolve]["signature"]
