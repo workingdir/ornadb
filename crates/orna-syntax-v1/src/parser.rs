@@ -3293,11 +3293,33 @@ impl Parser {
                 Some(
                     Keyword::For | Keyword::While | Keyword::Loop | Keyword::If | Keyword::Case,
                 ) => {
-                    let value = self.parse_control_expression();
+                    // Parse the complete expression spine before deciding
+                    // whether this control form is a statement or the block
+                    // tail. This preserves postfix/infix continuations and
+                    // lets a final unsemicolonated control expression produce
+                    // its value; a following block item is an unambiguous
+                    // statement boundary under ORNA-PARSE-002.
+                    let value = self.expr().unwrap_or_else(|| self.error_expr());
                     let span = value.span();
-                    statements.push(Statement::Control { value, span });
                     if self.is_punct(";") {
+                        if matches!(&value, Expr::Control { .. }) {
+                            statements.push(Statement::Control { value, span });
+                        } else {
+                            statements.push(Statement::Expression { value, span });
+                        }
                         self.bump()
+                    } else if self.is_punct("}") {
+                        tail = Some(Box::new(value));
+                        break;
+                    } else if matches!(&value, Expr::Control { .. }) {
+                        statements.push(Statement::Control { value, span });
+                    } else {
+                        statements.push(Statement::Expression { value, span });
+                        self.error_here(
+                            "ORNA-PARSE-002",
+                            "expected `;` after expression statement",
+                        );
+                        break;
                     }
                 }
                 _ => {
