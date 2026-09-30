@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 fn render_source_fixture(template: &str, replacements: &[(&str, &str)]) -> String {
     let mut source = template.to_owned();
     for (name, value) in replacements {
@@ -2621,6 +2621,7 @@ fn historical_effect_catalogue(effect: &str) -> Catalogue {
             may_fail: true,
         },
         generic_parameters: Vec::new(),
+        enum_variants: BTreeSet::new(),
         table_schema: None,
     };
     let symbols = std::collections::BTreeMap::from([("run".to_owned(), symbol)]);
