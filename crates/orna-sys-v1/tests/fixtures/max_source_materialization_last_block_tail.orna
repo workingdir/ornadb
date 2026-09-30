@@ -1,0 +1,2 @@
+pub table MaxSourceMaterializationLastBlock(id: Int) { value: Int, }
+pub fn max_source_materialization_last_block() = MaxSourceMaterializationLastBlock;
