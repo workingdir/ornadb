@@ -4438,6 +4438,201 @@ fn mixed_trust_closure_sources_keep_sibling_replacements_independent() {
 }
 
 #[test]
+fn mixed_trust_sibling_closures_cross_restore_captured_generations() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let untrusted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(message).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let original = vec![
+        admitted("ORNA-E-CROSS-OLD-ADMITTED", "cross old admitted parent")
+            .with_cause(untrusted("ORNA-E-CROSS-OLD-CHILD", "cross old child secret")),
+        untrusted("ORNA-E-CROSS-OLD-RAW", "cross old raw parent secret")
+            .with_cause(admitted("ORNA-E-CROSS-OLD-RAW-CHILD", "cross old raw child secret")),
+    ];
+    let replacement = vec![
+        untrusted("ORNA-E-CROSS-NEW-RAW", "cross new raw parent secret")
+            .with_cause(admitted("ORNA-E-CROSS-NEW-RAW-CHILD", "cross new raw child secret")),
+        admitted("ORNA-E-CROSS-NEW-ADMITTED", "cross new admitted parent")
+            .with_cause(untrusted("ORNA-E-CROSS-NEW-CHILD", "cross new child secret")),
+    ];
+    let old_projection = serde_json::to_value(&original).unwrap();
+    let old_wires = original
+        .iter()
+        .map(|diagnostic| diagnostic.encode_ovb().unwrap())
+        .collect::<Vec<_>>();
+    let new_projection = serde_json::to_value(&replacement).unwrap();
+    let new_wires = replacement
+        .iter()
+        .map(|diagnostic| diagnostic.encode_ovb().unwrap())
+        .collect::<Vec<_>>();
+
+    // The Orna reference specifies immutable closure captures and diagnostic
+    // redaction, but leaves host clone_from slot reuse unspecified. Captured
+    // sibling generations therefore act as owned, immutable replacement sources.
+    let mut left = original.clone();
+    let mut right = replacement.clone();
+    let left_source_snapshot = left.clone();
+    let right_source_snapshot = right.clone();
+    let capture_left = move || left_source_snapshot.clone();
+    let capture_right = move || right_source_snapshot.clone();
+
+    left.clone_from(&capture_right());
+    right.clone_from(&capture_left());
+    let left_crossed = left.clone();
+    let right_crossed = right.clone();
+    assert_eq!(left_crossed, replacement);
+    assert_eq!(right_crossed, original);
+
+    let left_crossed_source_snapshot = left_crossed.clone();
+    let right_crossed_source_snapshot = right_crossed.clone();
+    let capture_left_crossed = move || left_crossed_source_snapshot.clone();
+    let capture_right_crossed = move || right_crossed_source_snapshot.clone();
+    left.clone_from(&capture_right_crossed());
+    right.clone_from(&capture_left_crossed());
+    let left_restored = left.clone();
+    let right_restored = right.clone();
+    assert_eq!(left_restored, original);
+    assert_eq!(right_restored, replacement);
+
+    assert_eq!(serde_json::to_value(&original).unwrap(), old_projection);
+    assert_eq!(
+        original
+            .iter()
+            .map(|diagnostic| diagnostic.encode_ovb().unwrap())
+            .collect::<Vec<_>>(),
+        old_wires
+    );
+    assert_eq!(serde_json::to_value(&replacement).unwrap(), new_projection);
+    assert_eq!(
+        replacement
+            .iter()
+            .map(|diagnostic| diagnostic.encode_ovb().unwrap())
+            .collect::<Vec<_>>(),
+        new_wires
+    );
+
+    let compose_crossed_generations = {
+        let first_left = left_crossed.clone();
+        let first_right = right_crossed.clone();
+        let restored_left = left_restored.clone();
+        let restored_right = right_restored.clone();
+        move || {
+            let mut outer = admitted("ORNA-E-CROSS-OUTER", "cross outer closure admission");
+            for cause in [
+                first_left[0].clone(),
+                first_right[1].clone(),
+                restored_left[0].clone(),
+                restored_right[1].clone(),
+            ] {
+                outer = outer.with_cause(cause);
+            }
+            outer
+        }
+    };
+    let empty: Vec<Diagnostic> = Vec::new();
+    left.clone_from(&empty);
+    right.clone_from(&empty);
+    assert!(left.is_empty() && right.is_empty());
+
+    let outer = compose_crossed_generations();
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["message"], "cross outer closure admission");
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 4);
+    for cause in causes {
+        assert_eq!(cause["message"], "<redacted>");
+        assert_eq!(cause["causes"].as_array().unwrap().len(), 1);
+        assert_eq!(cause["causes"][0]["message"], "<redacted>");
+    }
+
+    let envelope = serde_json::json!({
+        "outer": outer.clone(),
+        "left_restored": left_restored,
+        "right_restored": right_restored,
+    });
+    let json = serde_json::to_vec(&envelope).unwrap();
+    for message in [
+        b"cross outer closure admission".as_slice(),
+        b"cross old admitted parent".as_slice(),
+        b"cross new admitted parent".as_slice(),
+    ] {
+        assert_eq!(
+            json.windows(message.len())
+                .filter(|window| *window == message)
+                .count(),
+            1
+        );
+    }
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            b"cross old raw parent secret".as_slice(),
+            b"cross new raw parent secret".as_slice(),
+            b"cross old child secret".as_slice(),
+            b"cross old raw child secret".as_slice(),
+            b"cross new raw child secret".as_slice(),
+            b"cross new child secret".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+
+    let wire = outer.encode_ovb().unwrap();
+    assert!(
+        wire.windows(b"cross outer closure admission".len())
+            .any(|window| window == b"cross outer closure admission")
+    );
+    for disclosure in [
+        fixture.as_bytes(),
+        b"cross old admitted parent".as_slice(),
+        b"cross new admitted parent".as_slice(),
+        b"cross old raw parent secret".as_slice(),
+        b"cross new raw parent secret".as_slice(),
+        b"cross new child secret".as_slice(),
+    ]
+    .into_iter()
+    .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
+    {
+        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    assert_eq!(
+        decoded["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cause| cause["causes"].as_array().unwrap().len())
+            .collect::<Vec<_>>(),
+        [1, 1, 1, 1]
+    );
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
