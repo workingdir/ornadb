@@ -1287,7 +1287,7 @@ fn is_safe_diagnostic_path(file_path: &str) -> bool {
 /// Live-protocol `Diagnostic`: tag 60011 around exact integer-key map
 /// `{0: code, 1: severity, 2: message, 3: spans, 4: notes, 5: causes,
 /// 6: redacted, 7?: stable diagnostic UUID}`. Causes are recursively tagged.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Diagnostic {
     code: SafeText,
     severity: DiagnosticSeverity,
@@ -1297,6 +1297,23 @@ pub struct Diagnostic {
     causes: Vec<Diagnostic>,
     redacted: bool,
     reference: Option<[u8; 16]>,
+}
+impl fmt::Debug for Diagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // SafeText validates syntax, not disclosure. Never let Debug become
+        // an implicit grant to print caller-controlled text or nested causes.
+        formatter
+            .debug_struct("Diagnostic")
+            .field("code", &"<redacted>")
+            .field("severity", &self.severity)
+            .field("message", &"<redacted>")
+            .field("spans", &"<redacted>")
+            .field("notes", &"<redacted>")
+            .field("causes", &"<redacted>")
+            .field("redacted", &self.redacted)
+            .field("reference", &self.reference)
+            .finish()
+    }
 }
 impl Diagnostic {
     pub fn new(
