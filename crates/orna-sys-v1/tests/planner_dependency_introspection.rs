@@ -1075,16 +1075,27 @@ fn explain_unknown_intermediate_keeps_exact_maximum_known_subtotal() {
 }
 
 #[test]
-fn explain_cost_boundary_retains_overflow_before_an_unknown_tail() {
+fn explain_cost_boundary_retains_overflow_before_unknown_join_tails() {
     let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
 
     let explain_after_updates = |last_update_rows| {
         explain_query(&QueryPlanDescription {
-            snapshot: SnapshotRef::descriptive("snapshot:boundary-before-unknown-tail"),
+            snapshot: SnapshotRef::descriptive("snapshot:boundary-before-unknown-join-tails"),
             source: obj("table:missing-stats"),
             source_statistics: None,
-            joins: Vec::new(),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:unknown-first-join"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:unknown-second-join"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
             predicate: None,
             projections: Vec::new(),
             distinct: false,
@@ -1106,9 +1117,9 @@ fn explain_cost_boundary_retains_overflow_before_an_unknown_tail() {
                     estimated_table_rows_before: Some(1),
                 },
             ],
-            materialize_into: Some(obj("materialization:boundary-before-unknown")),
+            materialize_into: Some(obj("materialization:boundary-before-unknown-joins")),
         })
-        .expect("known cost boundary followed by an unknown scan estimate")
+        .expect("known cost boundary followed by unknown join tails")
     };
 
     let exact = explain_after_updates(1);
@@ -1125,8 +1136,22 @@ fn explain_cost_boundary_retains_overflow_before_an_unknown_tail() {
         .filter_map(|node| node.estimated_work())
         .collect::<Vec<_>>();
     assert_eq!(exact_known_work, [1, 1, u64::MAX - 2]);
-    assert_eq!(exact.nodes().last().unwrap().kind(), PlanNodeKind::Scan);
-    assert_eq!(exact.nodes().last().unwrap().estimated_work(), None);
+    let unknown_tail = &exact.nodes()[3..];
+    assert_eq!(
+        unknown_tail
+            .iter()
+            .filter(|node| node.kind() == PlanNodeKind::Join)
+            .count(),
+        2
+    );
+    assert_eq!(
+        unknown_tail
+            .iter()
+            .filter(|node| node.kind() == PlanNodeKind::Scan)
+            .count(),
+        3
+    );
+    assert!(unknown_tail.iter().all(|node| node.estimated_work().is_none()));
 
     let overflow = explain_after_updates(2);
     assert_eq!(overflow.plan().estimated_cost(), None);
@@ -1136,9 +1161,10 @@ fn explain_cost_boundary_retains_overflow_before_an_unknown_tail() {
         Some(&PlanDetail::Boolean(true)),
         "overflow proven before the unknown scan remains visible on the root"
     );
-    assert_eq!(overflow.nodes().last().unwrap().kind(), PlanNodeKind::Scan);
-    assert_eq!(overflow.nodes().last().unwrap().estimated_work(), None);
-    let surface = serde_json::to_value(&overflow).expect("boundary overflow with unknown tail");
+    assert!(overflow.nodes()[3..]
+        .iter()
+        .all(|node| node.estimated_work().is_none()));
+    let surface = serde_json::to_value(&overflow).expect("boundary overflow with unknown tails");
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
