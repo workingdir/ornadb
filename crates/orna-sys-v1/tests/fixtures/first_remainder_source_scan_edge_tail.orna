@@ -1,0 +1,5 @@
+pub table FirstRemainderSourceScanEdgeSource(id: Int) { value: Int, }
+pub table FirstRemainderSourceScanEdgeTail(id: Int) { value: Int, }
+pub table FirstRemainderSourceScanEdgeUnknown(id: Int) { value: Int, }
+pub table FirstRemainderSourceScanEdgeTarget(id: Int) { value: Int, }
+pub fn delete_first_remainder_source_scan_edge() = FirstRemainderSourceScanEdgeTarget.delete(1);
