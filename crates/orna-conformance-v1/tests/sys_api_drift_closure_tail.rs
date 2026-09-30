@@ -6,6 +6,7 @@ const FROZEN_SYS_API: &str = include_str!("fixtures/reference/api/sys.json");
 const PUBLICATION_SURFACE: &str = include_str!("fixtures/sys-api-drift-publication-surface.orna");
 const INTERNAL_PUBLICATION_METADATA: &str =
     include_str!("fixtures/sys-api-drift-internal-publication-metadata.orna");
+const DEFAULT_ARGUMENTS: &str = include_str!("fixtures/sys-api-drift-default-arguments.orna");
 
 #[test]
 fn published_api_matches_the_frozen_schema_and_keeps_local_provenance() {
@@ -30,6 +31,23 @@ fn publication_surface_fixture_uses_frozen_sys_fields() {
         PUBLICATION_SURFACE,
     )]);
     assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
+}
+
+#[test]
+fn default_argument_fixture_uses_published_schema_edges() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-default-arguments.orna",
+        DEFAULT_ARGUMENTS,
+    )]);
+    assert!(
+        analysis.is_ok(),
+        "{:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
