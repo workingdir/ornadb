@@ -625,6 +625,79 @@ fn checkpoint_budget_tail_reports_only_the_crossing_id_after_a_row_conflict() {
 }
 
 #[test]
+fn zero_conflict_budget_stops_at_first_checkpoint_after_fixture_row_merge() {
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"base", vec![parse_fixture(BASE, RowKeyKind::Explicit)]);
+    source.add(MergeSide::Left, b"left", vec![parse_fixture(LEFT, RowKeyKind::Explicit)]);
+    source.add(MergeSide::Right, b"right", vec![parse_fixture(RIGHT, RowKeyKind::Explicit)]);
+
+    let mut base = snapshot(schema(true, FieldType::Str), manifest(1, 1, b"base"), None);
+    let mut left = snapshot(schema(true, FieldType::Str), manifest(2, 2, b"left"), None);
+    let mut right = snapshot(schema(true, FieldType::Str), manifest(3, 3, b"right"), None);
+
+    let clean_id = b"consumer/a-clean".to_vec();
+    base.checkpoints.insert(
+        clean_id.clone(),
+        CheckpointGeneration { generation: 1, position: Some(b"base".to_vec()) },
+    );
+    left.checkpoints.insert(
+        clean_id.clone(),
+        CheckpointGeneration { generation: 2, position: Some(b"left".to_vec()) },
+    );
+    right.checkpoints.insert(
+        clean_id.clone(),
+        CheckpointGeneration { generation: 1, position: Some(b"base".to_vec()) },
+    );
+
+    let first_conflict_id = b"consumer/m-first-conflict".to_vec();
+    for (snapshot, generation, token) in [
+        (&mut base, 10, b"base-m".as_slice()),
+        (&mut left, 11, b"left-m".as_slice()),
+        (&mut right, 12, b"right-m".as_slice()),
+    ] {
+        snapshot.checkpoints.insert(
+            first_conflict_id.clone(),
+            CheckpointGeneration { generation, position: Some(token.to_vec()) },
+        );
+    }
+
+    let later_conflict_id = b"consumer/z-unvisited".to_vec();
+    for (snapshot, generation, token) in [
+        (&mut base, 20, b"base-z".as_slice()),
+        (&mut left, 21, b"left-z".as_slice()),
+        (&mut right, 22, b"right-z".as_slice()),
+    ] {
+        snapshot.checkpoints.insert(
+            later_conflict_id.clone(),
+            CheckpointGeneration { generation, position: Some(token.to_vec()) },
+        );
+    }
+
+    // The spec requires bounded conflict materialization but leaves traversal
+    // order open. Storage completes changed row ranges before its ordered
+    // checkpoint walk, then reports only the first checkpoint beyond a zero
+    // detail budget without exposing a partial merge plan.
+    let error = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 100, max_conflicts: 0 },
+    )
+    .unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("the first divergent checkpoint exceeds the zero-detail budget")
+    };
+    assert_eq!(report.conflicts_lower_bound, 1);
+    assert_eq!(report.rows_examined, 3, "the fixture-backed disjoint row edits complete first");
+    assert!(report.affected_checkpoints.contains(first_conflict_id.as_slice()));
+    assert!(!report.affected_checkpoints.contains(clean_id.as_slice()));
+    assert!(!report.affected_checkpoints.contains(later_conflict_id.as_slice()));
+    assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+    assert_eq!(source.visited.len(), 3);
+}
+
+#[test]
 fn checkpoint_delete_update_budget_tail_reports_identity_for_either_deleted_side() {
     for delete_on_left in [true, false] {
         let (mut base, mut left, mut right, mut source) = row_checkpoint_conflict_inputs();
