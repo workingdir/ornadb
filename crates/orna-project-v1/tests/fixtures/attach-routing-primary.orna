@@ -1,0 +1,2 @@
+use contacts;
+pub fn primary_value(): Int = 7;
