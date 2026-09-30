@@ -20045,6 +20045,18 @@ mod tests {
             "the later projected failure occurs before the downstream filter"
         );
 
+        // A zero-row result must not enter the source at all, so even a
+        // failing first-row projection remains unevaluated.
+        let (zero, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-project-take-zero.orna"),
+        );
+        assert_eq!(
+            zero.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 0), "take(0) does no query work");
+
         // Relation `take` need not enumerate its remainder, so the later
         // missing lookup must stay latent when its row is outside the result.
         let (taken, lookups, scans) = invoke_query_fixture_with_counts(
