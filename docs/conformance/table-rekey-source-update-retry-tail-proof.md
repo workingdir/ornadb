@@ -99,3 +99,9 @@ two-row snapshot from that cycle: the competitor takes the original owner key,
 the owner moves aside and retries, then the competitor moves back and the owner
 retries again. Its complete ten-mutation log documents the local evaluation
 order without adding a language-level guarantee.
+
+`original_owner_key_retries_after_competitor_deletion` covers the matching
+release edge: the competitor claims the original owner key, then is deleted so
+the owner can retry into that key. Its fixture checks the full ordered mutation
+log; this caught-retry ordering remains adapter behavior where the reference is
+silent.
