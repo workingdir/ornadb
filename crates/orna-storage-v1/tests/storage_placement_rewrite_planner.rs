@@ -6,11 +6,17 @@ use orna_storage_v1::{
     EditableBaseRow, HybridBaseState, PhysicalPlacement, PlacementAction, PlacementCandidate,
     StoragePlacementError, StoragePreference, StorageProfile, StorageRewriteError,
     StorageRewriteTarget, PlacementReason, FrozenBatch, LooseMutation, LooseProjection, LooseRow,
-    MutationId, AUTOMATIC_EDITABLE_MAX_PUBLICATION_BYTES,
+    MutationId, AUTOMATIC_EDITABLE_MAX_PUBLICATION_BYTES, AUTOMATIC_EDITABLE_MAX_ROWS,
 };
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 
 const EDITABLE_ROW: &str = include_str!("fixtures/storage-placement-row.orna");
+const BATCH_BOUNDARY_DELETE_ROW: &str =
+    include_str!("fixtures/storage-placement-batch-delete.orna");
+const BATCH_BOUNDARY_UPDATE_ROW: &str =
+    include_str!("fixtures/storage-placement-batch-update.orna");
+const BATCH_BOUNDARY_INSERT_ROW: &str =
+    include_str!("fixtures/storage-placement-batch-insert.orna");
 const CASE_COLLISION_UPPER_ROW: &str = include_str!("fixtures/storage-placement-case-upper.orna");
 const CASE_COLLISION_LOWER_ROW: &str = include_str!("fixtures/storage-placement-case-lower.orna");
 const PATH_AT_LIMIT_ROW: &str = include_str!("fixtures/storage-placement-path-at-limit.orna");
@@ -396,6 +402,95 @@ fn automatic_placement_keeps_inclusive_row_and_byte_limits() {
     )
     .unwrap();
     assert_eq!(at_byte_limit.new_row_placement(), PhysicalPlacement::Editable);
+}
+
+#[test]
+fn batch_delete_offsets_insert_at_row_limit_while_update_counts_toward_byte_limit() {
+    let profile = profile();
+    let delete_key = key(rewrite_tail_fixture_key(BATCH_BOUNDARY_DELETE_ROW));
+    let update_key = key(rewrite_tail_fixture_key(BATCH_BOUNDARY_UPDATE_ROW));
+    let insert_key = key(rewrite_tail_fixture_key(BATCH_BOUNDARY_INSERT_ROW));
+    let delete_path = editable_path("20000");
+    let update_path = editable_path("20001");
+    let insert_path = editable_path("30000");
+    let current_paths = || existing_numeric_paths(AUTOMATIC_EDITABLE_MAX_ROWS);
+
+    // Model a large canonical insert body without checking in a multi-MiB
+    // fixture; the fixture rows anchor the three logical identities.
+    let insert_body_bytes = AUTOMATIC_EDITABLE_MAX_PUBLICATION_BYTES
+        - BATCH_BOUNDARY_UPDATE_ROW.len();
+    let plan_with_update_bytes = |update_body_bytes| {
+        plan_storage_placement(
+            &profile,
+            StoragePreference::Automatic,
+            AUTOMATIC_EDITABLE_MAX_ROWS,
+            false,
+            current_paths(),
+            [
+                PlacementCandidate::delete(
+                    delete_key.clone(),
+                    PhysicalPlacement::Editable,
+                    Some(delete_path.clone()),
+                ),
+                PlacementCandidate::update(
+                    update_key.clone(),
+                    update_body_bytes,
+                    PhysicalPlacement::Editable,
+                    Some(update_path.clone()),
+                ),
+                PlacementCandidate::insert(
+                    insert_key.clone(),
+                    insert_body_bytes,
+                    Some(insert_path.clone()),
+                ),
+            ],
+        )
+        .unwrap()
+    };
+
+    let at_boundary = plan_with_update_bytes(BATCH_BOUNDARY_UPDATE_ROW.len());
+    assert_eq!(at_boundary.resulting_row_count(), AUTOMATIC_EDITABLE_MAX_ROWS);
+    assert_eq!(at_boundary.new_row_placement(), PhysicalPlacement::Editable);
+    assert_eq!(at_boundary.reason(), PlacementReason::AutomaticEditable);
+
+    let over_byte_boundary = plan_with_update_bytes(BATCH_BOUNDARY_UPDATE_ROW.len() + 1);
+    assert_eq!(
+        over_byte_boundary.resulting_row_count(),
+        AUTOMATIC_EDITABLE_MAX_ROWS
+    );
+    assert_eq!(
+        over_byte_boundary.new_row_placement(),
+        PhysicalPlacement::Compact
+    );
+    assert_eq!(
+        over_byte_boundary.reason(),
+        PlacementReason::AutomaticPublicationBytes
+    );
+
+    for plan in [&at_boundary, &over_byte_boundary] {
+        let deleted = plan
+            .decisions()
+            .iter()
+            .find(|decision| decision.key().encoded() == delete_key)
+            .unwrap();
+        assert_eq!(deleted.action(), PlacementAction::Delete);
+        assert_eq!(deleted.placement(), PhysicalPlacement::Editable);
+        let updated = plan
+            .decisions()
+            .iter()
+            .find(|decision| decision.key().encoded() == update_key)
+            .unwrap();
+        assert_eq!(updated.action(), PlacementAction::Update);
+        assert_eq!(updated.placement(), PhysicalPlacement::Editable);
+    }
+    let inserted = over_byte_boundary
+        .decisions()
+        .iter()
+        .find(|decision| decision.key().encoded() == insert_key)
+        .unwrap();
+    assert_eq!(inserted.action(), PlacementAction::Insert);
+    assert_eq!(inserted.placement(), PhysicalPlacement::Compact);
+    assert!(inserted.editable_path().is_none());
 }
 
 #[test]
