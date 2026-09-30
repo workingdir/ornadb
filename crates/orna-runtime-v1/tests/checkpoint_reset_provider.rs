@@ -155,7 +155,7 @@ async fn unsupported_target_and_key_format_mismatch_fail_before_mutation() {
     assert_eq!(audits.len(), 2);
     assert!(!audits[1].succeeded);
     assert_eq!(audits[1].function, "sys.admin.reset_checkpoint");
-    assert!(audits[1].terminal_outcome.contains("not replayable"));
+    assert_eq!(audits[1].terminal_outcome, "failure:checkpoint_not_replayable");
 
     let mut mismatched_key = key.clone();
     mismatched_key.position_format = Component::new("position-format-v2").unwrap();
@@ -250,6 +250,8 @@ async fn supported_target_advances_once_and_audits_once() {
     assert_eq!(
         state.checkpoint_reset_audits(&key).await.unwrap(),
         vec![CheckpointResetAudit {
+            sequence: 1,
+            observed_generation: Some(0),
             key: key.clone(),
             old_version: 0,
             old_position: None,

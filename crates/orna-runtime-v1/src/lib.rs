@@ -142,6 +142,13 @@ CREATE TABLE IF NOT EXISTS runtime_table_history_metadata (
     floor_generation INTEGER NOT NULL CHECK (floor_generation >= 0),
     floor_digest BLOB NOT NULL CHECK (length(floor_digest) = 32)
 );
+-- These boundaries make append-only governance observations part of an exact
+-- checkpoint view. Audits themselves do not advance the table generation.
+CREATE TABLE IF NOT EXISTS runtime_history_governance_boundary (
+    generation INTEGER PRIMARY KEY CHECK (generation >= 0),
+    admin_audit_sequence INTEGER NOT NULL CHECK (admin_audit_sequence >= 0),
+    checkpoint_reset_audit_sequence INTEGER NOT NULL CHECK (checkpoint_reset_audit_sequence >= 0)
+);
 CREATE TABLE IF NOT EXISTS publication_freeze (
     intent_id BLOB PRIMARY KEY CHECK (length(intent_id) = 16),
     checkpoint_generation INTEGER NOT NULL,
@@ -357,6 +364,7 @@ CREATE TABLE IF NOT EXISTS stream_pause_reason (
 CREATE TABLE IF NOT EXISTS stream_checkpoint_reset_audit (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     key_id TEXT NOT NULL CHECK (length(key_id) > 0),
+    observed_generation INTEGER NOT NULL DEFAULT -1 CHECK (observed_generation >= -1),
     old_version INTEGER NOT NULL CHECK (old_version >= 0),
     old_position TEXT,
     new_version INTEGER NOT NULL CHECK (new_version >= 0),
@@ -973,6 +981,8 @@ pub struct Checkpoint {
 pub struct HistoricalSnapshot {
     capture: CwdCapture,
     mutation_sequence: u64,
+    admin_audit_sequence: u64,
+    checkpoint_reset_audit_sequence: u64,
 }
 
 impl HistoricalSnapshot {
@@ -986,6 +996,16 @@ impl HistoricalSnapshot {
         self.mutation_sequence
     }
 
+    /// Last generic administrative audit row included by this checkpoint.
+    pub const fn admin_audit_sequence(&self) -> u64 {
+        self.admin_audit_sequence
+    }
+
+    /// Last specialized checkpoint-reset audit row included by this checkpoint.
+    pub const fn checkpoint_reset_audit_sequence(&self) -> u64 {
+        self.checkpoint_reset_audit_sequence
+    }
+
     /// Whether two values can safely participate in one snapshot-scoped
     /// operation. Runtime snapshots at different generations are distinct
     /// contexts even when they belong to the same database.
@@ -995,6 +1015,76 @@ impl HistoricalSnapshot {
         } else {
             Err(RuntimeError::SnapshotContextMismatch)
         }
+    }
+}
+
+/// Context-bearing result of a governance audit read at one checkpoint pin.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoricalAuditRows<T> {
+    capture: CwdCapture,
+    rows: Vec<T>,
+}
+
+impl<T> HistoricalAuditRows<T> {
+    pub fn capture(&self) -> &CwdCapture {
+        &self.capture
+    }
+
+    pub fn rows(&self) -> &[T] {
+        &self.rows
+    }
+
+    /// Prevents audit rows observed at different checkpoint pins from being
+    /// combined as one historical result.
+    pub fn require_same_context<U>(
+        &self,
+        other: &HistoricalAuditRows<U>,
+    ) -> Result<(), RuntimeError> {
+        if self.capture == other.capture {
+            Ok(())
+        } else {
+            Err(RuntimeError::SnapshotContextMismatch)
+        }
+    }
+}
+
+/// Integrity summary for the logical rows available at a retained checkpoint.
+/// It is a local integrity statement, not a signature or external trust proof.
+/// Raw-value hashes are deliberately withheld: this generic layer cannot
+/// identify low-entropy secrets, whose hashes could disclose their values.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoricalSnapshotAttestation {
+    capture: CwdCapture,
+    mutation_sequence: u64,
+    row_count: u64,
+    table_count: u64,
+    admin_audit_sequence: u64,
+    checkpoint_reset_audit_sequence: u64,
+}
+
+impl HistoricalSnapshotAttestation {
+    pub fn capture(&self) -> &CwdCapture {
+        &self.capture
+    }
+
+    pub const fn mutation_sequence(&self) -> u64 {
+        self.mutation_sequence
+    }
+
+    pub const fn row_count(&self) -> u64 {
+        self.row_count
+    }
+
+    pub const fn table_count(&self) -> u64 {
+        self.table_count
+    }
+
+    pub const fn admin_audit_sequence(&self) -> u64 {
+        self.admin_audit_sequence
+    }
+
+    pub const fn checkpoint_reset_audit_sequence(&self) -> u64 {
+        self.checkpoint_reset_audit_sequence
     }
 }
 
@@ -3278,6 +3368,10 @@ pub enum StreamAdministrationOutcome {
 /// the explicit redaction marker.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckpointResetAudit {
+    pub sequence: u64,
+    /// None means the audit predates generation pinning and cannot be assigned
+    /// honestly to a historical checkpoint.
+    pub observed_generation: Option<u64>,
     pub key: CheckpointKey,
     pub old_version: u64,
     pub old_position: Option<Position>,
@@ -3609,6 +3703,7 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         Self::initialize_runtime_meta(&connection, identity, initial_digest).await?;
         migrate_runtime_table_history(&connection).await?;
+        migrate_historical_governance(&connection).await?;
         migrate_publication_policy_schema(&connection).await?;
         migrate_compact_receipt_schema(&connection).await?;
         let (compact_receipt_signing_key, compact_receipt_public_key) =
@@ -4977,7 +5072,8 @@ impl RuntimeState {
             }
             let observed_generation = u64::try_from(bigint_to_i64(current_capture.generation())?)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?;
-            let result = apply_admin_operation_tx(&transaction, &operation).await?;
+            let result =
+                apply_admin_operation_tx(&transaction, &operation, observed_generation).await?;
             store_admin_invocation_audit(
                 &transaction,
                 &descriptor,
@@ -5907,6 +6003,29 @@ impl RuntimeState {
                 )?,
             )
         };
+        let mut boundary_rows = transaction
+            .query(
+                "SELECT admin_audit_sequence, checkpoint_reset_audit_sequence
+                 FROM runtime_history_governance_boundary WHERE generation = ?1",
+                params![i64::try_from(generation).map_err(|_| RuntimeError::SnapshotNotFound)?],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let boundary = boundary_rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::SnapshotIncomplete)?;
+        let admin_audit_sequence = decode_u64(
+            boundary
+                .get::<i64>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        let checkpoint_reset_audit_sequence = decode_u64(
+            boundary
+                .get::<i64>(1)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
         let capture = CwdCapture::new(
             Snapshot::cwd(database_id, runtime_id, BigInt::from(generation))
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -5920,6 +6039,8 @@ impl RuntimeState {
         Ok(HistoricalSnapshot {
             capture,
             mutation_sequence,
+            admin_audit_sequence,
+            checkpoint_reset_audit_sequence,
         })
     }
 
@@ -6048,6 +6169,147 @@ impl RuntimeState {
             capture: capture.clone(),
             table: table.to_owned(),
             rows: table_rows,
+        })
+    }
+
+    /// Reads administrative invocation history through the immutable audit
+    /// sequence captured by this checkpoint generation.
+    pub async fn admin_invocation_audits_at(
+        &self,
+        snapshot: &HistoricalSnapshot,
+    ) -> Result<HistoricalAuditRows<AdminInvocationAudit>, RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        validate_historical_snapshot_tx(&transaction, snapshot).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let rows = load_admin_invocation_audits_through(
+            &self.connection,
+            snapshot.admin_audit_sequence,
+        )
+        .await?;
+        Ok(HistoricalAuditRows {
+            capture: snapshot.capture.clone(),
+            rows,
+        })
+    }
+
+    /// Reads stream checkpoint-reset governance history through the immutable
+    /// audit sequence captured by this checkpoint generation. Legacy reset
+    /// audits with no recorded generation remain available only in the
+    /// unpinned audit read because their historical membership is unknown.
+    pub async fn checkpoint_reset_audits_at(
+        &self,
+        key: &CheckpointKey,
+        snapshot: &HistoricalSnapshot,
+    ) -> Result<HistoricalAuditRows<CheckpointResetAudit>, RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        validate_historical_snapshot_tx(&transaction, snapshot).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let rows = load_stream_checkpoint_reset_audits_through(
+            &self.connection,
+            key,
+            snapshot.checkpoint_reset_audit_sequence,
+            false,
+        )
+        .await?;
+        Ok(HistoricalAuditRows {
+            capture: snapshot.capture.clone(),
+            rows,
+        })
+    }
+
+    /// Verifies that the pin is retained and that every visible row version
+    /// has its recorded SHA-256, then returns verified row counts and the
+    /// governance cut included in the pin. The summary attests runtime-retained
+    /// bytes, not function or package code; it deliberately withholds hashes
+    /// because this generic layer cannot distinguish secret row fields.
+    pub async fn attest_historical_snapshot(
+        &self,
+        snapshot: &HistoricalSnapshot,
+    ) -> Result<HistoricalSnapshotAttestation, RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        validate_historical_snapshot_tx(&transaction, snapshot).await?;
+        let mut rows = transaction
+            .query(
+                "SELECT history.table_id, history.row_value, history.row_digest
+                 FROM runtime_table_history AS history
+                 WHERE history.mutation_sequence <= ?1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM runtime_table_history AS newer
+                       WHERE newer.table_id = history.table_id
+                         AND newer.row_key = history.row_key
+                         AND newer.mutation_sequence <= ?1
+                         AND newer.mutation_sequence > history.mutation_sequence
+                   )
+                 ORDER BY history.table_id, history.row_key",
+                params![i64::try_from(snapshot.mutation_sequence)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut row_count = 0_u64;
+        let mut table_count = 0_u64;
+        let mut previous_table: Option<String> = None;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let table: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            validate_table_name(&table)?;
+            let value: Option<Vec<u8>> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let digest: Option<Vec<u8>> = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let (value, digest) = match (value, digest) {
+                (Some(value), Some(digest)) => (value, digest),
+                (None, None) => {
+                    // The latest tombstone is history bookkeeping, not part of
+                    // the logical row image described by this attestation.
+                    continue;
+                }
+                _ => return Err(RuntimeError::RecoveryInvalid),
+            };
+            let digest: [u8; 32] = fixed(digest)?;
+            if <[u8; 32]>::from(Sha256::digest(&value)) != digest {
+                return Err(RuntimeError::SnapshotIncomplete);
+            }
+            if previous_table.as_deref() != Some(&table) {
+                table_count = table_count
+                    .checked_add(1)
+                    .ok_or(RuntimeError::RecoveryInvalid)?;
+                previous_table = Some(table.clone());
+            }
+            row_count = row_count
+                .checked_add(1)
+                .ok_or(RuntimeError::RecoveryInvalid)?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(HistoricalSnapshotAttestation {
+            capture: snapshot.capture.clone(),
+            mutation_sequence: snapshot.mutation_sequence,
+            row_count,
+            table_count,
+            admin_audit_sequence: snapshot.admin_audit_sequence,
+            checkpoint_reset_audit_sequence: snapshot.checkpoint_reset_audit_sequence,
         })
     }
 
@@ -11923,11 +12185,18 @@ impl RuntimeState {
                 return Err(RuntimeError::RecoveryInvalid);
             }
             if active_key.as_deref() != Some(key_id.as_str()) {
-                if active_key.is_some()
-                    && (previous_version != checkpoint_version
-                        || latest_position != checkpoint_position)
-                {
-                    return Err(RuntimeError::RecoveryInvalid);
+                if let Some(previous_key) = active_key.as_deref() {
+                    let final_position = validate_stream_checkpoint_reset_bridge(
+                        &self.connection,
+                        previous_key,
+                        previous_version,
+                        latest_position.as_deref(),
+                        checkpoint_version,
+                    )
+                    .await?;
+                    if final_position != checkpoint_position {
+                        return Err(RuntimeError::RecoveryInvalid);
+                    }
                 }
                 active_key = Some(key_id);
                 previous_version = 0;
@@ -11938,38 +12207,81 @@ impl RuntimeState {
             {
                 return Err(RuntimeError::RecoveryInvalid);
             }
+            if version > previous_version.saturating_add(1) {
+                let reset_through = version - 1;
+                let _reset_position = validate_stream_checkpoint_reset_bridge(
+                    &self.connection,
+                    active_key.as_deref().ok_or(RuntimeError::RecoveryInvalid)?,
+                    previous_version,
+                    latest_position.as_deref(),
+                    reset_through,
+                )
+                .await?;
+                previous_version = reset_through;
+            }
             if version != previous_version.saturating_add(1) {
                 return Err(RuntimeError::RecoveryInvalid);
             }
             previous_version = version;
             latest_position = Some(committed);
         }
-        if active_key.is_some()
-            && (previous_version != checkpoint_version || latest_position != checkpoint_position)
-        {
-            return Err(RuntimeError::RecoveryInvalid);
+        if let Some(active_key) = active_key.as_deref() {
+            let final_position = validate_stream_checkpoint_reset_bridge(
+                &self.connection,
+                active_key,
+                previous_version,
+                latest_position.as_deref(),
+                checkpoint_version,
+            )
+            .await?;
+            if final_position != checkpoint_position {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
         }
-        let mut missing = self
+        let mut reset_only = self
             .connection
             .query(
-                "SELECT checkpoint.key_id
+                "SELECT checkpoint.key_id, checkpoint.version,
+                        checkpoint.committed_position
                  FROM stream_checkpoint AS checkpoint
-                 LEFT JOIN stream_checkpoint_history AS history
-                   ON history.key_id = checkpoint.key_id
-                  AND history.version = checkpoint.version
-                 WHERE checkpoint.version > 0 AND history.key_id IS NULL
-                 LIMIT 1",
+                 WHERE checkpoint.version > 0
+                   AND NOT EXISTS (
+                       SELECT 1 FROM stream_checkpoint_history AS history
+                       WHERE history.key_id = checkpoint.key_id
+                   )",
                 (),
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if missing
+        let mut reset_only_checkpoints = Vec::new();
+        while let Some(row) = reset_only
             .next()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_some()
         {
-            return Err(RuntimeError::RecoveryInvalid);
+            let key_id: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let version = decode_u64(
+                row.get::<i64>(1)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?;
+            let position: Option<String> =
+                row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            reset_only_checkpoints.push((key_id, version, position));
+        }
+        drop(reset_only);
+        for (key_id, version, position) in reset_only_checkpoints {
+            if validate_stream_checkpoint_reset_bridge(
+                &self.connection,
+                &key_id,
+                0,
+                None,
+                version,
+            )
+            .await?
+                != position
+            {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
         }
         Ok(())
     }
@@ -13785,6 +14097,7 @@ async fn store_stream_pause_reason(
 async fn apply_admin_operation_tx(
     connection: &Connection,
     operation: &AdminInvocationOperation,
+    observed_generation: u64,
 ) -> Result<AdminOperationResult, RuntimeError> {
     match operation {
         AdminInvocationOperation::Pause { key, reason } => {
@@ -13837,6 +14150,7 @@ async fn apply_admin_operation_tx(
                 expected,
                 &checkpoint,
                 &audit_reason,
+                observed_generation,
             )
             .await?;
             sync_stream_observation_tx(
@@ -13946,13 +14260,20 @@ async fn store_admin_invocation_audit(
 async fn load_admin_invocation_audits(
     connection: &Connection,
 ) -> Result<Vec<AdminInvocationAudit>, RuntimeError> {
+    load_admin_invocation_audits_through(connection, i64::MAX as u64).await
+}
+
+async fn load_admin_invocation_audits_through(
+    connection: &Connection,
+    through_sequence: u64,
+) -> Result<Vec<AdminInvocationAudit>, RuntimeError> {
     let mut rows = connection
         .query(
             "SELECT sequence, invocation_id, function_name, safe_arguments,
                     owner_id, owner_epoch, observed_generation,
                     terminal_outcome, succeeded, redacted
-             FROM admin_invocation_audit ORDER BY sequence",
-            (),
+             FROM admin_invocation_audit WHERE sequence <= ?1 ORDER BY sequence",
+            params![i64::try_from(through_sequence).map_err(|_| RuntimeError::RecoveryInvalid)?],
         )
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -14067,15 +14388,17 @@ async fn store_stream_checkpoint_reset_audit(
     expected: &CheckpointPrecondition,
     checkpoint: &StreamCheckpoint,
     audit_reason: &(String, bool),
+    observed_generation: u64,
 ) -> Result<(), RuntimeError> {
     connection
         .execute(
             "INSERT INTO stream_checkpoint_reset_audit
-             (key_id, old_version, old_position, new_version, new_position,
+             (key_id, observed_generation, old_version, old_position, new_version, new_position,
               reason, redacted)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 stream_key_id(key),
+                i64::try_from(observed_generation).map_err(|_| RuntimeError::RecoveryInvalid)?,
                 i64::try_from(expected.version).map_err(|_| RuntimeError::RecoveryInvalid)?,
                 expected
                     .committed
@@ -14102,13 +14425,28 @@ async fn load_stream_checkpoint_reset_audits(
     connection: &Connection,
     key: &CheckpointKey,
 ) -> Result<Vec<CheckpointResetAudit>, RuntimeError> {
+    load_stream_checkpoint_reset_audits_through(connection, key, i64::MAX as u64, true).await
+}
+
+async fn load_stream_checkpoint_reset_audits_through(
+    connection: &Connection,
+    key: &CheckpointKey,
+    through_sequence: u64,
+    include_unpinned_legacy: bool,
+) -> Result<Vec<CheckpointResetAudit>, RuntimeError> {
     let mut rows = connection
         .query(
-            "SELECT old_version, old_position, new_version, new_position,
-                    reason, redacted
+            "SELECT sequence, observed_generation, old_version, old_position,
+                    new_version, new_position, reason, redacted
              FROM stream_checkpoint_reset_audit
-             WHERE key_id = ?1 ORDER BY sequence",
-            params![stream_key_id(key)],
+             WHERE key_id = ?1 AND sequence <= ?2
+               AND (?3 = 1 OR observed_generation >= 0)
+             ORDER BY sequence",
+            params![
+                stream_key_id(key),
+                i64::try_from(through_sequence).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                if include_unpinned_legacy { 1_i64 } else { 0_i64 }
+            ],
         )
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -14118,30 +14456,44 @@ async fn load_stream_checkpoint_reset_audits(
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?
     {
+        let sequence = decode_u64(
+            row.get::<i64>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        let raw_observed_generation = row
+            .get::<i64>(1)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let observed_generation = if raw_observed_generation < 0 {
+            None
+        } else {
+            Some(decode_u64(raw_observed_generation)?)
+        };
         let old_position = row
-            .get::<Option<String>>(1)
+            .get::<Option<String>>(3)
             .map_err(|_| RuntimeError::RecoveryInvalid)?
             .map(decode_position)
             .transpose()?;
         let new_position = decode_position(
-            row.get::<String>(3)
+            row.get::<String>(5)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
         )?;
         audits.push(CheckpointResetAudit {
+            sequence,
+            observed_generation,
             key: key.clone(),
             old_version: decode_u64(
-                row.get::<i64>(0)
+                row.get::<i64>(2)
                     .map_err(|_| RuntimeError::RecoveryInvalid)?,
             )?,
             old_position,
             new_version: decode_u64(
-                row.get::<i64>(2)
+                row.get::<i64>(4)
                     .map_err(|_| RuntimeError::RecoveryInvalid)?,
             )?,
             new_position,
-            reason: row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            reason: row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?,
             redacted: decode_bool(
-                row.get::<i64>(5)
+                row.get::<i64>(7)
                     .map_err(|_| RuntimeError::RecoveryInvalid)?,
             )?,
         });
@@ -16642,6 +16994,17 @@ async fn append_mutations_with_catalogue_tx(
         )
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
+    connection
+        .execute(
+            "INSERT INTO runtime_history_governance_boundary
+             (generation, admin_audit_sequence, checkpoint_reset_audit_sequence)
+             SELECT ?1,
+                    COALESCE((SELECT MAX(sequence) FROM admin_invocation_audit), 0),
+                    COALESCE((SELECT MAX(sequence) FROM stream_checkpoint_reset_audit), 0)",
+            params![i64::try_from(generation).map_err(|_| RuntimeError::RecoveryInvalid)?],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
     faults.check(FaultPoint::AfterCheckpoint)?;
     connection
         .execute(
@@ -16819,6 +17182,85 @@ async fn migrate_runtime_table_history(connection: &Connection) -> Result<(), Ru
         .map_err(|_| RuntimeError::StorageUnavailable)
 }
 
+/// Adds generation cuts for append-only governance records. Older generic
+/// audits already carry their observed generation, so legacy cuts include only
+/// earlier-generation events; old specialized reset rows have no such evidence
+/// and stay visible only through the unpinned audit API.
+async fn migrate_historical_governance(connection: &Connection) -> Result<(), RuntimeError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut columns = BTreeMap::new();
+    let mut rows = transaction
+        .query("PRAGMA table_info(stream_checkpoint_reset_audit)", ())
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        columns.insert(
+            row.get::<String>(1)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            (),
+        );
+    }
+    if !columns.contains_key("observed_generation") {
+        transaction
+            .execute(
+                "ALTER TABLE stream_checkpoint_reset_audit
+                 ADD COLUMN observed_generation INTEGER NOT NULL DEFAULT -1
+                 CHECK (observed_generation >= -1)",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO runtime_history_governance_boundary
+             (generation, admin_audit_sequence, checkpoint_reset_audit_sequence)
+             VALUES (0, 0, 0)",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    // Prior versions did not persist exact audit sequence cuts beside a
+    // checkpoint. For those generations, observations from strictly earlier
+    // CWD generations are the conservative reconstructible prefix.
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO runtime_history_governance_boundary
+             (generation, admin_audit_sequence, checkpoint_reset_audit_sequence)
+             SELECT checkpoint.generation,
+                    COALESCE((SELECT MAX(audit.sequence)
+                              FROM admin_invocation_audit AS audit
+                              WHERE audit.observed_generation < checkpoint.generation), 0),
+                    COALESCE((SELECT MAX(audit.sequence)
+                              FROM stream_checkpoint_reset_audit AS audit
+                              WHERE audit.observed_generation >= 0
+                                AND audit.observed_generation < checkpoint.generation), 0)
+             FROM checkpoint WHERE checkpoint.generation > 0",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO runtime_schema_migration (migration)
+             VALUES ('historical-governance-boundary-v1')",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    transaction
+        .commit()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)
+}
+
 async fn runtime_table_history_floor(
     transaction: &Transaction,
 ) -> Result<(u64, [u8; 32]), RuntimeError> {
@@ -16842,6 +17284,178 @@ async fn runtime_table_history_floor(
         )?,
         fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
     ))
+}
+
+async fn validate_historical_snapshot_tx(
+    transaction: &Transaction,
+    snapshot: &HistoricalSnapshot,
+) -> Result<(), RuntimeError> {
+    let mut meta = transaction
+        .query(
+            "SELECT database_id, runtime_id, generation
+             FROM runtime_meta WHERE singleton = 1",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let row = meta
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .ok_or(RuntimeError::RecoveryInvalid)?;
+    let database_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let runtime_id = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let current_generation = decode_u64(
+        row.get::<i64>(2)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?;
+    let capture = snapshot.capture();
+    let generation = u64::try_from(bigint_to_i64(capture.generation())?)
+        .map_err(|_| RuntimeError::SnapshotContextMismatch)?;
+    if capture.database_id() != database_id
+        || capture.runtime_id() != runtime_id
+        || generation > current_generation
+    {
+        return Err(RuntimeError::SnapshotContextMismatch);
+    }
+    let (floor_generation, floor_digest) = runtime_table_history_floor(transaction).await?;
+    if generation < floor_generation {
+        return Err(RuntimeError::SnapshotIncomplete);
+    }
+    let (digest, mutation_sequence) = if generation == 0 {
+        if floor_generation != 0 {
+            return Err(RuntimeError::SnapshotIncomplete);
+        }
+        (floor_digest, 0)
+    } else {
+        let mut checkpoint = transaction
+            .query(
+                "SELECT digest, mutation_sequence FROM checkpoint WHERE generation = ?1",
+                params![i64::try_from(generation).map_err(|_| RuntimeError::SnapshotNotFound)?],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let row = checkpoint
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::SnapshotNotFound)?;
+        (
+            fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+            decode_u64(
+                row.get::<i64>(1)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?,
+        )
+    };
+    if digest != capture.generation_digest() || mutation_sequence != snapshot.mutation_sequence {
+        return Err(RuntimeError::SnapshotContextMismatch);
+    }
+    let mut boundary = transaction
+        .query(
+            "SELECT admin_audit_sequence, checkpoint_reset_audit_sequence
+             FROM runtime_history_governance_boundary WHERE generation = ?1",
+            params![i64::try_from(generation).map_err(|_| RuntimeError::SnapshotNotFound)?],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let row = boundary
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .ok_or(RuntimeError::SnapshotIncomplete)?;
+    let admin_audit_sequence = decode_u64(
+        row.get::<i64>(0)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?;
+    let checkpoint_reset_audit_sequence = decode_u64(
+        row.get::<i64>(1)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?;
+    if admin_audit_sequence != snapshot.admin_audit_sequence
+        || checkpoint_reset_audit_sequence != snapshot.checkpoint_reset_audit_sequence
+    {
+        return Err(RuntimeError::SnapshotContextMismatch);
+    }
+    Ok(())
+}
+
+/// Applies retained reset audits as explicit version transitions when
+/// validating stream history. A reset is governance history, not a delivery
+/// Complete/Skip watermark, but it still anchors the checkpoint version chain.
+async fn validate_stream_checkpoint_reset_bridge(
+    connection: &Connection,
+    key_id: &str,
+    start_version: u64,
+    start_position: Option<&str>,
+    end_version: u64,
+) -> Result<Option<String>, RuntimeError> {
+    if end_version < start_version {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    let mut version = start_version;
+    let mut position = start_position.map(str::to_owned);
+    if let Some(position) = position.as_deref() {
+        decode_position(position.to_owned())?;
+    }
+    let mut rows = connection
+        .query(
+            "SELECT old_version, old_position, new_version, new_position,
+                    reason, redacted, observed_generation
+             FROM stream_checkpoint_reset_audit
+             WHERE key_id = ?1 AND new_version > ?2 AND new_version <= ?3
+             ORDER BY new_version, sequence",
+            params![
+                key_id,
+                i64::try_from(start_version).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                i64::try_from(end_version).map_err(|_| RuntimeError::RecoveryInvalid)?
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        let old_version = decode_u64(
+            row.get::<i64>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        let old_position = row
+            .get::<Option<String>>(1)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if let Some(old_position) = &old_position {
+            decode_position(old_position.clone())?;
+        }
+        let new_version = decode_u64(
+            row.get::<i64>(2)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        let new_position: String = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        decode_position(new_position.clone())?;
+        let reason: String = row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        validate_observation_text(&reason)?;
+        decode_bool(
+            row.get::<i64>(5)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        let observed_generation: i64 =
+            row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if observed_generation < -1
+            || old_version != version
+            || old_position != position
+            || new_version != version.saturating_add(1)
+        {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        version = new_version;
+        position = Some(new_position);
+    }
+    if version != end_version {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    Ok(position)
 }
 
 async fn migrate_publication_policy_schema(connection: &Connection) -> Result<(), RuntimeError> {
@@ -24015,6 +24629,8 @@ mod tests {
         assert_eq!(
             state.checkpoint_reset_audits(&key).await.unwrap(),
             vec![CheckpointResetAudit {
+                sequence: 1,
+                observed_generation: Some(0),
                 key: key.clone(),
                 old_version: 0,
                 old_position: None,
