@@ -1973,7 +1973,11 @@ impl LiveApplication for ApplicationLiveAdapter {
         let Some((expected_database, runtime)) = self.runtime_identity else {
             return Err(LiveError::RuntimeUnavailable);
         };
-        if database.database != expected_database {
+        if database.database != expected_database
+            || database.snapshot.as_ref().is_some_and(|snapshot| {
+                !snapshot_matches_runtime(snapshot, expected_database, runtime)
+            })
+        {
             return Err(LiveError::ApplicationRejected);
         }
         let present = self.watch_value(session, source)?;
@@ -2095,6 +2099,19 @@ fn control_result(request: [u8; 16], fingerprint: [u8; 32]) -> Envelope {
             diagnostic: None,
         },
         extensions: BTreeMap::new(),
+    }
+}
+
+fn snapshot_matches_runtime(
+    snapshot: &CanonicalSnapshot,
+    expected_database: [u8; 16],
+    expected_runtime: [u8; 16],
+) -> bool {
+    match snapshot {
+        CanonicalSnapshot::Cwd {
+            database, runtime, ..
+        } => *database == expected_database && *runtime == expected_runtime,
+        CanonicalSnapshot::Commit { database, .. } => *database == expected_database,
     }
 }
 
@@ -2315,6 +2332,28 @@ mod tests {
         };
         assert_eq!(
             LiveApplication::watch(&mut adapter, [3; 16], [4; 16], &message),
+            Err(LiveError::ApplicationRejected)
+        );
+
+        let wrong_runtime_snapshot = Message::Watch {
+            source: include_str!("../tests/fixtures/live-watch-expression.orna")
+                .trim()
+                .to_owned(),
+            database: orna_protocol_v1::DatabaseContext {
+                database: [1; 16],
+                snapshot: Some(CanonicalSnapshot::cwd([1; 16], [9; 16], 0.into()).unwrap()),
+            },
+            presentation: orna_protocol_v1::PresentationContext {
+                locale: "en-US".to_owned(),
+                timezone: None,
+                width: None,
+                theme: "web/default".to_owned(),
+                supported_kinds: Vec::new(),
+            },
+            refresh_floor: None,
+        };
+        assert_eq!(
+            LiveApplication::watch(&mut adapter, [3; 16], [5; 16], &wrong_runtime_snapshot),
             Err(LiveError::ApplicationRejected)
         );
     }
