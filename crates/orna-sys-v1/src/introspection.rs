@@ -546,11 +546,43 @@ pub struct PlanOrdering {
 pub struct QueryPlanDescription {
     pub snapshot: SnapshotRef,
     pub source: ObjectRef,
+    /// Snapshot statistics for `source`. If `mutable_branch` is set, counts
+    /// must include the branch's current uncommitted overlay at `generation`.
+    pub source_statistics: Option<QuerySourceStatistics>,
+    /// Additional inputs joined in order after `source`.
+    pub joins: Vec<QueryJoinDescription>,
     pub predicate: Option<ExpressionRef>,
     pub projections: Vec<ExpressionRef>,
     pub distinct: bool,
     pub ordering: Vec<PlanOrdering>,
     pub limit: Option<u64>,
+    /// Optional destination for an explicit result materialization. Explain
+    /// estimates the write work but never performs this operation.
+    pub materialize_into: Option<ObjectRef>,
+}
+
+/// Statistics supplied by the snapshot/catalogue adapter, never measured by
+/// the explain path itself. Missing values remain missing in the plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QuerySourceStatistics {
+    pub estimated_rows: Option<u64>,
+    pub estimated_bytes: Option<u64>,
+    /// The generation identifies a mutable branch view; its counts above are
+    /// overlay-inclusive, so repeated edits cannot reuse a stale plan identity.
+    pub mutable_branch: Option<MutableBranchSnapshot>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MutableBranchSnapshot {
+    pub name: String,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryJoinDescription {
+    pub source: ObjectRef,
+    pub statistics: Option<QuerySourceStatistics>,
+    pub predicate: Option<ExpressionRef>,
 }
 
 /// The input to `sys.explain(FunctionRef)`. The catalogue adapter supplies
@@ -626,6 +658,14 @@ impl PlanNode {
     pub const fn actual_rows(&self) -> Option<u64> {
         self.actual_rows
     }
+
+    pub const fn estimated_rows(&self) -> Option<u64> {
+        self.estimated_rows
+    }
+
+    pub const fn estimated_bytes(&self) -> Option<u64> {
+        self.estimated_bytes
+    }
 }
 
 /// The canonical single row for `sys.Plan` plus its related plan-node rows.
@@ -696,6 +736,7 @@ pub enum ExplainError {
     TooManyNodes,
     TooManyExpressions,
     InvalidDependency,
+    InvalidPlanTree,
 }
 
 impl ExplainError {
@@ -707,6 +748,7 @@ impl ExplainError {
             Self::TooManyNodes => "sys.explain.plan_limit",
             Self::TooManyExpressions => "sys.explain.expression_limit",
             Self::InvalidDependency => "sys.explain.invalid_dependency",
+            Self::InvalidPlanTree => "sys.explain.invalid_plan_tree",
         }
     }
 }
@@ -719,10 +761,10 @@ impl fmt::Display for ExplainError {
 
 impl std::error::Error for ExplainError {}
 
-/// Plans the currently supported table-query shape without changing how it is
-/// evaluated. A scan remains the reference fallback; operators are logical
-/// observations only. Cost/cardinality/actual fields remain absent until a
-/// backend has measured or estimated them, as required by the 1.0 contract.
+/// Plans a resolved query without changing how it is evaluated. A scan remains
+/// the reference fallback; materialization is shown only when explicitly
+/// requested. Statistics are estimates supplied by the snapshot adapter, and
+/// actual fields remain absent because explain does not execute the query.
 pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, ExplainError> {
     if invalid_reference(query.snapshot.as_str()) {
         return Err(ExplainError::InvalidSnapshot);
@@ -731,10 +773,39 @@ pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, Expl
         return Err(ExplainError::InvalidObject);
     }
     if query
+        .joins
+        .iter()
+        .any(|join| invalid_reference(join.source.as_str()))
+        || query
+            .materialize_into
+            .as_ref()
+            .is_some_and(|target| invalid_reference(target.as_str()))
+        || query
+            .source_statistics
+            .iter()
+            .chain(query.joins.iter().filter_map(|join| join.statistics.as_ref()))
+            .filter_map(|statistics| statistics.mutable_branch.as_ref())
+            .any(|branch| invalid_reference(&branch.name))
+    {
+        return Err(ExplainError::InvalidObject);
+    }
+    let operator_bound = 1usize
+        .saturating_add(query.joins.len().saturating_mul(2))
+        .saturating_add(usize::from(query.predicate.is_some()))
+        .saturating_add(usize::from(!query.projections.is_empty()))
+        .saturating_add(usize::from(query.distinct))
+        .saturating_add(usize::from(!query.ordering.is_empty()))
+        .saturating_add(usize::from(query.limit.is_some()))
+        .saturating_add(usize::from(query.materialize_into.is_some()));
+    if operator_bound > MAX_PLAN_NODES {
+        return Err(ExplainError::TooManyNodes);
+    }
+    if query
         .predicate
         .iter()
         .chain(query.projections.iter())
         .chain(query.ordering.iter().map(|ordering| &ordering.expression))
+        .chain(query.joins.iter().filter_map(|join| join.predicate.as_ref()))
         .any(|expression| invalid_reference(expression.as_str()))
     {
         return Err(ExplainError::InvalidExpression);
@@ -744,70 +815,331 @@ pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, Expl
         .len()
         .saturating_add(query.ordering.len())
         .saturating_add(usize::from(query.predicate.is_some()))
+        .saturating_add(query.joins.iter().filter(|join| join.predicate.is_some()).count())
         > MAX_PLAN_EXPRESSIONS
     {
         return Err(ExplainError::TooManyExpressions);
     }
 
     let mut operators = Vec::<Operator>::new();
-    operators.push(Operator {
-        kind: PlanNodeKind::Scan,
-        object: Some(query.source.clone()),
-        predicate: None,
-        details: BTreeMap::new(),
-    });
+    let mut current = push_scan(
+        &mut operators,
+        query.source.clone(),
+        query.source_statistics.as_ref(),
+    );
+    let mut current_cardinality = source_cardinality(query.source_statistics.as_ref());
+    for join in &query.joins {
+        let right = push_scan(&mut operators, join.source.clone(), join.statistics.as_ref());
+        let right_cardinality = source_cardinality(join.statistics.as_ref());
+        let cardinality = join_cardinality(
+            current_cardinality,
+            right_cardinality,
+            join.predicate.is_some(),
+        );
+        // This adapter has no selectivity histogram: predicate joins use a
+        // documented 10% selectivity heuristic, while predicate-free joins
+        // retain the cross-product estimate. Neither choice changes execution.
+        let work = current_cardinality
+            .rows
+            .zip(right_cardinality.rows)
+            .and_then(|(left, right)| left.checked_add(right));
+        let mut details = BTreeMap::from([(
+            "strategy".to_owned(),
+            PlanDetail::Text("hash".to_owned()),
+        )]);
+        if join.predicate.is_some() {
+            details.insert(
+                "selectivity_assumption".to_owned(),
+                PlanDetail::Text("0.1_no_histogram".to_owned()),
+            );
+        } else {
+            details.insert(
+                "join_type".to_owned(),
+                PlanDetail::Text("cross".to_owned()),
+            );
+        }
+        let prior = current;
+        current = operators.len();
+        operators.push(Operator::new(
+            PlanNodeKind::Join,
+            None,
+            join.predicate.clone(),
+            details,
+            vec![prior, right],
+            cardinality,
+            work,
+        ));
+        current_cardinality = cardinality;
+    }
     if let Some(predicate) = &query.predicate {
-        operators.push(Operator {
-            kind: PlanNodeKind::Filter,
-            object: None,
-            predicate: Some(predicate.clone()),
-            details: BTreeMap::new(),
-        });
+        let cardinality = scale_cardinality(current_cardinality, 1, 2);
+        let work = current_cardinality.rows;
+        let details = BTreeMap::from([(
+            "selectivity_assumption".to_owned(),
+            PlanDetail::Text("0.5_no_histogram".to_owned()),
+        )]);
+        current = push_unary(
+            &mut operators,
+            current,
+            PlanNodeKind::Filter,
+            Some(predicate.clone()),
+            details,
+            cardinality,
+            work,
+        );
+        current_cardinality = cardinality;
     }
     if !query.projections.is_empty() {
-        operators.push(Operator {
-            kind: PlanNodeKind::Project,
-            object: None,
-            predicate: None,
-            details: BTreeMap::from([(
+        let cardinality = current_cardinality;
+        let work = current_cardinality
+            .rows
+            .and_then(|rows| rows.checked_mul(query.projections.len() as u64));
+        current = push_unary(
+            &mut operators,
+            current,
+            PlanNodeKind::Project,
+            None,
+            BTreeMap::from([(
                 "expressions".to_owned(),
                 PlanDetail::Expressions(query.projections.clone()),
             )]),
-        });
+            cardinality,
+            work,
+        );
     }
     if query.distinct {
         // The reference names no standalone DISTINCT plan kind. Aggregate is
         // the existing 1.0 logical operator for duplicate elimination.
-        operators.push(Operator {
-            kind: PlanNodeKind::Aggregate,
-            object: None,
-            predicate: None,
-            details: BTreeMap::from([(
+        let cardinality = scale_cardinality(current_cardinality, 1, 2);
+        let work = current_cardinality.rows.and_then(|rows| rows.checked_mul(2));
+        let details = BTreeMap::from([
+            (
                 "operation".to_owned(),
                 PlanDetail::Text("distinct".to_owned()),
-            )]),
-        });
+            ),
+            (
+                "selectivity_assumption".to_owned(),
+                PlanDetail::Text("0.5_no_histogram".to_owned()),
+            ),
+        ]);
+        current = push_unary(
+            &mut operators,
+            current,
+            PlanNodeKind::Aggregate,
+            None,
+            details,
+            cardinality,
+            work,
+        );
+        current_cardinality = cardinality;
     }
     if !query.ordering.is_empty() {
-        operators.push(Operator {
-            kind: PlanNodeKind::Sort,
-            object: None,
-            predicate: None,
-            details: BTreeMap::from([(
+        let cardinality = current_cardinality;
+        let work = current_cardinality.rows.and_then(sort_work);
+        current = push_unary(
+            &mut operators,
+            current,
+            PlanNodeKind::Sort,
+            None,
+            BTreeMap::from([(
                 "keys".to_owned(),
                 PlanDetail::Ordering(query.ordering.clone()),
             )]),
-        });
+            cardinality,
+            work,
+        );
     }
     if let Some(limit) = query.limit {
-        operators.push(Operator {
-            kind: PlanNodeKind::Limit,
-            object: None,
-            predicate: None,
-            details: BTreeMap::from([("limit".to_owned(), PlanDetail::Integer(limit))]),
-        });
+        let cardinality = limit_cardinality(current_cardinality, limit);
+        let work = current_cardinality.rows;
+        current = push_unary(
+            &mut operators,
+            current,
+            PlanNodeKind::Limit,
+            None,
+            BTreeMap::from([("limit".to_owned(), PlanDetail::Integer(limit))]),
+            cardinality,
+            work,
+        );
+        current_cardinality = cardinality;
     }
-    build_explained_plan(query.snapshot.clone(), operators)
+    if let Some(target) = &query.materialize_into {
+        let work = materialize_work(current_cardinality);
+        let details = BTreeMap::from([
+            (
+                "mode".to_owned(),
+                PlanDetail::Text("write_through".to_owned()),
+            ),
+            (
+                "fallback".to_owned(),
+                PlanDetail::Text("evaluate_query".to_owned()),
+            ),
+        ]);
+        current = push_unary(
+            &mut operators,
+            current,
+            PlanNodeKind::Materialize,
+            None,
+            details,
+            current_cardinality,
+            work,
+        );
+        operators[current].object = Some(target.clone());
+    }
+    build_plan(query.snapshot.clone(), operators, current)
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct Cardinality {
+    rows: Option<u64>,
+    bytes: Option<u64>,
+}
+
+fn source_cardinality(statistics: Option<&QuerySourceStatistics>) -> Cardinality {
+    statistics.map_or_else(Cardinality::default, |statistics| Cardinality {
+        rows: statistics.estimated_rows,
+        bytes: statistics.estimated_bytes,
+    })
+}
+
+fn push_scan(
+    operators: &mut Vec<Operator>,
+    object: ObjectRef,
+    statistics: Option<&QuerySourceStatistics>,
+) -> usize {
+    let cardinality = source_cardinality(statistics);
+    let mut details = BTreeMap::new();
+    if let Some(branch) = statistics.and_then(|stats| stats.mutable_branch.as_ref()) {
+        details.insert(
+            "mutable_branch".to_owned(),
+            PlanDetail::Text(branch.name.clone()),
+        );
+        details.insert(
+            "branch_generation".to_owned(),
+            PlanDetail::Integer(branch.generation),
+        );
+        details.insert(
+            "statistics_scope".to_owned(),
+            PlanDetail::Text("overlay_inclusive".to_owned()),
+        );
+    }
+    let work = cardinality
+        .rows
+        .zip(cardinality.bytes)
+        .and_then(|(rows, bytes)| rows.checked_add(ceil_div(bytes, 4096)));
+    let index = operators.len();
+    operators.push(Operator::new(
+        PlanNodeKind::Scan,
+        Some(object),
+        None,
+        details,
+        Vec::new(),
+        cardinality,
+        work,
+    ));
+    index
+}
+
+fn push_unary(
+    operators: &mut Vec<Operator>,
+    input: usize,
+    kind: PlanNodeKind,
+    predicate: Option<ExpressionRef>,
+    details: BTreeMap<String, PlanDetail>,
+    cardinality: Cardinality,
+    work: Option<u64>,
+) -> usize {
+    let index = operators.len();
+    operators.push(Operator::new(
+        kind,
+        None,
+        predicate,
+        details,
+        vec![input],
+        cardinality,
+        work,
+    ));
+    index
+}
+
+fn join_cardinality(left: Cardinality, right: Cardinality, has_predicate: bool) -> Cardinality {
+    let rows = left.rows.zip(right.rows).and_then(|(left, right)| {
+        let divisor = if has_predicate { 10 } else { 1 };
+        u64::try_from((u128::from(left) * u128::from(right)).div_ceil(divisor)).ok()
+    });
+    let bytes = rows.and_then(|rows| {
+        let (left_rows, left_bytes) = (left.rows?, left.bytes?);
+        let (right_rows, right_bytes) = (right.rows?, right.bytes?);
+        let left_width = if left_rows == 0 {
+            0
+        } else {
+            u128::from(left_bytes).div_ceil(u128::from(left_rows))
+        };
+        let right_width = if right_rows == 0 {
+            0
+        } else {
+            u128::from(right_bytes).div_ceil(u128::from(right_rows))
+        };
+        u64::try_from(u128::from(rows) * (left_width + right_width)).ok()
+    });
+    Cardinality { rows, bytes }
+}
+
+fn scale_cardinality(cardinality: Cardinality, numerator: u64, denominator: u64) -> Cardinality {
+    // No histogram/cardinality model is available at this layer. Predicate
+    // and distinct stages use the caller-selected deterministic fallback
+    // (currently 50%); estimates remain tagged details on those operators.
+    Cardinality {
+        rows: cardinality
+            .rows
+            .and_then(|rows| scale_count(rows, numerator, denominator)),
+        bytes: cardinality
+            .bytes
+            .and_then(|bytes| scale_count(bytes, numerator, denominator)),
+    }
+}
+
+fn limit_cardinality(cardinality: Cardinality, limit: u64) -> Cardinality {
+    let rows = cardinality.rows.map(|rows| rows.min(limit));
+    let bytes = match (cardinality.rows, cardinality.bytes, rows) {
+        (Some(before), Some(bytes), Some(after)) if before > 0 => {
+            scale_count(bytes, after, before)
+        }
+        (Some(0), Some(_), Some(_)) => Some(0),
+        (_, bytes, _) => bytes,
+    };
+    Cardinality { rows, bytes }
+}
+
+fn scale_count(value: u64, numerator: u64, denominator: u64) -> Option<u64> {
+    if denominator == 0 {
+        return Some(0);
+    }
+    u64::try_from((u128::from(value) * u128::from(numerator)).div_ceil(u128::from(denominator)))
+        .ok()
+}
+
+fn ceil_div(value: u64, divisor: u64) -> u64 {
+    value / divisor + u64::from(value % divisor != 0)
+}
+
+fn sort_work(rows: u64) -> Option<u64> {
+    // Comparison work is represented as rows * ceil(log2(rows)) integer units.
+    let levels = if rows <= 1 {
+        0
+    } else {
+        u64::from((rows - 1).ilog2() + 1)
+    };
+    rows.checked_mul(levels)
+}
+
+fn materialize_work(cardinality: Cardinality) -> Option<u64> {
+    // The portable API has no device-specific write price: one unit per row
+    // plus one unit per 4 KiB output block gives a stable relative estimate.
+    cardinality
+        .rows
+        .zip(cardinality.bytes)
+        .and_then(|(rows, bytes)| rows.checked_add(ceil_div(bytes, 4096)))
 }
 
 /// Builds a function/effect explain plan from catalogue-supplied direct edges.
@@ -863,11 +1195,11 @@ pub fn explain_function(
             | DependencyKind::Implementation
             | DependencyKind::PageEntry => continue,
         };
-        children.push(Operator {
+        children.push(Operator::new(
             kind,
-            object: Some(edge.to),
-            predicate: None,
-            details: [
+            Some(edge.to),
+            None,
+            [
                 (
                     "dependency_kind".to_owned(),
                     PlanDetail::Text(edge.kind.as_str().to_owned()),
@@ -883,15 +1215,11 @@ pub fn explain_function(
             ]
             .into_iter()
             .collect(),
-        });
+            Vec::new(),
+            Cardinality::default(),
+            None,
+        ));
     }
-    let mut operators = Vec::with_capacity(children.len() + 1);
-    operators.push(Operator {
-        kind: PlanNodeKind::Invoke,
-        object: Some(function_object),
-        predicate: None,
-        details: BTreeMap::new(),
-    });
     // Children are ordered by their typed edge identity, independent of the
     // order in which a catalogue implementation supplied those rows.
     children.sort_by(|left, right| {
@@ -899,8 +1227,19 @@ pub fn explain_function(
             .cmp(&right.kind)
             .then_with(|| left.object.cmp(&right.object))
     });
+    let mut operators = Vec::with_capacity(children.len() + 1);
+    let root = Operator::new(
+        PlanNodeKind::Invoke,
+        Some(function_object),
+        None,
+        BTreeMap::new(),
+        (1..=children.len()).collect(),
+        Cardinality::default(),
+        None,
+    );
+    operators.push(root);
     operators.extend(children);
-    build_function_plan(function.snapshot.clone(), operators)
+    build_plan(function.snapshot.clone(), operators, 0)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -909,39 +1248,72 @@ struct Operator {
     object: Option<ObjectRef>,
     predicate: Option<ExpressionRef>,
     details: BTreeMap<String, PlanDetail>,
+    inputs: Vec<usize>,
+    cardinality: Cardinality,
+    work: Option<u64>,
 }
 
-fn build_explained_plan(
-    snapshot: SnapshotRef,
-    mut leaf_to_root: Vec<Operator>,
-) -> Result<ExplainedPlan, ExplainError> {
-    if leaf_to_root.is_empty() {
-        return Err(ExplainError::TooManyNodes);
+impl Operator {
+    fn new(
+        kind: PlanNodeKind,
+        object: Option<ObjectRef>,
+        predicate: Option<ExpressionRef>,
+        details: BTreeMap<String, PlanDetail>,
+        inputs: Vec<usize>,
+        cardinality: Cardinality,
+        work: Option<u64>,
+    ) -> Self {
+        Self {
+            kind,
+            object,
+            predicate,
+            details,
+            inputs,
+            cardinality,
+            work,
+        }
     }
-    leaf_to_root.reverse();
-    build_plan(snapshot, leaf_to_root, true)
-}
-
-fn build_function_plan(
-    snapshot: SnapshotRef,
-    root_then_children: Vec<Operator>,
-) -> Result<ExplainedPlan, ExplainError> {
-    build_plan(snapshot, root_then_children, false)
 }
 
 fn build_plan(
     snapshot: SnapshotRef,
     operators: Vec<Operator>,
-    chain: bool,
+    root_index: usize,
 ) -> Result<ExplainedPlan, ExplainError> {
-    if operators.len() > MAX_PLAN_NODES {
+    if operators.is_empty() || operators.len() > MAX_PLAN_NODES {
         return Err(ExplainError::TooManyNodes);
+    }
+    if root_index >= operators.len() {
+        return Err(ExplainError::InvalidPlanTree);
+    }
+    let mut order = Vec::with_capacity(operators.len());
+    let mut stack = vec![root_index];
+    let mut visited = BTreeSet::new();
+    let mut parents = vec![None; operators.len()];
+    while let Some(index) = stack.pop() {
+        if index >= operators.len() || !visited.insert(index) {
+            return Err(ExplainError::InvalidPlanTree);
+        }
+        order.push(index);
+        for child in operators[index].inputs.iter().rev() {
+            if *child >= operators.len() || parents[*child].replace(index).is_some() {
+                return Err(ExplainError::InvalidPlanTree);
+            }
+            stack.push(*child);
+        }
+    }
+    if order.len() != operators.len() || parents[root_index].is_some() {
+        return Err(ExplainError::InvalidPlanTree);
+    }
+    let mut positions = vec![usize::MAX; operators.len()];
+    for (position, index) in order.iter().enumerate() {
+        positions[*index] = position;
     }
     let mut identity = Sha256::new();
     identity.update(b"orna.sys.plan.v1\0");
     hash_part(&mut identity, snapshot.as_str().as_bytes());
-    identity.update([u8::from(chain)]);
-    for operator in &operators {
+    for index in &order {
+        let operator = &operators[*index];
         hash_part(&mut identity, operator.kind.as_ref_str().as_bytes());
         hash_part(
             &mut identity,
@@ -963,6 +1335,13 @@ fn build_plan(
             hash_part(&mut identity, name.as_bytes());
             hash_plan_detail(&mut identity, detail);
         }
+        hash_optional_u64(&mut identity, operator.cardinality.rows);
+        hash_optional_u64(&mut identity, operator.cardinality.bytes);
+        hash_optional_u64(&mut identity, operator.work);
+        identity.update((operator.inputs.len() as u64).to_be_bytes());
+        for child in &operator.inputs {
+            identity.update((positions[*child] as u64).to_be_bytes());
+        }
     }
     let digest = hex(&identity.finalize());
     let id = format!("plan:{digest}");
@@ -971,27 +1350,22 @@ fn build_plan(
         .map(|position| PlanNodeRef::descriptive(format!("{id}:{position}")))
         .collect::<Vec<_>>();
 
-    let mut nodes = Vec::with_capacity(operators.len());
-    for (position, operator) in operators.into_iter().enumerate() {
+    let root = references[positions[root_index]].clone();
+    let mut total_work = Some(0u64);
+    let mut nodes = Vec::with_capacity(order.len());
+    for (position, index) in order.iter().enumerate() {
+        let operator = &operators[*index];
         let position_u32 = u32::try_from(position).map_err(|_| ExplainError::TooManyNodes)?;
-        let parent_position = if chain {
-            position.checked_sub(1)
-        } else if position > 0 {
-            Some(0)
-        } else {
-            None
+        let parent_position = parents[*index].map(|parent| positions[parent]);
+        let inputs = operator
+            .inputs
+            .iter()
+            .map(|child| references[positions[*child]].clone())
+            .collect();
+        total_work = match (total_work, operator.work) {
+            (Some(total), Some(work)) => total.checked_add(work),
+            _ => None,
         };
-        let input_position = if chain {
-            position.checked_add(1).filter(|next| *next < references.len())
-        } else {
-            None
-        };
-        let mut inputs = input_position
-            .map(|index| vec![references[index].clone()])
-            .unwrap_or_default();
-        if !chain && position == 0 {
-            inputs.extend(references.iter().skip(1).cloned());
-        }
         nodes.push(PlanNode {
             reference: references[position].clone(),
             plan: plan.clone(),
@@ -999,31 +1373,37 @@ fn build_plan(
             position: position_u32,
             kind: operator.kind,
             inputs,
-            object: operator.object,
-            estimated_rows: None,
+            object: operator.object.clone(),
+            estimated_rows: operator.cardinality.rows,
             actual_rows: None,
-            estimated_bytes: None,
+            estimated_bytes: operator.cardinality.bytes,
             actual_bytes: None,
-            predicate: operator.predicate,
-            details: operator.details,
+            predicate: operator.predicate.clone(),
+            details: operator.details.clone(),
         });
     }
-    let root = references
-        .first()
-        .cloned()
-        .ok_or(ExplainError::TooManyNodes)?;
     Ok(ExplainedPlan {
         plan: Plan {
             reference: plan,
             id,
             snapshot,
             root,
-            estimated_cost: None,
+            estimated_cost: total_work.map(|work| work.to_string()),
             actual_available: false,
             warnings: Vec::new(),
         },
         nodes,
     })
+}
+
+fn hash_optional_u64(hash: &mut Sha256, value: Option<u64>) {
+    match value {
+        Some(value) => {
+            hash.update([1]);
+            hash.update(value.to_be_bytes());
+        }
+        None => hash.update([0]),
+    }
 }
 
 fn hash_plan_detail(hash: &mut Sha256, detail: &PlanDetail) {
