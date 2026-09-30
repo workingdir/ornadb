@@ -81,3 +81,9 @@ this caught-retry ordering.
 competitor's move target. The fixture records the target owner's update and
 deletion, the competitor's successful move, and the final owner's retry, all in
 evaluation order. ORNA-MUT-005/006 do not define this caught-retry mutation log.
+
+`competitor_and_owner_retries_alternate_returned_key_closure` continues from
+that closure: the competitor retries into the returned key, the owner moves
+aside, and the competitor succeeds; then the owner retries after the competitor
+moves away again. The fixture asserts every owner transition and attached
+update. The reference is silent on the resulting caught-retry log order.
