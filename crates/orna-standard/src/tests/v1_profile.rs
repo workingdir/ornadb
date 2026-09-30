@@ -5,6 +5,8 @@ use crate::{
     REFERENCE_STANDARD_BITS_PATH_V1, REFERENCE_STANDARD_QUERY_PATH_V1,
     REFERENCE_STANDARD_TEXT_PATH_V1, REFERENCE_STANDARD_STATS_PATH_V1,
     REFERENCE_STANDARD_TIME_PATH_V1,
+    REFERENCE_STANDARD_TIME_COMPACT_PATH_V1, REFERENCE_STANDARD_TIME_CLOCK_PATH_V1,
+    REFERENCE_STANDARD_TIME_WORDS_PATH_V1, REFERENCE_STANDARD_TIME_ISO_PATH_V1,
     reference_standard_catalogue_v1,
     reference_standard_profile_v1, reference_standard_sources_v1,
 };
@@ -28,6 +30,15 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     assert_eq!(sources[6].0, REFERENCE_STANDARD_TIME_PATH_V1);
     assert!(sources[6].1.contains("pub fn timezone_data_version()"));
     assert!(sources[6].1.contains("pub fn resolve_local("));
+    for (index, path, operation) in [
+        (7, REFERENCE_STANDARD_TIME_COMPACT_PATH_V1, "compact"),
+        (8, REFERENCE_STANDARD_TIME_CLOCK_PATH_V1, "clock"),
+        (9, REFERENCE_STANDARD_TIME_WORDS_PATH_V1, "words"),
+        (10, REFERENCE_STANDARD_TIME_ISO_PATH_V1, "iso"),
+    ] {
+        assert_eq!(sources[index].0, path);
+        assert!(sources[index].1.contains(&format!("std.time.duration.{operation}.format")));
+    }
 
     let profile = reference_standard_profile_v1();
     assert_eq!(profile.snapshot(), "orna.std/v1-reference-library");

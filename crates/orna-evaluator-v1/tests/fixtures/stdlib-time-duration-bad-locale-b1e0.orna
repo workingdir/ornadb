@@ -1,0 +1,1 @@
+words_fmt.format(60.seconds, context: { locale: "fr-FR", time_zone: "UTC" })
