@@ -1342,6 +1342,7 @@ pub struct Diagnostic {
     notes: Vec<SafeText>,
     causes: Vec<Diagnostic>,
     redacted: bool,
+    root_message_admitted: bool,
     reference: Option<[u8; 16]>,
 }
 impl fmt::Debug for Diagnostic {
@@ -1378,6 +1379,7 @@ impl Diagnostic {
             notes: vec![],
             causes: vec![],
             redacted: false,
+            root_message_admitted: false,
             reference: None,
         })
     }
@@ -1400,6 +1402,7 @@ impl Diagnostic {
             .for_each(|note| *note = SafeText::redacted());
         self.causes = self.causes.into_iter().map(Diagnostic::redacted).collect();
         self.redacted = true;
+        self.root_message_admitted = false;
         self
     }
     /// Recursively redacts messages and notes, then installs the caller-admitted
@@ -1409,12 +1412,16 @@ impl Diagnostic {
     pub fn redacted_with_message(self, message: SafeText) -> Self {
         let mut diagnostic = self.redacted();
         diagnostic.message = message;
+        // This private, in-memory mark is the sole authority to preserve a
+        // non-marker root message across local serialization projections.
+        diagnostic.root_message_admitted = true;
         diagnostic
     }
     fn boundary_projection(&self) -> Self {
-        // A redacted root may carry a caller-admitted message, but children
-        // have no such admission when composed into another diagnostic.
-        let mut projection = if self.redacted {
+        // The wire `redacted` bit is descriptive, not trusted admission.
+        // Keep a root message only when this object received local admission;
+        // children still have no admission when composed into another record.
+        let mut projection = if self.root_message_admitted {
             self.clone()
         } else {
             self.clone().redacted()
@@ -1532,6 +1539,7 @@ impl Diagnostic {
                 .map(Self::from_raw)
                 .collect::<Result<_, _>>()?,
             redacted: boolean(required(&fields, 6)?)?,
+            root_message_admitted: false,
             reference: fields.get(&7).map(|value| uuid_bytes(value)).transpose()?,
         };
         diagnostic
