@@ -3,6 +3,7 @@ use syn::{
     Expr, ForeignItem, ImplItem, ItemFn, Lit, TraitItem,
     visit::{self, Visit},
 };
+use std::collections::BTreeSet;
 
 #[derive(Clone, Debug)]
 pub struct Function {
@@ -176,12 +177,300 @@ pub fn validate_function_metadata(metadata: &Value) -> Result<(), String> {
     let signature = object["signature"]
         .as_str()
         .expect("required signature validated");
-    if !signature.starts_with("fn ") || !signature.contains("(") || !signature.contains("): ") {
-        return Err("function metadata `signature` must be a function signature".to_owned());
+    let signature_identity = parse_signature_identity(signature)?;
+    if !valid_function_label(name, &signature_identity) {
+        return Err(format!(
+            "function label `{name}` does not match callable shape `{}`",
+            signature_identity.name,
+        ));
     }
     let effect = object["effect"].as_str().expect("required effect validated");
     if !matches!(effect, "read" | "invoke" | "admin") {
         return Err(format!("unknown system API effect `{effect}`"));
+    }
+
+    let requires_contract = name.starts_with("sys.admin.");
+    let requires_preconditions = FUNCTIONS_WITH_PRECONDITIONS.contains(&name);
+    let requires_ownership = matches!(name, "sys.start(Value)" | "sys.start<T>");
+    let requires_snapshot_rule = matches!(
+        name,
+        "sys.invoke(Value)" | "sys.invoke<T>" | "sys.start(Value)" | "sys.start<T>"
+    );
+    for (field, required) in [
+        ("contract", requires_contract),
+        ("preconditions", requires_preconditions),
+        ("ownership", requires_ownership),
+        ("snapshot_rule", requires_snapshot_rule),
+    ] {
+        if object.contains_key(field) != required {
+            return Err(format!(
+                "function `{name}` requires metadata field `{field}`={required}"
+            ));
+        }
+    }
+
+    // Freeze the published 1.0 effect partition at generation time. The
+    // semantic loader applies the same surface rule before calls are admitted.
+    let expected_effect = if name.starts_with("sys.admin.plan_checkout") {
+        "read"
+    } else if name.starts_with("sys.admin.") {
+        "admin"
+    } else if matches!(
+        name,
+        "sys.invoke(Value)" | "sys.invoke<T>" | "sys.start(Value)" | "sys.start<T>"
+            | "sys.await" | "sys.cancel"
+    ) {
+        "invoke"
+    } else {
+        "read"
+    };
+    if effect != expected_effect {
+        return Err(format!(
+            "function `{name}` requires effect `{expected_effect}`, found `{effect}`"
+        ));
+    }
+    Ok(())
+}
+
+// These are the 1.0 callable labels whose checkout/recovery contract requires
+// explicit optimistic preconditions. Keep this list aligned with the semantic
+// SystemApi loader; labels are exact so overload metadata cannot bleed across.
+const FUNCTIONS_WITH_PRECONDITIONS: &[&str] = &[
+    "sys.admin.checkout(SnapshotRef)",
+    "sys.admin.checkout(CommitRef)",
+    "sys.admin.checkout(BranchRef)",
+    "sys.admin.checkout(TagRef)",
+    "sys.admin.checkout(GitOid)",
+    "sys.admin.checkout(Str)",
+    "sys.admin.create_branch(SnapshotRef)",
+    "sys.admin.create_branch(CommitRef)",
+    "sys.admin.create_branch(BranchRef)",
+    "sys.admin.create_branch(TagRef)",
+    "sys.admin.create_branch(GitOid)",
+    "sys.admin.create_branch(Str)",
+    "sys.admin.retry_failure",
+    "sys.admin.skip_failure",
+    "sys.admin.replay_failure",
+    "sys.admin.resolve_failure",
+];
+
+#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct SignatureIdentity {
+    name: String,
+    type_parameters: BTreeSet<String>,
+    parameters: Vec<(String, bool)>,
+}
+
+fn parse_signature_identity(signature: &str) -> Result<SignatureIdentity, String> {
+    let signature = signature
+        .strip_prefix("fn ")
+        .ok_or_else(|| "function metadata `signature` must start with `fn `".to_owned())?;
+    let open = signature
+        .find('(')
+        .ok_or_else(|| "function signature is missing `(`".to_owned())?;
+    let close = matching_delimiter(signature, open, '(', ')')
+        .ok_or_else(|| "function signature has unbalanced parameters".to_owned())?;
+    let header = &signature[..open];
+    let (name, type_parameters) = match header.split_once('<') {
+        Some((name, params)) if params.ends_with('>') => {
+            let params = params[..params.len() - 1].split(',').map(str::trim);
+            let mut type_parameters = BTreeSet::new();
+            for parameter in params {
+                if !valid_identifier(parameter) || !type_parameters.insert(parameter.to_owned()) {
+                    return Err("function signature has invalid or duplicate type parameters".to_owned());
+                }
+            }
+            (name, type_parameters)
+        }
+        Some(_) => return Err("function signature has malformed type parameters".to_owned()),
+        None => (header, BTreeSet::new()),
+    };
+    if !valid_sys_path(name) {
+        return Err("function signature must name a valid sys function path".to_owned());
+    }
+    let result = signature[close + 1..]
+        .strip_prefix(": ")
+        .ok_or_else(|| "function signature is missing a result type".to_owned())?;
+    if result.trim().is_empty() || result.contains('\n') {
+        return Err("function signature result type must be single-line nonblank text".to_owned());
+    }
+
+    let mut parameters = Vec::new();
+    let mut parameter_names = BTreeSet::new();
+    for parameter in split_top_level(&signature[open + 1..close])? {
+        let parameter = parameter.trim();
+        if parameter.is_empty() {
+            continue;
+        }
+        let (declaration, has_default) = match parameter.split_once(" = ") {
+            Some((declaration, _)) => (declaration, true),
+            None => (parameter, false),
+        };
+        let (parameter_name, parameter_type) = declaration
+            .split_once(": ")
+            .ok_or_else(|| "function parameter must use `name: Type` notation".to_owned())?;
+        if !valid_identifier(parameter_name)
+            || parameter_type.trim().is_empty()
+            || !parameter_names.insert(parameter_name.to_owned())
+        {
+            return Err("function signature has an invalid or duplicate parameter".to_owned());
+        }
+        parameters.push((parameter_type.trim().to_owned(), has_default));
+    }
+    Ok(SignatureIdentity {
+        name: name.to_owned(),
+        type_parameters,
+        parameters,
+    })
+}
+
+fn split_top_level(input: &str) -> Result<Vec<&str>, String> {
+    let mut parts = Vec::new();
+    let (mut angle, mut square, mut paren) = (0_i32, 0_i32, 0_i32);
+    let mut start = 0;
+    for (index, character) in input.char_indices() {
+        match character {
+            '<' => angle += 1,
+            '>' => angle -= 1,
+            '[' => square += 1,
+            ']' => square -= 1,
+            '(' => paren += 1,
+            ')' => paren -= 1,
+            ',' if angle == 0 && square == 0 && paren == 0 => {
+                parts.push(&input[start..index]);
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+        if angle < 0 || square < 0 || paren < 0 {
+            return Err("function signature has unbalanced parameter types".to_owned());
+        }
+    }
+    if angle != 0 || square != 0 || paren != 0 {
+        return Err("function signature has unbalanced parameter types".to_owned());
+    }
+    if !input[start..].trim().is_empty() {
+        parts.push(&input[start..]);
+    }
+    Ok(parts)
+}
+
+fn matching_delimiter(input: &str, open: usize, left: char, right: char) -> Option<usize> {
+    let mut depth = 0;
+    for (index, character) in input.char_indices().skip_while(|(index, _)| *index < open) {
+        if character == left {
+            depth += 1;
+        } else if character == right {
+            depth -= 1;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+    }
+    None
+}
+
+fn valid_identifier(identifier: &str) -> bool {
+    let mut chars = identifier.chars();
+    chars
+        .next()
+        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
+fn valid_sys_path(path: &str) -> bool {
+    let mut segments = path.split('.');
+    matches!(segments.next(), Some("sys"))
+        && segments.clone().count() >= 1
+        && segments.all(|segment| {
+            let mut chars = segment.chars();
+            chars
+                .next()
+                .is_some_and(|first| first.is_ascii_lowercase())
+                && chars.all(|character| {
+                    character.is_ascii_lowercase()
+                        || character.is_ascii_digit()
+                        || character == '_'
+                })
+        })
+}
+
+fn valid_function_label(label: &str, signature: &SignatureIdentity) -> bool {
+    let Some(suffix) = label.strip_prefix(&signature.name) else {
+        return false;
+    };
+    if suffix.is_empty() {
+        return true;
+    }
+    if let Some(parameters) = suffix
+        .strip_prefix('<')
+        .and_then(|parameters| parameters.strip_suffix('>'))
+    {
+        let parameters = parameters
+            .split(',')
+            .map(str::trim)
+            .collect::<BTreeSet<_>>();
+        return !parameters.is_empty()
+            && parameters.len() == signature.type_parameters.len()
+            && parameters.iter().all(|parameter| {
+                valid_identifier(parameter) && signature.type_parameters.contains(*parameter)
+            });
+    }
+    let Some(labelled_type) = suffix
+        .strip_prefix('(')
+        .and_then(|parameters| parameters.strip_suffix(')'))
+        .map(str::trim)
+    else {
+        return false;
+    };
+    if labelled_type.is_empty() || labelled_type.contains(',') {
+        return false;
+    }
+    let is_erased_generic_input = matches!(signature.name.as_str(), "sys.invoke" | "sys.start")
+        && labelled_type == "Value";
+    is_erased_generic_input
+        || signature
+            .parameters
+            .iter()
+            .any(|(parameter_type, _)| type_label(parameter_type) == labelled_type)
+}
+
+fn type_label(ty: &str) -> &str {
+    let ty = ty.trim().strip_suffix('?').unwrap_or(ty.trim());
+    if ty.starts_with('[') && ty.ends_with(']') {
+        return type_label(&ty[1..ty.len() - 1]);
+    }
+    ty.split('<')
+        .next()
+        .unwrap_or(ty)
+        .rsplit('.')
+        .next()
+        .unwrap_or(ty)
+}
+
+/// Validate cross-annotation invariants before deriving constants or emitting JSON.
+pub fn validate_collection(functions: &[Function]) -> Result<(), String> {
+    let mut names = BTreeSet::new();
+    let mut constants = BTreeSet::new();
+    let mut signatures = BTreeSet::new();
+    for function in functions {
+        validate_function_metadata(&function.metadata)?;
+        let name = function.metadata["name"].as_str().expect("validated name");
+        if !names.insert(name.to_owned()) {
+            return Err(format!("duplicate #[ornasys] name {name}"));
+        }
+        let constant = format!("{}_DESCRIPTOR", function.method.to_ascii_uppercase());
+        if !constants.insert(constant.clone()) {
+            return Err(format!("duplicate #[ornasys] descriptor constant {constant}"));
+        }
+        let signature = function.metadata["signature"]
+            .as_str()
+            .expect("validated signature");
+        if !signatures.insert(parse_signature_identity(signature)?) {
+            return Err(format!(
+                "duplicate #[ornasys] callable signature for function `{name}`"
+            ));
+        }
     }
     Ok(())
 }
@@ -241,11 +530,18 @@ pub fn validate_api_document(api: &Value) -> Result<(), String> {
         .as_array()
         .expect("function inventory validated");
     let mut names = std::collections::BTreeSet::new();
+    let mut signatures = BTreeSet::new();
     for function in functions {
         validate_function_metadata(function)?;
         let name = function["name"].as_str().expect("validated name");
         if !names.insert(name) {
             return Err(format!("duplicate system API function `{name}`"));
+        }
+        let signature = function["signature"]
+            .as_str()
+            .expect("validated signature");
+        if !signatures.insert(parse_signature_identity(signature)?) {
+            return Err(format!("duplicate callable signature for system API function `{name}`"));
         }
     }
     Ok(())
