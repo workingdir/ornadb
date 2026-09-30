@@ -1,5 +1,5 @@
 use orna_foundation_v1::{
-    Diagnostic, DiagnosticSeverity, DiagnosticSpan, GitHash, SafeText, Snapshot,
+    Diagnostic, DiagnosticSeverity, DiagnosticSpan, GitHash, OvbRaw, SafeText, Snapshot, Value,
 };
 
 fn diagnostic_with_secret_text() -> Diagnostic {
@@ -164,6 +164,57 @@ fn composed_json_and_codec_projections_redact_fixture_tails() {
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
     assert_eq!(decoded["causes"][0]["message"], "<redacted>");
+}
+
+#[test]
+fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
+    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
+    let raw_root = raw_diagnostic("ORNA-E-ROOT", fixture, vec![raw_cause], false);
+    let decoded = Diagnostic::decode_ovb(&Value::new(raw_root).unwrap().encode().unwrap()).unwrap();
+
+    assert_eq!(decoded.message(), "<redacted>");
+    let json = serde_json::to_vec(&decoded).unwrap();
+    assert!(
+        !json
+            .windows(fixture.len())
+            .any(|window| window == fixture.as_bytes())
+    );
+    let projection = serde_json::to_value(decoded).unwrap();
+    assert_eq!(projection["redacted"], true);
+    assert_eq!(projection["message"], "<redacted>");
+    assert_eq!(projection["causes"][0]["redacted"], true);
+    assert_eq!(projection["causes"][0]["message"], "<redacted>");
+
+    // A producer-admitted root message may survive, but a nested cause with
+    // a false redaction claim cannot inherit that admission.
+    let mixed = raw_diagnostic(
+        "ORNA-E-ROOT",
+        "safe admitted message",
+        vec![raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false)],
+        true,
+    );
+    let decoded = Diagnostic::decode_ovb(&Value::new(mixed).unwrap().encode().unwrap()).unwrap();
+    assert_eq!(decoded.message(), "safe admitted message");
+    let projection = serde_json::to_value(decoded).unwrap();
+    assert_eq!(projection["message"], "safe admitted message");
+    assert_eq!(projection["causes"][0]["message"], "<redacted>");
+}
+
+fn raw_diagnostic(code: &str, message: &str, causes: Vec<OvbRaw>, redacted: bool) -> OvbRaw {
+    let fields = vec![
+        (0, OvbRaw::Text(code.to_owned())),
+        (1, OvbRaw::Int(3.into())),
+        (2, OvbRaw::Text(message.to_owned())),
+        (3, OvbRaw::Array(Vec::new())),
+        (4, OvbRaw::Array(Vec::new())),
+        (5, OvbRaw::Array(causes)),
+        (6, OvbRaw::Bool(redacted)),
+    ]
+    .into_iter()
+    .map(|(key, value)| (OvbRaw::Int(key.into()), value))
+    .collect();
+    OvbRaw::Tag(60011, Box::new(OvbRaw::Map(fields)))
 }
 
 fn assert_redacted_boundaries(redacted: Diagnostic, expected_message: &str) {
