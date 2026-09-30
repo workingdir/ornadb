@@ -7974,6 +7974,8 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
     let full_base_reset_tail_id = b"consumer/zzz-full-base-reset-tail".to_vec();
     let one_sided_full_base_reset_tail_id =
         b"consumer/zzzz-one-sided-full-base-reset-tail".to_vec();
+    let same_side_full_base_delete_reset_id_prefix =
+        b"consumer/zzzz-one-sided-full-base-reset".to_vec();
     let opposite_full_base_delete_before_reset_id =
         b"consumer/zzzy-opposite-full-base-delete-before-reset".to_vec();
     let same_side_full_base_delete_before_reset_id =
@@ -7999,7 +8001,9 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
     // impact or consuming conflict detail. Full-base tombstones before and
     // after the reset on both its own and opposite branches prove the stable-ID
     // tail closure orderings. A same-side tombstone before the first checkpoint
-    // conflict also exercises the prefix edge of that ordered traversal.
+    // conflict also exercises the traversal prefix. A same-side tombstone
+    // whose ID is a strict prefix of the reset ID exercises the adjacent tail
+    // boundary.
     let build_inputs = |
         row_delete_left: bool,
         checkpoint_delete_left: bool,
@@ -8102,6 +8106,23 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
             right.checkpoints.insert(
                 one_sided_full_base_reset_tail_id.clone(),
                 reset_fixture.clone(),
+            );
+        }
+        base.checkpoints.insert(
+            same_side_full_base_delete_reset_id_prefix.clone(),
+            full_checkpoint.clone(),
+        );
+        // This tombstone is on the reset branch and its ID is a strict byte
+        // prefix of the reset ID; the opposite branch retains the base value.
+        if tail_reset_left {
+            right.checkpoints.insert(
+                same_side_full_base_delete_reset_id_prefix.clone(),
+                full_checkpoint.clone(),
+            );
+        } else {
+            left.checkpoints.insert(
+                same_side_full_base_delete_reset_id_prefix.clone(),
+                full_checkpoint.clone(),
             );
         }
         base.checkpoints.insert(
@@ -8278,6 +8299,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
                     assert!(!report.affected_checkpoints.contains(trailing_delete_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(full_base_reset_tail_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(one_sided_full_base_reset_tail_id.as_slice()));
+                    assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_reset_id_prefix.as_slice()));
                     assert!(!report.affected_checkpoints.contains(opposite_full_base_delete_before_reset_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_before_reset_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_before_first_checkpoint_conflict_id.as_slice()));
@@ -8325,6 +8347,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
                 assert!(!report.affected_checkpoints.contains(trailing_delete_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(full_base_reset_tail_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(one_sided_full_base_reset_tail_id.as_slice()));
+                assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_reset_id_prefix.as_slice()));
                 assert!(!report.affected_checkpoints.contains(opposite_full_base_delete_before_reset_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_before_reset_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_before_first_checkpoint_conflict_id.as_slice()));
