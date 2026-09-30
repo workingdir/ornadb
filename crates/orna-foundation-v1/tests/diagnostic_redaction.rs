@@ -215,6 +215,76 @@ fn local_message_admission_does_not_transfer_to_nested_diagnostics() {
 }
 
 #[test]
+fn local_trust_stays_on_root_across_cause_composition_orders() {
+    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let admitted_grandchild = Diagnostic::new(
+        SafeText::new("ORNA-E-ADMITTED-GRANDCHILD").unwrap(),
+        DiagnosticSeverity::Warning,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .with_note(SafeText::new(fixture).unwrap())
+    .redacted_with_message(SafeText::new(fixture).unwrap());
+    let admitted_child = Diagnostic::new(
+        SafeText::new("ORNA-E-ADMITTED-CHILD").unwrap(),
+        DiagnosticSeverity::Warning,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .with_note(SafeText::new(fixture).unwrap())
+    .with_cause(admitted_grandchild)
+    .redacted_with_message(SafeText::new(fixture).unwrap());
+
+    let parent_admitted_before_cause = Diagnostic::new(
+        SafeText::new("ORNA-E-PARENT-FIRST").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .redacted_with_message(SafeText::new("admitted parent message").unwrap())
+    .with_cause(admitted_child.clone());
+    let parent_admitted_after_cause = Diagnostic::new(
+        SafeText::new("ORNA-E-CAUSE-FIRST").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .with_cause(admitted_child)
+    .redacted_with_message(SafeText::new("admitted parent message").unwrap());
+
+    for diagnostic in [parent_admitted_before_cause, parent_admitted_after_cause] {
+        let json = serde_json::to_vec(&diagnostic).unwrap();
+        let projection = serde_json::to_value(&diagnostic).unwrap();
+        let encoded = diagnostic.encode_ovb().unwrap();
+
+        assert_eq!(projection["message"], "admitted parent message");
+        assert_eq!(projection["redacted"], true);
+        assert_eq!(projection["causes"][0]["message"], "<redacted>");
+        assert_eq!(projection["causes"][0]["notes"][0], "<redacted>");
+        assert_eq!(
+            projection["causes"][0]["causes"][0]["message"],
+            "<redacted>"
+        );
+        assert_eq!(
+            projection["causes"][0]["causes"][0]["notes"][0],
+            "<redacted>"
+        );
+        for bytes in [&json, &encoded] {
+            assert!(
+                !bytes
+                    .windows(fixture.len())
+                    .any(|window| window == fixture.as_bytes())
+            );
+        }
+
+        let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
+        assert_eq!(decoded["message"], "<redacted>");
+        assert_eq!(decoded["causes"][0]["message"], "<redacted>");
+        assert_eq!(decoded["causes"][0]["causes"][0]["message"], "<redacted>");
+    }
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
