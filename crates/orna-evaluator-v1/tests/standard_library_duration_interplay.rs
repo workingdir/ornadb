@@ -680,6 +680,50 @@ fn positive_factor_tail_chains_keep_the_minute_side_after_rescaling() {
 }
 
 #[test]
+fn positive_factor_values_around_two_keep_the_minute_boundary_tails() {
+    // The reference does not specify fractional factors that scale a
+    // subminute duration across one minute. Pin the exact 3 ns edge tails.
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
+    ] {
+        assert_eq!(session.submit(source), Ok(None), "{source}");
+    }
+
+    for (source, expected) in [
+        (
+            include_str!("fixtures/stdlib-time-duration-factor-near-two-before-minute-2p80b.orna"),
+            texts(&[
+                "59.999999997s",
+                "00:00:59.999999997",
+                "59.999999997 seconds",
+                "PT59.999999997S",
+            ]),
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-factor-near-two-after-minute-2p80b.orna"),
+            texts(&[
+                "1m 0.000000003s",
+                "00:01:00.000000003",
+                "1 minute, 0.000000003 seconds",
+                "PT1M0.000000003S",
+            ]),
+        ),
+    ] {
+        let result = session.submit(source);
+        assert_eq!(
+            result,
+            Ok(Some(expected)),
+            "{source}; diagnostic={}",
+            result.as_ref().err().map_or("none", |error| error.code())
+        );
+    }
+}
+
+#[test]
 fn clock_output_bound_keeps_elapsed_hours_and_fractional_tail() {
     let limits = Limits {
         max_string_bytes: 129,
