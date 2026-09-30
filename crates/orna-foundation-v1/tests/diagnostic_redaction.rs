@@ -7469,6 +7469,186 @@ fn recursive_revocation_closure_preserves_nested_parent_snapshots() {
 }
 
 #[test]
+fn revoked_nested_snapshots_survive_cause_vector_shrink_and_regrowth() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let untrusted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(message).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+
+    let old_branch = admitted("ORNA-E-SNAPSHOT-BRANCH", "old nested branch admission")
+        .with_cause(admitted("ORNA-E-SNAPSHOT-TAIL-A", "old nested tail A"))
+        .with_cause(admitted("ORNA-E-SNAPSHOT-TAIL-B", "old nested tail B"));
+    let old_generation = admitted("ORNA-E-SNAPSHOT-PARENT", "old snapshot parent admission")
+        .with_cause(old_branch);
+    let capture_old = {
+        let snapshot = old_generation.clone();
+        move || snapshot.clone()
+    };
+    let revoked_generation = capture_old().redacted();
+    let capture_revoked = {
+        let snapshot = revoked_generation.clone();
+        move || snapshot.clone()
+    };
+    let short_replacement = untrusted(
+        "ORNA-E-SNAPSHOT-SHORT",
+        "short replacement parent secret",
+    )
+    .with_cause(untrusted(
+        "ORNA-E-SNAPSHOT-SHORT-BRANCH",
+        "short replacement branch secret",
+    ));
+
+    // ORNA-SECRET-002 requires diagnostic secret redaction but leaves host
+    // Clone::clone_from behavior for nested vector shrink/regrowth unspecified.
+    // Keep captured tree generations as snapshots while replacing live slots.
+    let mut left = capture_old();
+    let mut right = capture_revoked();
+    left.clone_from(&short_replacement);
+    right.clone_from(&capture_old());
+    assert_eq!(left, short_replacement);
+    assert_eq!(right, old_generation);
+    left.clone_from(&capture_revoked());
+    right.clone_from(&short_replacement);
+    assert_eq!(left, revoked_generation);
+    assert_eq!(right, short_replacement);
+
+    assert_eq!(
+        serde_json::to_value(capture_old()).unwrap()["message"],
+        "old snapshot parent admission"
+    );
+    let revoked_projection = serde_json::to_value(capture_revoked()).unwrap();
+    assert_eq!(revoked_projection["message"], "<redacted>");
+    assert_eq!(revoked_projection["causes"][0]["causes"].as_array().unwrap().len(), 2);
+
+    let compose_captured_snapshots = {
+        let left = left.clone();
+        let right = right.clone();
+        let capture_old = capture_old;
+        let capture_revoked = capture_revoked;
+        move || {
+            admitted("ORNA-E-SNAPSHOT-OUTER", "snapshot closure outer admission")
+                .with_cause(left.clone())
+                .with_cause(right.clone())
+                .with_cause(capture_old())
+                .with_cause(capture_revoked())
+        }
+    };
+    let live_replacement = untrusted(
+        "ORNA-E-SNAPSHOT-LIVE",
+        "live replacement snapshot secret",
+    );
+    left.clone_from(&live_replacement);
+    right.clone_from(&live_replacement);
+    assert_eq!(left, live_replacement);
+    assert_eq!(right, live_replacement);
+
+    let outer = compose_captured_snapshots();
+    assert_eq!(outer, compose_captured_snapshots());
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["message"], "snapshot closure outer admission");
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 4);
+    for cause in causes {
+        assert_redacted_tree(cause);
+    }
+    assert_eq!(causes[0]["causes"][0]["causes"].as_array().unwrap().len(), 2);
+    assert!(causes[1]["causes"][0]["causes"].as_array().unwrap().is_empty());
+    assert_eq!(causes[2]["causes"][0]["causes"].as_array().unwrap().len(), 2);
+    assert_eq!(causes[3]["causes"][0]["causes"].as_array().unwrap().len(), 2);
+
+    let json = serde_json::to_vec(&outer).unwrap();
+    assert!(
+        json.windows(b"snapshot closure outer admission".len())
+            .any(|window| window == b"snapshot closure outer admission")
+    );
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"old snapshot parent admission".as_slice(),
+            b"old nested branch admission".as_slice(),
+            b"old nested tail A".as_slice(),
+            b"old nested tail B".as_slice(),
+            b"short replacement parent secret".as_slice(),
+            b"short replacement branch secret".as_slice(),
+            b"live replacement snapshot secret".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+
+    let wire = outer.encode_ovb().unwrap();
+    assert!(
+        wire.windows(b"snapshot closure outer admission".len())
+            .any(|window| window == b"snapshot closure outer admission")
+    );
+    for disclosure in [
+        fixture.as_bytes(),
+        b"old snapshot parent admission".as_slice(),
+        b"old nested branch admission".as_slice(),
+        b"old nested tail A".as_slice(),
+        b"old nested tail B".as_slice(),
+    ]
+    .into_iter()
+    .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
+    {
+        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    let decoded_causes = decoded["causes"].as_array().unwrap();
+    assert_eq!(decoded_causes.len(), 4);
+    for cause in decoded_causes {
+        assert_redacted_tree(cause);
+    }
+    assert_eq!(
+        decoded_causes[0]["causes"][0]["causes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        decoded_causes[1]["causes"][0]["causes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
