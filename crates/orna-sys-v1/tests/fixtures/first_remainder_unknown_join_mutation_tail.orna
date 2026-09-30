@@ -1,0 +1,5 @@
+pub table FirstRemainderUnknownJoinMutationSource(id: Int) { value: Int, }
+pub table FirstRemainderUnknownJoinMutationLeft(id: Int) { value: Int, }
+pub table FirstRemainderUnknownJoinMutationRight(id: Int) { value: Int, }
+pub table FirstRemainderUnknownJoinMutationTarget(id: Int) { value: Int, }
+pub fn update_first_remainder_unknown_join_mutation() = FirstRemainderUnknownJoinMutationTarget.update(1, { value: 2 });
