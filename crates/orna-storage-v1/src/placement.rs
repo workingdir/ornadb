@@ -312,6 +312,7 @@ pub fn plan_storage_placement(
     };
 
     let mut planned_paths = BTreeSet::new();
+    let mut editable_paths = Vec::new();
     let mut decisions = Vec::with_capacity(keyed.len());
     for (key, (candidate, action, body_bytes)) in keyed {
         let placement = match candidate.existing {
@@ -324,6 +325,7 @@ pub fn plan_storage_placement(
                 if !planned_paths.insert(path.clone()) {
                     return Err(StoragePlacementError::PathCollision);
                 }
+                editable_paths.push(path.clone());
                 if body_bytes > MAX_EDITABLE_ROW_BYTES {
                     return Err(StoragePlacementError::EditableRowTooLarge);
                 }
@@ -342,6 +344,11 @@ pub fn plan_storage_placement(
             canonical_body_bytes: body_bytes,
         });
     }
+
+    // A path can be valid on this host and still alias a sibling on a
+    // case-insensitive filesystem. Reject the batch before it is published.
+    crate::validate_portable_paths(&editable_paths)
+        .map_err(|_| StoragePlacementError::PathCollision)?;
 
     Ok(PlacementPlan {
         preference,
