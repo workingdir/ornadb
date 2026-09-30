@@ -1,0 +1,3 @@
+pub table SourceRemainderAfterUnknownSource(id: Int) { value: Int, }
+pub table SourceRemainderAfterUnknownBytes(id: Int) { value: Int, }
+pub table SourceRemainderAfterUnknownRows(id: Int) { value: Int, }
