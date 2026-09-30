@@ -21110,6 +21110,26 @@ mod tests {
             "last() retains both matches across an interleaved nonmatch on short exhaustion"
         );
 
+        // Natural exhaustion may follow another rejected row after the
+        // interleaved matches. Keep the last accepted value through both
+        // rejections instead of treating the final one as a lost boundary.
+        let (last_returns_interleaved_multirow_short_post_filter_take_with_trailing_nonmatch, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-short-interleaved-matches-trailing-nonmatch.orna"
+                ),
+            );
+        assert_eq!(
+            last_returns_interleaved_multirow_short_post_filter_take_with_trailing_nonmatch.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 6),
+            "last() retains the final match across an interleaved and trailing nonmatch"
+        );
+
         // The reference is silent when a short post-filter take has already
         // collected multiple matches before its next predicate fails. Since
         // the requested prefix is still incomplete, preserve that failure
