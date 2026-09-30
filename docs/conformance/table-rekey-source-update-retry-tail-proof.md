@@ -208,3 +208,10 @@ nested closure updates and deletes that destination blocker before retrying the
 inserted re-key. The inserted row then moves and the owner claims its target;
 the mutation tail documents this local nested closure order where the reference
 is silent.
+
+`inserted_move_retry_survives_reused_occupied_destination` extends that blocked
+move closure by inserting a replacement at the just-released move destination.
+The inserted row's retry is caught again; that nested closure updates and deletes
+the replacement, after which the original inserted row moves and the owner
+retry completes. The asserted mutation tail records this local ordering where
+the reference is silent.
