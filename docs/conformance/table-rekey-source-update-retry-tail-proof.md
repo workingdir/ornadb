@@ -266,3 +266,8 @@ The second handoff retry also reclaims an older intermediate destination. The
 inserted row moves aside there, the competitor retries into its released key,
 and the inserted row takes the competitor's vacated source. This local nested
 reuse order is pinned because the reference does not describe it.
+
+The third handoff again uses a destination released by a prior move. The
+competitor moves there while the inserted row retries into its target, then
+returns to the inserted row's vacated source. This repeated target-reuse retry
+ordering is documented as a local choice where the reference is silent.
