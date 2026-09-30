@@ -11011,7 +11011,7 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
         block_on(host.dispatch_frame(
             [15; 16],
             3,
-            Frame::Binary(tenth_same_scope_eval),
+            Frame::Binary(tenth_same_scope_eval.clone()),
             &mut application,
         )),
         Err(Error::RequestMismatch),
@@ -11111,13 +11111,37 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     .expect("the successor scope preserves its Unknown snapshot after target start");
     assert_eq!(tenth_unknown_retry, tenth_unknown);
 
+    // The reference requires an Eval ID/input collision to fail, but leaves
+    // replay of that rejected Eval after the query target changes unstated.
+    // Keep the rejection stable and preserve the accepted query identity.
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [15; 16],
+            7,
+            Frame::Binary(tenth_same_scope_eval),
+            &mut application,
+        )),
+        Err(Error::RequestMismatch),
+        "replaying the rejected Eval after its query target starts still mismatches"
+    );
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [10; 16],
+            request_id: [91; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == tenth_query_fingerprint
+    ));
+
     // The reference requires a mismatch when a request ID is reused for
     // different input, but does not specify whether that rejection changes
     // as the original query's target changes. Keep this diagnostic stable:
     // replaying the same rejected retarget must not replace the saved query.
     let tenth_retargeted_after_start = block_on(host.dispatch_frame(
         [15; 16],
-        7,
+        8,
         Frame::Binary(tenth_retargeted_query.clone()),
         &mut application,
     ))
@@ -11149,7 +11173,7 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     .unwrap();
     let tenth_fresh = block_on(host.dispatch_frame(
         [15; 16],
-        8,
+        9,
         Frame::Binary(tenth_fresh_request.clone()),
         &mut application,
     ))
