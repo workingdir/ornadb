@@ -8,3 +8,4 @@ pub fn metadata_rows(rows: Relation<sys.ValueMetadata<sys.Value>>): Relation<sys
 pub fn generic_metadata_rows<T>(rows: Relation<sys.ValueMetadata<T>>): Relation<sys.ValueMetadata<T>> = rows;
 pub fn metadata_protocols<T>(metadata: sys.ValueMetadata<T>): Relation<sys.Protocol> = metadata.protocols;
 pub fn invocation_result_value<T>(result: sys.InvocationResult<T>): T? = result.value;
+pub fn generic_metadata_protocols<T>(rows: Relation<sys.ValueMetadata<T>>): Relation<sys.Protocol> = rows | flat_map(row => row.protocols);
