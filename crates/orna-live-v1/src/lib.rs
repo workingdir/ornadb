@@ -1350,7 +1350,6 @@ impl LiveSessionChildren for LiveApplicationWorkSupervisor {
 /// owns the application lease and is therefore not complete until the
 /// application task explicitly acknowledges its terminal boundary.
 pub struct LiveApplicationTicket {
-    attachment: [u8; 16],
     session: [u8; 16],
     request: [u8; 16],
     message: Message,
@@ -2721,7 +2720,6 @@ impl LiveHost {
         }
         self.application_sessions.insert(session);
         Ok(ApplicationPreparation::Work(LiveApplicationTicket {
-            attachment,
             session,
             request,
             message: envelope.message,
@@ -6123,7 +6121,7 @@ impl LiveTransport {
                         // errors owned by the caller.
                         if let Some(envelope) = decoded.as_ref()
                             && let Some(outcome) = self.operational_error_outcome(
-                                socket.attachment,
+                                self.host.attachments.get(&socket.attachment).copied(),
                                 envelope,
                                 error,
                             )?
@@ -6185,7 +6183,7 @@ impl LiveTransport {
         &mut self,
         completion: LiveApplicationCompletion,
     ) -> Result<WebSocketOutput> {
-        let attachment = completion.ticket.attachment;
+        let session = completion.ticket.session;
         let envelope = Envelope {
             request: Some(completion.ticket.request),
             watch: completion.ticket.watch,
@@ -6202,7 +6200,7 @@ impl LiveTransport {
                 // while framing, attachment, and stale-completion failures
                 // remain transport errors owned by the caller.
                 if let Some(outcome) =
-                    self.operational_error_outcome(attachment, &envelope, error)?
+                    self.operational_error_outcome(Some(session), &envelope, error)?
                 {
                     self.websocket_output(outcome)
                 } else {
@@ -7502,7 +7500,11 @@ impl LiveTransport {
                     Err(error) => {
                         if let Some(envelope) = decoded.as_ref()
                             && let Some(outcome) =
-                                self.operational_error_outcome(socket.attachment, envelope, error)?
+                                self.operational_error_outcome(
+                                    self.host.attachments.get(&socket.attachment).copied(),
+                                    envelope,
+                                    error,
+                                )?
                         {
                             return Ok(Some(self.websocket_output(outcome)?));
                         }
@@ -7531,17 +7533,21 @@ impl LiveTransport {
     /// boundary failures must not be misrepresented as a handle rejection.
     fn operational_error_outcome(
         &self,
-        attachment: [u8; 16],
+        session: Option<[u8; 16]>,
         envelope: &Envelope,
         error: Error,
     ) -> Result<Option<DispatchOutcome>> {
         let Some(request) = envelope.request else {
             return Ok(None);
         };
-        let known_watch = self.host.attachments.get(&attachment).and_then(|session| {
+        // Completions can outlive the socket attachment that admitted them:
+        // resume retires that attachment while preserving the session's
+        // request and watch identities. Correlate against the admitted
+        // session, not a reverse lookup through a possibly retired socket.
+        let known_watch = session.and_then(|session| {
             envelope
                 .watch
-                .filter(|watch| self.host.watches.contains(&(*session, *watch)))
+                .filter(|watch| self.host.watches.contains(&(session, *watch)))
         });
         let (code, watch) = match error {
             Error::RequestMismatch => (Error::RequestMismatch.code(), None),
