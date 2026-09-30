@@ -21212,6 +21212,26 @@ mod tests {
             "last() closes before four rejected branches and the failing tail"
         );
 
+        // The reference gives no cutoff detail for a still longer closed
+        // tail. Keep the fifth consecutive reject and following failure
+        // outside the completed bracketed take(2) prefix.
+        let (last_closes_bracketed_take_two_before_five_rejects_and_failure, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-bracketed-five-rejects-then-failing-tail.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_bracketed_take_two_before_five_rejects_and_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "last() closes before five rejected branches and the failing tail"
+        );
+
         // The reference is silent when the entire bracketed candidate tail
         // is rejected before take(2) naturally exhausts. The empty last()
         // result keeps its explicit coalesce fallback.
