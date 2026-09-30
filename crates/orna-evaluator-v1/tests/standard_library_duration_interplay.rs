@@ -515,6 +515,64 @@ fn duration_clock_format_keeps_fractional_minute_and_sign_boundaries() {
 }
 
 #[test]
+fn duration_formatters_keep_positive_factor_products_on_the_correct_side_of_a_minute() {
+    // Orna-1.0.0 shows minute formatting but leaves fractional-factor edge
+    // precision unspecified. Pin exact nanoseconds and decompose at 60 seconds.
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
+    ] {
+        assert_eq!(session.submit(source), Ok(None), "{source}");
+    }
+
+    for (source, expected) in [
+        (
+            include_str!("fixtures/stdlib-time-duration-compact-factor-before-minute-96nep.orna"),
+            "59.999999994s",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-compact-factor-after-minute-96nep.orna"),
+            "1m 0.000000006s",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-clock-factor-before-minute-96nep.orna"),
+            "00:00:59.999999994",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-clock-factor-after-minute-96nep.orna"),
+            "00:01:00.000000006",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-words-factor-before-minute-96nep.orna"),
+            "59.999999994 seconds",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-words-factor-after-minute-96nep.orna"),
+            "1 minute, 0.000000006 seconds",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-iso-factor-before-minute-96nep.orna"),
+            "PT59.999999994S",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-iso-factor-after-minute-96nep.orna"),
+            "PT1M0.000000006S",
+        ),
+    ] {
+        let result = session.submit(source);
+        assert_eq!(
+            result,
+            Ok(Some(text(expected))),
+            "{source}; diagnostic={}",
+            result.as_ref().err().map_or("none", |error| error.code())
+        );
+    }
+}
+
+#[test]
 fn clock_output_bound_keeps_elapsed_hours_and_fractional_tail() {
     let limits = Limits {
         max_string_bytes: 129,
