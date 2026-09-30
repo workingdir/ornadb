@@ -2,11 +2,17 @@
 //!
 //! This crate deliberately performs no TLS, socket, clock, entropy-provider, or
 //! session-store I/O. Integrations supply those capabilities through the small
-//! adapter traits below; no request payload may select a provider or authority.
+//! adapter traits below; secret storage is the explicit SOPS-backed exception.
+//! No request payload may select a provider or authority.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
+use serde::Serialize;
 use subtle::ConstantTimeEq;
+
+mod sops;
+
+pub use sops::SopsProvider;
 
 pub const CREDENTIAL_BYTES: usize = 32;
 /// Maximum session lease permitted by the live protocol profile.
@@ -17,9 +23,9 @@ pub const MAX_SESSION_LEASE: u64 = 300_000;
 
 /// A stable, non-secret name for one externally managed secret.
 ///
-/// The reference is descriptive data, not a resolution capability. Providers
-/// remain adapter-owned; in particular, this crate does not select SOPS,
-/// decryption identities, or any other external secret system from the name.
+/// The reference is descriptive data, not a resolution capability. The SOPS
+/// provider maps names to opaque hashed filenames; references never select a
+/// path, decryption identity, or external authority.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SecretRef(String);
 
@@ -54,8 +60,17 @@ impl fmt::Display for SecretRef {
     }
 }
 
+impl Serialize for SecretRef {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 /// Non-sensitive metadata exposed for a secret reference.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SecretMetadata {
     reference: SecretRef,
     provider: String,
@@ -110,19 +125,21 @@ impl std::error::Error for SecretBoundaryError {}
 
 /// Adapter-owned secret boundary.
 ///
-/// `metadata` is safe to use for inspection without decryption. `with_secret`
-/// is the explicit privileged resolution operation; implementations must
-/// decrypt in memory and return [`SecretBoundaryError::Unavailable`] when the
-/// external identity is absent. The callback is the only byte-bearing surface
-/// exposed by this crate, so secret material has no public `Debug`, `Display`,
-/// or serialization representation here.
+/// `metadata` returns only stable, non-secret facts. Providers may probe
+/// availability by decrypting into memory and immediately discarding the
+/// result. `with_secret` is the explicit privileged resolution operation;
+/// implementations must decrypt in memory and return
+/// [`SecretBoundaryError::Unavailable`] when the external identity is absent.
+/// The callback is the only byte-bearing surface exposed by this crate, so
+/// resolved material has no public `Debug`, `Display`, or serialization API.
 pub trait SecretResolver {
-    /// Returns non-sensitive metadata without resolving secret bytes.
+    /// Returns non-sensitive metadata without disclosing resolved secret bytes.
     ///
     /// # Errors
     ///
-    /// Returns a provider-owned boundary error when the reference is denied or
-    /// its metadata is unavailable.
+    /// Returns [`SecretBoundaryError::Denied`] when metadata access is denied.
+    /// Providers report ordinary unavailability with
+    /// [`SecretMetadata::available`] set to `false`.
     fn metadata(&self, reference: &SecretRef) -> Result<SecretMetadata, SecretBoundaryError>;
 
     /// Resolves the secret for one explicitly privileged callback.
