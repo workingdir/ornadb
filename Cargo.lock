@@ -1232,6 +1232,7 @@ name = "orna-application-v1"
 version = "1.0.0"
 dependencies = [
  "futures",
+ "getrandom 0.3.4",
  "num-bigint 0.4.8",
  "orna-evaluator-v1",
  "orna-foundation-v1",
