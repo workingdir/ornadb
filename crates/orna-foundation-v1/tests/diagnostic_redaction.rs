@@ -49,6 +49,44 @@ fn admitted_root_message_does_not_disclose_notes_or_nested_causes() {
     assert_redacted_boundaries(redacted, &message);
 }
 
+#[test]
+fn diagnostic_debug_redacts_fixture_payloads_without_explicit_redaction() {
+    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let cause = Diagnostic::new(
+        SafeText::new(fixture).unwrap(),
+        DiagnosticSeverity::Warning,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .with_note(SafeText::new(fixture).unwrap());
+    let diagnostic = Diagnostic::new(
+        SafeText::new(fixture).unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new(fixture).unwrap(),
+    )
+    .unwrap()
+    .with_span(
+        DiagnosticSpan::new(
+            Snapshot::Commit {
+                database: [7; 16],
+                algorithm: GitHash::Sha256,
+                oid: vec![9; 32],
+            },
+            "secrets/credential.orna",
+            0.into(),
+            1.into(),
+        )
+        .unwrap(),
+    )
+    .with_note(SafeText::new(fixture).unwrap())
+    .with_cause(cause);
+
+    let debug = format!("{diagnostic:?}");
+    assert!(debug.contains("<redacted>"));
+    assert!(!debug.contains(fixture));
+    assert!(!debug.contains("credential.orna"));
+}
+
 fn assert_redacted_boundaries(redacted: Diagnostic, expected_message: &str) {
     let ovb = redacted.encode_ovb().unwrap();
     let decoded = Diagnostic::decode_ovb(&ovb).unwrap();
