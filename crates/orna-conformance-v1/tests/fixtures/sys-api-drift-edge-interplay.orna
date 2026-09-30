@@ -43,4 +43,5 @@ pub fn optional_reference_target_columns(tables: Relation<sys.Table>): Relation<
 pub fn optional_reference_target_column_names(tables: Relation<sys.Table>): Relation<Str> = optional_reference_target_columns(tables) | map(column => column.name);
 pub fn optional_keyed_reference_target_columns(tables: Relation<sys.Table>): Relation<sys.Column> = optional_reference_target_columns(tables) | filter(optional_column => optional_column.optional) | filter(keyed_column => keyed_column.key_position != null);
 pub fn optional_keyed_reference_target_column_names(tables: Relation<sys.Table>): Relation<Str> = optional_keyed_reference_target_columns(tables) | map(column => column.name);
-pub fn computed_optional_keyed_reference_target_column_names(tables: Relation<sys.Table>): Relation<Str> = optional_keyed_reference_target_columns(tables) | filter(computed_column => computed_column.computed_expression != null) | map(computed_column => computed_column.name);
+pub fn computed_column_rows(columns: Relation<sys.Column>): Relation<sys.Column> = columns | filter(column => column.computed_expression != null);
+pub fn computed_optional_keyed_reference_target_column_names(tables: Relation<sys.Table>): Relation<Str> = computed_column_rows(optional_keyed_reference_target_columns(tables)) | map(column => column.name);
