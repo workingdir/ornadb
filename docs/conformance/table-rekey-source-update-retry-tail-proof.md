@@ -222,3 +222,9 @@ and is blocked by the moved row. Its closure moves the inserted row again,
 updates it at the new key, and lets the competitor retry before the owner
 returns. The local mutation tail captures this nested destination reuse where
 the reference is silent.
+
+`competitor_retry_survives_successive_inserted_target_moves` has that competitor
+retry against the inserted row's second move destination. A further nested
+closure moves the inserted row once more and updates it before the competitor
+claims the vacated key and the owner returns. The asserted tail documents this
+successive local move and retry order where the reference is silent.
