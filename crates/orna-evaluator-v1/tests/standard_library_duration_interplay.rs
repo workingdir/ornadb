@@ -108,3 +108,75 @@ fn exact_decimal_duration_respects_seconds_digit_limit_not_nanosecond_intermedia
         result.as_ref().err().map_or("none", |error| error.code())
     );
 }
+
+#[test]
+fn integer_duration_units_enforce_limit_after_seconds_scaling() {
+    let limits = Limits {
+        max_integer_digits: 5,
+        ..Limits::default()
+    };
+    let mut session = AdmittedReplSession::with_reference_standard(limits).unwrap();
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna")),
+        Ok(None)
+    );
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-time-duration-hour-boundary-vfh0m.orna")),
+        Ok(Some(text("27:00:00")))
+    );
+    assert_eq!(
+        session
+            .submit(include_str!("fixtures/stdlib-time-duration-hour-overflow-vfh0m.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-LIMIT"
+    );
+
+    let limits = Limits {
+        max_integer_digits: 4,
+        ..Limits::default()
+    };
+    let mut session = AdmittedReplSession::with_reference_standard(limits).unwrap();
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna")),
+        Ok(None)
+    );
+    assert_eq!(
+        session
+            .submit(include_str!("fixtures/stdlib-time-duration-minute-overflow-vfh0m.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
+#[test]
+fn duration_clock_format_keeps_fractional_minute_and_sign_boundaries() {
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna")),
+        Ok(None)
+    );
+    for (source, expected) in [
+        (
+            include_str!("fixtures/stdlib-time-duration-before-minute-vfh0m.orna"),
+            "00:00:59.999999999",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-after-minute-vfh0m.orna"),
+            "00:01:00.000000001",
+        ),
+        (
+            include_str!("fixtures/stdlib-time-duration-negative-nanosecond-vfh0m.orna"),
+            "-00:00:00.000000001",
+        ),
+    ] {
+        let result = session.submit(source);
+        assert_eq!(
+            result,
+            Ok(Some(text(expected))),
+            "{source}; diagnostic={}",
+            result.as_ref().err().map_or("none", |error| error.code())
+        );
+    }
+}
