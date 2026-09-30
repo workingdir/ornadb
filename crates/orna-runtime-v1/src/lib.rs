@@ -25997,6 +25997,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second_reset.version, 2);
+        let receipts_before_reopen = state.admin_invocation_audits().await.unwrap();
+        let reset_receipt_order = receipts_before_reopen
+            .iter()
+            .filter(|receipt| {
+                receipt.invocation_id == first_reset_id
+                    || receipt.invocation_id == second_reset_id
+            })
+            .map(|receipt| (receipt.invocation_id, receipt.sequence))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reset_receipt_order
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            vec![first_reset_id, second_reset_id],
+            "reset receipts retain their independent admission order"
+        );
+        assert!(reset_receipt_order
+            .windows(2)
+            .all(|pair| pair[0].1 < pair[1].1));
+        let reset_audits_before_reopen = state.checkpoint_reset_audits(&key).await.unwrap();
+        assert_eq!(
+            reset_audits_before_reopen
+                .iter()
+                .map(|audit| audit.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
 
         // Exercise startup reconstruction of a missing successful reset
         // result while invocation lifecycle events remain independently durable.
@@ -26014,6 +26042,15 @@ mod tests {
 
         let reopened = open_state(&repo).await;
         let writer = reopened.acquire_lease(id(74)).await.unwrap();
+        assert_eq!(
+            reopened.admin_invocation_audits().await.unwrap(),
+            receipts_before_reopen,
+            "receipt reconstruction preserves audit identities, results and ordering"
+        );
+        assert_eq!(
+            reopened.checkpoint_reset_audits(&key).await.unwrap(),
+            reset_audits_before_reopen
+        );
         let terminal_tail = reopened
             .invocation_observation_tail(Some(cursor), 4)
             .await
@@ -26045,7 +26082,7 @@ mod tests {
             reopened
                 .reset_checkpoint_with_invocation_id(
                     writer,
-                    first_request,
+                    first_request.clone(),
                     first_reset_id,
                 )
                 .await,
@@ -26054,17 +26091,48 @@ mod tests {
         );
         assert_eq!(
             reopened
-                .reset_checkpoint_with_invocation_id(writer, second_request, second_reset_id)
+                .reset_checkpoint_with_invocation_id(
+                    writer,
+                    second_request,
+                    second_reset_id,
+                )
                 .await,
             Ok(second_reset.clone())
         );
         assert_eq!(reopened.stream_checkpoint(&key).await.unwrap(), second_reset);
+        let mut changed_request = first_request;
+        changed_request.reason = "different request under the retained ID".into();
+        assert_eq!(
+            reopened
+                .reset_checkpoint_with_invocation_id(
+                    writer,
+                    changed_request,
+                    first_reset_id,
+                )
+                .await,
+            Err(RuntimeError::AdminInvocationConflict),
+            "argument drift conflicts before changing either ordered journal"
+        );
+        assert_eq!(
+            reopened.admin_invocation_audits().await.unwrap(),
+            receipts_before_reopen,
+            "replays and conflicts do not allocate new audit sequence entries"
+        );
         assert_eq!(reopened.orphan_abandoned_invocations(writer).await.unwrap(), 0);
         let full_tail = reopened
             .invocation_observation_tail(None, 8)
             .await
             .unwrap();
         assert_eq!(full_tail.entries.len(), 6);
+        assert_eq!(
+            full_tail
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5, 6],
+            "admin receipt reconciliation leaves the invocation tail sequence contiguous"
+        );
         assert_eq!(
             full_tail
                 .entries
