@@ -52,6 +52,37 @@ where
         .await
 }
 
+/// Runs one already validated, terminal administrative effect after removing
+/// this runtime's activation fence for the duration of the effect. Callers
+/// must first prove that the activation staged no table mutations; this is a
+/// host boundary helper, not an application capability.
+pub async fn with_terminal_admin_effect<T, F, Fut>(
+    state: &RuntimeState,
+    lease: WriterLease,
+    callback: F,
+) -> Result<T, RuntimeError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T, RuntimeError>>,
+{
+    let state_id = std::ptr::from_ref(state) as usize;
+    let mut active = ACTIVE_ACTIVATION_STATES
+        .try_with(|states| states.borrow().clone())
+        .unwrap_or_default();
+    if let Some(index) = active.iter().position(|active_id| *active_id == state_id) {
+        active.remove(index);
+    }
+
+    ACTIVE_ACTIVATION_STATES
+        .scope(RefCell::new(active), async {
+            if state.current_lease().await? != Some(lease) {
+                return Err(RuntimeError::OwnerLost);
+            }
+            callback().await
+        })
+        .await
+}
+
 /// Staged table changes and the typed value produced by one activation.
 ///
 /// The evaluator can use the staged result for read-your-writes semantics while

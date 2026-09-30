@@ -294,6 +294,24 @@ impl ApplicationAuthority {
             ApplicationError::EffectRejected(error.code().to_owned())
         })?;
         let (mutations, effects) = handler.into_parts()?;
+        if !mutations.is_empty()
+            && let Some(effect) = effects.iter().find(|effect| {
+                matches!(
+                    effect,
+                    ApplicationEffectRequest::PauseStream { .. }
+                        | ApplicationEffectRequest::ResumeStream { .. }
+                )
+            })
+        {
+            // The admin transition uses its own durable transaction. A source
+            // activation with staged table writes must finish first.
+            let code = dispatcher
+                .reject_staged_admin_effect(effect.clone(), context)
+                .await
+                .err()
+                .unwrap_or_else(|| "sys.admin.busy".to_owned());
+            return Err(ApplicationError::SourceEffectFailed(code));
+        }
         for effect in effects {
             value = dispatcher
                 .dispatch(effect, context)
@@ -382,6 +400,9 @@ pub enum ApplicationEffectRequest {
         stream: CanonicalValue,
         reason: Option<String>,
     },
+    ResumeStream {
+        stream: CanonicalValue,
+    },
     CancelInvocation {
         invocation: CanonicalValue,
         reason: Option<String>,
@@ -409,6 +430,14 @@ pub trait AsyncApplicationEffectDispatcher {
         effect: ApplicationEffectRequest,
         context: &'a RuntimeActivationContext,
     ) -> ApplicationEffectFuture<'a>;
+
+    fn reject_staged_admin_effect<'a>(
+        &'a self,
+        _effect: ApplicationEffectRequest,
+        _context: &'a RuntimeActivationContext,
+    ) -> ApplicationEffectFuture<'a> {
+        Box::pin(async { Err("sys.admin.busy".to_owned()) })
+    }
 }
 
 struct LiveEffectAdapter<'a>(&'a dyn LiveAdminEffectDispatcher);
@@ -427,8 +456,30 @@ impl AsyncApplicationEffectDispatcher for LiveEffectAdapter<'_> {
             ApplicationEffectRequest::PauseStream { stream, reason } => {
                 self.0.pause_stream(stream, reason, context)
             }
+            ApplicationEffectRequest::ResumeStream { stream } => {
+                self.0.resume_stream(stream, context)
+            }
             ApplicationEffectRequest::CancelInvocation { .. } => {
                 Box::pin(async { Err("sys.invoke.effect_unavailable".to_owned()) })
+            }
+        }
+    }
+
+    fn reject_staged_admin_effect<'a>(
+        &'a self,
+        effect: ApplicationEffectRequest,
+        context: &'a RuntimeActivationContext,
+    ) -> ApplicationEffectFuture<'a> {
+        match effect {
+            ApplicationEffectRequest::PauseStream { stream, reason } => {
+                self.0.reject_staged_admin_effect(stream, reason, false, context)
+            }
+            ApplicationEffectRequest::ResumeStream { stream } => {
+                self.0
+                    .reject_staged_admin_effect(stream, None, true, context)
+            }
+            ApplicationEffectRequest::CancelInvocation { .. } => {
+                Box::pin(async { Err("sys.admin.busy".to_owned()) })
             }
         }
     }
@@ -718,6 +769,19 @@ impl EffectHandler for AsyncSourceMutationEffectHandler {
                 .map(Some)
                 .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"));
         }
+        if source_function_path(callee).as_deref() == Some("sys.admin.resume_stream") {
+            let [stream] = arguments else {
+                return Err(SourceMutationEffectHandler::effect_error(
+                    "ORNA-EVAL-ARGUMENT",
+                ));
+            };
+            self.effects.push(ApplicationEffectRequest::ResumeStream {
+                stream: stream.clone(),
+            });
+            return CanonicalValue::new(OvbRaw::Bool(false))
+                .map(Some)
+                .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"));
+        }
         if source_function_path(callee).as_deref() == Some("sys.cancel") {
             let request = match arguments {
                 [invocation] => ApplicationEffectRequest::CancelInvocation {
@@ -830,7 +894,10 @@ fn validate_terminal_runtime_effect(
 }
 
 fn is_runtime_source_effect_path(path: &str) -> bool {
-    matches!(path, "sys.admin.pause_stream" | "sys.cancel")
+    matches!(
+        path,
+        "sys.admin.pause_stream" | "sys.admin.resume_stream" | "sys.cancel"
+    )
 }
 
 fn is_terminal_runtime_effect_call(expression: &Expr) -> bool {
@@ -1824,6 +1891,9 @@ mod tests {
             Box::pin(async move {
                 match effect {
                     ApplicationEffectRequest::PauseStream { .. } => {
+                        Ok(CanonicalValue::new(OvbRaw::Bool(true)).expect("canonical bool"))
+                    }
+                    ApplicationEffectRequest::ResumeStream { .. } => {
                         Ok(CanonicalValue::new(OvbRaw::Bool(true)).expect("canonical bool"))
                     }
                     ApplicationEffectRequest::CancelInvocation { .. } => {
