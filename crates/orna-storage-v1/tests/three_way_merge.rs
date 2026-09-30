@@ -1087,7 +1087,7 @@ fn segmented_checkpoint_delete_update_impacts_cross_the_shared_budget_boundary()
     // open. Resolve ordered ranges before bytewise checkpoint IDs for stable
     // impact tails across both delete/update orientations.
     for delete_on_left in [true, false] {
-        for max_conflicts in [2, 3] {
+        for max_conflicts in [0, 2, 3] {
             let (base, left, right, mut source) = build_inputs(delete_on_left);
             let error = merge_three_way_snapshots(
                 &base,
@@ -1098,6 +1098,7 @@ fn segmented_checkpoint_delete_update_impacts_cross_the_shared_budget_boundary()
             )
             .unwrap_err();
             let (report, exact_conflicts) = match (max_conflicts, error) {
+                (0, BranchMergeError::BudgetExceeded { report }) => (report, None),
                 (2, BranchMergeError::BudgetExceeded { report }) => (report, None),
                 (3, BranchMergeError::Conflicts { conflicts, report }) => {
                     assert_eq!(conflicts.len(), 3);
@@ -1116,14 +1117,20 @@ fn segmented_checkpoint_delete_update_impacts_cross_the_shared_budget_boundary()
                 }
                 (_, error) => panic!("unexpected budget result: {error:?}"),
             };
-            assert_eq!(report.conflicts_lower_bound, 3);
-            assert_eq!(report.rows_examined, 6);
+            assert_eq!(report.conflicts_lower_bound, if max_conflicts == 0 { 1 } else { 3 });
+            assert_eq!(report.rows_examined, if max_conflicts == 0 { 3 } else { 6 });
             assert!(report.affected_tables.contains(&id(1)));
             assert!(report.affected_ranges.contains(&(id(1), low_range.clone())));
-            assert!(report.affected_ranges.contains(&(id(1), high_range.clone())));
-            assert!(report.affected_checkpoints.contains(b"consumer/source".as_slice()));
-            assert_eq!(source.visited.len(), 6);
-            if max_conflicts == 2 {
+            if max_conflicts == 0 {
+                assert!(!report.affected_ranges.contains(&(id(1), high_range.clone())));
+                assert!(report.affected_checkpoints.is_empty());
+                assert_eq!(source.visited.len(), 3);
+            } else {
+                assert!(report.affected_ranges.contains(&(id(1), high_range.clone())));
+                assert!(report.affected_checkpoints.contains(b"consumer/source".as_slice()));
+                assert_eq!(source.visited.len(), 6);
+            }
+            if max_conflicts < 3 {
                 assert!(exact_conflicts.is_none());
             } else {
                 assert!(exact_conflicts.is_some());
