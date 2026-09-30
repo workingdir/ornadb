@@ -148,3 +148,8 @@ release boundary: after the secondary blocker moves, the owner takes its key and
 blocks the primary blocker's retry. The owner moves aside in a nested closure,
 allowing both competitor moves to finish before it returns to its original key.
 The fixture documents this local mutation order where the reference is silent.
+
+`owner_unblocks_its_nested_move_before_competitor_closure` adds a blocker to the
+owner's move-aside target. The owner's nested failure closure moves that blocker
+away, then the primary blocker, competitor, and owner complete their retries in
+order. The fixture records the local closure log where the reference is silent.
