@@ -164,9 +164,91 @@ async fn governance_reads_and_row_attestations_follow_immutable_checkpoint_cuts(
     assert_eq!(attestation_zero.table_count(), 0);
     assert_eq!(attestation_one.row_count(), 1);
     assert_eq!(attestation_one.table_count(), 1);
+    assert_eq!(generation_one.generation(), 1);
+    assert_eq!(attestation_one.generation(), 1);
     assert_eq!(attestation_one.capture(), generation_one.capture());
     assert_eq!(attestation_one.admin_audit_sequence(), 2);
     assert_eq!(attestation_one.checkpoint_reset_audit_sequence(), 1);
+
+    // Governance actions after a selected generation belong to the next
+    // checkpoint cut. Unsafe provider text is retained only as a redaction
+    // marker in the specialized reset history.
+    state
+        .reset_checkpoint(
+            writer,
+            CheckpointResetRequest {
+                key: key.clone(),
+                expected: CheckpointPrecondition {
+                    version: 1,
+                    committed: Some(orna_stream_v1::Position {
+                        token: Component::new("position-one").unwrap(),
+                    }),
+                },
+                to: orna_stream_v1::Position {
+                    token: Component::new("position-two").unwrap(),
+                },
+                reason: "operator\0private detail".into(),
+            },
+        )
+        .await
+        .expect("record redacted reset after generation one");
+    let activation = state.begin_activation().await.expect("capture next activation");
+    state
+        .commit_table_activation(
+            writer,
+            &activation,
+            &[TableMutation::new([47; 16], "records", vec![1], None).unwrap()],
+            [48; 32],
+            &NoFault,
+        )
+        .await
+        .expect("commit generation two delete");
+    let generation_two = state
+        .select_historical_snapshot(2)
+        .await
+        .expect("select generation two");
+
+    assert_eq!(
+        state
+            .admin_invocation_audits_at(&generation_one)
+            .await
+            .unwrap()
+            .rows()
+            .len(),
+        2,
+        "generation one must not absorb later governance actions"
+    );
+    assert_eq!(generation_one.generation(), 1, "pins retain their selected generation");
+    assert_eq!(
+        state
+            .select_historical_snapshot(u64::MAX)
+            .await
+            .unwrap_err(),
+        orna_runtime_v1::RuntimeError::SnapshotNotFound
+    );
+    let admin_two = state
+        .admin_invocation_audits_at(&generation_two)
+        .await
+        .unwrap();
+    assert_eq!(admin_two.rows().len(), 3);
+    assert_eq!(admin_two.rows()[2].observed_generation, 1);
+    let resets_two = state
+        .checkpoint_reset_audits_at(&key, &generation_two)
+        .await
+        .unwrap();
+    assert_eq!(resets_two.rows().len(), 2);
+    assert_eq!(resets_two.rows()[1].observed_generation, Some(1));
+    assert_eq!(resets_two.rows()[1].reason, "<redacted>");
+    assert!(resets_two.rows()[1].redacted);
+    let attestation_two = state
+        .attest_historical_snapshot(&generation_two)
+        .await
+        .unwrap();
+    assert_eq!(attestation_two.generation(), 2);
+    assert_eq!(attestation_two.row_count(), 0);
+    assert_eq!(attestation_two.table_count(), 0);
+    assert_eq!(attestation_two.admin_audit_sequence(), 3);
+    assert_eq!(attestation_two.checkpoint_reset_audit_sequence(), 2);
 
     drop(state);
     let reopened = RuntimeState::open(
