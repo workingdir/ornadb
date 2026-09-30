@@ -10,6 +10,6 @@ description = "Bounded pre-effect admission for Orna 1.0 reflective invocation"
 orna-security-v1 = { path = "../orna-security-v1" }
 serde = { version = "1.0.229", features = ["derive"] }
 sha2 = "0.10.9"
+serde_json = "1.0.151"
 
 [dev-dependencies]
-serde_json = "1.0.151"
