@@ -264,7 +264,15 @@ impl PackageResolver {
                 repository,
                 commit,
                 self.loader,
-            )?;
+            )
+            .map_err(|error| match error {
+                // The normative contract fixes exact commit identity but not
+                // package-load diagnostics. Keep host paths and parser details
+                // out of resolver errors while distinguishing a present pin
+                // whose contents are not a loadable database.
+                AttachmentError::Project(_) => AttachmentError::PinnedPackageInvalid,
+                error => error,
+            })?;
             session.attach_database(database)?;
         }
         Ok(session)
@@ -349,7 +357,25 @@ impl AttachedDatabaseSession {
     /// Reports the one database whose transaction may be written by this
     /// session. Independent attached logs are never described as atomic.
     pub fn is_writable_database(&self, name: &str) -> bool {
-        self.primary.pin.name == name
+        self.validate_write_target(name).is_ok()
+    }
+
+    /// Enforces the attach-layer write boundary before a caller starts a
+    /// mutation. ORNA-ATTACH-002 and ORNA-HIST-003 require attached snapshots
+    /// to stay read-only; v1 reports a stable refusal for attached aliases and
+    /// the system namespace, while only the session's primary is writable.
+    pub fn validate_write_target(&self, name: &str) -> Result<(), AttachmentError> {
+        let name = checked_name(name.to_owned())?;
+        if name == self.primary.pin.name {
+            return Ok(());
+        }
+        if name == "sys" {
+            return Err(AttachmentError::SystemDatabaseReadOnly);
+        }
+        if self.attached.contains_key(&name) {
+            return Err(AttachmentError::AttachedSnapshotReadOnly);
+        }
+        Err(AttachmentError::DatabaseUnavailable)
     }
 
     /// Source modules for typed session admission. Attached module namespaces
@@ -504,7 +530,11 @@ pub enum AttachmentError {
     SystemDatabaseCannotAttach,
     RepositoryUnavailable,
     PinUnavailable,
+    PinnedPackageInvalid,
     DuplicateAttachment,
+    AttachedSnapshotReadOnly,
+    SystemDatabaseReadOnly,
+    DatabaseUnavailable,
     PrimaryDatabaseCannotDetach,
     SystemDatabaseCannotDetach,
     AttachmentNotFound,
@@ -523,7 +553,11 @@ impl fmt::Display for AttachmentError {
             Self::SystemDatabaseCannotAttach => "the system database is provided by the host",
             Self::RepositoryUnavailable => "pinned package repository is unavailable",
             Self::PinUnavailable => "pinned package commit is unavailable",
+            Self::PinnedPackageInvalid => "pinned package is not a loadable database",
             Self::DuplicateAttachment => "database attachment name is already in use",
+            Self::AttachedSnapshotReadOnly => "attached database snapshots are read-only",
+            Self::SystemDatabaseReadOnly => "the system database cannot be written",
+            Self::DatabaseUnavailable => "database is not available in this session",
             Self::PrimaryDatabaseCannotDetach => "the primary database cannot be detached",
             Self::SystemDatabaseCannotDetach => "the system database cannot be detached",
             Self::AttachmentNotFound => "database attachment does not exist",

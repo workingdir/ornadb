@@ -312,6 +312,7 @@ pub fn plan_storage_placement(
     };
 
     let mut planned_paths = BTreeSet::new();
+    let mut editable_paths = Vec::new();
     let mut decisions = Vec::with_capacity(keyed.len());
     for (key, (candidate, action, body_bytes)) in keyed {
         let placement = match candidate.existing {
@@ -324,6 +325,7 @@ pub fn plan_storage_placement(
                 if !planned_paths.insert(path.clone()) {
                     return Err(StoragePlacementError::PathCollision);
                 }
+                editable_paths.push(path.clone());
                 if body_bytes > MAX_EDITABLE_ROW_BYTES {
                     return Err(StoragePlacementError::EditableRowTooLarge);
                 }
@@ -342,6 +344,11 @@ pub fn plan_storage_placement(
             canonical_body_bytes: body_bytes,
         });
     }
+
+    // A path can be valid on this host and still alias a sibling on a
+    // case-insensitive filesystem. Reject the batch before it is published.
+    crate::validate_portable_paths(&editable_paths)
+        .map_err(|_| StoragePlacementError::PathCollision)?;
 
     Ok(PlacementPlan {
         preference,
@@ -398,9 +405,12 @@ impl StorageRewriteRow {
 ///
 /// The adapter must publish the complete target behind one generation barrier
 /// and use compare-and-swap against the observed base HEAD. `verify_candidate`
-/// is required before that barrier becomes visible.
+/// is required before that barrier becomes visible. The plan only replaces the
+/// current placement snapshot; it never prunes ancestor commits or row objects.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StorageRewritePlan {
+    table_id: [u8; 16],
+    schema_fingerprint: [u8; 32],
     from: StorageProfile,
     to: StorageRewriteTarget,
     previous_generation: u64,
@@ -445,6 +455,38 @@ impl StorageRewritePlan {
         profile: &CompactOvbProfile,
         rows: impl IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
     ) -> Result<StorageRewriteVerification, StorageRewriteError> {
+        self.verify_rows(profile, rows, StorageRewriteError::CandidateMismatch)
+    }
+
+    /// Rechecks the source table immediately before a rewrite crosses its
+    /// generation barrier. Comparing the full logical row set closes the
+    /// editable-only case where storage generations can otherwise repeat;
+    /// repository adapters must still compare-and-swap against the captured
+    /// Git HEAD so unrelated snapshot changes also conflict.
+    pub fn verify_source_snapshot(
+        &self,
+        profile: &CompactOvbProfile,
+        observed_generation: u64,
+        rows: impl IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
+    ) -> Result<(), StorageRewriteError> {
+        if observed_generation != self.previous_generation {
+            return Err(StorageRewriteError::StaleInput);
+        }
+        self.verify_rows(profile, rows, StorageRewriteError::StaleInput)
+            .map(|_| ())
+    }
+
+    fn verify_rows(
+        &self,
+        profile: &CompactOvbProfile,
+        rows: impl IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
+        mismatch_error: StorageRewriteError,
+    ) -> Result<StorageRewriteVerification, StorageRewriteError> {
+        if profile.table_id() != self.table_id
+            || profile.schema_fingerprint() != self.schema_fingerprint
+        {
+            return Err(StorageRewriteError::WrongProfile);
+        }
         let mut actual = BTreeMap::new();
         for (key_bytes, value_bytes) in rows {
             profile
@@ -480,7 +522,7 @@ impl StorageRewritePlan {
             })
             .collect::<Result<BTreeMap<_, _>, StorageRewriteError>>()?;
         if actual != expected {
-            return Err(StorageRewriteError::CandidateMismatch);
+            return Err(mismatch_error);
         }
         Ok(StorageRewriteVerification {
             rows: actual.len(),
@@ -691,6 +733,8 @@ pub fn plan_storage_rewrite(
         return Err(StorageRewriteError::InvalidGeneration);
     }
     Ok(StorageRewritePlan {
+        table_id: profile.table_id(),
+        schema_fingerprint: profile.schema_fingerprint(),
         from,
         to: target,
         previous_generation: generation - 1,
@@ -762,6 +806,7 @@ pub enum StorageRewriteError {
     InvalidEditableRow,
     InvalidCanonicalRow,
     CandidateMismatch,
+    StaleInput,
     ResourceLimit,
     InvalidGeneration,
 }
@@ -778,6 +823,7 @@ impl std::fmt::Display for StorageRewriteError {
             Self::InvalidEditableRow => "storage rewrite produced an invalid editable row",
             Self::InvalidCanonicalRow => "storage rewrite row is not canonical",
             Self::CandidateMismatch => "storage rewrite candidate changes logical rows",
+            Self::StaleInput => "storage rewrite input snapshot changed after planning",
             Self::ResourceLimit => "storage rewrite exceeds its configured resource bound",
             Self::InvalidGeneration => "storage rewrite candidate generation is invalid",
         })

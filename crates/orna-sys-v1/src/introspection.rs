@@ -556,6 +556,8 @@ pub struct QueryPlanDescription {
     pub distinct: bool,
     pub ordering: Vec<PlanOrdering>,
     pub limit: Option<u64>,
+    /// Ordered table-write stages applied after the query operators.
+    pub mutations: Vec<QueryMutationDescription>,
     /// Optional destination for an explicit result materialization. Explain
     /// estimates the write work but never performs this operation.
     pub materialize_into: Option<ObjectRef>,
@@ -583,6 +585,40 @@ pub struct QueryJoinDescription {
     pub source: ObjectRef,
     pub statistics: Option<QuerySourceStatistics>,
     pub predicate: Option<ExpressionRef>,
+}
+
+/// A known table mutation at the tail of a query plan. Counts are estimates
+/// from the pinned adapter state; inserts/deletes adjust the table estimate,
+/// while updates/rekeys preserve its cardinality.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryMutationDescription {
+    pub table: ObjectRef,
+    pub kind: QueryMutationKind,
+    pub estimated_affected_rows: Option<u64>,
+    pub estimated_write_bytes: Option<u64>,
+    /// Optional overlay-inclusive count before this mutation. If omitted, the
+    /// planner uses the source/join estimate or a preceding mutation's result.
+    pub estimated_table_rows_before: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryMutationKind {
+    Insert,
+    Update,
+    Delete,
+    Rekey,
+}
+
+impl QueryMutationKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Insert => "insert",
+            Self::Update => "update",
+            Self::Delete => "delete",
+            Self::Rekey => "rekey",
+        }
+    }
 }
 
 /// The input to `sys.explain(FunctionRef)`. The catalogue adapter supplies
@@ -781,6 +817,10 @@ pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, Expl
             .as_ref()
             .is_some_and(|target| invalid_reference(target.as_str()))
         || query
+            .mutations
+            .iter()
+            .any(|mutation| invalid_reference(mutation.table.as_str()))
+        || query
             .source_statistics
             .iter()
             .chain(query.joins.iter().filter_map(|join| join.statistics.as_ref()))
@@ -796,6 +836,7 @@ pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, Expl
         .saturating_add(usize::from(query.distinct))
         .saturating_add(usize::from(!query.ordering.is_empty()))
         .saturating_add(usize::from(query.limit.is_some()))
+        .saturating_add(query.mutations.len())
         .saturating_add(usize::from(query.materialize_into.is_some()));
     if operator_bound > MAX_PLAN_NODES {
         return Err(ExplainError::TooManyNodes);
@@ -963,6 +1004,71 @@ pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, Expl
         );
         current_cardinality = cardinality;
     }
+    let mut table_rows = BTreeMap::<ObjectRef, Option<u64>>::new();
+    table_rows.insert(
+        query.source.clone(),
+        query.source_statistics.as_ref().and_then(|stats| stats.estimated_rows),
+    );
+    for join in &query.joins {
+        table_rows.insert(
+            join.source.clone(),
+            join.statistics.as_ref().and_then(|stats| stats.estimated_rows),
+        );
+    }
+    for mutation in &query.mutations {
+        let before = mutation
+            .estimated_table_rows_before
+            .or_else(|| table_rows.get(&mutation.table).copied().flatten());
+        let after = mutated_table_rows(mutation.kind, before, mutation.estimated_affected_rows);
+        let mut details = BTreeMap::from([
+            (
+                "mutation".to_owned(),
+                PlanDetail::Text(mutation.kind.as_str().to_owned()),
+            ),
+            (
+                "strategy".to_owned(),
+                PlanDetail::Text("apply_table_mutation".to_owned()),
+            ),
+        ]);
+        if let Some(before) = before {
+            details.insert(
+                "table_rows_before".to_owned(),
+                PlanDetail::Integer(before),
+            );
+        }
+        if let Some(after) = after {
+            details.insert(
+                "table_rows_after".to_owned(),
+                PlanDetail::Integer(after),
+            );
+        }
+        if let Some(affected) = mutation.estimated_affected_rows {
+            details.insert("affected_rows".to_owned(), PlanDetail::Integer(affected));
+        }
+        if let Some(bytes) = mutation.estimated_write_bytes {
+            details.insert("write_bytes".to_owned(), PlanDetail::Integer(bytes));
+        }
+        // `sys.PlanNodeKind` has no mutation variant in 1.0. Preserve the
+        // portable vocabulary and identify the table-write operation in details.
+        current = push_unary(
+            &mut operators,
+            current,
+            PlanNodeKind::Invoke,
+            None,
+            details,
+            Cardinality {
+                rows: mutation.estimated_affected_rows,
+                bytes: mutation.estimated_write_bytes,
+            },
+            mutation_work(mutation.estimated_affected_rows, mutation.estimated_write_bytes),
+        );
+        current_cardinality = Cardinality {
+            rows: mutation.estimated_affected_rows,
+            bytes: mutation.estimated_write_bytes,
+        };
+        operators[current].object = Some(mutation.table.clone());
+        table_rows.insert(mutation.table.clone(), after);
+    }
     if let Some(target) = &query.materialize_into {
         let work = materialize_work(current_cardinality);
         let details = BTreeMap::from([
@@ -1080,7 +1186,9 @@ fn join_cardinality(left: Cardinality, right: Cardinality, has_predicate: bool) 
         } else {
             u128::from(right_bytes).div_ceil(u128::from(right_rows))
         };
-        u64::try_from(u128::from(rows) * (left_width + right_width)).ok()
+        u128::from(rows)
+            .checked_mul(left_width + right_width)
+            .and_then(|bytes| u64::try_from(bytes).ok())
     });
     Cardinality { rows, bytes }
 }
@@ -1140,6 +1248,30 @@ fn materialize_work(cardinality: Cardinality) -> Option<u64> {
         .rows
         .zip(cardinality.bytes)
         .and_then(|(rows, bytes)| rows.checked_add(ceil_div(bytes, 4096)))
+}
+
+fn mutation_work(affected_rows: Option<u64>, write_bytes: Option<u64>) -> Option<u64> {
+    affected_rows
+        .zip(write_bytes)
+        .and_then(|(rows, bytes)| rows.checked_add(ceil_div(bytes, 4096)))
+}
+
+fn mutated_table_rows(
+    kind: QueryMutationKind,
+    before: Option<u64>,
+    affected_rows: Option<u64>,
+) -> Option<u64> {
+    match kind {
+        QueryMutationKind::Insert => before
+            .zip(affected_rows)
+            .and_then(|(before, affected)| before.checked_add(affected)),
+        QueryMutationKind::Delete => before
+            .zip(affected_rows)
+            .and_then(|(before, affected)| before.checked_sub(affected)),
+        // Orna updates and rekeys do not add or remove table rows. Their
+        // returned mutation count is distinct from total table cardinality.
+        QueryMutationKind::Update | QueryMutationKind::Rekey => before,
+    }
 }
 
 /// Builds a function/effect explain plan from catalogue-supplied direct edges.
@@ -1366,6 +1498,12 @@ fn build_plan(
             (Some(total), Some(work)) => total.checked_add(work),
             _ => None,
         };
+        let mut details = operator.details.clone();
+        if let Some(work) = operator.work {
+            // `sys.PlanNode` has no dedicated cost column. Keep each local
+            // contribution in details so the explain tail adds to Plan.cost.
+            details.insert("estimated_work".to_owned(), PlanDetail::Integer(work));
+        }
         nodes.push(PlanNode {
             reference: references[position].clone(),
             plan: plan.clone(),
@@ -1379,7 +1517,7 @@ fn build_plan(
             estimated_bytes: operator.cardinality.bytes,
             actual_bytes: None,
             predicate: operator.predicate.clone(),
-            details: operator.details.clone(),
+            details,
         });
     }
     Ok(ExplainedPlan {
