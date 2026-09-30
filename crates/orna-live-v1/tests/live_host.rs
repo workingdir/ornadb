@@ -3440,7 +3440,7 @@ fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch()
 
     // A status query with the competing canonical fingerprint must not reveal
     // the recovered terminal record under the old fingerprint.
-    let competing_status = Envelope {
+    let competing_status_request = Envelope {
         request: Some([40; 16]),
         watch: None,
         message: Message::RequestStatus {
@@ -3451,23 +3451,67 @@ fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch()
     }
     .encode(Limits::default().protocol)
     .unwrap();
-    let competing_status = block_on(transport.receive_with_application(
+    let competing_status_output = block_on(transport.receive_with_application(
         &mut socket,
         9,
-        &masked_binary_payload(&competing_status),
+        &masked_binary_payload(&competing_status_request),
         &mut application,
     ))
     .unwrap();
-    let WebSocketOutput::Binary { payload, .. } = &competing_status[0] else {
+    let WebSocketOutput::Binary { payload, .. } = &competing_status_output[0] else {
         panic!("a competing status fingerprint receives a portable diagnostic");
     };
     let competing_status = Envelope::decode(payload, Limits::default().protocol).unwrap();
     assert_eq!(competing_status.request, Some([40; 16]));
     assert_eq!(competing_status.watch, None);
     assert!(matches!(
-        competing_status.message,
+        &competing_status.message,
         Message::Diagnostic { .. }
     ));
+
+    // Reusing the rejected query ID for the corrected target fingerprint is
+    // itself a request-fingerprint collision; it cannot rewrite that ID's
+    // original portable rejection.
+    let corrected_same_id = Envelope {
+        request: Some([40; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [37; 16],
+            fingerprint: event_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let corrected_same_id = block_on(transport.receive_with_application(
+        &mut socket,
+        10,
+        &masked_binary_payload(&corrected_same_id),
+        &mut application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &corrected_same_id[0] else {
+        panic!("a changed status payload cannot reuse the rejected query ID");
+    };
+    assert_eq!(
+        Envelope::decode(payload, Limits::default().protocol).unwrap(),
+        competing_status
+    );
+
+    let exact_status_retry = block_on(transport.receive_with_application(
+        &mut socket,
+        11,
+        &masked_binary_payload(&competing_status_request),
+        &mut application,
+    ))
+    .unwrap();
+    let WebSocketOutput::Binary { payload, .. } = &exact_status_retry[0] else {
+        panic!("an exact rejected status retry replays its diagnostic");
+    };
+    assert_eq!(
+        Envelope::decode(payload, Limits::default().protocol).unwrap(),
+        competing_status
+    );
 
     // A malformed retry is rejected before admission, so it cannot rewrite
     // the terminal record that RequestStatus exposes after host recovery.
@@ -3484,7 +3528,7 @@ fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch()
     .unwrap();
     let post_rejection_status = block_on(transport.receive_with_application(
         &mut socket,
-        10,
+        12,
         &masked_binary_payload(&post_rejection_status),
         &mut application,
     ))
@@ -3506,7 +3550,7 @@ fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch()
 
     let mismatch = block_on(transport.receive_with_application(
         &mut socket,
-        11,
+        13,
         &masked_binary_payload(&altered),
         &mut application,
     ))
@@ -3521,7 +3565,7 @@ fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch()
 
     let replay = block_on(transport.receive_with_application(
         &mut socket,
-        12,
+        14,
         &masked_binary_payload(&request),
         &mut application,
     ))
