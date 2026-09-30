@@ -21131,6 +21131,26 @@ mod tests {
             "last() closes the bracketed take(2) after its second match before the trailing nonmatch"
         );
 
+        // The reference leaves a rejected row followed by a failing source
+        // beyond the completed bracketed take(2) implicit. Once the second
+        // match closes the prefix, neither tail candidate is evaluated.
+        let (last_closes_bracketed_take_two_before_rejected_and_failing_tail, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-bracketed-reject-then-failing-tail.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_bracketed_take_two_before_rejected_and_failing_tail.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "last() closes the bracketed take(2) before both rejected and failing tail sources"
+        );
+
         // The reference is silent when the entire bracketed candidate tail
         // is rejected before take(2) naturally exhausts. The empty last()
         // result keeps its explicit coalesce fallback.
