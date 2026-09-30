@@ -1433,6 +1433,7 @@ impl Diagnostic {
         // a cause; the containing diagnostic does not inherit that authority.
         // Building that projection does not consume or revoke an admitted
         // sibling clone that is serialized at its own root.
+        // Clone::clone_from similarly replaces only its receiver's local mark.
         let mut projection = if self.root_message_admitted {
             self.clone()
         } else {
