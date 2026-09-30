@@ -20966,6 +20966,27 @@ mod tests {
             "last() returns its final match after the bounded nonmatch without evaluating the failing next row"
         );
 
+        // The reference specifies ordered union, bounded take, and callback
+        // failure propagation separately, but leaves this last() boundary
+        // edge implicit. The prefix ends on its final match; the next union
+        // branch would emit a missing lookup and must remain unopened.
+        let (last_closes_on_final_match_before_failing_tail, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-final-match-at-bound-excludes-failure.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_on_final_match_before_failing_tail.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "last() closes on its final matching row without evaluating the failing union tail"
+        );
+
         // The reference is silent when the bounded tail continues past a
         // nonmatch to a predicate failure, with another match after that
         // failure. Preserve the error instead of allowing last() to evaluate
