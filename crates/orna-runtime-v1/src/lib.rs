@@ -20480,6 +20480,27 @@ mod tests {
             "take(1) searches past the rejected right-child row and reaches its failure"
         );
 
+        // The filter/take rules say to retain matches and stop once the
+        // requested result exists. The reference does not separately state
+        // that this also keeps a later effectful child tail latent. One
+        // matching right row satisfies take(1), so the following bad lookup
+        // must not run.
+        let (filtered_right_child_match, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-right-filter-demand-stops-after-match.orna"
+            ),
+        );
+        assert_eq!(
+            filtered_right_child_match.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (1, 1),
+            "the first matching right-child row satisfies demand before its failing tail"
+        );
+
         // The reference fixes left-to-right union order and bounded
         // enumeration but leaves projection failures across a child-local
         // take boundary implicit. Keep the left child lazy: its excluded
