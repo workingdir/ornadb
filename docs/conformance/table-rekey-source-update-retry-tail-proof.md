@@ -76,3 +76,8 @@ vacated source key, blocking its return re-key; when the competitor moves aside,
 the owner retries successfully. The fixture checks the collision, release, and
 retry sequence against evaluation order because the reference does not specify
 this caught-retry ordering.
+
+`owner_retry_waits_for_competitor_target_closure` adds a nested block on the
+competitor's move target. The fixture records the target owner's update and
+deletion, the competitor's successful move, and the final owner's retry, all in
+evaluation order. ORNA-MUT-005/006 do not define this caught-retry mutation log.

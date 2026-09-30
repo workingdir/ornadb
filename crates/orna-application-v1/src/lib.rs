@@ -6101,6 +6101,114 @@ mod tests {
     }
 
     #[test]
+    fn owner_retry_waits_for_competitor_target_closure() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "table-rekey-competitor-target-blocked-owner-retry-tail.orna",
+                include_str!("../tests/fixtures/table-rekey-competitor-target-blocked-owner-retry-tail.orna"),
+                "main",
+            )
+            .expect("checked-in nested competitor closure fixture should be admitted");
+
+        let int = |value: i64| {
+            CanonicalValue::new(OvbRaw::Int(value.into())).expect("integer is canonical")
+        };
+        let row = |id: i64, text: &str, quantity: i64| {
+            CanonicalValue::new(OvbRaw::Map(vec![
+                (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
+                (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
+                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+            ]))
+            .expect("row is canonical")
+        };
+        let key = |value: i64| int(value).encode().expect("key is canonical");
+        let rows = BTreeMap::from([(
+            "Note".to_owned(),
+            vec![
+                (key(1), row(1, "first source", 10).encode().unwrap()),
+                (key(2), row(2, "original destination", 20).encode().unwrap()),
+                (key(3), row(3, "second source", 30).encode().unwrap()),
+                (key(6), row(6, "move target blocker", 40).encode().unwrap()),
+            ],
+        )]);
+        let tables = admitted_table_schemas(&application.module_header);
+        let mut handler =
+            SourceMutationEffectHandler::with_table_rows(tables, rows).expect("valid snapshot");
+
+        invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            &Environment::new(),
+            application.limits,
+            &mut handler,
+        )
+        .expect("the owner retries after the competitor's blocked move closes");
+
+        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        assert_eq!(mutations.len(), 34);
+
+        let expected = [
+            (2, Some(4), false, Some(row(4, "original destination", 20))),
+            (1, Some(2), false, Some(row(2, "first source", 10))),
+            (1, None, true, Some(row(1, "replacement", 30))),
+            (2, None, false, Some(row(2, "first source", 11))),
+            (1, None, false, Some(row(1, "replacement", 31))),
+            (2, None, false, Some(row(2, "first source", 12))),
+            (1, None, false, None),
+            (2, Some(1), false, Some(row(1, "first source", 12))),
+            (1, None, false, Some(row(1, "first source", 13))),
+            (3, Some(2), false, Some(row(2, "second source", 30))),
+            (2, None, false, Some(row(2, "second source", 31))),
+            (1, None, false, Some(row(1, "first source", 14))),
+            (1, None, false, None),
+            (2, Some(1), false, Some(row(1, "second source", 31))),
+            (1, None, false, Some(row(1, "second source", 32))),
+            (1, None, false, Some(row(1, "second source", 33))),
+            (1, Some(2), false, Some(row(2, "second source", 33))),
+            (2, None, false, Some(row(2, "second source", 34))),
+            (4, Some(1), false, Some(row(1, "original destination", 20))),
+            (1, None, false, Some(row(1, "original destination", 21))),
+            (1, None, false, Some(row(1, "original destination", 22))),
+            (1, Some(5), false, Some(row(5, "original destination", 22))),
+            (5, None, false, Some(row(5, "original destination", 23))),
+            (2, Some(1), false, Some(row(1, "second source", 34))),
+            (1, None, false, Some(row(1, "second source", 35))),
+            (1, Some(4), false, Some(row(4, "second source", 35))),
+            (4, None, false, Some(row(4, "second source", 36))),
+            (4, None, false, Some(row(4, "second source", 37))),
+            (6, None, false, Some(row(6, "move target blocker", 41))),
+            (6, None, false, None),
+            (4, Some(6), false, Some(row(6, "second source", 37))),
+            (6, None, false, Some(row(6, "second source", 38))),
+            (5, Some(4), false, Some(row(4, "original destination", 23))),
+            (4, None, false, Some(row(4, "original destination", 25))),
+        ];
+
+        for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in
+            mutations.iter().zip(expected).enumerate()
+        {
+            assert_eq!(mutation.key(), key(old_key), "mutation {index} source key");
+            let expected_key = new_key.map(key);
+            assert_eq!(
+                mutation.rekey_to(),
+                expected_key.as_deref(),
+                "mutation {index} re-key destination"
+            );
+            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            match expected_row {
+                Some(expected_row) => assert_eq!(
+                    CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
+                    expected_row,
+                    "mutation {index} row value"
+                ),
+                None => assert_eq!(mutation.value(), None, "mutation {index} deletion value"),
+            }
+        }
+    }
+
+    #[test]
     fn failed_mutation_tail_does_not_return_earlier_effects_for_staging() {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
