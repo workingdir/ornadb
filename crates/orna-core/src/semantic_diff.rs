@@ -720,6 +720,9 @@ fn diff_rows(
         })
         .collect::<Vec<_>>();
     changes.extend(ordinary);
+    // A deleted identity and a different identity re-keyed into its former
+    // key can both describe the same final key. Retire the old identity first
+    // to keep this otherwise-unspecified tie deterministic for report readers.
     changes.sort_by(|left, right| {
         let rank = |kind| match kind {
             RowChangeKind::Removed => 0,
