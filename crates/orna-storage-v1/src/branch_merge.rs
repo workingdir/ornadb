@@ -483,6 +483,9 @@ fn record_conflict(
     report: &mut BranchMergeReport,
     budget: BranchMergeBudget,
 ) -> bool {
+    // The same materialization budget spans row and checkpoint phases. The
+    // first conflict over it stops resolution and returns only its bounded
+    // location summary, never an incomplete plan or an unbounded detail list.
     report.conflicts_lower_bound = report.conflicts_lower_bound.saturating_add(1);
     if let Some(table) = table { report.affected_tables.insert(table); }
     if let Some(range) = range { report.affected_ranges.insert(range); }

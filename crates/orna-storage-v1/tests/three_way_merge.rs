@@ -126,6 +126,46 @@ fn budget() -> BranchMergeBudget {
     BranchMergeBudget { max_rows_examined: 100, max_conflicts: 20 }
 }
 
+fn row_checkpoint_conflict_inputs() -> (
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    FixtureRows,
+) {
+    let base_checkpoint = CheckpointGeneration {
+        generation: 4,
+        position: Some(b"base-token".to_vec()),
+    };
+    let left_checkpoint = CheckpointGeneration {
+        generation: 5,
+        position: Some(b"left-token".to_vec()),
+    };
+    let right_checkpoint = CheckpointGeneration {
+        generation: 6,
+        position: Some(b"right-token".to_vec()),
+    };
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"base", vec![parse_fixture(BASE, RowKeyKind::Explicit)]);
+    source.add(MergeSide::Left, b"left", vec![parse_fixture(LEFT, RowKeyKind::Explicit)]);
+    source.add(MergeSide::Right, b"right", vec![parse_fixture(CONFLICT, RowKeyKind::Explicit)]);
+    let base = snapshot(
+        schema(true, FieldType::Str),
+        manifest(1, 1, b"base"),
+        Some(base_checkpoint),
+    );
+    let left = snapshot(
+        schema(true, FieldType::Str),
+        manifest(2, 2, b"left"),
+        Some(left_checkpoint),
+    );
+    let right = snapshot(
+        schema(true, FieldType::Str),
+        manifest(3, 3, b"right"),
+        Some(right_checkpoint),
+    );
+    (base, left, right, source)
+}
+
 #[test]
 fn independent_edits_to_one_keyed_row_merge_by_field_from_orna_fixtures() {
     let base_row = parse_fixture(BASE, RowKeyKind::Explicit);
@@ -326,6 +366,43 @@ fn row_and_checkpoint_conflicts_accumulate_in_phase_order_without_a_partial_plan
     assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
     assert!(report.affected_checkpoints.contains(b"consumer/source".as_slice()));
     assert_eq!(source.visited.len(), 3);
+}
+
+#[test]
+fn conflict_budget_crossing_from_rows_into_checkpoints_has_a_precise_boundary() {
+    let no_detail_budget = BranchMergeBudget { max_rows_examined: 100, max_conflicts: 0 };
+    let (base, left, right, mut source) = row_checkpoint_conflict_inputs();
+    let error = merge_three_way_snapshots(&base, &left, &right, &mut source, no_detail_budget)
+        .unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("first row conflict exceeds the zero-detail budget")
+    };
+    assert_eq!(report.conflicts_lower_bound, 1);
+    assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+    assert!(report.affected_checkpoints.is_empty());
+
+    let one_detail_budget = BranchMergeBudget { max_rows_examined: 100, max_conflicts: 1 };
+    let (base, left, right, mut source) = row_checkpoint_conflict_inputs();
+    let error = merge_three_way_snapshots(&base, &left, &right, &mut source, one_detail_budget)
+        .unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("checkpoint conflict is the first conflict beyond the row detail")
+    };
+    assert_eq!(report.conflicts_lower_bound, 2);
+    assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+    assert!(report.affected_checkpoints.contains(b"consumer/source".as_slice()));
+
+    let exact_budget = BranchMergeBudget { max_rows_examined: 100, max_conflicts: 2 };
+    let (base, left, right, mut source) = row_checkpoint_conflict_inputs();
+    let error = merge_three_way_snapshots(&base, &left, &right, &mut source, exact_budget)
+        .unwrap_err();
+    let BranchMergeError::Conflicts { conflicts, report } = error else {
+        panic!("conflicts at the exact budget remain a typed conflict result")
+    };
+    assert_eq!(conflicts.len(), 2);
+    assert!(matches!(&conflicts[0], BranchMergeConflict::Row { .. }));
+    assert!(matches!(&conflicts[1], BranchMergeConflict::CheckpointConflict { .. }));
+    assert_eq!(report.conflicts_lower_bound, 2);
 }
 
 #[test]
