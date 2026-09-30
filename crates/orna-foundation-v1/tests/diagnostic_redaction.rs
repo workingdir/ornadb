@@ -5079,6 +5079,228 @@ fn mixed_trust_sibling_parent_closures_restore_resized_cause_generations() {
 }
 
 #[test]
+fn mixed_trust_sibling_closures_restore_nested_cause_generations() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let untrusted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(message).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let old_left = admitted("ORNA-E-NEST-OLD-LEFT", "nested old left admission").with_cause(
+        untrusted("ORNA-E-NEST-OLD-LEFT-CAUSE", "nested old left cause secret")
+            .with_cause(admitted("ORNA-E-NEST-OLD-LEFT-LEAF", "nested old left leaf")),
+    );
+    let old_right = untrusted("ORNA-E-NEST-OLD-RIGHT", "nested old right root secret").with_cause(
+        admitted("ORNA-E-NEST-OLD-RIGHT-CAUSE", "nested old right cause admission")
+            .with_cause(untrusted("ORNA-E-NEST-OLD-R0", "nested old right leaf zero"))
+            .with_cause(admitted("ORNA-E-NEST-OLD-R1", "nested old right leaf one"))
+            .with_cause(untrusted("ORNA-E-NEST-OLD-R2", "nested old right leaf two secret")),
+    );
+    let new_left = untrusted("ORNA-E-NEST-NEW-LEFT", "nested new left root secret").with_cause(
+        admitted("ORNA-E-NEST-NEW-LEFT-CAUSE", "nested new left cause admission")
+            .with_cause(untrusted("ORNA-E-NEST-NEW-L0", "nested new left leaf zero secret"))
+            .with_cause(admitted("ORNA-E-NEST-NEW-L1", "nested new left leaf one"))
+            .with_cause(untrusted("ORNA-E-NEST-NEW-L2", "nested new left leaf two secret")),
+    );
+    let new_right = admitted("ORNA-E-NEST-NEW-RIGHT", "nested new right admission").with_cause(
+        untrusted("ORNA-E-NEST-NEW-RIGHT-CAUSE", "nested new right cause secret")
+            .with_cause(admitted("ORNA-E-NEST-NEW-RIGHT-LEAF", "nested new right leaf")),
+    );
+    let source_snapshots = vec![
+        old_left.clone(),
+        old_right.clone(),
+        new_left.clone(),
+        new_right.clone(),
+    ];
+    let source_projections = source_snapshots
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let source_wires = source_snapshots
+        .iter()
+        .map(Diagnostic::encode_ovb)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    // The reference specifies immutable closure captures and diagnostic
+    // redaction, but is silent on host Clone::clone_from reuse at nested cause
+    // depths. Preserve each sibling's captured tree as an owned generation.
+    let capture_old_left = {
+        let snapshot = source_snapshots[0].clone();
+        move || snapshot.clone()
+    };
+    let capture_old_right = {
+        let snapshot = source_snapshots[1].clone();
+        move || snapshot.clone()
+    };
+    let capture_new_left = {
+        let snapshot = source_snapshots[2].clone();
+        move || snapshot.clone()
+    };
+    let capture_new_right = {
+        let snapshot = source_snapshots[3].clone();
+        move || snapshot.clone()
+    };
+    let mut left = capture_old_left();
+    let mut right = capture_old_right();
+    left.clone_from(&capture_new_left());
+    right.clone_from(&capture_new_right());
+    let left_new_generation = left.clone();
+    let right_new_generation = right.clone();
+    assert_eq!(left_new_generation, new_left);
+    assert_eq!(right_new_generation, new_right);
+
+    left.clone_from(&capture_old_right());
+    right.clone_from(&capture_old_left());
+    let left_crossed_generation = left.clone();
+    let right_crossed_generation = right.clone();
+    assert_eq!(left_crossed_generation, old_right);
+    assert_eq!(right_crossed_generation, old_left);
+
+    left.clone_from(&capture_new_left());
+    right.clone_from(&capture_new_right());
+    assert_eq!(left, new_left);
+    assert_eq!(right, new_right);
+    for (index, snapshot) in source_snapshots.iter().enumerate() {
+        assert_eq!(serde_json::to_value(snapshot).unwrap(), source_projections[index]);
+        assert_eq!(snapshot.encode_ovb().unwrap(), source_wires[index]);
+    }
+
+    let compose_captured_nested_generations = {
+        let left_after_growth = left_new_generation.clone();
+        let right_after_shrink = right_new_generation.clone();
+        let left_after_cross = left_crossed_generation.clone();
+        let right_after_cross = right_crossed_generation.clone();
+        move || {
+            admitted("ORNA-E-NEST-OUTER", "nested generation outer admission")
+                .with_cause(left_after_growth.clone())
+                .with_cause(right_after_shrink.clone())
+                .with_cause(left_after_cross.clone())
+                .with_cause(right_after_cross.clone())
+        }
+    };
+    let empty_parent = untrusted("ORNA-E-NEST-EMPTY", "nested empty parent secret");
+    left.clone_from(&empty_parent);
+    right.clone_from(&empty_parent);
+    assert_eq!(left, empty_parent);
+    assert_eq!(right, empty_parent);
+
+    let outer = compose_captured_nested_generations();
+    assert_eq!(outer, compose_captured_nested_generations());
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["message"], "nested generation outer admission");
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 4);
+    for (cause, expected_leaf_count) in causes.iter().zip([3, 1, 3, 1]) {
+        assert_eq!(cause["message"], "<redacted>");
+        let nested = cause["causes"].as_array().unwrap();
+        assert_eq!(nested.len(), 1);
+        assert_eq!(nested[0]["message"], "<redacted>");
+        let leaves = nested[0]["causes"].as_array().unwrap();
+        assert_eq!(leaves.len(), expected_leaf_count);
+        for leaf in leaves {
+            assert_eq!(leaf["message"], "<redacted>");
+        }
+    }
+
+    let envelope = serde_json::json!({
+        "outer": outer.clone(),
+        "old_left": old_left,
+        "new_right": new_right,
+    });
+    let json = serde_json::to_vec(&envelope).unwrap();
+    for message in [
+        b"nested generation outer admission".as_slice(),
+        b"nested old left admission".as_slice(),
+        b"nested new right admission".as_slice(),
+    ] {
+        assert_eq!(
+            json.windows(message.len())
+                .filter(|window| *window == message)
+                .count(),
+            1
+        );
+    }
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"nested old left cause secret".as_slice(),
+            b"nested old left leaf".as_slice(),
+            b"nested old right root secret".as_slice(),
+            b"nested old right cause admission".as_slice(),
+            b"nested old right leaf zero".as_slice(),
+            b"nested old right leaf one".as_slice(),
+            b"nested old right leaf two secret".as_slice(),
+            b"nested new left root secret".as_slice(),
+            b"nested new left cause admission".as_slice(),
+            b"nested new left leaf zero secret".as_slice(),
+            b"nested new left leaf one".as_slice(),
+            b"nested new left leaf two secret".as_slice(),
+            b"nested new right cause secret".as_slice(),
+            b"nested new right leaf".as_slice(),
+            b"nested empty parent secret".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+
+    let wire = outer.encode_ovb().unwrap();
+    assert!(
+        wire.windows(b"nested generation outer admission".len())
+            .any(|window| window == b"nested generation outer admission")
+    );
+    for disclosure in [
+        fixture.as_bytes(),
+        b"nested old left admission".as_slice(),
+        b"nested new right admission".as_slice(),
+        b"nested old right root secret".as_slice(),
+        b"nested new left root secret".as_slice(),
+        b"nested old right leaf two secret".as_slice(),
+        b"nested new left leaf two secret".as_slice(),
+    ]
+    .into_iter()
+    .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
+    {
+        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
+    assert_eq!(decoded["message"], "<redacted>");
+    assert_eq!(
+        decoded["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cause| cause["causes"][0]["causes"].as_array().unwrap().len())
+            .collect::<Vec<_>>(),
+        [3, 1, 3, 1]
+    );
+}
+
+#[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
