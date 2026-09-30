@@ -20026,8 +20026,43 @@ mod tests {
         );
         assert_eq!((lookups, scans), (2, 2), "the later-page miss stops projection");
 
+        // Relation `take` need not enumerate its remainder, so the later
+        // missing lookup must stay latent when its row is outside the result.
+        let (taken, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-project-take.orna"),
+        );
+        assert_eq!(
+            taken.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!((lookups, scans), (1, 1), "take does not evaluate a later failing projection");
+
+        // A failed read does not pin a result: the next invocation sees a
+        // repair staged into this same activation session.
         session
-            .stage_mutation(TableMutation::new(id(42), "sys.Storage", query_test_key(9), Some(vec![0xff])).unwrap())
+            .stage_mutation(query_test_mutation(
+                42,
+                99,
+                Some(query_test_row(99, "repaired", 99)),
+            ))
+            .unwrap();
+        let (repaired, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-projection-missing.orna"),
+        );
+        assert_eq!(
+            repaired.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(3u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "a later invocation observes the repaired lookup and newly visible row"
+        );
+
+        session
+            .stage_mutation(TableMutation::new(id(43), "sys.Storage", query_test_key(9), Some(vec![0xff])).unwrap())
             .unwrap();
         let (corrupt, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
@@ -20045,13 +20080,13 @@ mod tests {
         // request the third source page, which contains the staged bad value.
         session
             .stage_mutation(
-                TableMutation::new(id(43), "sys.Storage", query_test_key(9), None).unwrap(),
+                TableMutation::new(id(44), "sys.Storage", query_test_key(9), None).unwrap(),
             )
             .unwrap();
         session
             .stage_mutation(
                 TableMutation::new(
-                    id(44),
+                    id(45),
                     "sys.Storage",
                     query_test_key(99),
                     Some(vec![0xff]),
