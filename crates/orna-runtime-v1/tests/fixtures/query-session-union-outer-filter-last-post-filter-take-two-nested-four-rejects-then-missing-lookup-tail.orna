@@ -1,0 +1,30 @@
+sys.Storage
+    | project(storage => storage.id)
+    | union(
+        sys.Storage
+            | project(storage => storage.id)
+            | filter(id => id == 7)
+            | union(
+                sys.Storage
+                    | project(storage => storage.id)
+                    | filter(id => id == 9)
+                    | union(
+                        sys.Storage
+                            | project(storage => storage.id)
+                            | filter(id => id == 11)
+                            | union(
+                                sys.Storage
+                                    | project(storage => storage.id)
+                                    | filter(id => id == 13)
+                                    | union(
+                                        sys.Storage
+                                            | project(storage => storage.target)
+                                            | filter(id => id == 99)
+                                    )
+                            )
+                    )
+            )
+    )
+    | filter(id => sys.Storage.lookup(id).title == "later")
+    | take(2)
+    | last() ?? 0
