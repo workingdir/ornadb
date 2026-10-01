@@ -9740,6 +9740,128 @@ mod tests {
     }
 
     #[test]
+    fn request_status_snapshots_retain_reserved_and_running_targets_after_completion() {
+        const FIXTURE: &str = include_str!("../tests/fixtures/live-runtime-boundary.orna");
+
+        let mut host = subscribed_host(None);
+        let session = [1; 16];
+        let attachment = [4; 16];
+        let reserved_target = [40; 16];
+        let reserved_fingerprint = [41; 32];
+        host.serving.reserve_request(session, reserved_target).unwrap();
+        host.requests.insert(
+            (session, reserved_target),
+            RequestRecord {
+                fingerprint: reserved_fingerprint,
+                terminal: None,
+            },
+        );
+
+        let running_target = [42; 16];
+        let eval = eval_source_frame(running_target, FIXTURE);
+        let target_fingerprint = match Envelope::decode(&eval, Limits::default().protocol)
+            .unwrap()
+            .message
+        {
+            Message::Eval { fingerprint, .. } => fingerprint,
+            _ => unreachable!("the fixture is admitted through Eval"),
+        };
+        let ticket = match futures::executor::block_on(host.prepare_application_frame(
+            attachment,
+            2,
+            Frame::Binary(eval),
+        ))
+        .unwrap()
+        {
+            ApplicationPreparation::Work(ticket) => ticket,
+            ApplicationPreparation::Completed(_) => panic!("Eval should be running work"),
+        };
+        assert!(matches!(
+            host.serving.request_state(session, running_target),
+            Ok(orna_serving_v1::RequestState::Running)
+        ));
+
+        let reserved_query = request_status_frame([43; 16], reserved_target, reserved_fingerprint);
+        let running_query = request_status_frame([44; 16], running_target, target_fingerprint);
+        let snapshot = |host: &mut LiveHost,
+                        query: Vec<u8>,
+                        expected: ([u8; 16], RequestState)| {
+            let preparation = futures::executor::block_on(host.prepare_application_frame(
+                attachment,
+                3,
+                Frame::Binary(query),
+            ))
+            .unwrap();
+            let ApplicationPreparation::Completed(outcome) = preparation else {
+                panic!("RequestStatus is a read-only query");
+            };
+            let response = outcome.response.unwrap();
+            assert!(matches!(
+                &response.message,
+                Message::RequestStatusResult { target, state, .. }
+                    if *target == expected.0 && *state == expected.1
+            ));
+            response
+        };
+        let reserved_snapshot = snapshot(
+            &mut host,
+            reserved_query.clone(),
+            (reserved_target, RequestState::Reserved),
+        );
+        let running_snapshot = snapshot(
+            &mut host,
+            running_query.clone(),
+            (running_target, RequestState::Running),
+        );
+
+        host.serving
+            .complete_request(session, reserved_target)
+            .unwrap();
+        let completion = futures::executor::block_on(ticket.execute(&mut RejectApplication));
+        futures::executor::block_on(host.complete_application(completion)).unwrap();
+
+        for (query, expected) in [
+            (reserved_query, reserved_snapshot),
+            (running_query, running_snapshot),
+        ] {
+            let preparation = futures::executor::block_on(host.prepare_application_frame(
+                attachment,
+                4,
+                Frame::Binary(query),
+            ))
+            .unwrap();
+            let ApplicationPreparation::Completed(outcome) = preparation else {
+                panic!("an exact status retry replays its retained response");
+            };
+            assert_eq!(outcome.response, Some(expected));
+        }
+
+        for (request, target, fingerprint) in [
+            ([45; 16], reserved_target, reserved_fingerprint),
+            ([46; 16], running_target, target_fingerprint),
+        ] {
+            let preparation = futures::executor::block_on(host.prepare_application_frame(
+                attachment,
+                5,
+                Frame::Binary(request_status_frame(request, target, fingerprint)),
+            ))
+            .unwrap();
+            let ApplicationPreparation::Completed(outcome) = preparation else {
+                panic!("a fresh status query completes without application work");
+            };
+            assert!(matches!(
+                outcome.response.unwrap().message,
+                Message::RequestStatusResult {
+                    target: returned_target,
+                    state: RequestState::Terminal,
+                    fingerprint: Some(returned_fingerprint),
+                    result: None,
+                } if returned_target == target && returned_fingerprint == fingerprint
+            ));
+        }
+    }
+
+    #[test]
     fn admitted_eval_ticket_carries_runtime_publication_rows() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
