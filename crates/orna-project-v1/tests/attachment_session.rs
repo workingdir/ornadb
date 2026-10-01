@@ -1879,6 +1879,295 @@ fn nested_rebind_chain_keeps_longer_sibling_and_uses_each_replacement_manifest()
 }
 
 #[test]
+fn deep_rebind_chain_uses_exact_parent_aliases_at_each_depth() {
+    let package_source = include_str!("fixtures/attach-package.orna");
+    let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
+    let alias0 = "archive";
+    let alias1 = "archive_copy";
+    let alias2 = "archive_copy_archive";
+    let alias3 = "archive_copy_archive_archive";
+    let alias4 = "archive_copy_archive_archive_archive";
+    let alias5 = "archive_copy_archive_archive_archive_archive";
+
+    let old_short = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "30",
+        None,
+        "old short alias before deep rebinds",
+    );
+    let old_selected_long = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "33",
+        None,
+        "selected parent's longer sibling",
+    );
+    let old_selected_deep = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "34",
+        None,
+        "selected parent's deepest sibling",
+    );
+    let old_depth1 = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "31",
+        None,
+        "first retained route in original chain",
+    );
+    let old_depth2 = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "41",
+        None,
+        "second retained route in original chain",
+    );
+    let old_depth3 = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "51",
+        None,
+        "third retained route in original chain",
+    );
+    let old_depth4 = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "61",
+        None,
+        "fourth retained route in original chain",
+    );
+    let sibling1 = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "35",
+        None,
+        "first retained prefix sibling",
+    );
+    let sibling2 = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "55",
+        None,
+        "second retained prefix sibling",
+    );
+    let sibling3 = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "65",
+        None,
+        "third retained prefix sibling",
+    );
+    let replacement_leaf = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "99",
+        None,
+        "leaf in final rebound chain",
+    );
+
+    let manifest4 = format!("{alias5} {replacement_leaf}\n");
+    let replacement4 = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "90",
+        Some(&manifest4),
+        "fourth replacement owns the final child",
+    );
+    let manifest3 = format!("{alias4} {old_depth4}\n{alias5} {sibling3}\n");
+    let replacement3 = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "80",
+        Some(&manifest3),
+        "third replacement with longer sibling",
+    );
+    let manifest2 = format!("{alias3} {old_depth3}\n{alias4} {sibling2}\n");
+    let replacement2 = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "70",
+        Some(&manifest2),
+        "second replacement with longer sibling",
+    );
+    let manifest1 = format!("{alias2} {old_depth2}\n{alias3} {sibling1}\n");
+    let replacement1 = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "60",
+        Some(&manifest1),
+        "first replacement with longer sibling",
+    );
+    let manifest0 = format!("{alias1} {old_depth1}\n");
+    let replacement0 = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "50",
+        Some(&manifest0),
+        "ancestor replacement starts the new chain",
+    );
+
+    let selected_source = package_source.replace("42", "25");
+    let selected_manifest = format!(
+        "{alias0} {old_short}\n{alias3} {old_selected_long}\n{alias4} {old_selected_deep}\n"
+    );
+    let selected_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &selected_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &selected_manifest),
+        ],
+        "selected parent before the deepest alias chain rebinds",
+    );
+    let outer_source = package_source.replace("42", "24");
+    let outer_manifest = format!("{alias2} {selected_commit}\n");
+    let outer_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &outer_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &outer_manifest),
+        ],
+        "outer parent for deep alias chain",
+    );
+    let root_manifest = format!("{alias4} {outer_commit}\n");
+    let (_root_dir, root_repository, root_commit) = repository(&[
+        ("main.orna", include_str!("fixtures/attach-primary.orna")),
+        (PACKAGE_PIN_MANIFEST_PATH, &root_manifest),
+    ]);
+    let loader = ProjectLoader::default();
+    let primary = PinnedDatabase::resolve("app", root_repository, &root_commit, loader).unwrap();
+    let resolver = PackageResolver::new(
+        [
+            (alias0.to_owned(), shared_repository.clone()),
+            (alias1.to_owned(), shared_repository.clone()),
+            (alias2.to_owned(), shared_repository.clone()),
+            (alias3.to_owned(), shared_repository.clone()),
+            (alias4.to_owned(), shared_repository.clone()),
+            (alias5.to_owned(), shared_repository.clone()),
+        ],
+        loader,
+    )
+    .unwrap();
+
+    let root = resolver.resolve_for_parent(primary).unwrap();
+    let outer = root.database(alias4).unwrap().clone();
+    let outer_closure = resolver.resolve_for_parent(outer).unwrap();
+    let selected = outer_closure.database(alias2).unwrap().clone();
+    let mut selected_closure = resolver.resolve_for_parent(selected).unwrap();
+    let original_selected_closure = selected_closure.clone();
+    let rebound0 = PinnedDatabase::resolve(
+        alias0,
+        shared_repository.clone(),
+        &replacement0,
+        loader,
+    )
+    .unwrap();
+    selected_closure.detach_database(alias0).unwrap();
+    selected_closure.attach_database(rebound0.clone()).unwrap();
+    assert_module_route(&selected_closure, "archive.orna", "= 50");
+    assert_module_route(
+        &selected_closure,
+        "archive_copy_archive_archive.orna",
+        "= 33",
+    );
+    assert_module_route(
+        &selected_closure,
+        "archive_copy_archive_archive_archive.orna",
+        "= 34",
+    );
+    assert_module_route(&original_selected_closure, "archive.orna", "= 30");
+
+    let mut closure0 = resolver.resolve_for_parent(rebound0).unwrap();
+    let original0 = closure0.clone();
+    let rebound1 = PinnedDatabase::resolve(
+        alias1,
+        shared_repository.clone(),
+        &replacement1,
+        loader,
+    )
+    .unwrap();
+    closure0.detach_database(alias1).unwrap();
+    closure0.attach_database(rebound1.clone()).unwrap();
+    assert_module_route(&closure0, "archive_copy.orna", "= 60");
+    assert_module_route(&original0, "archive_copy.orna", "= 31");
+
+    let mut closure1 = resolver.resolve_for_parent(rebound1).unwrap();
+    let original1 = closure1.clone();
+    let rebound2 = PinnedDatabase::resolve(
+        alias2,
+        shared_repository.clone(),
+        &replacement2,
+        loader,
+    )
+    .unwrap();
+    closure1.detach_database(alias2).unwrap();
+    closure1.attach_database(rebound2.clone()).unwrap();
+    assert_module_route(&closure1, "archive_copy_archive.orna", "= 70");
+    assert_module_route(&closure1, "archive_copy_archive_archive.orna", "= 35");
+    assert_module_route(&original1, "archive_copy_archive.orna", "= 41");
+
+    let mut closure2 = resolver.resolve_for_parent(rebound2).unwrap();
+    let original2 = closure2.clone();
+    let rebound3 = PinnedDatabase::resolve(
+        alias3,
+        shared_repository.clone(),
+        &replacement3,
+        loader,
+    )
+    .unwrap();
+    closure2.detach_database(alias3).unwrap();
+    closure2.attach_database(rebound3.clone()).unwrap();
+    assert_module_route(&closure2, "archive_copy_archive_archive.orna", "= 80");
+    assert_module_route(
+        &closure2,
+        "archive_copy_archive_archive_archive.orna",
+        "= 55",
+    );
+    assert_module_route(&original2, "archive_copy_archive_archive.orna", "= 51");
+
+    let mut closure3 = resolver.resolve_for_parent(rebound3).unwrap();
+    let original3 = closure3.clone();
+    let rebound4 = PinnedDatabase::resolve(
+        alias4,
+        shared_repository,
+        &replacement4,
+        loader,
+    )
+    .unwrap();
+    closure3.detach_database(alias4).unwrap();
+    closure3.attach_database(rebound4.clone()).unwrap();
+    assert_module_route(
+        &closure3,
+        "archive_copy_archive_archive_archive.orna",
+        "= 90",
+    );
+    assert_module_route(
+        &closure3,
+        "archive_copy_archive_archive_archive_archive.orna",
+        "= 65",
+    );
+    assert_module_route(&original3, "archive_copy_archive_archive_archive.orna", "= 61");
+
+    let closure4 = resolver.resolve_for_parent(rebound4).unwrap();
+    assert_module_route(&closure4, "main.orna", "= 90");
+    assert_module_route(
+        &closure4,
+        "archive_copy_archive_archive_archive_archive.orna",
+        "= 99",
+    );
+    assert_eq!(
+        closure4
+            .database(alias5)
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        replacement_leaf
+    );
+}
+
+#[test]
 fn short_alias_rebound_to_long_pin_keeps_longer_nested_routes() {
     let package_source = include_str!("fixtures/attach-package.orna");
     let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
