@@ -2537,11 +2537,19 @@ fn watch_with_context(request: [u8; 16], database: [u8; 16]) -> Vec<u8> {
 }
 
 fn create(host: &mut LiveHost, issuer: &mut Issuer) -> SessionCredential {
+    create_with_expiration(host, issuer, 100)
+}
+
+fn create_with_expiration(
+    host: &mut LiveHost,
+    issuer: &mut Issuer,
+    expires_at: u64,
+) -> SessionCredential {
     block_on(host.create(
         CreateRequest {
             id: [1; 16],
             origin: origin(),
-            expires_at: 100,
+            expires_at,
             now: 0,
             subscribe: &subscribe(),
         },
@@ -5595,7 +5603,7 @@ fn durable_running_status_snapshot_survives_session_handoff() {
 #[test]
 fn durable_status_snapshots_survive_repeated_owner_handoffs() {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
-    const HANDOFFS: u8 = 4;
+    const HANDOFFS: u8 = 8;
 
     let (root, repository) = durable_repository();
     let runtime = open_durable_state(&repository);
@@ -5626,7 +5634,7 @@ fn durable_status_snapshots_survive_repeated_owner_handoffs() {
 
     let mut host = durable_host_with_owner(runtime, owner.owner_id);
     let mut issuer = Issuer(1, None);
-    let credential = create(&mut host, &mut issuer);
+    let credential = create_with_expiration(&mut host, &mut issuer, 10_000);
     block_on(host.resume(ResumeRequest {
         id: session,
         origin: &origin(),
@@ -5689,7 +5697,7 @@ fn durable_status_snapshots_survive_repeated_owner_handoffs() {
             RequestOwner::from(current_owner),
         );
         let mut issuer = Issuer(2 + handoff, None);
-        let credential = create(&mut host, &mut issuer);
+        let credential = create_with_expiration(&mut host, &mut issuer, 10_000);
         let attachment = [6 + handoff; 16];
         block_on(host.resume(ResumeRequest {
             id: session,
@@ -5775,7 +5783,7 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
     eval_outcome: UnitEvalOutcome,
 ) {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
-    const HANDOFFS: u8 = 4;
+    const HANDOFFS: u8 = 8;
 
     let (root, repository) = durable_repository();
     let runtime = open_durable_state(&repository);
@@ -5783,7 +5791,7 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
     let owner = block_on(runtime.acquire_lease([75; 16])).unwrap();
     let mut host = durable_host_with_owner(runtime, owner.owner_id);
     let mut issuer = Issuer(1, None);
-    let credential = create(&mut host, &mut issuer);
+    let credential = create_with_expiration(&mut host, &mut issuer, 10_000);
     block_on(host.resume(ResumeRequest {
         id: session,
         origin: &origin(),
@@ -5880,7 +5888,7 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
             RequestOwner::from(current_owner),
         );
         let mut issuer = Issuer(2 + handoff, None);
-        let credential = create(&mut host, &mut issuer);
+        let credential = create_with_expiration(&mut host, &mut issuer, 10_000);
         let attachment = [6 + handoff; 16];
         block_on(host.resume(ResumeRequest {
             id: session,
@@ -5949,6 +5957,213 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
     }
 
     assert_eq!(application.calls, 1);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn durable_unknown_status_snapshots_survive_reconnect_handoff_storm_and_target_reuse() {
+    const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
+    const HANDOFFS: u8 = 8;
+
+    let (root, repository) = durable_repository();
+    let runtime = open_durable_state(&repository);
+    let session = [1; 16];
+    let owner = block_on(runtime.acquire_lease([75; 16])).unwrap();
+    let target_request = eval_with_context(session, [81; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&target_request, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    let target_fingerprint = request_fingerprint(&target_request, session);
+    let status_request = |request| {
+        Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::RequestStatus {
+                target: [81; 16],
+                fingerprint: target_fingerprint,
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap()
+    };
+
+    let mut host = durable_host_with_owner(runtime, owner.owner_id);
+    let mut issuer = Issuer(1, None);
+    let credential = create_with_expiration(&mut host, &mut issuer, 10_000);
+    block_on(host.resume(ResumeRequest {
+        id: session,
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+    let pinned_request = status_request([82; 16]);
+    let pinned_snapshot = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(pinned_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the first query pins Unknown before the target ID exists");
+    assert!(matches!(
+        &pinned_snapshot.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Unknown,
+            fingerprint: None,
+            result: None,
+        } if *target == [81; 16]
+    ));
+
+    let mut snapshots = vec![(pinned_request, pinned_snapshot)];
+    let mut sequence = 4;
+    let mut current_owner = owner;
+    drop(host);
+    let mut final_host = None;
+
+    for handoff in 0..HANDOFFS {
+        let replacement_id = [76 + handoff; 16];
+        let recovery_runtime = open_durable_state(&repository);
+        let replacement = block_on(
+            recovery_runtime.recover_abandoned(current_owner.owner_id, replacement_id),
+        )
+        .unwrap();
+        drop(recovery_runtime);
+
+        let mut host = durable_host_after_takeover(
+            open_durable_state(&repository),
+            replacement.owner_id,
+            RequestOwner::from(current_owner),
+        );
+        let mut issuer = Issuer(2 + handoff, None);
+        let credential = create_with_expiration(&mut host, &mut issuer, 10_000);
+        let attachment = [6 + handoff; 16];
+        block_on(host.resume(ResumeRequest {
+            id: session,
+            origin: &origin(),
+            credential: &credential,
+            attachment,
+            now: 2 + u64::from(handoff),
+        }))
+        .unwrap();
+
+        let mut current_attachment = attachment;
+        for reconnect in 0..=2 {
+            if reconnect > 0 {
+                let next_attachment = [60 + handoff * 2 + reconnect - 1; 16];
+                let outcome = block_on(host.resume(ResumeRequest {
+                    id: session,
+                    origin: &origin(),
+                    credential: &credential,
+                    attachment: next_attachment,
+                    now: sequence,
+                }))
+                .unwrap();
+                assert!(matches!(
+                    outcome,
+                    orna_security_v1::AttachOutcome::Replaced(previous)
+                        if previous == orna_security_v1::AttachmentId::new(current_attachment)
+                ));
+                current_attachment = next_attachment;
+            }
+
+            replay_durable_status_snapshots(
+                &mut host,
+                current_attachment,
+                &snapshots,
+                &mut sequence,
+                &mut application,
+            );
+
+            let fresh_request = status_request([83 + handoff * 3 + reconnect; 16]);
+            let fresh = block_on(host.dispatch_frame(
+                current_attachment,
+                sequence,
+                Frame::Binary(fresh_request.clone()),
+                &mut application,
+            ))
+            .unwrap()
+            .response
+            .expect("the unknown target remains Unknown throughout the handoff storm");
+            assert!(matches!(
+                &fresh.message,
+                Message::RequestStatusResult {
+                    target,
+                    state: orna_protocol_v1::RequestState::Unknown,
+                    fingerprint: None,
+                    result: None,
+                } if *target == [81; 16]
+            ));
+            snapshots.push((fresh_request, fresh));
+            sequence += 1;
+        }
+
+        current_owner = replacement;
+        if handoff + 1 == HANDOFFS {
+            final_host = Some((host, current_attachment));
+        } else {
+            drop(host);
+        }
+    }
+
+    let (mut host, attachment) = final_host.expect("the final owner stays live");
+    let terminal = block_on(host.dispatch_frame(
+        attachment,
+        sequence,
+        Frame::Binary(target_request),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the fixture Eval reuses the formerly unknown target ID");
+    assert!(matches!(
+        &terminal.message,
+        Message::Result {
+            status: ResultStatus::Success,
+            ..
+        }
+    ));
+    let expected_result = ResultBody::from_result(&terminal, Limits::default().protocol).unwrap();
+    sequence += 1;
+
+    replay_durable_status_snapshots(
+        &mut host,
+        attachment,
+        &snapshots,
+        &mut sequence,
+        &mut application,
+    );
+    let fresh_terminal_request = status_request([120; 16]);
+    let fresh_terminal = block_on(host.dispatch_frame(
+        attachment,
+        sequence,
+        Frame::Binary(fresh_terminal_request),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a new status identity observes the target after ID reuse");
+    assert!(matches!(
+        &fresh_terminal.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [81; 16]
+            && *fingerprint == target_fingerprint
+            && result == &expected_result
+    ));
+    assert_eq!(application.calls, 1);
+    drop(host);
     remove_test_repository(&root);
 }
 
