@@ -10779,6 +10779,43 @@ fn explain_closes_first_byte_work_across_three_scans_at_max() {
         );
     }
 
+    // Two half-block scans also total exactly one raw block. Keep their two
+    // local work units visible at every pair of scan positions.
+    for scan_bytes in [[2_048, 2_048, 0], [2_048, 0, 2_048], [0, 2_048, 2_048]] {
+        let exact = explain(u64::MAX - 2, 0, scan_bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let exact_nodes = exact.nodes();
+        let source = exact_nodes
+            .iter()
+            .find(|node| node.object() == Some(&obj("table:ByteWorkThreeScanSource")))
+            .unwrap();
+        assert_eq!(source.estimated_work(), Some(u64::MAX - 2));
+        for (name, bytes) in [
+            "table:ByteWorkThreeScanFirst",
+            "table:ByteWorkThreeScanMiddle",
+            "table:ByteWorkThreeScanLast",
+        ]
+        .into_iter()
+        .zip(scan_bytes)
+        {
+            let scan = exact_nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap();
+            assert_eq!(scan.estimated_bytes(), Some(bytes));
+            assert_eq!(scan.estimated_work(), Some(if bytes == 0 { 0 } else { 1 }));
+        }
+
+        let overflow = explain(u64::MAX - 1, 0, scan_bytes);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "half-block scans round independently across unknown gaps"
+        );
+    }
+
     // Include the source's own first byte in the same closure. Four separate
     // one-byte scans each round to one unit, so MAX-4 source rows close exactly;
     // combining their raw bytes before rounding would charge a single unit.
