@@ -1,0 +1,48 @@
+pub fn bad(flag: Bool): Int { case flag {
+true: "outer {root => {
+let saved = root;
+case root {
+true: inner => {
+let inner_saved = inner;
+case inner {
+true: first => { case first {
+true: 1,
+false: 2
+} },
+false: "prefix {second => { case second {
+true: 3,
+false: 4
+} }} suffix",
+true: third => { case third {
+true: 5,
+false: 6
+} },
+false: "deep {fourth => { let nested = leaf => { case leaf {
+true: 7,
+false: 8
+} }; case fourth {
+true: 9,
+false: 10
+} }} end",
+false 0 { value: 11 },
+true 1 { other_value: 12 },
+false 2 { third_value: 13 },
+true 3 { fourth_value: 14 }
+};
+after => { case after {
+true: inner_saved,
+false: "after {root} tail"
+} }
+},
+false: outer_finish => { case outer_finish {
+true: saved,
+false: "outer {root} tail"
+} }
+};
+finish => { case root {
+true: saved,
+false: "finish {flag} tail"
+} }
+}} after",
+false: "fallback {flag} done"
+}}
