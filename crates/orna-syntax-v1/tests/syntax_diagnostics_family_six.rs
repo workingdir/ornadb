@@ -106,3 +106,64 @@ fn nested_interpolation_recovery_keeps_self_and_compound_suffixes() {
     assert_eq!(deep_arms.len(), 2, "{deep_arms:?}");
     assert!(matches!(&outer_arms[1].body, Expr::Literal { text, .. } if text == "\"fallback\""));
 }
+
+#[test]
+fn nested_guard_recovery_keeps_a_deep_compound_suffix() {
+    let source = include_str!("fixtures/nested-case-recovery-compound-suffix-in-guard.orna");
+    let parsed = parse_module(source);
+
+    assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+    let diagnostic = &parsed.diagnostics[0];
+    let start = source.find("true 0").expect("malformed guarded case arm") + "true ".len();
+    assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+    assert_eq!(diagnostic.message, "expected `:` after case pattern");
+    assert_eq!(diagnostic.span.start, start, "{diagnostic:?}");
+    assert_eq!(diagnostic.span.end, start + 1, "{diagnostic:?}");
+    assert!(parsed.is_malformed());
+    assert!(!parsed.is_incomplete());
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected the nested-guard function");
+    };
+    let Expr::Block {
+        tail: Some(outer_tail),
+        ..
+    } = body
+    else {
+        panic!("expected the outer case at the block tail: {body:?}");
+    };
+    let Expr::Control {
+        arms: outer_arms, ..
+    } = outer_tail.as_ref()
+    else {
+        panic!("block tail is not a case: {outer_tail:?}");
+    };
+    assert_eq!(outer_arms.len(), 2, "{outer_arms:?}");
+    let Some(Expr::Control {
+        arms: guard_arms, ..
+    }) = outer_arms[0].guard.as_ref()
+    else {
+        panic!("outer arm lost its case guard: {:?}", outer_arms[0].guard);
+    };
+    let [arm] = guard_arms.as_slice() else {
+        panic!("recovered guard suffix is missing: {guard_arms:?}");
+    };
+    assert!(matches!(
+        &arm.pattern,
+        Pattern::Constructor { path, arguments, .. }
+            if path.iter().map(|segment| segment.text.as_str()).collect::<Vec<_>>() == ["Packet"]
+                && arguments.len() == 2
+                && matches!(&arguments[0], Pattern::List { elements, .. } if elements.len() == 2)
+                && matches!(&arguments[1], Pattern::Constructor { fields, .. } if fields.len() == 1)
+    ));
+    assert!(matches!(arm.guard.as_ref(), Some(Expr::Name { text, .. }) if text == "flag"));
+    assert!(matches!(&arm.body, Expr::Literal { text, .. } if text == "true"));
+    assert!(matches!(
+        &outer_arms[0].body,
+        Expr::Literal { text, .. } if text == "\"nested compound matched\""
+    ));
+    assert!(matches!(
+        &outer_arms[1].body,
+        Expr::Literal { text, .. } if text == "\"fallback\""
+    ));
+}
