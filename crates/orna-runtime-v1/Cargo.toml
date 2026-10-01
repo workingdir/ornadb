@@ -15,6 +15,7 @@ num-bigint = "0.4.6"
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-repository-v1 = { path = "../orna-repository-v1" }
 orna-stream-v1 = { path = "../orna-stream-v1" }
+orna-sys-v1 = { path = "../orna-sys-v1" }
 sha2 = "0.10.9"
 tokio = { version = "1.48.0", features = ["macros", "rt", "sync"] }
 uuid = { version = "1.18.1", features = ["v4"] }

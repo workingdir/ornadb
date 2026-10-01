@@ -1,11 +1,15 @@
 use std::{
+    collections::BTreeSet,
     env, fs,
     path::{Path, PathBuf},
 };
 
 mod build_support;
 
-use build_support::{Collector, canonical_pretty_json, validate_api_document, validate_collection};
+use build_support::{
+    Collector, canonical_pretty_json, parse_role_version, validate_api_document,
+    validate_collection,
+};
 use serde_json::{Value, json};
 
 fn rust_sources(root: &Path, output: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -92,6 +96,99 @@ fn main() {
     let mut generated_json = canonical_pretty_json(&api).expect("serialize system API canonically");
     generated_json.push('\n');
 
+    // Project the same annotated methods to an internal typed provider ABI.
+    // Role/version metadata stays out of the frozen public 1.0 artifact.
+    let declared_failures = api["failure_codes"]
+        .as_array()
+        .expect("validated API failure-code array");
+    let operations = collector
+        .functions
+        .iter()
+        .map(|function| {
+            let name = function.metadata["name"].as_str().expect("validated name");
+            let operation_namespace = name
+                .find(['(', '<'])
+                .map_or(name, |end| &name[..end]);
+            let failures = declared_failures
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|code| {
+                    *code == operation_namespace
+                        || code
+                            .strip_prefix(operation_namespace)
+                            .is_some_and(|tail| tail.starts_with('.'))
+                })
+                .collect::<Vec<_>>();
+            let preconditions = function.metadata["preconditions"]
+                .as_str()
+                .map(|value| vec![value])
+                .unwrap_or_default();
+            json!({
+                "name": name,
+                "version": {"major": 1, "minor": 0},
+                "signature": function.metadata["signature"],
+                "effect": function.metadata["effect"],
+                "preconditions": preconditions,
+                "failures": failures,
+                "role": function.role,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut roles = std::collections::BTreeMap::<String, Value>::new();
+    for function in &collector.functions {
+        let Some(role) = &function.role else {
+            continue;
+        };
+        let (name, major, minor) = parse_role_version(role).expect("role validated by collector");
+        let effect = function.metadata["effect"].as_str().expect("validated effect");
+        let role_entry = roles.entry(name.to_owned()).or_insert_with(|| {
+            json!({
+                "name": name,
+                "version": {"major": major, "minor": minor},
+                "effects": [],
+                "operations": [],
+                "required": true,
+                "replaceable": false,
+                "builtin_provider": "orna.sys.v1",
+            })
+        });
+        role_entry["effects"]
+            .as_array_mut()
+            .expect("generated effect array")
+            .push(json!(effect));
+        role_entry["operations"]
+            .as_array_mut()
+            .expect("generated role operation list")
+            .push(function.metadata["name"].clone());
+    }
+    for role in roles.values_mut() {
+        let effects = role["effects"]
+            .as_array()
+            .expect("generated role effects")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(effects.len(), 1, "semantic role has incompatible effects");
+        role["effects"] = json!(effects);
+        let operations = role["operations"]
+            .as_array()
+            .expect("generated role operation list")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<BTreeSet<_>>();
+        role["operations"] = json!(operations);
+    }
+    let provider_abi = json!({
+        "abi_version": {"major": 1, "minor": 0},
+        "operations": operations,
+        "roles": roles.into_values().collect::<Vec<_>>(),
+    });
+    let mut provider_abi_json =
+        canonical_pretty_json(&provider_abi).expect("serialize provider ABI canonically");
+    provider_abi_json.push('\n');
+
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("build output directory"));
     fs::write(out_dir.join("api_sys.json"), generated_json).expect("write generated api/sys.json");
+    fs::write(out_dir.join("system_provider_abi.json"), provider_abi_json)
+        .expect("write generated typed system provider ABI");
 }

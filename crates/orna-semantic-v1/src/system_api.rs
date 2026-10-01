@@ -23,6 +23,7 @@ pub(crate) struct SystemApi {
     removed: BTreeMap<String, RemovedName>,
     enums: BTreeMap<String, BTreeSet<String>>,
     failure_codes: BTreeSet<String>,
+    provider_operations: BTreeMap<String, orna_sys_v1::OperationContract>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,6 +77,7 @@ pub(crate) struct RelationDescriptor {
 pub(crate) struct FunctionDescriptor {
     /// The exact JSON overload label, including any disambiguating type.
     pub label: String,
+    pub signature: String,
     pub name: String,
     pub type_parameters: BTreeSet<String>,
     pub parameters: Vec<ParameterDescriptor>,
@@ -148,11 +150,47 @@ pub(crate) enum SystemApiError {
     InvalidRelationMetadata,
     InvalidValueTypeMetadata,
     InvalidFunctionMetadata,
+    ProviderAbiMismatch,
 }
 
 impl SystemApi {
     pub(crate) fn embedded() -> Result<Self, SystemApiError> {
-        Self::from_json(EMBEDDED_SYSTEM_API)
+        let mut api = Self::from_json(EMBEDDED_SYSTEM_API)?;
+        api.bind_provider_abi()?;
+        Ok(api)
+    }
+
+    fn bind_provider_abi(&mut self) -> Result<(), SystemApiError> {
+        let abi = orna_sys_v1::system_provider_abi();
+        abi.validate()
+            .map_err(|_| SystemApiError::ProviderAbiMismatch)?;
+        if abi.operations().count() != self.inventory.functions {
+            return Err(SystemApiError::ProviderAbiMismatch);
+        }
+        let mut contracts = BTreeMap::new();
+        for descriptor in self.functions.values().flatten() {
+            let contract = abi
+                .operation(&descriptor.label)
+                .ok_or(SystemApiError::ProviderAbiMismatch)?;
+            let expected_effect = match contract.effects.iter().next() {
+                Some(orna_sys_v1::SystemEffect::Read) => SystemEffect::Read,
+                Some(orna_sys_v1::SystemEffect::Invoke) => SystemEffect::Invoke,
+                Some(orna_sys_v1::SystemEffect::Admin) => SystemEffect::Admin,
+                None => return Err(SystemApiError::ProviderAbiMismatch),
+            };
+            if contract.signature.source != descriptor.signature
+                || contract.effects.iter().count() != 1
+                || expected_effect != descriptor.effect
+            {
+                return Err(SystemApiError::ProviderAbiMismatch);
+            }
+            contracts.insert(descriptor.label.clone(), contract.clone());
+        }
+        if contracts.len() != abi.operations().count() {
+            return Err(SystemApiError::ProviderAbiMismatch);
+        }
+        self.provider_operations = contracts;
+        Ok(())
     }
 
     pub(crate) fn from_json(source: &str) -> Result<Self, SystemApiError> {
@@ -492,6 +530,7 @@ impl SystemApi {
             removed,
             enums,
             failure_codes,
+            provider_operations: BTreeMap::new(),
         })
     }
 
@@ -507,6 +546,11 @@ impl SystemApi {
 
     pub(crate) fn function(&self, name: &str) -> Option<&[FunctionDescriptor]> {
         self.functions.get(name).map(Vec::as_slice)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn provider_operation(&self, name: &str) -> Option<&orna_sys_v1::OperationContract> {
+        self.provider_operations.get(name)
     }
 
     /// The portable failure-code vocabulary declared by `api/sys.json`.
@@ -848,6 +892,7 @@ fn parse_function(
     )?;
     Ok(FunctionDescriptor {
         label: raw.name.clone(),
+        signature: raw.signature.clone(),
         name,
         type_parameters,
         parameters,
@@ -1931,6 +1976,32 @@ mod tests {
             api.types.get("sys.RowRef").unwrap().type_parameters,
             vec!["T"]
         );
+    }
+
+    #[test]
+    fn semantic_api_binds_the_generated_typed_provider_contracts() {
+        let api = SystemApi::embedded().unwrap();
+        let contract = api
+            .provider_operation("sys.admin.checkout(SnapshotRef)")
+            .expect("semantic operation is linked to the baked ABI");
+        assert_eq!(
+            contract.signature.source,
+            "fn sys.admin.checkout(target: sys.SnapshotRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef"
+        );
+        assert!(!contract.preconditions.is_empty());
+        assert!(
+            contract
+                .failures
+                .iter()
+                .any(|failure| failure.as_str() == "sys.abi.precondition_failed")
+        );
+        let descriptor = api
+            .function("sys.admin.checkout")
+            .unwrap()
+            .iter()
+            .find(|descriptor| descriptor.label == "sys.admin.checkout(SnapshotRef)")
+            .unwrap();
+        assert_eq!(descriptor.effect, SystemEffect::Admin);
     }
 
     #[test]
