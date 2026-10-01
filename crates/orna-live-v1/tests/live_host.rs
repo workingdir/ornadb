@@ -14755,6 +14755,56 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     }
     assert_eq!(application.calls, 1);
 
+    // Start another cycle with the other same-target payload to pin the
+    // alternating sequence's reverse phase as well.
+    for (frame, expected, label, now) in [
+        (
+            Frame::Binary(repeated_same_target_query.clone()),
+            repeated_same_target_mismatch.clone(),
+            "the second mismatch starts the reverse-phase cycle",
+            42,
+        ),
+        (
+            Frame::Binary(terminal_eval.clone()),
+            terminal_eval_replay.clone(),
+            "the terminal failure replays after the reverse-phase first retry",
+            43,
+        ),
+        (
+            Frame::Binary(same_target_wrong_fingerprint_query.clone()),
+            same_target_fingerprint_mismatch.clone(),
+            "the first mismatch replays in the reverse-phase cycle",
+            44,
+        ),
+        (
+            Frame::Binary(terminal_eval.clone()),
+            terminal_eval_replay.clone(),
+            "the terminal failure remains stable through the reverse phase",
+            45,
+        ),
+        (
+            Frame::Binary(repeated_same_target_query.clone()),
+            repeated_same_target_mismatch.clone(),
+            "the second mismatch replays after the reverse-phase failure",
+            46,
+        ),
+        (
+            Frame::Binary(same_target_wrong_fingerprint_query.clone()),
+            same_target_fingerprint_mismatch.clone(),
+            "the first mismatch closes the reverse-phase cycle",
+            47,
+        ),
+    ] {
+        assert_eq!(
+            block_on(host.dispatch_frame([6; 16], now, frame, &mut application))
+                .unwrap()
+                .response
+                .expect(label),
+            expected
+        );
+    }
+    assert_eq!(application.calls, 1);
+
     let fresh_status_query = Envelope {
         request: Some([94; 16]),
         watch: None,
@@ -14769,7 +14819,7 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     let fresh_status_fingerprint = request_fingerprint(&fresh_status_query, [1; 16]);
     let fresh_status = block_on(host.dispatch_frame(
         [6; 16],
-        42,
+        48,
         Frame::Binary(fresh_status_query),
         &mut application,
     ))
