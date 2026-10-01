@@ -12087,6 +12087,149 @@ fn duplicate_deep_recoveries_redact_local_snapshot_admission() {
 }
 
 #[test]
+fn empty_duplicate_sibling_counts_follow_order_with_duplicate_terminals() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let make_wire = |payload: &str, counts: [usize; 2], reverse: bool| {
+        let sibling = |label: &str, count: usize| {
+            let terminal = (0..count).fold(
+                admitted("ORNA-E-EMPTY-DUP-IDENTICAL-TERMINAL", payload),
+                |terminal, index| {
+                    terminal.with_cause(admitted(
+                        "ORNA-E-EMPTY-DUP-IDENTICAL-TAIL",
+                        &format!("{payload} {label} duplicate tail {index} secret"),
+                    ))
+                },
+            );
+            admitted(
+                "ORNA-E-EMPTY-DUP-IDENTICAL-SIBLING",
+                &format!("{payload} {label} sibling secret"),
+            )
+            .with_cause(terminal)
+        };
+        let left = sibling("LEFT", counts[0]);
+        let right = sibling("RIGHT", counts[1]);
+        let (first, second) = if reverse {
+            (right, left)
+        } else {
+            (left, right)
+        };
+        admitted("ORNA-E-EMPTY-DUP-IDENTICAL-ROOT", payload)
+            .with_cause(first)
+            .with_cause(second)
+            .encode_ovb()
+            .unwrap()
+    };
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    fn sibling_tail_counts(diagnostic: &serde_json::Value) -> Vec<usize> {
+        let siblings = diagnostic["causes"].as_array().unwrap();
+        assert_eq!(siblings.len(), 2);
+        siblings
+            .iter()
+            .map(|sibling| {
+                assert_eq!(sibling["code"], "ORNA-E-EMPTY-DUP-IDENTICAL-SIBLING");
+                let terminal = &sibling["causes"][0];
+                assert_eq!(terminal["code"], "ORNA-E-EMPTY-DUP-IDENTICAL-TERMINAL");
+                let tails = terminal["causes"].as_array().unwrap();
+                for tail in tails {
+                    assert_eq!(tail["code"], "ORNA-E-EMPTY-DUP-IDENTICAL-TAIL");
+                    assert!(tail["causes"].as_array().unwrap().is_empty());
+                }
+                tails.len()
+            })
+            .collect()
+    }
+
+    let forward_wire = make_wire("forward identical empty duplicate payload", [2, 0], false);
+    let reverse_wire = make_wire("reverse identical empty duplicate payload", [2, 0], true);
+    let empty_wire = make_wire("empty identical duplicate payload", [0, 0], false);
+    let replay_forward = || Diagnostic::decode_ovb(&forward_wire).unwrap();
+    let replay_reverse = || Diagnostic::decode_ovb(&reverse_wire).unwrap();
+    let replay_empty = || Diagnostic::decode_ovb(&empty_wire).unwrap();
+    let mut receiver = replay_forward();
+    let forward = receiver.clone();
+    receiver.clone_from(&replay_reverse());
+    let reverse = receiver.clone();
+    receiver.clone_from(&replay_empty());
+    let empty_between = receiver.clone();
+    receiver.clone_from(&replay_forward());
+    let restored_forward = receiver.clone();
+    assert_eq!(restored_forward, forward);
+    assert_eq!(empty_between, replay_empty());
+
+    // ORNA-SECRET-002 leaves ordering open; retain the insertion positions of
+    // same-code siblings even when their nested terminal codes also match.
+    let outer = admitted(
+        "ORNA-E-EMPTY-DUP-IDENTICAL-OUTER",
+        "public identical empty duplicate admission",
+    )
+    .with_cause(forward)
+    .with_cause(reverse)
+    .with_cause(empty_between)
+    .with_cause(restored_forward);
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["severity"], "error");
+    assert_eq!(
+        projection["message"],
+        "public identical empty duplicate admission"
+    );
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 4);
+    for cause in causes {
+        assert_redacted_tree(cause);
+    }
+    assert_eq!(
+        causes.iter().map(sibling_tail_counts).collect::<Vec<_>>(),
+        vec![vec![2, 0], vec![0, 2], vec![0, 0], vec![2, 0]],
+    );
+
+    let json = serde_json::to_vec(&outer).unwrap();
+    let encoded = outer.encode_ovb().unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"forward identical empty duplicate payload".as_slice(),
+            b"reverse identical empty duplicate payload".as_slice(),
+            b"empty identical duplicate payload".as_slice(),
+            b"LEFT duplicate tail 0 secret".as_slice(),
+            b"LEFT duplicate tail 1 secret".as_slice(),
+            b"RIGHT duplicate tail 0 secret".as_slice(),
+            b"LEFT sibling secret".as_slice(),
+            b"RIGHT sibling secret".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
+    assert_redacted_tree(&decoded);
+    assert_eq!(decoded["causes"], projection["causes"]);
+}
+
+#[test]
 fn duplicate_deep_snapshots_preserve_repeated_tail_order() {
     let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
