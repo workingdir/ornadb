@@ -22132,3 +22132,144 @@ fn diagnostic_reload_storm_keeps_latest_alias_bindings_in_wire_order() {
         }
     }
 }
+
+#[test]
+fn diagnostic_concurrent_reloads_follow_serialized_alias_rebind_order() {
+    fn diagnostic(code: &str, fixture: &str) -> Diagnostic {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn reference_uuid(byte: u8) -> String {
+        let pair = format!("{byte:02x}");
+        format!(
+            "{pair}{pair}{pair}{pair}-{pair}{pair}-{pair}{pair}-{pair}{pair}-{pair}{pair}{pair}{pair}{pair}{pair}"
+        )
+    }
+
+    fn assert_generation(
+        projection: &serde_json::Value,
+        generation: usize,
+        references: &[Option<u8>],
+    ) {
+        assert_eq!(projection["code"], format!("ORNA-E-CONCURRENT-ROOT-{generation}"));
+        assert_eq!(projection["message"], "<redacted>");
+        let causes = projection["causes"].as_array().unwrap();
+        assert_eq!(causes.len(), references.len());
+        assert_eq!(
+            causes
+                .iter()
+                .map(|cause| cause["code"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>(),
+            (0..references.len())
+                .map(|slot| format!("ORNA-E-CONCURRENT-{generation}-SLOT-{slot}"))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            causes
+                .iter()
+                .map(|cause| cause["reference"].as_str().map(str::to_owned))
+                .collect::<Vec<_>>(),
+            references
+                .iter()
+                .map(|reference| (*reference).map(reference_uuid))
+                .collect::<Vec<_>>()
+        );
+
+        for (slot, (cause, reference)) in causes.iter().zip(references).enumerate() {
+            assert_eq!(cause["message"], "<redacted>");
+            let nested = cause["causes"].as_array().unwrap();
+            if reference.is_some() {
+                let expected = if generation % 2 == 0 {
+                    ["LEFT", "RIGHT"]
+                } else {
+                    ["RIGHT", "LEFT"]
+                }
+                .map(|side| format!("ORNA-E-CONCURRENT-{generation}-SLOT-{slot}-{side}"));
+                assert_eq!(
+                    nested
+                        .iter()
+                        .map(|child| child["code"].as_str().unwrap().to_owned())
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+            } else {
+                assert!(nested.is_empty());
+            }
+        }
+    }
+
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let rounds = vec![
+        vec![Some(0x11), Some(0x22), Some(0x11)],
+        vec![Some(0x22), Some(0x11), Some(0x22)],
+        vec![None, Some(0x11), Some(0x22), Some(0x11)],
+        vec![Some(0x22), None, Some(0x22)],
+        vec![Some(0x11), Some(0x11), None, Some(0x22)],
+        vec![Some(0x22), Some(0x11), Some(0x22), None],
+        vec![Some(0x11), None, Some(0x22), Some(0x11)],
+        vec![Some(0x22), Some(0x22), Some(0x11)],
+    ];
+    let mut wires = Vec::with_capacity(rounds.len());
+    for (generation, references) in rounds.iter().enumerate() {
+        let mut root = diagnostic(&format!("ORNA-E-CONCURRENT-ROOT-{generation}"), fixture);
+        for (slot, reference) in references.iter().enumerate() {
+            let mut cause = diagnostic(
+                &format!("ORNA-E-CONCURRENT-{generation}-SLOT-{slot}"),
+                fixture,
+            );
+            if let Some(reference) = reference {
+                cause = cause.with_reference([*reference; 16]);
+                let sides = if generation % 2 == 0 {
+                    ["LEFT", "RIGHT"]
+                } else {
+                    ["RIGHT", "LEFT"]
+                };
+                for side in sides {
+                    cause = cause.with_cause(diagnostic(
+                        &format!("ORNA-E-CONCURRENT-{generation}-SLOT-{slot}-{side}"),
+                        fixture,
+                    ));
+                }
+            }
+            root = root.with_cause(cause);
+        }
+        wires.push(root.encode_ovb().unwrap());
+    }
+
+    let initial = diagnostic("ORNA-E-CONCURRENT-INITIAL", fixture);
+    let shared = std::sync::Arc::new(std::sync::Mutex::new((initial, Vec::new())));
+    let start = std::sync::Arc::new(std::sync::Barrier::new(rounds.len()));
+    std::thread::scope(|scope| {
+        for (generation, wire) in wires.iter().enumerate() {
+            let shared = std::sync::Arc::clone(&shared);
+            let start = std::sync::Arc::clone(&start);
+            let wire = wire.clone();
+            let references = &rounds[generation];
+            scope.spawn(move || {
+                start.wait();
+                let mut state = shared.lock().unwrap();
+                state.0.reload_ovb(&wire).unwrap();
+                let projection = serde_json::to_value(&state.0).unwrap();
+                assert_generation(&projection, generation, references);
+                state.1.push(generation);
+            });
+        }
+    });
+
+    let state = shared.lock().unwrap();
+    assert_eq!(state.1.len(), rounds.len());
+    let mut observed_generations = state.1.clone();
+    observed_generations.sort_unstable();
+    assert_eq!(observed_generations, (0..rounds.len()).collect::<Vec<_>>());
+    let last_generation = *state.1.last().unwrap();
+    assert_generation(
+        &serde_json::to_value(&state.0).unwrap(),
+        last_generation,
+        &rounds[last_generation],
+    );
+}
