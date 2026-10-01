@@ -14909,3 +14909,164 @@ fn empty_duplicate_sibling_tails_keep_owner_across_replay() {
     assert_redacted_tree(&decoded);
     assert_eq!(decoded["causes"], projection["causes"]);
 }
+
+#[test]
+fn empty_duplicate_sibling_order_keeps_nested_tail_owners_on_replay() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let make_wire = |payload: &str, reverse: bool| {
+        let sibling = |name: &str, count: usize| {
+            let terminal = (0..count).fold(
+                admitted(&format!("ORNA-E-EMPTY-DUP-ORDER-{name}-TERMINAL"), payload),
+                |terminal, index| {
+                    terminal.with_cause(admitted(
+                        "ORNA-E-EMPTY-DUP-ORDER-TAIL",
+                        &format!("{payload} {name} empty duplicate tail {index} secret"),
+                    ))
+                },
+            );
+            admitted(
+                "ORNA-E-EMPTY-DUP-ORDER-SIBLING",
+                &format!("{payload} {name} sibling secret"),
+            )
+            .with_cause(terminal)
+        };
+        let left = sibling("LEFT", 2);
+        let right = sibling("RIGHT", 1);
+        let (first, second) = if reverse {
+            (right, left)
+        } else {
+            (left, right)
+        };
+        admitted("ORNA-E-EMPTY-DUP-ORDER-ROOT", payload)
+            .with_cause(first)
+            .with_cause(second)
+            .encode_ovb()
+            .unwrap()
+    };
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    fn sibling_terminal_codes(diagnostic: &serde_json::Value) -> Vec<String> {
+        diagnostic["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|sibling| sibling["causes"][0]["code"].as_str().unwrap().to_owned())
+            .collect()
+    }
+    fn sibling_tail_counts(diagnostic: &serde_json::Value) -> Vec<usize> {
+        diagnostic["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|sibling| sibling["causes"][0]["causes"].as_array().unwrap().len())
+            .collect()
+    }
+    fn assert_empty_tail_shapes(diagnostic: &serde_json::Value) {
+        for sibling in diagnostic["causes"].as_array().unwrap() {
+            assert_eq!(sibling["code"], "ORNA-E-EMPTY-DUP-ORDER-SIBLING");
+            for tail in sibling["causes"][0]["causes"].as_array().unwrap() {
+                assert_eq!(tail["code"], "ORNA-E-EMPTY-DUP-ORDER-TAIL");
+                assert!(tail["causes"].as_array().unwrap().is_empty());
+            }
+        }
+    }
+
+    let forward_wire = make_wire("forward empty duplicate sibling order payload", false);
+    let reverse_wire = make_wire("reverse empty duplicate sibling order payload", true);
+    let replay_forward = || Diagnostic::decode_ovb(&forward_wire).unwrap();
+    let replay_reverse = || Diagnostic::decode_ovb(&reverse_wire).unwrap();
+    let mut receiver = replay_forward();
+    let forward = receiver.clone();
+    receiver.clone_from(&replay_reverse());
+    let reverse = receiver.clone();
+    receiver.clone_from(&replay_forward());
+    let restored_forward = receiver.clone();
+    assert_eq!(restored_forward, forward);
+
+    // ORNA-SECRET-002 leaves order open; retain left-to-right insertion order
+    // and keep each empty duplicate tail group with its nested sibling.
+    let outer = admitted(
+        "ORNA-E-EMPTY-DUP-ORDER-OUTER",
+        "public empty duplicate sibling order admission",
+    )
+    .with_cause(forward)
+    .with_cause(reverse)
+    .with_cause(restored_forward);
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["severity"], "error");
+    assert_eq!(
+        projection["message"],
+        "public empty duplicate sibling order admission"
+    );
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 3);
+    for cause in causes {
+        assert_redacted_tree(cause);
+        assert_empty_tail_shapes(cause);
+    }
+    assert_eq!(
+        causes.iter().map(sibling_terminal_codes).collect::<Vec<_>>(),
+        vec![
+            vec![
+                "ORNA-E-EMPTY-DUP-ORDER-LEFT-TERMINAL".to_owned(),
+                "ORNA-E-EMPTY-DUP-ORDER-RIGHT-TERMINAL".to_owned(),
+            ],
+            vec![
+                "ORNA-E-EMPTY-DUP-ORDER-RIGHT-TERMINAL".to_owned(),
+                "ORNA-E-EMPTY-DUP-ORDER-LEFT-TERMINAL".to_owned(),
+            ],
+            vec![
+                "ORNA-E-EMPTY-DUP-ORDER-LEFT-TERMINAL".to_owned(),
+                "ORNA-E-EMPTY-DUP-ORDER-RIGHT-TERMINAL".to_owned(),
+            ],
+        ],
+    );
+    assert_eq!(
+        causes.iter().map(sibling_tail_counts).collect::<Vec<_>>(),
+        vec![vec![2, 1], vec![1, 2], vec![2, 1]],
+    );
+
+    let json = serde_json::to_vec(&outer).unwrap();
+    let encoded = outer.encode_ovb().unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"forward empty duplicate sibling order payload".as_slice(),
+            b"reverse empty duplicate sibling order payload".as_slice(),
+            b"LEFT empty duplicate tail 0 secret".as_slice(),
+            b"LEFT empty duplicate tail 1 secret".as_slice(),
+            b"RIGHT empty duplicate tail 0 secret".as_slice(),
+            b"LEFT sibling secret".as_slice(),
+            b"RIGHT sibling secret".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
+    assert_redacted_tree(&decoded);
+    assert_eq!(decoded["causes"], projection["causes"]);
+}
