@@ -14511,8 +14511,8 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
             21,
         ),
         (
-            repeated_same_target_query,
-            repeated_same_target_mismatch,
+            repeated_same_target_query.clone(),
+            repeated_same_target_mismatch.clone(),
             "cross-kind ID reuse preserves the repeated same-target mismatch",
             22,
         ),
@@ -14594,6 +14594,46 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     );
     assert_eq!(application.calls, 1);
 
+    // The second same-target fingerprint has an independent mismatch snapshot;
+    // pin the same terminal-replay interleave for its exact retries as well.
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            28,
+            Frame::Binary(repeated_same_target_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the second same-target retry replays its own mismatch"),
+        repeated_same_target_mismatch
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            29,
+            Frame::Binary(terminal_eval.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the terminal failure replays between retries of the second mismatch"),
+        terminal_eval_replay
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            30,
+            Frame::Binary(repeated_same_target_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the second mismatch retry stays stable after terminal failure replay"),
+        repeated_same_target_mismatch
+    );
+    assert_eq!(application.calls, 1);
+
     let fresh_status_query = Envelope {
         request: Some([94; 16]),
         watch: None,
@@ -14608,7 +14648,7 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     let fresh_status_fingerprint = request_fingerprint(&fresh_status_query, [1; 16]);
     let fresh_status = block_on(host.dispatch_frame(
         [6; 16],
-        28,
+        31,
         Frame::Binary(fresh_status_query),
         &mut application,
     ))
