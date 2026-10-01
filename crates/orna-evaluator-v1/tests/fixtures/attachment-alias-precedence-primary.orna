@@ -1,0 +1,2 @@
+use archive;
+pub fn primary_value(): Int = archive.nested_value();
