@@ -92,6 +92,8 @@ const SOURCE_REMAINDER_BYTES_THEN_RESET_TAIL: &str =
     include_str!("fixtures/source_remainder_bytes_then_reset_tail.orna");
 const BYTE_REMAINDER_RESET_EDGE_TAIL: &str =
     include_str!("fixtures/byte_remainder_reset_edge_tail.orna");
+const BYTE_REMAINDER_REPEATED_RESET_TAIL: &str =
+    include_str!("fixtures/byte_remainder_repeated_reset_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -8675,6 +8677,148 @@ fn explain_closes_byte_remainders_across_reset_rounding_edges() {
     }));
 
     let surface = serde_json::to_value(&overflow).expect("byte reset edge overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_keeps_rounded_byte_work_across_repeated_resets() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_REMAINDER_REPEATED_RESET_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    // ORNA-PLAN does not specify byte-cost units or rounding. Continue the
+    // pragmatic 4-KiB block model: the source contributes MAX-4, then an
+    // unknown join hides the total. A scan byte tail and first update write
+    // each round independently; a second update resets the output again to
+    // one row and zero bytes. That later reset must not erase work from the
+    // first update. A zero-byte first write stays one below; either 4096-byte
+    // scan or write tails close exactly; 4097 bytes on either side overflow.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let source_rows = u64::MAX - MAX_BYTE_BLOCKS - 4;
+    let explain = |scan_bytes, first_write_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:byte-remainder-repeated-resets"),
+            source: obj("table:RepeatedResetSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:RepeatedResetUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:RepeatedResetScanTail"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(scan_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:RepeatedResetFirstTarget"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(first_write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:RepeatedResetLastTarget"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(0),
+                    estimated_table_rows_before: Some(1),
+                },
+            ],
+            materialize_into: Some(obj("materialization:repeated-reset-tail")),
+        })
+        .expect("scan byte remainder followed by two cardinality resets")
+    };
+
+    let below = explain(0, 0);
+    assert_eq!(below.plan().estimated_cost(), None);
+    assert_eq!(below.root().details().get("estimated_cost_overflow"), None);
+
+    for exact in [explain(4_096, 0), explain(0, 4_096)] {
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(
+            exact.root().details().get("estimated_cost_overflow"),
+            None,
+            "either rounded byte source closes at MAX through the two resets"
+        );
+    }
+
+    for overflow in [explain(4_097, 0), explain(0, 4_097), explain(1, 4_096)] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "extra scan or update byte rounding survives the later reset"
+        );
+    }
+
+    let overflow = explain(0, 4_097);
+    let nodes = overflow.nodes();
+    let position = |kind, name: &str| {
+        nodes
+            .iter()
+            .position(|node| node.kind() == kind && node.object() == Some(&obj(name)))
+            .expect("fixture-backed plan node appears")
+    };
+    let source_position = position(PlanNodeKind::Scan, "table:RepeatedResetSource");
+    let unknown_position = position(PlanNodeKind::Scan, "table:RepeatedResetUnknown");
+    let scan_position = position(PlanNodeKind::Scan, "table:RepeatedResetScanTail");
+    let first_reset_position = position(PlanNodeKind::Invoke, "table:RepeatedResetFirstTarget");
+    let last_reset_position = position(PlanNodeKind::Invoke, "table:RepeatedResetLastTarget");
+    assert!(source_position < unknown_position);
+    assert!(unknown_position < scan_position);
+    assert!(last_reset_position < first_reset_position);
+    assert!(first_reset_position < source_position);
+    assert_eq!(
+        overflow.root().inputs(),
+        &[nodes[last_reset_position].reference().clone()]
+    );
+    assert_eq!(
+        nodes[last_reset_position].inputs(),
+        &[nodes[first_reset_position].reference().clone()]
+    );
+    assert_eq!(nodes[scan_position].parent(), nodes[first_reset_position].inputs().first());
+    assert_eq!(nodes[source_position].estimated_work(), Some(u64::MAX - 4));
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+    assert_eq!(nodes[scan_position].estimated_bytes(), Some(0));
+    assert_eq!(nodes[scan_position].estimated_work(), None);
+    assert_eq!(nodes[first_reset_position].estimated_rows(), Some(1));
+    assert_eq!(nodes[first_reset_position].estimated_bytes(), Some(4_097));
+    assert_eq!(nodes[first_reset_position].estimated_work(), Some(3));
+    assert_eq!(nodes[last_reset_position].estimated_rows(), Some(1));
+    assert_eq!(nodes[last_reset_position].estimated_bytes(), Some(0));
+    assert_eq!(nodes[last_reset_position].estimated_work(), Some(1));
+    assert_eq!(overflow.root().estimated_rows(), Some(1));
+    assert_eq!(overflow.root().estimated_bytes(), Some(0));
+    assert_eq!(overflow.root().estimated_work(), Some(1));
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow).expect("repeated reset byte overflow surface");
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
