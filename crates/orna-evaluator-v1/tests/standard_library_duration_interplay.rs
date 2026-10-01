@@ -3142,6 +3142,40 @@ fn positive_factor_rescaled_tails_close_after_sixty_fourth_doubling() {
 }
 
 #[test]
+fn positive_factor_rescaled_tails_close_after_sixty_fifth_doubling() {
+    // The reference is silent at this next scale. Continue the symmetric edge
+    // correction by doubling the prior tail to 110,680,464,442,257,309,696 ns
+    // around 36,893,488,147,419,103,232 minutes, pinning 25620477880152155d 32m.
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
+    ] {
+        assert_eq!(session.submit(source), Ok(None), "{source}");
+    }
+
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixty-fifth-doubling-from-below-0q58q.orna"),
+        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixty-fifth-doubling-from-above-0q58q.orna"),
+    ] {
+        let result = session.submit(source);
+        assert_eq!(
+            result,
+            Ok(Some(texts(&[
+                "25620477880152155d 32m",
+                "614891469123651720:32:00",
+                "25620477880152155 days, 32 minutes",
+                "P25620477880152155DT32M",
+            ]))),
+            "{source}; diagnostic={}",
+            result.as_ref().err().map_or("none", |error| error.code())
+        );
+    }
+}
+
+#[test]
 fn clock_output_bound_keeps_elapsed_hours_and_fractional_tail() {
     let limits = Limits {
         max_string_bytes: 129,
