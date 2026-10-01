@@ -433,6 +433,26 @@ fn edge_interplay_fixture_projects_unknown_inexact_count_through_target_columns(
 }
 
 #[test]
+fn edge_interplay_fixture_retains_unknown_inexact_target_through_column_handoff() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Retain the entire unknown/inexact target across its Columns callback, then project its
+    // count as Int?; the frozen API does not define exactness as a non-null guarantee.
+    assert!(
+        analysis.is_ok(),
+        "unknown/inexact target record and nullable count must survive the Column handoff: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_chains_unknown_inexact_target_filters() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
