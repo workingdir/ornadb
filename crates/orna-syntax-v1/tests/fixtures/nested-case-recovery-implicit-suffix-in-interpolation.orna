@@ -1,0 +1,9 @@
+pub fn nested(flag: Bool): String {
+    "before {case flag {
+        true: "inner {case flag {
+            true 0
+            false: 1
+        }} tail",
+        false: "fallback"
+    }} after"
+}
