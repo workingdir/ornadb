@@ -60,3 +60,7 @@ At dispatch, the runtime resolves the operation ID, checks each registry-declare
 ## Follow-on implementation note: registry parity guard (issue #5623)
 
 The build and focused CI proof share one artifact projection over the annotated Rust implementation registry plus the non-operation type-graph inventory. The proof reruns generation and byte-compares the normative `api/sys.json`, embedded dispatch JSON, bundled `.orna` declarations, and each generated module file against the build outputs; it also parses the regenerated dispatch table and compares it to the runtime typed table. The separate stub proof continues to check supported Orna grammar, resolved types, and one-to-one dispatch markers. These checks make all three artifacts standing registry projections without changing the frozen 1.0.0 contract.
+
+## Follow-on proof note: generic keyword alias tail (issue #5639)
+
+The parity proof also pins the generated `sys.invoke<T>` declaration whose type-witness parameter is named `as` in the registry and emitted as `as_` for Orna grammar. Its small `.orna` golden is stored inside `orna-sys-v1/tests/fixtures/` and included at compile time. This closes the focused reserved-keyword/generic tail without reading fixtures from the external reference tree or changing generated artifact bytes.

@@ -1,6 +1,8 @@
 use orna_syntax_v1::{Declaration, TypeExpr, parse_module};
 use orna_sys_v1::{AbiType, OperationContract, system_binding_stubs, system_provider_abi};
 
+const GENERIC_KEYWORD_STUB_FIXTURE: &str = include_str!("fixtures/sys-invoke-generic-keyword.orna");
+
 fn resolve_type(ty: &TypeExpr) -> Result<AbiType, String> {
     match ty {
         TypeExpr::Name {
@@ -176,4 +178,60 @@ fn generated_sys_stubs_parse_resolve_to_registry_types_and_dispatch_one_to_one()
             operation.id.as_str()
         );
     }
+}
+
+#[test]
+fn generated_generic_keyword_stub_tail_matches_the_in_crate_fixture() {
+    let fixture = GENERIC_KEYWORD_STUB_FIXTURE.trim_end();
+    assert!(
+        system_binding_stubs().contains(fixture),
+        "generated bundle must retain the generic `as` keyword alias fixture"
+    );
+
+    let parsed = parse_module(fixture);
+    assert!(
+        parsed.is_ok(),
+        "the focused generated stub must parse in supported Orna grammar: {:?}",
+        parsed.diagnostics
+    );
+    assert_eq!(parsed.value.items.len(), 1);
+    let Declaration::Function { signature, .. } = &parsed.value.items[0].declaration else {
+        panic!("the keyword fixture must contain one function declaration")
+    };
+    let operation = system_provider_abi()
+        .operation("sys.invoke<T>")
+        .expect("generic invoke dispatch entry");
+    assert_eq!(
+        signature
+            .generics
+            .iter()
+            .map(|generic| generic.name.as_str())
+            .collect::<Vec<_>>(),
+        operation
+            .signature
+            .type_parameters
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+    );
+    let parameter = &signature.parameters[2];
+    let parameter_source = &fixture[parameter.span.start..parameter.span.end];
+    assert_eq!(parameter_source.split_once(": ").unwrap().0, "as_");
+    assert!(fixture.contains("// sys-parameter-alias: as=as_\n"));
+    assert_eq!(operation.signature.parameters[2].name, "as");
+    assert_eq!(
+        resolve_type(
+            parameter
+                .annotation
+                .as_ref()
+                .expect("typed alias parameter")
+        )
+        .expect("supported alias type"),
+        operation.signature.parameters[2].ty
+    );
+    assert_eq!(
+        resolve_type(signature.result.as_ref().expect("typed generic result"))
+            .expect("supported generic result"),
+        operation.signature.result
+    );
 }
