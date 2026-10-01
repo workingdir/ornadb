@@ -573,6 +573,26 @@ fn edge_interplay_fixture_retains_unknown_exact_count_through_reference_key_colu
 }
 
 #[test]
+fn edge_interplay_fixture_null_filters_unknown_exact_count_after_reference_key_columns() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Keep the nullable arm available to a final null predicate after traversing the
+    // Reference target Key and its Columns; exactness does not guarantee count presence.
+    assert!(
+        analysis.is_ok(),
+        "null filtering after Reference target-Key columns must accept the unknown exact count: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_composes_unknown_target_count_with_inexactness() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
