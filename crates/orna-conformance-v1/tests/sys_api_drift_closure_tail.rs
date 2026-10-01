@@ -253,6 +253,26 @@ fn edge_interplay_fixture_captures_nullable_outer_field_for_sibling_filter() {
 }
 
 #[test]
+fn edge_interplay_fixture_projects_outer_nullable_field_from_sibling_map() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The frozen schema does not say that a documented sibling has any relationship to the
+    // anchor's default_expression; preserve that nullable outer field through the nested map.
+    assert!(
+        analysis.is_ok(),
+        "nested sibling maps must retain the captured nullable outer expression: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn runtime_publication_counters_do_not_leak_into_frozen_sys_types() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-internal-publication-metadata.orna",
