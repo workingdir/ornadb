@@ -10819,7 +10819,11 @@ fn explain_closes_first_byte_work_across_three_scans_at_max() {
     // ORNA-PLAN leaves byte aggregation across unknown scan gaps unspecified;
     // preserve source-local 4-KiB rounding as the source crosses that boundary.
     // The paired scan first bytes then close at MAX in every scan placement.
-    for (source_bytes, exact_source_rows) in [(4_096, u64::MAX - 3), (4_097, u64::MAX - 4)] {
+    for (source_bytes, exact_source_rows) in [
+        (4_095, u64::MAX - 3),
+        (4_096, u64::MAX - 3),
+        (4_097, u64::MAX - 4),
+    ] {
         for scan_bytes in [[1, 1, 0], [1, 0, 1], [0, 1, 1]] {
             let exact = explain(exact_source_rows, source_bytes, scan_bytes);
             assert_eq!(exact.plan().estimated_cost(), None);
