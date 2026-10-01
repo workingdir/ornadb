@@ -5021,6 +5021,154 @@ mod tests {
     }
 
     #[test]
+    fn nested_pin_reverse_prefix_historical_tail_keeps_older_middle_pin() {
+        let app_source = include_str!("../tests/fixtures/attached-incompatible-main.orna");
+        let shared_source = include_str!("../tests/fixtures/attached-equivalent-main.orna");
+        let (app_dir, app_repository, _) = repository(app_source);
+        let (shared_dir, shared_repository, _) = repository(shared_source);
+
+        let oldest_copy_commit = write_commit(
+            shared_dir.path(),
+            "main.orna",
+            &shared_source.replace("42", "7"),
+        );
+        let archive_historical_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive_copy {oldest_copy_commit}\n"),
+        );
+        let archive_copy_historical_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive {archive_historical_commit}\n"),
+        );
+        let longest_historical_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive_copy {archive_copy_historical_commit}\n"),
+        );
+        let archive_copy_current_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive_copy_archive {longest_historical_commit}\n"),
+        );
+        let archive_current_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive_copy {archive_copy_current_commit}\n"),
+        );
+        let longest_current_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive {archive_current_commit}\n"),
+        );
+        let app_commit = write_commit(
+            app_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!(
+                "archive {archive_current_commit}\narchive_copy {archive_copy_current_commit}\narchive_copy_archive {longest_current_commit}\n"
+            ),
+        );
+
+        let loader = ProjectLoader::default();
+        let app = PinnedDatabase::resolve(
+            "app",
+            app_repository.clone(),
+            &app_commit,
+            loader,
+        )
+        .unwrap();
+        let resolver = PackageResolver::new(
+            [
+                ("app".to_owned(), app_repository),
+                ("archive".to_owned(), shared_repository.clone()),
+                ("archive_copy".to_owned(), shared_repository.clone()),
+                ("archive_copy_archive".to_owned(), shared_repository),
+            ],
+            loader,
+        )
+        .unwrap();
+
+        let root_session = resolver.resolve_for_parent(app).unwrap();
+        let longest_current = resolver
+            .resolve_for_parent(
+                root_session
+                    .database("archive_copy_archive")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        let archive_current = resolver
+            .resolve_for_parent(longest_current.database("archive").unwrap().clone())
+            .unwrap();
+        let copy_current = resolver
+            .resolve_for_parent(archive_current.database("archive_copy").unwrap().clone())
+            .unwrap();
+        let longest_historical = resolver
+            .resolve_for_parent(
+                copy_current
+                    .database("archive_copy_archive")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        let copy_historical = resolver
+            .resolve_for_parent(longest_historical.database("archive_copy").unwrap().clone())
+            .unwrap();
+        let archive_historical_pin = copy_historical.database("archive").unwrap().clone();
+        let mut archive_historical = resolver
+            .resolve_for_parent(archive_historical_pin.clone())
+            .unwrap();
+        let archive_historical_sibling = resolver
+            .resolve_for_parent(archive_historical_pin)
+            .unwrap();
+        let oldest_copy = archive_historical
+            .database("archive_copy")
+            .unwrap()
+            .clone();
+
+        assert_eq!(longest_current.primary().pin().commit().as_str(), longest_current_commit);
+        assert_eq!(archive_current.primary().pin().commit().as_str(), archive_current_commit);
+        assert_eq!(copy_current.primary().pin().commit().as_str(), archive_copy_current_commit);
+        assert_eq!(longest_historical.primary().pin().commit().as_str(), longest_historical_commit);
+        assert_eq!(copy_historical.primary().pin().commit().as_str(), archive_copy_historical_commit);
+        assert_eq!(archive_historical.primary().pin().commit().as_str(), archive_historical_commit);
+        assert_eq!(oldest_copy.pin().name(), "archive_copy");
+        assert_eq!(oldest_copy.pin().commit().as_str(), oldest_copy_commit);
+        assert_ne!(
+            root_session.database("archive_copy").unwrap().pin(),
+            oldest_copy.pin()
+        );
+
+        // The reference fixes the historical OIDs but is silent on a further
+        // reverse-prefix edge from an old `archive` pin back to `archive_copy`.
+        // V1 follows that exact tail edge and isolates its detach per session.
+        archive_historical.detach_database("archive_copy").unwrap();
+        assert!(archive_historical.database("archive_copy").is_none());
+        assert_eq!(
+            archive_historical_sibling
+                .database("archive_copy")
+                .unwrap()
+                .pin(),
+            oldest_copy.pin()
+        );
+        let oldest_copy_session = resolver.resolve_for_parent(oldest_copy).unwrap();
+        assert_eq!(oldest_copy_session.primary().pin().name(), "archive_copy");
+        assert_eq!(oldest_copy_session.primary().pin().commit().as_str(), oldest_copy_commit);
+        assert_eq!(oldest_copy_session.attached().count(), 0);
+        for (name, expected_commit) in [
+            ("archive", archive_current_commit.as_str()),
+            ("archive_copy", archive_copy_current_commit.as_str()),
+            ("archive_copy_archive", longest_current_commit.as_str()),
+        ] {
+            assert_eq!(
+                root_session.database(name).unwrap().pin().commit().as_str(),
+                expected_commit
+            );
+        }
+    }
+
+    #[test]
     fn equivalent_units_interoperate_across_attachments_but_name_match_is_not_enough() {
         let primary_source = include_str!("fixtures/attached-primary-main.orna");
         let (_primary_dir, primary_repository, primary_commit) = repository(&primary_source);
