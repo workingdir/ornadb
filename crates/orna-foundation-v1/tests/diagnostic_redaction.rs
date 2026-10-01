@@ -16806,3 +16806,196 @@ fn cloned_alias_siblings_retain_their_duplicate_tail_additions() {
         reverse_projection["causes"]
     );
 }
+
+#[test]
+fn cloned_alias_tails_keep_distinct_appends_across_siblings() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let diagnostic = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(message).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let make_wire = |payload: &str, reverse: bool| {
+        let shared_tail = diagnostic(
+            "ORNA-E-ALIAS-SIBLING-DUP-TAIL",
+            &format!("{payload} shared base tail secret"),
+        )
+        .with_cause(diagnostic(
+            "ORNA-E-ALIAS-SIBLING-SHARED-CHILD",
+            &format!("{payload} shared base child secret"),
+        ));
+        let sibling = |side: &str| {
+            let aliased_tail = |slot: &str| {
+                shared_tail.clone().with_cause(diagnostic(
+                    &format!("ORNA-E-ALIAS-SIBLING-{side}-{slot}-CHILD"),
+                    &format!("{payload} {side} {slot} alias child secret"),
+                ))
+            };
+            let mut tails = vec![aliased_tail("A"), aliased_tail("B")];
+            if reverse {
+                tails.reverse();
+            }
+            let terminal = tails.into_iter().fold(
+                diagnostic("ORNA-E-ALIAS-SIBLING-DUP-TERMINAL", payload),
+                |terminal, tail| terminal.with_cause(tail),
+            );
+            diagnostic(
+                "ORNA-E-ALIAS-SIBLING-DUP-BRANCH",
+                &format!("{payload} {side} sibling alias secret"),
+            )
+            .with_cause(terminal)
+        };
+        let left = sibling("LEFT");
+        let right = sibling("RIGHT");
+        let siblings = if reverse {
+            vec![right, left]
+        } else {
+            vec![left, right]
+        };
+        siblings
+            .into_iter()
+            .fold(
+                diagnostic("ORNA-E-ALIAS-SIBLING-DUP-ROOT", payload),
+                |root, sibling| root.with_cause(sibling),
+            )
+            .redacted()
+            .encode_ovb()
+            .unwrap()
+    };
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        for note in diagnostic["notes"].as_array().unwrap() {
+            assert_eq!(note, "<redacted>");
+        }
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    fn alias_tail_children(diagnostic: &serde_json::Value) -> Vec<Vec<Vec<String>>> {
+        let siblings = diagnostic["causes"].as_array().unwrap();
+        assert_eq!(siblings.len(), 2);
+        siblings
+            .iter()
+            .map(|sibling| {
+                assert_eq!(sibling["code"], "ORNA-E-ALIAS-SIBLING-DUP-BRANCH");
+                let terminal = &sibling["causes"][0];
+                assert_eq!(terminal["code"], "ORNA-E-ALIAS-SIBLING-DUP-TERMINAL");
+                let tails = terminal["causes"].as_array().unwrap();
+                assert_eq!(tails.len(), 2);
+                tails
+                    .iter()
+                    .map(|tail| {
+                        assert_eq!(tail["code"], "ORNA-E-ALIAS-SIBLING-DUP-TAIL");
+                        let children = tail["causes"].as_array().unwrap();
+                        assert_eq!(children.len(), 2);
+                        assert_eq!(
+                            children[0]["code"],
+                            "ORNA-E-ALIAS-SIBLING-SHARED-CHILD"
+                        );
+                        children
+                            .iter()
+                            .map(|child| {
+                                assert!(child["causes"].as_array().unwrap().is_empty());
+                                child["code"].as_str().unwrap().to_owned()
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    let forward_wire = make_wire("forward shared alias payload", false);
+    let reverse_wire = make_wire("reverse shared alias payload", true);
+    let forward = Diagnostic::decode_ovb(&forward_wire).unwrap();
+    let reverse = Diagnostic::decode_ovb(&reverse_wire).unwrap();
+    let forward_projection = serde_json::to_value(&forward).unwrap();
+    let reverse_projection = serde_json::to_value(&reverse).unwrap();
+    assert_redacted_tree(&forward_projection);
+    assert_redacted_tree(&reverse_projection);
+
+    // ORNA-SECRET-002 leaves equal-code sibling/tail order unspecified; preserve
+    // insertion order and use appended child identities to track cloned tails.
+    let forward_shapes = vec![
+        vec![
+            vec![
+                "ORNA-E-ALIAS-SIBLING-SHARED-CHILD".to_owned(),
+                "ORNA-E-ALIAS-SIBLING-LEFT-A-CHILD".to_owned(),
+            ],
+            vec![
+                "ORNA-E-ALIAS-SIBLING-SHARED-CHILD".to_owned(),
+                "ORNA-E-ALIAS-SIBLING-LEFT-B-CHILD".to_owned(),
+            ],
+        ],
+        vec![
+            vec![
+                "ORNA-E-ALIAS-SIBLING-SHARED-CHILD".to_owned(),
+                "ORNA-E-ALIAS-SIBLING-RIGHT-A-CHILD".to_owned(),
+            ],
+            vec![
+                "ORNA-E-ALIAS-SIBLING-SHARED-CHILD".to_owned(),
+                "ORNA-E-ALIAS-SIBLING-RIGHT-B-CHILD".to_owned(),
+            ],
+        ],
+    ];
+    let reverse_shapes = vec![
+        vec![forward_shapes[1][1].clone(), forward_shapes[1][0].clone()],
+        vec![forward_shapes[0][1].clone(), forward_shapes[0][0].clone()],
+    ];
+    assert_eq!(alias_tail_children(&forward_projection), forward_shapes);
+    assert_eq!(alias_tail_children(&reverse_projection), reverse_shapes);
+
+    let mut receiver = forward.clone();
+    receiver.clone_from(&reverse);
+    assert_eq!(
+        alias_tail_children(&serde_json::to_value(&receiver).unwrap()),
+        reverse_shapes
+    );
+    receiver.clone_from(&forward);
+    assert_eq!(receiver, forward);
+
+    let forward_json = serde_json::to_vec(&forward).unwrap();
+    let reverse_json = serde_json::to_vec(&reverse).unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"forward shared alias payload".as_slice(),
+            b"reverse shared alias payload".as_slice(),
+            b"shared base tail secret".as_slice(),
+            b"shared base child secret".as_slice(),
+            b"LEFT A alias child secret".as_slice(),
+            b"LEFT B alias child secret".as_slice(),
+            b"RIGHT A alias child secret".as_slice(),
+            b"RIGHT B alias child secret".as_slice(),
+            b"LEFT sibling alias secret".as_slice(),
+            b"RIGHT sibling alias secret".as_slice(),
+        ])
+    {
+        for bytes in [&forward_json, &reverse_json, &forward_wire, &reverse_wire] {
+            assert!(!bytes
+                .windows(disclosure.len())
+                .any(|window| window == disclosure));
+        }
+    }
+    assert_eq!(
+        serde_json::to_value(Diagnostic::decode_ovb(&forward_wire).unwrap()).unwrap()["causes"],
+        forward_projection["causes"]
+    );
+    assert_eq!(
+        serde_json::to_value(Diagnostic::decode_ovb(&reverse_wire).unwrap()).unwrap()["causes"],
+        reverse_projection["causes"]
+    );
+}
