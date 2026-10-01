@@ -8188,6 +8188,10 @@ mod tests {
                     shared_repository.clone(),
                 ),
                 (
+                    "nested_archive_copy_archive_copy".to_owned(),
+                    shared_repository.clone(),
+                ),
+                (
                     "archive_copy_archive_archive".to_owned(),
                     shared_repository.clone(),
                 ),
@@ -8516,11 +8520,18 @@ mod tests {
                 .pin(),
             short_pin.pin()
         );
+        let expanded_deep_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!(
+                "nested_archive_copy_archive {long_revision_commit}\n"
+            ),
+        );
         let expanded_short_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
             &format!(
-                "nested_archive {short_revision_commit}\nnested_archive_copy {middle_revision_commit}\nnested_archive_copy_archive {long_revision_commit}\n"
+                "nested_archive {short_revision_commit}\nnested_archive_copy {middle_revision_commit}\nnested_archive_copy_archive {long_revision_commit}\nnested_archive_copy_archive_copy {expanded_deep_commit}\n"
             ),
         );
         let expanded_short_replacement = PinnedDatabase::resolve(
@@ -8647,6 +8658,70 @@ mod tests {
             .unwrap();
         assert_eq!(
             expanded_long_grandchild
+                .database("archive")
+                .unwrap()
+                .pin(),
+            short_pin.pin()
+        );
+        // The reference is silent on continuing an expanded alias route
+        // through another closure edge. V1 follows each manifest alias while
+        // retaining the pin names at every level.
+        let nested_archive_deep_pin = expanded_short_session
+            .database("nested_archive_copy_archive_copy")
+            .unwrap()
+            .pin();
+        assert_eq!(
+            nested_archive_deep_pin.name(),
+            "nested_archive_copy_archive_copy"
+        );
+        assert_eq!(
+            nested_archive_deep_pin.commit().as_str(),
+            expanded_deep_commit
+        );
+        let expanded_deep_child = resolver
+            .resolve_for_parent(
+                expanded_short_session
+                    .database("nested_archive_copy_archive_copy")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            expanded_deep_child.primary().pin().name(),
+            "nested_archive_copy_archive_copy"
+        );
+        assert_eq!(
+            expanded_deep_child
+                .database("nested_archive_copy_archive")
+                .unwrap()
+                .pin(),
+            nested_archive_long_pin
+        );
+        let expanded_deep_grandchild = resolver
+            .resolve_for_parent(
+                expanded_deep_child
+                    .database("nested_archive_copy_archive")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            expanded_deep_grandchild
+                .database("archive_copy")
+                .unwrap()
+                .pin(),
+            middle_pin.pin()
+        );
+        let expanded_deep_great_grandchild = resolver
+            .resolve_for_parent(
+                expanded_deep_grandchild
+                    .database("archive_copy")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            expanded_deep_great_grandchild
                 .database("archive")
                 .unwrap()
                 .pin(),
