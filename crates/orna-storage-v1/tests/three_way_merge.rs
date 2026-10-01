@@ -923,6 +923,83 @@ fn zero_conflict_budget_allows_row_tombstone_and_checkpoint_deletes() {
 }
 
 #[test]
+fn fixture_reset_stays_present_between_prefix_and_deep_checkpoint_tombstones() {
+    let reset_id = b"consumer/reset".to_vec();
+    let prefix_tombstone_id = b"consumer/res".to_vec();
+    let child_tombstone_id = [reset_id.as_slice(), b"/child".as_slice()].concat();
+    let mut deep_tombstone_id = child_tombstone_id.clone();
+    for _ in 0..103 {
+        deep_tombstone_id.extend_from_slice(b"/child");
+    }
+    let added_reset_id = b"consumer/z-reset-created".to_vec();
+    let retained_id = b"consumer/z-retained".to_vec();
+    let base_checkpoint = parse_checkpoint_fixture(CHECKPOINT_BASE);
+    let reset_checkpoint = parse_checkpoint_fixture(CHECKPOINT_RESET);
+    let retained_checkpoint = parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS);
+
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"base", vec![parse_fixture(BASE, RowKeyKind::Explicit)]);
+    source.add(MergeSide::Left, b"left", Vec::new());
+    source.add(MergeSide::Right, b"right", Vec::new());
+
+    let mut base = snapshot(schema(true, FieldType::Str), manifest(1, 1, b"base"), None);
+    let mut left = snapshot(schema(true, FieldType::Str), manifest(2, 2, b"left"), None);
+    let mut right = snapshot(schema(true, FieldType::Str), manifest(3, 3, b"right"), None);
+
+    // A present positionless reset wins over the unchanged side. The shorter
+    // prefix and both child depths are separate checkpoint identities whose
+    // clean deletions must not remove or recreate the reset entry.
+    base.checkpoints.insert(reset_id.clone(), base_checkpoint.clone());
+    left.checkpoints.insert(reset_id.clone(), reset_checkpoint.clone());
+    right.checkpoints.insert(reset_id.clone(), base_checkpoint.clone());
+
+    base.checkpoints.insert(prefix_tombstone_id.clone(), base_checkpoint.clone());
+    right.checkpoints.insert(prefix_tombstone_id.clone(), base_checkpoint.clone());
+    base.checkpoints.insert(child_tombstone_id.clone(), base_checkpoint.clone());
+    left.checkpoints.insert(child_tombstone_id.clone(), base_checkpoint.clone());
+    base.checkpoints.insert(deep_tombstone_id.clone(), base_checkpoint.clone());
+
+    // A reset may also be introduced when both branches agree; keep an
+    // unchanged cursorless checkpoint beside it to distinguish presence from
+    // deletion throughout the complete plan.
+    left.checkpoints.insert(added_reset_id.clone(), reset_checkpoint.clone());
+    right.checkpoints.insert(added_reset_id.clone(), reset_checkpoint.clone());
+    for branch in [&mut base, &mut left, &mut right] {
+        branch.checkpoints.insert(retained_id.clone(), retained_checkpoint.clone());
+    }
+
+    let plan = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 100, max_conflicts: 0 },
+    )
+    .expect("fixture resets and tombstones resolve without checkpoint conflicts");
+
+    assert_eq!(plan.report.conflicts_lower_bound, 0);
+    assert_eq!(plan.report.rows_examined, 1);
+    assert!(plan.report.affected_checkpoints.is_empty());
+    assert_eq!(
+        plan.checkpoints.keys().cloned().collect::<Vec<_>>(),
+        vec![reset_id.clone(), added_reset_id.clone(), retained_id.clone()],
+    );
+    assert_eq!(plan.checkpoints.get(reset_id.as_slice()), Some(&reset_checkpoint));
+    assert_eq!(plan.checkpoints.get(added_reset_id.as_slice()), Some(&reset_checkpoint));
+    assert_eq!(plan.checkpoints.get(retained_id.as_slice()), Some(&retained_checkpoint));
+    assert!(!plan.checkpoints.contains_key(prefix_tombstone_id.as_slice()));
+    assert!(!plan.checkpoints.contains_key(child_tombstone_id.as_slice()));
+    assert!(!plan.checkpoints.contains_key(deep_tombstone_id.as_slice()));
+    assert_eq!(source.visited.len(), 3);
+
+    let MergedSegment::Rows { rows, tombstones, .. } = &plan.tables[&id(1)].segments[0] else {
+        panic!("the row deletion resolves alongside reset and checkpoint tombstones")
+    };
+    assert!(rows.is_empty());
+    assert_eq!(tombstones, &[integer(1)]);
+}
+
+#[test]
 fn segmented_zero_conflict_budget_stops_after_tombstone_before_checkpoints() {
     let candidate_a = integer(10);
     let candidate_b = integer(20);
