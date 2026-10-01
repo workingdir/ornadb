@@ -8134,10 +8134,15 @@ mod tests {
             "main.orna",
             &shared_source.replace("42", "7"),
         );
-        let middle_revision_commit = write_commit(
+        write_commit(
             shared_dir.path(),
             "main.orna",
             &shared_source.replace("42", "8"),
+        );
+        let middle_revision_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive {short_revision_commit}\n"),
         );
         write_commit(
             shared_dir.path(),
@@ -8231,6 +8236,27 @@ mod tests {
                 .as_str(),
             middle_revision_commit
         );
+        let long_endpoint_child_session = resolver
+            .resolve_for_parent(
+                long_endpoint_session
+                    .database("archive_copy")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            long_endpoint_child_session.primary().pin().name(),
+            "archive_copy"
+        );
+        assert_eq!(
+            long_endpoint_child_session
+                .database("archive")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            short_revision_commit
+        );
 
         historical.detach_database("archive").unwrap();
         historical.attach_database(replacement_short.clone()).unwrap();
@@ -8278,6 +8304,34 @@ mod tests {
         assert_eq!(
             long_endpoint_session.database("archive_copy").unwrap().pin(),
             rebound_session.database("archive_copy").unwrap().pin()
+        );
+        let rebound_child_session = resolver
+            .resolve_for_parent(
+                rebound_session
+                    .database("archive_copy")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            rebound_child_session.primary().pin().name(),
+            "archive_copy"
+        );
+        assert_eq!(
+            rebound_child_session
+                .database("archive")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            short_revision_commit
+        );
+        assert_eq!(
+            long_endpoint_child_session
+                .database("archive")
+                .unwrap()
+                .pin(),
+            rebound_child_session.database("archive").unwrap().pin()
         );
         assert_eq!(
             root_session
