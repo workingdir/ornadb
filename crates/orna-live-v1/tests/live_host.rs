@@ -5722,6 +5722,183 @@ fn durable_status_snapshots_survive_repeated_owner_handoffs() {
 }
 
 #[test]
+fn durable_terminal_snapshots_survive_repeated_owner_handoffs() {
+    durable_terminal_snapshots_survive_repeated_owner_handoffs_with(UnitEvalOutcome::Unit);
+}
+
+#[test]
+fn durable_terminal_failure_snapshots_survive_repeated_owner_handoffs() {
+    durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
+        UnitEvalOutcome::SemanticFailure,
+    );
+}
+
+fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
+    eval_outcome: UnitEvalOutcome,
+) {
+    const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
+    const HANDOFFS: u8 = 4;
+
+    let (root, repository) = durable_repository();
+    let runtime = open_durable_state(&repository);
+    let session = [1; 16];
+    let owner = block_on(runtime.acquire_lease([75; 16])).unwrap();
+    let mut host = durable_host_with_owner(runtime, owner.owner_id);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: session,
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+
+    let target_request = eval_with_context(session, [81; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&target_request, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    let target_fingerprint = request_fingerprint(&target_request, session);
+    let mut application = UnitApplication {
+        eval_outcome,
+        ..UnitApplication::default()
+    };
+    let target_result = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(target_request),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the fixture Eval returns a terminal result");
+    let expected_status = match eval_outcome {
+        UnitEvalOutcome::Unit => ResultStatus::Success,
+        UnitEvalOutcome::SemanticFailure => ResultStatus::Failure,
+    };
+    assert!(matches!(
+        &target_result.message,
+        Message::Result { status, .. } if *status == expected_status
+    ));
+    let expected_result = ResultBody::from_result(&target_result, Limits::default().protocol)
+        .unwrap();
+
+    let status_request = |request| {
+        Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::RequestStatus {
+                target: [81; 16],
+                fingerprint: target_fingerprint,
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap()
+    };
+    let pinned_request = status_request([82; 16]);
+    let pinned_snapshot = block_on(host.dispatch_frame(
+        [5; 16],
+        3,
+        Frame::Binary(pinned_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the initial owner pins a terminal status snapshot");
+    assert!(matches!(
+        &pinned_snapshot.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [81; 16]
+            && *fingerprint == target_fingerprint
+            && result == &expected_result
+    ));
+    let mut snapshots = vec![(pinned_request, pinned_snapshot)];
+    let mut sequence = 4;
+    let mut current_owner = owner;
+    drop(host);
+
+    for handoff in 0..HANDOFFS {
+        let replacement_id = [76 + handoff; 16];
+        let recovery_runtime = open_durable_state(&repository);
+        let replacement = block_on(
+            recovery_runtime.recover_abandoned(current_owner.owner_id, replacement_id),
+        )
+        .unwrap();
+        assert_eq!(replacement.owner_id, replacement_id);
+        drop(recovery_runtime);
+
+        let mut host = durable_host_after_takeover(
+            open_durable_state(&repository),
+            replacement.owner_id,
+            RequestOwner::from(current_owner),
+        );
+        let mut issuer = Issuer(2 + handoff, None);
+        let credential = create(&mut host, &mut issuer);
+        let attachment = [6 + handoff; 16];
+        block_on(host.resume(ResumeRequest {
+            id: session,
+            origin: &origin(),
+            credential: &credential,
+            attachment,
+            now: 2 + u64::from(handoff),
+        }))
+        .unwrap();
+
+        for (query, expected) in &snapshots {
+            let replay = block_on(host.dispatch_frame(
+                attachment,
+                sequence,
+                Frame::Binary(query.clone()),
+                &mut application,
+            ))
+            .unwrap()
+            .response
+            .expect("each prior terminal query remains replayable after takeover");
+            assert_eq!(&replay, expected);
+            sequence += 1;
+        }
+
+        let fresh_request = status_request([83 + handoff; 16]);
+        let fresh = block_on(host.dispatch_frame(
+            attachment,
+            sequence,
+            Frame::Binary(fresh_request.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("a fresh query still observes the terminal result");
+        assert!(matches!(
+            &fresh.message,
+            Message::RequestStatusResult {
+                target,
+                state: orna_protocol_v1::RequestState::Terminal,
+                fingerprint: Some(fingerprint),
+                result: Some(result),
+            } if *target == [81; 16]
+                && *fingerprint == target_fingerprint
+                && result == &expected_result
+        ));
+        snapshots.push((fresh_request, fresh));
+        sequence += 1;
+        current_owner = replacement;
+        drop(host);
+    }
+
+    assert_eq!(application.calls, 1);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn durable_request_status_identity_is_scoped_when_sessions_reuse_target_ids() {
     let (root, repository) = durable_repository();
     let mut host = durable_host(open_durable_state(&repository));
