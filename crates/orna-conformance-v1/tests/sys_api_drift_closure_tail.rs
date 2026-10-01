@@ -473,6 +473,26 @@ fn edge_interplay_fixture_retains_unknown_exact_target_across_reference_handoff(
 }
 
 #[test]
+fn edge_interplay_fixture_retains_unknown_exact_count_across_reference_action_filter() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Reference optionality and delete action do not constrain the target Table's row_count;
+    // keep its exact-but-unknown count nullable through both Reference predicates.
+    assert!(
+        analysis.is_ok(),
+        "optional non-restrict Reference filtering must retain the unknown exact count: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_retains_unknown_exact_count_through_nested_reference_lookup() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
