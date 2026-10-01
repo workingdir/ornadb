@@ -15061,6 +15061,39 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
                 && status.fingerprint == second_fresh_status_fingerprint
     ));
 
+    let eval_reusing_second_fresh_status_identity =
+        eval_with_context([1; 16], [95; 16], [8; 16], None);
+    assert!(matches!(
+        Envelope::decode(
+            &eval_reusing_second_fresh_status_identity,
+            Limits::default().protocol
+        )
+        .unwrap()
+        .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            69,
+            Frame::Binary(eval_reusing_second_fresh_status_identity),
+            &mut application,
+        )),
+        Err(Error::RequestMismatch)
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            70,
+            Frame::Binary(second_fresh_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("cross-kind reuse leaves the second fresh status replay intact"),
+        second_fresh_status
+    );
+
     // The reference is silent on a second fresh identity within the same
     // reverse-phase retry cycle; retain both status snapshots independently.
     for (frame, expected, label, now) in [
@@ -15068,49 +15101,49 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
             Frame::Binary(repeated_same_target_query.clone()),
             repeated_same_target_mismatch.clone(),
             "the second mismatch starts the second fresh-status cycle",
-            69,
+            71,
         ),
         (
             Frame::Binary(terminal_eval.clone()),
             terminal_eval_replay.clone(),
             "the terminal failure replays before the second fresh status retry",
-            70,
+            72,
         ),
         (
             Frame::Binary(second_fresh_status_query.clone()),
             second_fresh_status.clone(),
             "the second fresh status identity replays after terminal failure",
-            71,
+            73,
         ),
         (
             Frame::Binary(same_target_wrong_fingerprint_query.clone()),
             same_target_fingerprint_mismatch.clone(),
             "the first mismatch follows the second fresh status replay",
-            72,
+            74,
         ),
         (
             Frame::Binary(terminal_eval.clone()),
             terminal_eval_replay.clone(),
             "the terminal failure remains stable after the first mismatch",
-            73,
+            75,
         ),
         (
             Frame::Binary(repeated_same_target_query.clone()),
             repeated_same_target_mismatch.clone(),
             "the second mismatch remains independent through the status replay",
-            74,
+            76,
         ),
         (
             Frame::Binary(second_fresh_status_query.clone()),
             second_fresh_status.clone(),
             "the second fresh status response stays replayable at cycle end",
-            75,
+            77,
         ),
         (
             Frame::Binary(fresh_status_query.clone()),
             fresh_status.clone(),
             "the first fresh status identity remains distinct from the second",
-            76,
+            78,
         ),
     ] {
         assert_eq!(
@@ -15122,6 +15155,16 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
         );
     }
     assert_eq!(application.calls, 1);
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [1; 16],
+            request_id: [95; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == second_fresh_status_fingerprint
+    ));
     drop(host);
     remove_test_repository(&root);
 }
