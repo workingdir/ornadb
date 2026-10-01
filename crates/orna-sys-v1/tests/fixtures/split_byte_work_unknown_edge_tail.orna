@@ -1,0 +1,6 @@
+pub table SplitByteUnknownEdgeSource(id: Int) { value: Int, }
+pub table SplitByteUnknownEdgeBefore(id: Int) { value: Int, }
+pub table SplitByteUnknownEdgeUnknown(id: Int) { value: Int, }
+pub table SplitByteUnknownEdgeAfter(id: Int) { value: Int, }
+pub table SplitByteUnknownEdgeFirstReset(id: Int) { value: Int, }
+pub table SplitByteUnknownEdgeLastReset(id: Int) { value: Int, }
