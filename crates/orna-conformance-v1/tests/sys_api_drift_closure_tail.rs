@@ -493,6 +493,26 @@ fn edge_interplay_fixture_retains_unknown_exact_count_across_reference_action_fi
 }
 
 #[test]
+fn edge_interplay_fixture_retains_unknown_exact_count_through_source_column_lookup() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Resolving a Reference's source Column does not promise a row count for its target; keep
+    // the exact-but-unknown parent count nullable through this second catalog relation.
+    assert!(
+        analysis.is_ok(),
+        "source Column lookup must retain the unknown exact target count: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_retains_unknown_exact_count_through_nested_reference_lookup() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
