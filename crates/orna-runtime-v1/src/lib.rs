@@ -24199,6 +24199,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_split_pressure_mixed_leaf_limits_stop_after_two_matches() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=12)
+            .map(|row_id| {
+                let title = if matches!(row_id, 7 | 11) {
+                    "later"
+                } else {
+                    "current"
+                };
+                let target = if matches!(row_id, 8 | 10 | 12) {
+                    99
+                } else {
+                    row_id
+                };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(135), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // Reference behavior does not specify how different branch-local
+        // take caps interact with filters after union. The left leaf admits
+        // rows seven and eight under take(2); the right leaf has a wider
+        // take(4). Outer rejects and a nonmatching lookup delay the second
+        // match until row eleven, where global take(2) closes before row
+        // twelve's missing lookup can be observed.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-take-two-split-pressure-mixed-leaf-limits-stop.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(2u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 7),
+            "the mixed child caps preserve outer-filter pressure and stop at the second match"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_split_pressure_mixed_leaf_limits_preserve_failure_while_take_is_short() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=11)
+            .map(|row_id| {
+                let title = if row_id == 7 { "later" } else { "current" };
+                let target = if matches!(row_id, 8 | 10 | 11) {
+                    99
+                } else {
+                    row_id
+                };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(136), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // Branch-local caps still bound each leaf, but the outer demand is
+        // not satisfied by the one surviving left match and the nonmatching
+        // right row. The later right-leaf lookup failure remains observable
+        // inside its take(4) prefix instead of being hidden by the wider cap.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-take-two-split-pressure-mixed-leaf-limits-failure.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 7),
+            "the underfilled outer take exposes an in-cap failure after both leaves"
+        );
+    }
+
+    #[tokio::test]
     async fn query_projection_failures_recover_at_the_outer_boundary() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
