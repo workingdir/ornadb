@@ -76,7 +76,14 @@ fn main() {
                                                         Note.rekey(2, 6);
                                                         Note.rekey(3, 2);
                                                         Note.rekey(6, 3);
-                                                        Note.update(3, { quantity: 32 })
+                                                        Note.update(3, { quantity: 32 });
+                                                        Note.rekey(3, 2) |? (competitor_retries_after_tenth_handoff => {
+                                                            Note.update(2, { quantity: 20 });
+                                                            Note.rekey(2, 6);
+                                                            Note.rekey(3, 2);
+                                                            Note.rekey(6, 3);
+                                                            Note.update(3, { quantity: 33 })
+                                                        })
                                                     })
                                                 })
                                             })
