@@ -1074,6 +1074,28 @@ fn replay_durable_status_snapshots(
     }
 }
 
+fn replay_durable_status_snapshots_reverse(
+    host: &mut LiveHost,
+    attachment: [u8; 16],
+    snapshots: &[(Vec<u8>, Envelope)],
+    sequence: &mut u64,
+    application: &mut UnitApplication,
+) {
+    for (query, expected) in snapshots.iter().rev() {
+        let replay = block_on(host.dispatch_frame(
+            attachment,
+            *sequence,
+            Frame::Binary(query.clone()),
+            application,
+        ))
+        .unwrap()
+        .response
+        .expect("each previously pinned status identity remains available");
+        assert_eq!(&replay, expected);
+        *sequence += 1;
+    }
+}
+
 fn remove_test_repository(root: &Path) {
     fs::remove_dir_all(root).unwrap();
 }
@@ -5364,6 +5386,9 @@ fn durable_status_snapshots_keep_reserved_and_running_through_handoff_storm() {
         (reserved_query.clone(), reserved_snapshot.clone()),
         (running_query.clone(), running_snapshot.clone()),
     ];
+    // The reference defines status states but leaves snapshot-cache lifetime and
+    // replay order across reconnects unspecified. Keep each query identity pinned
+    // to its original response, independent of ordering and later target completion.
     for (request, target, fingerprint, result) in [
         ([85; 16], [81; 16], reserved_fingerprint, &reserved_result),
         ([86; 16], [82; 16], running_fingerprint, &running_result),
@@ -5412,13 +5437,23 @@ fn durable_status_snapshots_keep_reserved_and_running_through_handoff_storm() {
                 if previous == orna_security_v1::AttachmentId::new(current_attachment)
         ));
         current_attachment = next_attachment;
-        replay_durable_status_snapshots(
-            &mut host,
-            current_attachment,
-            &snapshots,
-            &mut sequence,
-            &mut application,
-        );
+        if reconnect % 2 == 0 {
+            replay_durable_status_snapshots(
+                &mut host,
+                current_attachment,
+                &snapshots,
+                &mut sequence,
+                &mut application,
+            );
+        } else {
+            replay_durable_status_snapshots_reverse(
+                &mut host,
+                current_attachment,
+                &snapshots,
+                &mut sequence,
+                &mut application,
+            );
+        }
     }
 
     drop(host);
@@ -5472,13 +5507,23 @@ fn durable_status_snapshots_keep_reserved_and_running_through_handoff_storm() {
                 current_attachment = next_attachment;
             }
 
-            replay_durable_status_snapshots(
-                &mut recovered,
-                current_attachment,
-                &snapshots,
-                &mut sequence,
-                &mut application,
-            );
+            if (handoff + reconnect) % 2 == 0 {
+                replay_durable_status_snapshots(
+                    &mut recovered,
+                    current_attachment,
+                    &snapshots,
+                    &mut sequence,
+                    &mut application,
+                );
+            } else {
+                replay_durable_status_snapshots_reverse(
+                    &mut recovered,
+                    current_attachment,
+                    &snapshots,
+                    &mut sequence,
+                    &mut application,
+                );
+            }
 
             for (request, target, fingerprint, result) in [
                 (
