@@ -12085,3 +12085,93 @@ fn duplicate_deep_recoveries_redact_local_snapshot_admission() {
     assert_redacted_tree(&decoded);
     assert_eq!(decoded["causes"], projection["causes"]);
 }
+
+#[test]
+fn duplicate_deep_snapshots_preserve_repeated_tail_order() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+
+    let terminal = admitted("ORNA-E-TAKE4-TERMINAL", "deep snapshot payload")
+        .with_cause(admitted(
+            "ORNA-E-TAKE4-REPEATED-TAIL",
+            "first repeated tail secret",
+        ))
+        .with_cause(admitted(
+            "ORNA-E-TAKE4-REPEATED-TAIL",
+            "second repeated tail secret",
+        ));
+    let nested = admitted("ORNA-E-TAKE4-NESTED", "deep snapshot payload")
+        .with_cause(terminal);
+    let parent = admitted("ORNA-E-TAKE4-PARENT", "deep snapshot payload")
+        .with_cause(nested);
+    let branch = admitted("ORNA-E-TAKE4-BRANCH", "deep snapshot payload")
+        .with_cause(parent);
+    let root = admitted("ORNA-E-TAKE4-ROOT", "deep snapshot payload")
+        .with_cause(branch);
+    let wire = root.encode_ovb().unwrap();
+    let first = Diagnostic::decode_ovb(&wire).unwrap();
+    let duplicate = Diagnostic::decode_ovb(&wire).unwrap();
+    assert_eq!(first, duplicate);
+
+    // ORNA-SECRET-002 requires diagnostic secret redaction but is silent on
+    // repeated tail order and multiplicity; preserve both in the recovered snapshots.
+    let outer = admitted("ORNA-E-TAKE4-OUTER", "outer deep snapshot admission")
+        .with_cause(first)
+        .with_cause(duplicate);
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["message"], "outer deep snapshot admission");
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 2);
+    assert_eq!(causes[0], causes[1]);
+    for cause in causes {
+        assert_redacted_tree(cause);
+        let terminal = &cause["causes"][0]["causes"][0]["causes"][0]["causes"][0];
+        let tails = terminal["causes"].as_array().unwrap();
+        assert_eq!(tails.len(), 2);
+        assert_eq!(tails[0]["code"], "ORNA-E-TAKE4-REPEATED-TAIL");
+        assert_eq!(tails[1]["code"], "ORNA-E-TAKE4-REPEATED-TAIL");
+        assert_eq!(tails[0]["message"], "<redacted>");
+        assert_eq!(tails[1]["message"], "<redacted>");
+    }
+
+    let json = serde_json::to_vec(&outer).unwrap();
+    let encoded = outer.encode_ovb().unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"deep snapshot payload".as_slice(),
+            b"first repeated tail secret".as_slice(),
+            b"second repeated tail secret".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
+    assert_redacted_tree(&decoded);
+    assert_eq!(decoded["causes"], projection["causes"]);
+}
