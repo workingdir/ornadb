@@ -433,6 +433,26 @@ fn edge_interplay_fixture_null_filters_exact_count_in_region_before_exact_filter
 }
 
 #[test]
+fn edge_interplay_fixture_splits_exact_then_null_region_filters() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The caller-supplied table relation stands for a region. Apply the exactness predicate
+    // before the null-count predicate as distinct filters; neither field refines the other.
+    assert!(
+        analysis.is_ok(),
+        "exact-then-null region filters must keep the exact count nullable: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_projects_unknown_exact_target_count_through_columns() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
