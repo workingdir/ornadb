@@ -947,6 +947,169 @@ fn rebound_alias_precedence_survives_multiple_closure_depths() {
     assert_eq!(old_long_pin.pin().commit().as_str(), old_long_commit);
 }
 
+#[test]
+fn short_alias_rebound_to_long_pin_keeps_longer_nested_routes() {
+    let package_source = include_str!("fixtures/attach-package.orna");
+    let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
+
+    let deep_leaf_source = package_source.replace("42", "83");
+    let deep_leaf_commit = write_commit(
+        shared_dir.path(),
+        &[("main.orna", &deep_leaf_source)],
+        "short-to-long route terminal",
+    );
+    let nested_short_source = package_source.replace("42", "81");
+    let nested_short_commit = write_commit(
+        shared_dir.path(),
+        &[("main.orna", &nested_short_source)],
+        "short-to-long middle route",
+    );
+    let nested_long_source = package_source.replace("42", "82");
+    let nested_long_manifest = format!("archive_copy {deep_leaf_commit}\n");
+    let nested_long_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &nested_long_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &nested_long_manifest),
+        ],
+        "short-to-long nested route",
+    );
+
+    let replacement_source = package_source.replace("42", "80");
+    let replacement_manifest = format!(
+        "archive_copy {nested_short_commit}\narchive_copy_archive {nested_long_commit}\n"
+    );
+    let replacement_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &replacement_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &replacement_manifest),
+        ],
+        "long alias replacement snapshot",
+    );
+    let old_short_source = package_source.replace("42", "50");
+    let old_short_commit = write_commit(
+        shared_dir.path(),
+        &[("main.orna", &old_short_source)],
+        "old short alias snapshot",
+    );
+    let nested_parent_source = package_source.replace("42", "53");
+    let nested_parent_manifest = format!(
+        "archive {old_short_commit}\narchive_copy_archive {replacement_commit}\n"
+    );
+    let nested_parent_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &nested_parent_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &nested_parent_manifest),
+        ],
+        "nested parent before short alias rebind",
+    );
+    let outer_source = package_source.replace("42", "44");
+    let outer_manifest = format!("archive_copy {nested_parent_commit}\n");
+    let outer_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &outer_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &outer_manifest),
+        ],
+        "outer parent before short alias rebind",
+    );
+
+    let root_manifest = format!("archive_copy_archive_archive {outer_commit}\n");
+    let (_root_dir, root_repository, root_commit) = repository(&[
+        ("main.orna", include_str!("fixtures/attach-primary.orna")),
+        (PACKAGE_PIN_MANIFEST_PATH, &root_manifest),
+    ]);
+    let loader = ProjectLoader::default();
+    let primary = PinnedDatabase::resolve("app", root_repository, &root_commit, loader).unwrap();
+    let resolver = PackageResolver::new(
+        [
+            ("archive".to_owned(), shared_repository.clone()),
+            ("archive_copy".to_owned(), shared_repository.clone()),
+            ("archive_copy_archive".to_owned(), shared_repository.clone()),
+            ("archive_copy_archive_archive".to_owned(), shared_repository.clone()),
+        ],
+        loader,
+    )
+    .unwrap();
+
+    let root = resolver.resolve_for_parent(primary).unwrap();
+    let outer = root
+        .database("archive_copy_archive_archive")
+        .unwrap()
+        .clone();
+    let outer_closure = resolver.resolve_for_parent(outer).unwrap();
+    let nested_parent = outer_closure.database("archive_copy").unwrap().clone();
+    let mut nested_closure = resolver.resolve_for_parent(nested_parent).unwrap();
+    let long_pin = nested_closure
+        .database("archive_copy_archive")
+        .unwrap()
+        .clone();
+    assert_eq!(long_pin.pin().commit().as_str(), replacement_commit);
+    assert_eq!(
+        nested_closure.database("archive").unwrap().pin().commit().as_str(),
+        old_short_commit
+    );
+
+    let replacement = PinnedDatabase::resolve(
+        "archive",
+        shared_repository,
+        &replacement_commit,
+        loader,
+    )
+    .unwrap();
+    nested_closure.detach_database("archive").unwrap();
+    nested_closure
+        .attach_database(replacement.clone())
+        .unwrap();
+    assert_module_route(&nested_closure, "main.orna", "= 53");
+    assert_module_route(&nested_closure, "archive.orna", "= 80");
+    assert_module_route(&nested_closure, "archive_copy_archive.orna", "= 80");
+    assert_eq!(
+        nested_closure.database("archive").unwrap().pin().commit(),
+        long_pin.pin().commit()
+    );
+    assert_ne!(
+        nested_closure.database("archive").unwrap().pin(),
+        nested_closure
+            .database("archive_copy_archive")
+            .unwrap()
+            .pin()
+    );
+
+    let replacement_closure = resolver.resolve_for_parent(replacement).unwrap();
+    assert_module_route(&replacement_closure, "main.orna", "= 80");
+    assert_module_route(&replacement_closure, "archive_copy.orna", "= 81");
+    assert_module_route(&replacement_closure, "archive_copy_archive.orna", "= 82");
+    assert_eq!(
+        replacement_closure
+            .database("archive_copy")
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        nested_short_commit
+    );
+    let long_nested = replacement_closure
+        .database("archive_copy_archive")
+        .unwrap()
+        .clone();
+    let deep_closure = resolver.resolve_for_parent(long_nested).unwrap();
+    assert_module_route(&deep_closure, "main.orna", "= 82");
+    assert_module_route(&deep_closure, "archive_copy.orna", "= 83");
+    assert_eq!(
+        deep_closure
+            .database("archive_copy")
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        deep_leaf_commit
+    );
+    assert_eq!(long_pin.pin().commit().as_str(), replacement_commit);
+}
+
 fn assert_module_route(session: &AttachedDatabaseSession, path: &str, source_marker: &str) {
     assert!(
         session
