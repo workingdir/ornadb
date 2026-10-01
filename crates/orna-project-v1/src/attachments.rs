@@ -235,6 +235,9 @@ impl PackageResolver {
     /// and aliases sharing a repository remain independent. The reference does
     /// not define host mapping precedence for those aliases; v1 uses exact-key
     /// lookup for every selected parent's historical manifest.
+    /// After a caller rebinds an alias, selecting that replacement here loads
+    /// its own committed manifest. Sibling aliases remain pinned in the source
+    /// session and do not retarget the replacement's closure.
     /// The reference requires each historical parent's exact pins but does not
     /// require flattening a recursive closure into one session.
     pub fn resolve_for_parent(
