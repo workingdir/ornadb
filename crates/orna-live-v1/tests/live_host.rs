@@ -2958,6 +2958,150 @@ fn terminal_status_snapshot_survives_http_reconnect() {
 }
 
 #[test]
+fn unknown_status_snapshot_survives_http_reconnect_and_target_id_reuse() {
+    const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
+
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let (old_token, mut old_socket) = create_transport_session_with_socket(
+        &mut transport,
+        &mut issuer,
+        &mut authority,
+        &mut deletion,
+        [5; 16],
+        0,
+    );
+    let target_request = eval_with_context([1; 16], [91; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&target_request, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    let target_fingerprint = request_fingerprint(&target_request, [1; 16]);
+    let status_request = |request| {
+        Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::RequestStatus {
+                target: [91; 16],
+                fingerprint: target_fingerprint,
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap()
+    };
+    let pinned_request = status_request([92; 16]);
+    let mut application = UnitApplication::default();
+    let pinned_output = block_on(transport.receive_with_application(
+        &mut old_socket,
+        1,
+        &masked_binary_payload(&pinned_request),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("the query returns Unknown before the target ID is used");
+    let WebSocketOutput::Binary {
+        payload: pinned_payload,
+        ..
+    } = pinned_output
+    else {
+        panic!("the status response is binary");
+    };
+    let pinned_snapshot = Envelope::decode(&pinned_payload, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        &pinned_snapshot.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Unknown,
+            fingerprint: None,
+            result: None,
+        } if *target == [91; 16]
+    ));
+
+    let (_, mut new_socket) = resume_transport_session_with_socket(
+        &mut transport,
+        &mut issuer,
+        &mut authority,
+        &mut deletion,
+        &old_token,
+        [5; 16],
+        [6; 16],
+        2,
+    );
+    let target_output = block_on(transport.receive_with_application(
+        &mut new_socket,
+        3,
+        &masked_binary_payload(&target_request),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("the previously unknown target ID can be reused after reconnect");
+    let WebSocketOutput::Binary {
+        payload: target_payload,
+        ..
+    } = target_output
+    else {
+        panic!("the Eval result is binary");
+    };
+    let target_result = Envelope::decode(&target_payload, Limits::default().protocol).unwrap();
+    let expected_result =
+        ResultBody::from_result(&target_result, Limits::default().protocol).unwrap();
+
+    let replay = block_on(transport.receive_with_application(
+        &mut new_socket,
+        4,
+        &masked_binary_payload(&status_request([92; 16])),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("the exact query replays Unknown after its target ID is reused");
+    let WebSocketOutput::Binary { payload, .. } = replay else {
+        panic!("the replayed status response is binary");
+    };
+    assert_eq!(
+        Envelope::decode(&payload, Limits::default().protocol).unwrap(),
+        pinned_snapshot
+    );
+
+    let fresh = block_on(transport.receive_with_application(
+        &mut new_socket,
+        5,
+        &masked_binary_payload(&status_request([93; 16])),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("a fresh query sees the reused target ID as Terminal");
+    let WebSocketOutput::Binary { payload, .. } = fresh else {
+        panic!("a fresh status response is binary");
+    };
+    let fresh = Envelope::decode(&payload, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        &fresh.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *fingerprint == target_fingerprint
+            && result == &expected_result
+    ));
+    assert_eq!(application.calls, 1);
+}
+
+#[test]
 fn rejected_cross_layer_reconnect_preserves_a_valid_session() {
     let mut host = host();
     let mut issuer = Issuer(1, None);
