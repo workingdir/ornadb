@@ -80,6 +80,8 @@ const REMAINDER_AFTER_UNKNOWN_MULTI_SCAN_TAIL: &str =
     include_str!("fixtures/remainder_after_unknown_multi_scan_tail.orna");
 const POST_UNKNOWN_REMAINDER_SCAN_INTERPLAY_TAIL: &str =
     include_str!("fixtures/post_unknown_remainder_scan_interplay_tail.orna");
+const UNKNOWN_SCAN_SPLIT_REMAINDER_EDGE_TAIL: &str =
+    include_str!("fixtures/unknown_scan_split_remainder_edge_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -7883,6 +7885,160 @@ fn explain_closes_remainder_after_unknown_with_scan_interplay() {
 
     let surface = serde_json::to_value(&overflow)
         .expect("post-unknown remainder interplay overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_source_remainder_with_scan_tails_across_unknown() {
+    let parsed = orna_syntax_v1::parse_module(UNKNOWN_SCAN_SPLIT_REMAINDER_EDGE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Following the established
+    // pragmatic 4-KiB-per-scan lower bound, the source's first byte remainder
+    // contributes 2^52. A separate byte scan before an unknown scan and a
+    // byte tail plus rows-only scan after it close exactly at MAX. One fewer
+    // tail byte stays below; the first byte beyond either scan's 4-KiB block
+    // or one additional row crosses the aggregate bound.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let rows_to_close_source_and_two_tails = u64::MAX - MAX_BYTE_BLOCKS - 2;
+    let explain = |prefix_bytes, tail_bytes, closing_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:unknown-scan-split-remainder-edge",
+            ),
+            source: obj("table:UnknownScanSplitRemainderSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:UnknownScanSplitRemainderPrefix"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(prefix_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:UnknownScanSplitRemainderUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:UnknownScanSplitRemainderTail"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:UnknownScanSplitRemainderRows"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(closing_rows),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:unknown-scan-split-remainder")),
+        })
+        .expect("source remainder closure across pre- and post-unknown scans")
+    };
+
+    let one_below = explain(4_095, 0, rows_to_close_source_and_two_tails);
+    assert_eq!(one_below.plan().estimated_cost(), None);
+    assert_eq!(one_below.root().details().get("estimated_cost_overflow"), None);
+
+    for prefix_bytes in [4_095, 4_096] {
+        let exact = explain(
+            prefix_bytes,
+            1,
+            rows_to_close_source_and_two_tails,
+        );
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(
+            exact.root().details().get("estimated_cost_overflow"),
+            None,
+            "independently rounded scan bounds on both sides of unknown close at MAX"
+        );
+    }
+
+    let prefix_overflow = explain(
+        4_097,
+        1,
+        rows_to_close_source_and_two_tails,
+    );
+    let tail_overflow = explain(
+        4_096,
+        4_097,
+        rows_to_close_source_and_two_tails,
+    );
+    let row_overflow = explain(
+        4_096,
+        1,
+        rows_to_close_source_and_two_tails + 1,
+    );
+    for overflow in [&prefix_overflow, &tail_overflow, &row_overflow] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "either scan remainder edge or the closing row crosses MAX"
+        );
+    }
+
+    let nodes = tail_overflow.nodes();
+    let scan_position = |name: &str| {
+        nodes
+            .iter()
+            .position(|node| {
+                node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(name))
+            })
+            .expect("fixture scan appears in explained plan")
+    };
+    let source_position = scan_position("table:UnknownScanSplitRemainderSource");
+    let prefix_position = scan_position("table:UnknownScanSplitRemainderPrefix");
+    let unknown_position = scan_position("table:UnknownScanSplitRemainderUnknown");
+    let tail_position = scan_position("table:UnknownScanSplitRemainderTail");
+    let rows_position = scan_position("table:UnknownScanSplitRemainderRows");
+    assert!(source_position < prefix_position);
+    assert!(prefix_position < unknown_position);
+    assert!(unknown_position < tail_position);
+    assert!(tail_position < rows_position);
+    assert_eq!(nodes[source_position].estimated_bytes(), Some(FIRST_REMAINDER_SOURCE_BYTES));
+    assert_eq!(nodes[prefix_position].estimated_bytes(), Some(4_096));
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+    assert_eq!(nodes[tail_position].estimated_bytes(), Some(4_097));
+    assert_eq!(
+        nodes[rows_position].estimated_rows(),
+        Some(rows_to_close_source_and_two_tails)
+    );
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&tail_overflow)
+        .expect("split unknown remainder overflow surface");
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
