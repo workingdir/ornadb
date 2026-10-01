@@ -4,12 +4,15 @@ use orna_evolution_v1::{
 };
 use orna_foundation_v1::OvbRaw;
 use orna_storage_v1::{
-    BranchMergeBudget, BranchMergeConflict, BranchMergeError, BranchRowSource, KeyRange,
-    MergeSide, MergedSegment, RowSegmentManifest, TableManifest, ThreeWaySnapshot,
+    BranchMergeBudget, BranchMergeConflict, BranchMergeError, BranchMergePlan, BranchRowSource,
+    KeyRange, MergeSide, MergedSegment, RowSegmentManifest, TableManifest, ThreeWaySnapshot,
     merge_three_way_snapshots,
 };
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Barrier},
+};
 
 const BASE: &str = include_str!("fixtures/merge-contact-base.orna");
 const LEFT: &str = include_str!("fixtures/merge-contact-left.orna");
@@ -199,6 +202,27 @@ impl BranchRowSource for FixtureRows {
             }
         }
         Ok(())
+    }
+}
+
+struct BarrierFixtureRows {
+    source: FixtureRows,
+    first_load: Option<Arc<Barrier>>,
+}
+
+impl BranchRowSource for BarrierFixtureRows {
+    fn visit_rows(
+        &mut self,
+        side: MergeSide,
+        table: ObjectId,
+        segment: Option<&RowSegmentManifest>,
+        range: &KeyRange,
+        visitor: &mut dyn FnMut(KeyedRow) -> bool,
+    ) -> Result<(), String> {
+        if let Some(first_load) = self.first_load.take() {
+            first_load.wait();
+        }
+        self.source.visit_rows(side, table, segment, range, visitor)
     }
 }
 
@@ -15458,6 +15482,368 @@ fn fixture_depth_split_tombstones_follow_table_wide_primary_key_order() {
     );
     assert_eq!(plan.report.rows_examined, 5);
     assert_eq!(source.visited.len(), 9);
+}
+
+fn cross_depth_load_inputs() -> (
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    FixtureRows,
+) {
+    let shallow = parse_fixture(TOMBSTONE_DEPTH_SHALLOW, RowKeyKind::Explicit);
+    let middle = parse_fixture(TOMBSTONE_DEPTH_MIDDLE, RowKeyKind::Explicit);
+    let deep = parse_fixture(TOMBSTONE_DEPTH_DEEP, RowKeyKind::Explicit);
+    let mut source = FixtureRows::default();
+    // Physical visitation is deepest-first. The completed logical result
+    // must not inherit the row source's load order.
+    source.add(
+        MergeSide::Base,
+        b"load-base",
+        vec![deep.clone(), middle.clone(), shallow],
+    );
+    source.add(MergeSide::Left, b"load-left", vec![middle]);
+    source.add(MergeSide::Right, b"load-right", vec![deep]);
+    let base = snapshot(string_key_schema(), manifest(1, 1, b"load-base"), None);
+    let left = snapshot(string_key_schema(), manifest(2, 2, b"load-left"), None);
+    let right = snapshot(string_key_schema(), manifest(3, 3, b"load-right"), None);
+    (base, left, right, source)
+}
+
+fn split_cross_depth_load_inputs(
+    middle_on_left: bool,
+) -> (
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    FixtureRows,
+) {
+    let shallow = parse_fixture(TOMBSTONE_DEPTH_SHALLOW, RowKeyKind::Explicit);
+    let middle = parse_fixture(TOMBSTONE_DEPTH_MIDDLE, RowKeyKind::Explicit);
+    let deep = parse_fixture(TOMBSTONE_DEPTH_DEEP, RowKeyKind::Explicit);
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"split-load-base-root", vec![shallow]);
+    source.add(
+        MergeSide::Base,
+        b"split-load-base-middle",
+        vec![middle.clone()],
+    );
+    source.add(MergeSide::Base, b"split-load-base-deep", vec![deep.clone()]);
+    let (left_middle, left_deep, right_middle, right_deep) = if middle_on_left {
+        (vec![middle], Vec::new(), Vec::new(), vec![deep])
+    } else {
+        (Vec::new(), vec![deep], vec![middle], Vec::new())
+    };
+    source.add(MergeSide::Left, b"split-load-left-root", Vec::new());
+    source.add(MergeSide::Left, b"split-load-left-middle", left_middle);
+    source.add(MergeSide::Left, b"split-load-left-deep", left_deep);
+    source.add(MergeSide::Right, b"split-load-right-root", Vec::new());
+    source.add(MergeSide::Right, b"split-load-right-middle", right_middle);
+    source.add(MergeSide::Right, b"split-load-right-deep", right_deep);
+
+    let base = snapshot(
+        string_key_schema(),
+        depth_split_manifest(
+            21,
+            [21, 22, 23],
+            [
+                b"split-load-base-root",
+                b"split-load-base-middle",
+                b"split-load-base-deep",
+            ],
+        ),
+        None,
+    );
+    let left = snapshot(
+        string_key_schema(),
+        depth_split_manifest(
+            24,
+            [24, 25, 26],
+            [
+                b"split-load-left-root",
+                b"split-load-left-middle",
+                b"split-load-left-deep",
+            ],
+        ),
+        None,
+    );
+    let right = snapshot(
+        string_key_schema(),
+        depth_split_manifest(
+            27,
+            [27, 28, 29],
+            [
+                b"split-load-right-root",
+                b"split-load-right-middle",
+                b"split-load-right-deep",
+            ],
+        ),
+        None,
+    );
+    (base, left, right, source)
+}
+
+fn flattened_row_tombstones(plan: &BranchMergePlan) -> Vec<CanonicalValue> {
+    plan.tables[&id(1)]
+        .segments
+        .iter()
+        .flat_map(|segment| match segment {
+            MergedSegment::Rows { tombstones, .. } => tombstones.clone(),
+            other => panic!("expected materialized cross-depth rows, got {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn fixture_cross_depth_tombstones_keep_order_at_exact_load_budget() {
+    // ORNA-MERGE-005 requires bounded work and an isolated complete result,
+    // but is silent on path-depth ordering. A complete load therefore emits
+    // tombstones in canonical key order.
+    let (base, left, right, mut source) = cross_depth_load_inputs();
+    let plan = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 5, max_conflicts: 0 },
+    )
+    .expect("the exact load budget produces a complete cross-depth merge");
+    assert_eq!(plan.report.rows_examined, 5);
+    let MergedSegment::Rows { rows, tombstones, .. } = &plan.tables[&id(1)].segments[0] else {
+        panic!("cross-depth changes materialize as one bounded segment")
+    };
+    assert!(rows.is_empty());
+    assert_eq!(
+        tombstones,
+        &[string("root"), string("root/child"), string("root/child/deep")],
+        "load visitation order does not change canonical cross-depth tombstone order",
+    );
+}
+
+#[test]
+fn concurrent_split_loads_keep_tombstones_ordered_across_depth_boundaries() {
+    // The reference defines bounded isolated merges but is silent on
+    // concurrent load scheduling. Pin the local rule that each independent
+    // result follows canonical key order across segment boundaries.
+    let (base_a, left_a, right_a, source_a) = split_cross_depth_load_inputs(true);
+    let (base_b, left_b, right_b, source_b) = split_cross_depth_load_inputs(false);
+    let start = Arc::new(Barrier::new(2));
+    let start_a = Arc::clone(&start);
+    let load_a = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: source_a,
+            first_load: Some(start_a),
+        };
+        merge_three_way_snapshots(
+            &base_a,
+            &left_a,
+            &right_a,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 5, max_conflicts: 0 },
+        )
+        .expect("first split load completes")
+    });
+    let load_b = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: source_b,
+            first_load: Some(start),
+        };
+        merge_three_way_snapshots(
+            &base_b,
+            &left_b,
+            &right_b,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 5, max_conflicts: 0 },
+        )
+        .expect("opposite-orientation split load completes")
+    });
+
+    let plan_a = load_a.join().expect("first split worker completes");
+    let plan_b = load_b.join().expect("second split worker completes");
+    assert_eq!(plan_a, plan_b, "opposite tombstone orientations merge identically");
+    assert_eq!(plan_a.report.rows_examined, 5);
+    assert_eq!(
+        flattened_row_tombstones(&plan_a),
+        vec![string("root"), string("root/child"), string("root/child/deep")],
+        "each segment boundary contributes tombstones in table-wide primary-key order",
+    );
+    assert_eq!(plan_a.tables[&id(1)].segments.len(), 3);
+}
+
+#[test]
+fn concurrent_split_and_whole_loads_keep_the_same_tombstone_order() {
+    let (split_base, split_left, split_right, split_source) =
+        split_cross_depth_load_inputs(true);
+    let (whole_base, whole_left, whole_right, whole_source) = cross_depth_load_inputs();
+    let start = Arc::new(Barrier::new(2));
+    let split_start = Arc::clone(&start);
+    let split_load = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: split_source,
+            first_load: Some(split_start),
+        };
+        merge_three_way_snapshots(
+            &split_base,
+            &split_left,
+            &split_right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 5, max_conflicts: 0 },
+        )
+        .expect("split layout load completes")
+    });
+    let whole_load = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: whole_source,
+            first_load: Some(start),
+        };
+        merge_three_way_snapshots(
+            &whole_base,
+            &whole_left,
+            &whole_right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 5, max_conflicts: 0 },
+        )
+        .expect("whole-table layout load completes")
+    });
+
+    let split_plan = split_load.join().expect("split layout worker completes");
+    let whole_plan = whole_load.join().expect("whole layout worker completes");
+    let expected = vec![string("root"), string("root/child"), string("root/child/deep")];
+    assert_eq!(flattened_row_tombstones(&split_plan), expected);
+    assert_eq!(flattened_row_tombstones(&whole_plan), expected);
+    assert_eq!(split_plan.report.rows_examined, 5);
+    assert_eq!(whole_plan.report.rows_examined, 5);
+    assert_eq!(split_plan.tables[&id(1)].segments.len(), 3);
+    assert_eq!(whole_plan.tables[&id(1)].segments.len(), 1);
+}
+
+#[test]
+fn fixture_cross_depth_load_budget_stops_without_partial_plan() {
+    let (base, left, right, mut source) = cross_depth_load_inputs();
+    let error = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 4, max_conflicts: 0 },
+    )
+    .unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("an incomplete cross-depth load cannot return a partial tombstone plan")
+    };
+    assert_eq!(report.rows_examined, 5, "the report records the first row beyond the cap");
+    assert_eq!(report.conflicts_lower_bound, 0);
+    assert_eq!(report.affected_ranges, [(id(1), KeyRange::all())].into_iter().collect());
+    assert_eq!(source.visited.len(), 3, "the bounded merge stops in the third row source");
+}
+
+#[test]
+fn concurrent_fixture_load_orders_keep_cross_depth_tombstones_deterministic() {
+    // The reference requires bounded, isolated merge results but is silent on
+    // independent concurrent loads. Each complete invocation uses its own
+    // fixture source and must produce the same logical key order.
+    let (base_a, left_a, right_a, source_a) = cross_depth_load_inputs();
+    let (base_b, left_b, right_b, mut source_b) = cross_depth_load_inputs();
+    for rows in source_b.rows.values_mut() {
+        rows.reverse();
+    }
+
+    let start = Arc::new(Barrier::new(2));
+    let start_a = Arc::clone(&start);
+    let load_a = std::thread::spawn(move || {
+        start_a.wait();
+        let mut source = source_a;
+        merge_three_way_snapshots(
+            &base_a,
+            &left_a,
+            &right_a,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 5, max_conflicts: 0 },
+        )
+        .expect("the first concurrent fixture load fits its private budget")
+    });
+    let load_b = std::thread::spawn(move || {
+        start.wait();
+        merge_three_way_snapshots(
+            &base_b,
+            &left_b,
+            &right_b,
+            &mut source_b,
+            BranchMergeBudget { max_rows_examined: 5, max_conflicts: 0 },
+        )
+        .expect("the reversed concurrent fixture load fits its private budget")
+    });
+
+    let plan_a = load_a.join().expect("first merge worker completes");
+    let plan_b = load_b.join().expect("second merge worker completes");
+    assert_eq!(plan_a, plan_b, "concurrent load order cannot change the merge plan");
+    assert_eq!(plan_a.report.rows_examined, 5);
+    let MergedSegment::Rows { rows, tombstones, .. } = &plan_a.tables[&id(1)].segments[0] else {
+        panic!("concurrent cross-depth fixture loads materialize one segment")
+    };
+    assert!(rows.is_empty());
+    assert_eq!(
+        tombstones,
+        &[string("root"), string("root/child"), string("root/child/deep")],
+    );
+}
+
+#[test]
+fn concurrent_cross_depth_load_budgets_are_isolated_per_merge() {
+    // Each in-flight merge owns its row counter and failure report. A capped
+    // worker must not change the complete result of its concurrent peer.
+    let (base_ok, left_ok, right_ok, source_ok) = cross_depth_load_inputs();
+    let (base_capped, left_capped, right_capped, mut source_capped) =
+        cross_depth_load_inputs();
+    for rows in source_capped.rows.values_mut() {
+        rows.reverse();
+    }
+
+    let start = Arc::new(Barrier::new(2));
+    let start_ok = Arc::clone(&start);
+    let complete = std::thread::spawn(move || {
+        start_ok.wait();
+        let mut source = source_ok;
+        merge_three_way_snapshots(
+            &base_ok,
+            &left_ok,
+            &right_ok,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 5, max_conflicts: 0 },
+        )
+    });
+    let capped = std::thread::spawn(move || {
+        start.wait();
+        merge_three_way_snapshots(
+            &base_capped,
+            &left_capped,
+            &right_capped,
+            &mut source_capped,
+            BranchMergeBudget { max_rows_examined: 4, max_conflicts: 0 },
+        )
+    });
+
+    let plan = complete
+        .join()
+        .expect("complete-load worker finishes")
+        .expect("the exact-budget worker returns a complete plan");
+    assert_eq!(plan.report.rows_examined, 5);
+    let error = capped
+        .join()
+        .expect("capped-load worker finishes")
+        .expect_err("the one-row-short worker stops independently");
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("the capped concurrent load reports its own budget stop")
+    };
+    assert_eq!(report.rows_examined, 5);
+    assert_eq!(report.affected_ranges, [(id(1), KeyRange::all())].into_iter().collect());
+    let MergedSegment::Rows { rows, tombstones, .. } = &plan.tables[&id(1)].segments[0] else {
+        panic!("the successful peer retains a complete cross-depth segment")
+    };
+    assert!(rows.is_empty());
+    assert_eq!(
+        tombstones,
+        &[string("root"), string("root/child"), string("root/child/deep")],
+    );
 }
 
 #[test]

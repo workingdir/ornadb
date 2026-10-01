@@ -8,7 +8,6 @@ mod build_support;
 use build_support::{
     collect_rust_sources, generate_sys_artifacts,
 };
-use serde_json::Value;
 
 fn rust_sources(root: &Path, output: &mut Vec<PathBuf>) -> std::io::Result<()> {
     let mut entries = fs::read_dir(root)?.collect::<Result<Vec<_>, _>>()?;
@@ -26,16 +25,8 @@ fn rust_sources(root: &Path, output: &mut Vec<PathBuf>) -> std::io::Result<()> {
 
 fn main() {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
-    let workspace = manifest
-        .parent()
-        .and_then(Path::parent)
-        .expect("orna-sys-v1 must be two levels below the workspace root");
     let source_root = manifest.join("src");
-    let schema_path = workspace.join("api/sys.schema.json");
-    let registry_path = source_root.join("system_api_inventory.json");
     let build_support_path = manifest.join("build_support.rs");
-    println!("cargo:rerun-if-changed={}", schema_path.display());
-    println!("cargo:rerun-if-changed={}", registry_path.display());
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", build_support_path.display());
     // Watch the directory recursively so adding a new annotated module also
@@ -53,21 +44,18 @@ fn main() {
     }
     let collector = collect_rust_sources(&source_root)
         .expect("annotated system API collection must be unique and internally consistent");
+    for asset in &collector.registry_assets {
+        println!("cargo:rerun-if-changed={}", asset.display());
+    }
 
-    let schema_text = fs::read_to_string(&schema_path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", schema_path.display()));
-    let schema: Value = serde_json::from_str(&schema_text).expect("valid published JSON Schema");
-    assert_eq!(
-        schema["$schema"].as_str(),
-        Some("https://json-schema.org/draft/2020-12/schema"),
-        "published system API schema must use JSON Schema 2020-12"
-    );
-    assert_eq!(schema["type"].as_str(), Some("object"));
-
-    let registry_text = fs::read_to_string(&registry_path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", registry_path.display()));
-    let registry: Value = serde_json::from_str(&registry_text)
-        .expect("valid system API type-graph registry inventory");
+    let registry = collector
+        .type_graph
+        .clone()
+        .expect("annotated sys registry must attach the type graph");
+    let schema = collector
+        .schema
+        .clone()
+        .expect("annotated sys registry must attach its schema contract");
     // One deterministic projection generates every baked sys artifact. The
     // focused parity test reruns this exact path against the compiled outputs.
     let artifacts = generate_sys_artifacts(&collector.functions, registry, &schema)
@@ -76,6 +64,11 @@ fn main() {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("build output directory"));
     fs::write(out_dir.join("api_sys.json"), artifacts.api_json)
         .expect("write generated api/sys.json");
+    fs::write(
+        out_dir.join("system_api_schema.json"),
+        artifacts.schema_json,
+    )
+    .expect("write generated embedded system API schema");
     fs::write(
         out_dir.join("system_provider_abi.json"),
         artifacts.provider_abi_json,
