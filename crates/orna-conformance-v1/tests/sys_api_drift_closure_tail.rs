@@ -555,6 +555,26 @@ fn edge_interplay_fixture_filters_present_projected_exact_counts() {
 }
 
 #[test]
+fn edge_interplay_fixture_hands_off_filtered_present_projected_exact_count() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // After filtering present projected counts, capture each nullable-typed value in a nested
+    // callback. Exactness itself still does not refine row_count's declared optional type.
+    assert!(
+        analysis.is_ok(),
+        "a present projected exact count must survive the callback handoff: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_projects_unknown_exact_target_count_through_columns() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
