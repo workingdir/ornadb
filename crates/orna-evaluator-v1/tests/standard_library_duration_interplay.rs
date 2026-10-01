@@ -4871,3 +4871,38 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_tenth_doubling() {
         );
     }
 }
+
+#[test]
+fn positive_factor_rescaled_tails_close_after_one_hundred_eleventh_doubling() {
+    // The reference is silent at this next scale. Continue the symmetric edge
+    // correction by doubling the prior tail to 7,788,445,287,802,241,442,795,744.493830144 seconds
+    // around 2,596,148,429,267,413,814,265,248,164,610,048 minutes, pinning 1802880853657926259906422336534d 18h 8m.
+    // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
+    ] {
+        assert_eq!(session.submit(source), Ok(None), "{source}");
+    }
+
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-eleventh-doubling-from-below-xjeto.orna"),
+        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-eleventh-doubling-from-above-xjeto.orna"),
+    ] {
+        let result = session.submit(source);
+        assert_eq!(
+            result,
+            Ok(Some(texts(&[
+                "1802880853657926259906422336534d 18h 8m",
+                "43269140487790230237754136076834:08:00",
+                "1802880853657926259906422336534 days, 18 hours, 8 minutes",
+                "P1802880853657926259906422336534DT18H8M",
+            ]))),
+            "{source}; diagnostic={}",
+            result.as_ref().err().map_or("none", |error| error.code())
+        );
+    }
+}
