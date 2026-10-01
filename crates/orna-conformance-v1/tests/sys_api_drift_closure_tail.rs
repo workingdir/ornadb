@@ -453,6 +453,26 @@ fn edge_interplay_fixture_retains_unknown_exact_count_through_nested_reference_l
 }
 
 #[test]
+fn edge_interplay_fixture_null_filters_unknown_exact_count_after_nested_handoff() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Exactness remains independent of count presence; keep the null arm available after a
+    // second relation handoff and a filter on the projected count.
+    assert!(
+        analysis.is_ok(),
+        "unknown exact count must remain nullable at the nested handoff tail: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_composes_unknown_target_count_with_inexactness() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
