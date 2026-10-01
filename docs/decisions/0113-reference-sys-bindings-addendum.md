@@ -72,3 +72,7 @@ A sibling fixture pins `sys.start<T>` through the same keyword alias path, inclu
 ## Follow-on proof note: generic start overload alias parity (issue #5665)
 
 An in-crate fixture now pins the erased `sys.start(Value)` and generic `sys.start<T>` declarations together. It proves both overload dispatch markers remain present in generated order and only the generic overload aliases the reserved registry parameter `as` to grammar-valid `as_`; both parsed result types still resolve to their respective registry contracts. The fixture remains a local compile-time include and adds no generated artifact or API change.
+
+## Follow-on proof note: generic invoke overload alias parity (issue #5679)
+
+A matching in-crate fixture pins the erased `sys.invoke(Value)` and generic `sys.invoke<T>` declarations together. Its parse and registry lookup checks preserve the overload order, `as` to `as_` alias only on the generic operation, and the two distinct registered result types, without changing the generated API artifacts.
