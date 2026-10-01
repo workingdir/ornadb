@@ -8411,7 +8411,8 @@ mod tests {
     #[test]
     fn owner_retry_after_nested_competitor_handoff_reclaims_released_key() {
         // The reference requires failed rekeys to be atomic but leaves nested retry ordering open;
-        // pin the local handoff behavior by asserting every mutation in source order.
+        // pin the local handoff behavior by asserting every mutation in source order. In the final
+        // tail, the owner vacates key 2, the competitor takes it, and the owner reuses key 3.
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
         let application = authority
@@ -8507,6 +8508,11 @@ mod tests {
             (3, Some(2), false, Some(row(2, "owner", 16))),
             (6, Some(3), false, Some(row(3, "competitor", 30))),
             (3, None, false, Some(row(3, "competitor", 31))),
+            (2, None, false, Some(row(2, "owner", 17))),
+            (2, Some(6), false, Some(row(6, "owner", 17))),
+            (3, Some(2), false, Some(row(2, "competitor", 31))),
+            (6, Some(3), false, Some(row(3, "owner", 17))),
+            (3, None, false, Some(row(3, "owner", 18))),
         ];
         assert_eq!(mutations.len(), expected.len());
         for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in
