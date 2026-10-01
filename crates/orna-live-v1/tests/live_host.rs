@@ -15843,6 +15843,62 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
             && *fingerprint == terminal_fingerprint
             && result == &expected_first_terminal_body
     ));
+    // The reference leaves retarget diagnostics with mixed snapshots open;
+    // each identity must keep its accepted response through the mismatch.
+    let intermediate_first_retarget_query =
+        status_query([100; 16], [92; 16], other_fingerprint);
+    let intermediate_first_retarget = block_on(host.dispatch_frame(
+        [6; 16],
+        11,
+        Frame::Binary(intermediate_first_retarget_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the terminal-snapshot identity rejects a retarget to the unknown target");
+    assert!(matches!(
+        &intermediate_first_retarget.message,
+        Message::Diagnostic { .. }
+    ));
+    let intermediate_second_retarget_query =
+        status_query([99; 16], [91; 16], terminal_fingerprint);
+    let intermediate_second_retarget = block_on(host.dispatch_frame(
+        [6; 16],
+        11,
+        Frame::Binary(intermediate_second_retarget_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the unknown-snapshot identity rejects a retarget to the terminal target");
+    assert!(matches!(
+        &intermediate_second_retarget.message,
+        Message::Diagnostic { .. }
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            11,
+            Frame::Binary(intermediate_first_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the first intermediate snapshot survives the retarget"),
+        intermediate_terminal_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            11,
+            Frame::Binary(intermediate_second_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the second intermediate snapshot survives the retarget"),
+        intermediate_unknown_status
+    );
 
     // The reference leaves the two-snapshot cycle unspecified after both
     // targets become terminal; keep each accepted response isolated while
@@ -16048,6 +16104,30 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
         .response
         .expect("the intermediate first-target identity keeps its Terminal snapshot"),
         intermediate_terminal_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            23,
+            Frame::Binary(intermediate_first_retarget_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the first intermediate retarget diagnostic keeps its retry snapshot"),
+        intermediate_first_retarget
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            23,
+            Frame::Binary(intermediate_second_retarget_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the second intermediate retarget diagnostic keeps its retry snapshot"),
+        intermediate_second_retarget
     );
     assert_eq!(
         block_on(host.dispatch_frame(
