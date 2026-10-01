@@ -393,6 +393,26 @@ fn edge_interplay_fixture_composes_unknown_target_count_with_exactness() {
 }
 
 #[test]
+fn edge_interplay_fixture_null_filters_exact_count_inside_region_callback() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The frozen API has no separate Region abstraction, so use the caller-supplied table
+    // relation as the candidate region. Exactness does not guarantee row_count presence.
+    assert!(
+        analysis.is_ok(),
+        "region-scoped exact counts must remain nullable through the inner null filter: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_projects_unknown_exact_target_count_through_columns() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
