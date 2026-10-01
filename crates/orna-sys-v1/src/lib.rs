@@ -5059,11 +5059,10 @@ mod tests {
 
     #[test]
     fn normative_sys_descriptor_metadata_is_present_and_runtime_neutral() {
-        // This is descriptor evidence only: the normative JSON is parsed and
-        // validated here, but no sys function is implemented or invoked.
-        let document: serde_json::Value =
-            serde_json::from_str(include_str!("../../../api/sys.json"))
-                .expect("api/sys.json must remain valid JSON");
+        // This is descriptor evidence only: the compile-time generated
+        // normative JSON is parsed here, but no sys function is invoked.
+        let document: serde_json::Value = serde_json::from_str(&system_api_json())
+            .expect("generated sys API must remain valid JSON");
 
         assert_eq!(document["status"], "specification");
         let functions = document["functions"]
