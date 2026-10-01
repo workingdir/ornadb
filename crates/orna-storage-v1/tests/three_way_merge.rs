@@ -4,8 +4,8 @@ use orna_evolution_v1::{
 };
 use orna_foundation_v1::OvbRaw;
 use orna_storage_v1::{
-    BranchMergeBudget, BranchMergeConflict, BranchMergeError, BranchRowSource, KeyRange,
-    MergeSide, MergedSegment, RowSegmentManifest, TableManifest, ThreeWaySnapshot,
+    BranchMergeBudget, BranchMergeConflict, BranchMergeError, BranchMergePlan, BranchRowSource,
+    KeyRange, MergeSide, MergedSegment, RowSegmentManifest, TableManifest, ThreeWaySnapshot,
     merge_three_way_snapshots,
 };
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
@@ -202,6 +202,27 @@ impl BranchRowSource for FixtureRows {
             }
         }
         Ok(())
+    }
+}
+
+struct BarrierFixtureRows {
+    source: FixtureRows,
+    first_load: Option<Arc<Barrier>>,
+}
+
+impl BranchRowSource for BarrierFixtureRows {
+    fn visit_rows(
+        &mut self,
+        side: MergeSide,
+        table: ObjectId,
+        segment: Option<&RowSegmentManifest>,
+        range: &KeyRange,
+        visitor: &mut dyn FnMut(KeyedRow) -> bool,
+    ) -> Result<(), String> {
+        if let Some(first_load) = self.first_load.take() {
+            first_load.wait();
+        }
+        self.source.visit_rows(side, table, segment, range, visitor)
     }
 }
 
@@ -15488,6 +15509,90 @@ fn cross_depth_load_inputs() -> (
     (base, left, right, source)
 }
 
+fn split_cross_depth_load_inputs(
+    middle_on_left: bool,
+) -> (
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    FixtureRows,
+) {
+    let shallow = parse_fixture(TOMBSTONE_DEPTH_SHALLOW, RowKeyKind::Explicit);
+    let middle = parse_fixture(TOMBSTONE_DEPTH_MIDDLE, RowKeyKind::Explicit);
+    let deep = parse_fixture(TOMBSTONE_DEPTH_DEEP, RowKeyKind::Explicit);
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"split-load-base-root", vec![shallow]);
+    source.add(
+        MergeSide::Base,
+        b"split-load-base-middle",
+        vec![middle.clone()],
+    );
+    source.add(MergeSide::Base, b"split-load-base-deep", vec![deep.clone()]);
+    let (left_middle, left_deep, right_middle, right_deep) = if middle_on_left {
+        (vec![middle], Vec::new(), Vec::new(), vec![deep])
+    } else {
+        (Vec::new(), vec![deep], vec![middle], Vec::new())
+    };
+    source.add(MergeSide::Left, b"split-load-left-root", Vec::new());
+    source.add(MergeSide::Left, b"split-load-left-middle", left_middle);
+    source.add(MergeSide::Left, b"split-load-left-deep", left_deep);
+    source.add(MergeSide::Right, b"split-load-right-root", Vec::new());
+    source.add(MergeSide::Right, b"split-load-right-middle", right_middle);
+    source.add(MergeSide::Right, b"split-load-right-deep", right_deep);
+
+    let base = snapshot(
+        string_key_schema(),
+        depth_split_manifest(
+            21,
+            [21, 22, 23],
+            [
+                b"split-load-base-root",
+                b"split-load-base-middle",
+                b"split-load-base-deep",
+            ],
+        ),
+        None,
+    );
+    let left = snapshot(
+        string_key_schema(),
+        depth_split_manifest(
+            24,
+            [24, 25, 26],
+            [
+                b"split-load-left-root",
+                b"split-load-left-middle",
+                b"split-load-left-deep",
+            ],
+        ),
+        None,
+    );
+    let right = snapshot(
+        string_key_schema(),
+        depth_split_manifest(
+            27,
+            [27, 28, 29],
+            [
+                b"split-load-right-root",
+                b"split-load-right-middle",
+                b"split-load-right-deep",
+            ],
+        ),
+        None,
+    );
+    (base, left, right, source)
+}
+
+fn flattened_row_tombstones(plan: &BranchMergePlan) -> Vec<CanonicalValue> {
+    plan.tables[&id(1)]
+        .segments
+        .iter()
+        .flat_map(|segment| match segment {
+            MergedSegment::Rows { tombstones, .. } => tombstones.clone(),
+            other => panic!("expected materialized cross-depth rows, got {other:?}"),
+        })
+        .collect()
+}
+
 #[test]
 fn fixture_cross_depth_tombstones_keep_order_at_exact_load_budget() {
     // ORNA-MERGE-005 requires bounded work and an isolated complete result,
@@ -15512,6 +15617,56 @@ fn fixture_cross_depth_tombstones_keep_order_at_exact_load_budget() {
         &[string("root"), string("root/child"), string("root/child/deep")],
         "load visitation order does not change canonical cross-depth tombstone order",
     );
+}
+
+#[test]
+fn concurrent_split_loads_keep_tombstones_ordered_across_depth_boundaries() {
+    // The reference defines bounded isolated merges but is silent on
+    // concurrent load scheduling. Pin the local rule that each independent
+    // result follows canonical key order across segment boundaries.
+    let (base_a, left_a, right_a, source_a) = split_cross_depth_load_inputs(true);
+    let (base_b, left_b, right_b, source_b) = split_cross_depth_load_inputs(false);
+    let start = Arc::new(Barrier::new(2));
+    let start_a = Arc::clone(&start);
+    let load_a = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: source_a,
+            first_load: Some(start_a),
+        };
+        merge_three_way_snapshots(
+            &base_a,
+            &left_a,
+            &right_a,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 5, max_conflicts: 0 },
+        )
+        .expect("first split load completes")
+    });
+    let load_b = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: source_b,
+            first_load: Some(start),
+        };
+        merge_three_way_snapshots(
+            &base_b,
+            &left_b,
+            &right_b,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 5, max_conflicts: 0 },
+        )
+        .expect("opposite-orientation split load completes")
+    });
+
+    let plan_a = load_a.join().expect("first split worker completes");
+    let plan_b = load_b.join().expect("second split worker completes");
+    assert_eq!(plan_a, plan_b, "opposite tombstone orientations merge identically");
+    assert_eq!(plan_a.report.rows_examined, 5);
+    assert_eq!(
+        flattened_row_tombstones(&plan_a),
+        vec![string("root"), string("root/child"), string("root/child/deep")],
+        "each segment boundary contributes tombstones in table-wide primary-key order",
+    );
+    assert_eq!(plan_a.tables[&id(1)].segments.len(), 3);
 }
 
 #[test]
