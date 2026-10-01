@@ -333,6 +333,26 @@ fn edge_interplay_fixture_keeps_column_projection_under_nullable_table_edge() {
 }
 
 #[test]
+fn edge_interplay_fixture_projects_nullable_table_field_through_columns() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The frozen schema does not relate a table's optional row_count to docs on its Columns;
+    // preserve the nullable parent field when projecting it through the child relation.
+    assert!(
+        analysis.is_ok(),
+        "Column filtering must retain the parent Table's nullable projection: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn runtime_publication_counters_do_not_leak_into_frozen_sys_types() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-internal-publication-metadata.orna",
