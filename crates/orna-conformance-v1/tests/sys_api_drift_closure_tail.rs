@@ -313,6 +313,26 @@ fn edge_interplay_fixture_projects_deepest_nullable_column_field() {
 }
 
 #[test]
+fn edge_interplay_fixture_keeps_column_projection_under_nullable_table_edge() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The frozen schema makes row_count and default_expression nullable independently and does
+    // not say whether unknown-count tables retain columns; preserve the nested nullable result.
+    assert!(
+        analysis.is_ok(),
+        "nullable Table filtering must retain the nullable Column projection: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn runtime_publication_counters_do_not_leak_into_frozen_sys_types() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-internal-publication-metadata.orna",
