@@ -42,6 +42,148 @@ pub fn canonical_pretty_json(value: &Value) -> Result<String, serde_json::Error>
     serde_json::to_string_pretty(&sort(value.clone()))
 }
 
+/// Generated Orna source for one typed provider operation.
+pub struct BindingStub {
+    pub module: String,
+    pub source: String,
+}
+
+/// Emit grammar-valid Orna declaration stubs from typed provider operations.
+/// The registry signature is the language-facing type contract; annotated
+/// Rust methods are descriptor accessors. See
+/// `docs/decisions/0113-reference-sys-bindings-addendum.md` for the architecture.
+pub fn generate_binding_stubs(operations: &[Value]) -> Result<Vec<BindingStub>, String> {
+    let mut operations = operations.iter().collect::<Vec<_>>();
+    operations.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
+
+    let mut stubs = Vec::with_capacity(operations.len());
+    for operation_contract in operations {
+        let operation = operation_contract["name"]
+            .as_str()
+            .ok_or_else(|| "registered sys operation has no name".to_owned())?;
+        let signature = operation_contract["signature"]
+            .as_str()
+            .ok_or_else(|| format!("registered operation `{operation}` has no signature"))?;
+        let identity = parse_signature_identity(signature)?;
+        let callable = identity
+            .name
+            .strip_prefix("sys.")
+            .ok_or_else(|| format!("registered operation `{operation}` is outside sys"))?;
+        let module = identity
+            .name
+            .rsplit_once('.')
+            .map(|(module, _)| module.to_owned())
+            .ok_or_else(|| format!("registered operation `{operation}` has no sys module"))?;
+        let local_name = callable
+            .rsplit('.')
+            .next()
+            .ok_or_else(|| format!("registered operation `{operation}` has no function name"))?;
+        let emitted_name = grammar_identifier(local_name);
+        if !valid_identifier(&emitted_name) {
+            return Err(format!(
+                "registered operation `{operation}` cannot be emitted in Orna grammar"
+            ));
+        }
+
+        let (signature, parameter_aliases) = grammar_parameter_names(signature)?;
+        let signature_without_keyword = signature
+            .strip_prefix("fn ")
+            .ok_or_else(|| format!("registered operation `{operation}` has an invalid signature"))?;
+        let header_end = signature_without_keyword
+            .find('(')
+            .ok_or_else(|| format!("registered operation `{operation}` has no parameter list"))?;
+        let header = &signature_without_keyword[..header_end];
+        let callable_end = header.find('<').unwrap_or(header.len());
+        // Preserve generic parameters, typed arguments, defaults and result.
+        let declaration_tail = &signature_without_keyword[callable_end..];
+
+        let mut source = format!("// sys-op: {operation}\n");
+        for (original, emitted) in parameter_aliases {
+            source.push_str(&format!("// sys-parameter-alias: {original}={emitted}\n"));
+        }
+        source.push_str(&format!(
+            "pub fn {emitted_name}{declaration_tail} = error(code: \"sys.binding.stub\", message: \"generated declaration stub\");\n\n"
+        ));
+        stubs.push(BindingStub { module, source });
+    }
+    Ok(stubs)
+}
+
+fn grammar_parameter_names(signature: &str) -> Result<(String, Vec<(String, String)>), String> {
+    let open = signature
+        .find('(')
+        .ok_or_else(|| "function signature is missing `(`".to_owned())?;
+    let close = matching_delimiter(signature, open, '(', ')')
+        .ok_or_else(|| "function signature has unbalanced parameters".to_owned())?;
+    let mut replacements = Vec::new();
+    let mut aliases = Vec::new();
+    for parameter in split_top_level(&signature[open + 1..close])? {
+        let parameter = parameter.trim();
+        if parameter.is_empty() {
+            continue;
+        }
+        let declaration = parameter
+            .split_once(" = ")
+            .map_or(parameter, |(declaration, _)| declaration);
+        let (name, _) = declaration
+            .split_once(": ")
+            .ok_or_else(|| "function parameter must use `name: Type` notation".to_owned())?;
+        let emitted = grammar_identifier(name);
+        if emitted != name {
+            let parameter_start = parameter.as_ptr() as usize - signature.as_ptr() as usize;
+            let name_start = parameter_start + declaration.find(name).expect("parameter name");
+            replacements.push((name_start, name_start + name.len(), emitted.clone()));
+            aliases.push((name.to_owned(), emitted));
+        }
+    }
+    let mut rewritten = signature.to_owned();
+    replacements.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
+    for (start, end, replacement) in replacements {
+        rewritten.replace_range(start..end, &replacement);
+    }
+    Ok((rewritten, aliases))
+}
+
+fn grammar_identifier(identifier: &str) -> String {
+    if matches!(
+        identifier,
+        "as" | "assert"
+            | "base"
+            | "break"
+            | "case"
+            | "continue"
+            | "dim"
+            | "else"
+            | "enum"
+            | "false"
+            | "fn"
+            | "for"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "null"
+            | "offset"
+            | "affine"
+            | "protocol"
+            | "pub"
+            | "return"
+            | "self"
+            | "static"
+            | "table"
+            | "true"
+            | "type"
+            | "unit"
+            | "use"
+            | "while"
+    ) {
+        format!("{identifier}_")
+    } else {
+        identifier.to_owned()
+    }
+}
+
 impl Collector {
     pub fn collect_source(&mut self, source_name: &str, source: &str) {
         match syn::parse_file(source) {
