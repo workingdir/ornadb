@@ -88,6 +88,8 @@ const SOURCE_REMAINDER_SPLIT_BOUNDS_AFTER_UNKNOWN_TAIL: &str =
     include_str!("fixtures/source_remainder_split_bounds_after_unknown_tail.orna");
 const SOURCE_REMAINDER_BYTES_THEN_ROWS_AFTER_UNKNOWN_TAIL: &str =
     include_str!("fixtures/source_remainder_bytes_then_rows_after_unknown_tail.orna");
+const SOURCE_REMAINDER_BYTES_THEN_RESET_TAIL: &str =
+    include_str!("fixtures/source_remainder_bytes_then_reset_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -8415,6 +8417,134 @@ fn explain_closes_source_remainder_with_bytes_then_rows_after_unknown() {
 
     let surface = serde_json::to_value(&byte_overflow)
         .expect("bytes-then-rows post-unknown overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_preserves_byte_remainder_across_mutation_cardinality_reset() {
+    let parsed = orna_syntax_v1::parse_module(SOURCE_REMAINDER_BYTES_THEN_RESET_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 4);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Continue the pragmatic
+    // 4-KiB-per-scan lower bound: the source's rows and first byte remainder
+    // establish MAX-3 work, an unknown join hides the exact total, and a
+    // later bytes-only scan plus update and materialize costs close it. The
+    // update resets current cardinality to its small result but must not
+    // discard the earlier known-work lower bound. Zero tail bytes leave the
+    // sum below MAX; 1..=4096 close exactly; 4097 crosses it.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let source_rows = u64::MAX - MAX_BYTE_BLOCKS - 3;
+    let explain = |tail_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:source-remainder-bytes-then-reset"),
+            source: obj("table:BytesThenResetSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:BytesThenResetUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:BytesThenResetTail"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:BytesThenResetTarget"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(1),
+                estimated_write_bytes: Some(0),
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: Some(obj("materialization:bytes-then-reset")),
+        })
+        .expect("byte remainder followed by cardinality-resetting update")
+    };
+
+    let one_below = explain(0);
+    assert_eq!(one_below.plan().estimated_cost(), None);
+    assert_eq!(one_below.root().details().get("estimated_cost_overflow"), None);
+
+    for tail_bytes in [1, 4_095, 4_096] {
+        let exact = explain(tail_bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(
+            exact.root().details().get("estimated_cost_overflow"),
+            None,
+            "byte tail and reset suffix close the known lower bound at MAX"
+        );
+    }
+
+    let overflow = explain(4_097);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the extra rounded byte block overflows before the small reset result"
+    );
+
+    let nodes = overflow.nodes();
+    let position = |kind, name: &str| {
+        nodes
+            .iter()
+            .position(|node| node.kind() == kind && node.object() == Some(&obj(name)))
+            .expect("fixture-backed plan node appears")
+    };
+    let source_position = position(PlanNodeKind::Scan, "table:BytesThenResetSource");
+    let unknown_position = position(PlanNodeKind::Scan, "table:BytesThenResetUnknown");
+    let bytes_position = position(PlanNodeKind::Scan, "table:BytesThenResetTail");
+    let reset_position = position(PlanNodeKind::Invoke, "table:BytesThenResetTarget");
+    assert!(source_position < unknown_position);
+    assert!(unknown_position < bytes_position);
+    assert!(reset_position < source_position);
+    assert_eq!(
+        overflow.root().inputs(),
+        &[nodes[reset_position].reference().clone()]
+    );
+    assert_eq!(
+        nodes[bytes_position].parent(),
+        nodes[reset_position].inputs().first(),
+        "the reset consumes the join whose right input is the byte-only scan"
+    );
+    assert_eq!(nodes[source_position].estimated_work(), Some(u64::MAX - 3));
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+    assert_eq!(nodes[bytes_position].estimated_rows(), None);
+    assert_eq!(nodes[bytes_position].estimated_bytes(), Some(4_097));
+    assert_eq!(nodes[bytes_position].estimated_work(), None);
+    assert_eq!(nodes[reset_position].estimated_rows(), Some(1));
+    assert_eq!(nodes[reset_position].estimated_bytes(), Some(0));
+    assert_eq!(nodes[reset_position].estimated_work(), Some(1));
+    assert_eq!(overflow.root().estimated_rows(), Some(1));
+    assert_eq!(overflow.root().estimated_bytes(), Some(0));
+    assert_eq!(overflow.root().estimated_work(), Some(1));
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow).expect("byte remainder reset overflow surface");
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
