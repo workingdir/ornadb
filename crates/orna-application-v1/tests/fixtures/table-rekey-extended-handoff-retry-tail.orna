@@ -42,7 +42,40 @@ fn continue_after_fourteenth_handoff() {
         Note.rekey(2, 6);
         Note.rekey(3, 2);
         Note.rekey(6, 3);
-        Note.update(3, { quantity: 36 })
+        Note.update(3, { quantity: 36 });
+        continue_after_fifteenth_handoff()
+    })
+}
+
+fn continue_after_fifteenth_handoff() {
+    Note.rekey(3, 2) |? (competitor_retries_after_sixteenth_handoff => {
+        Note.update(3, { quantity: 37 });
+        Note.rekey(2, 6);
+        Note.rekey(3, 2);
+        Note.rekey(6, 3);
+        Note.update(3, { quantity: 40 });
+        continue_after_sixteenth_handoff()
+    })
+}
+
+fn continue_after_sixteenth_handoff() {
+    Note.rekey(3, 2) |? (owner_retries_after_seventeenth_handoff => {
+        Note.update(3, { quantity: 41 });
+        Note.rekey(2, 6);
+        Note.rekey(3, 2);
+        Note.rekey(6, 3);
+        Note.update(3, { quantity: 38 });
+        continue_after_seventeenth_handoff()
+    })
+}
+
+fn continue_after_seventeenth_handoff() {
+    Note.rekey(3, 2) |? (competitor_retries_after_eighteenth_handoff => {
+        Note.update(3, { quantity: 39 });
+        Note.rekey(2, 6);
+        Note.rekey(3, 2);
+        Note.rekey(6, 3);
+        Note.update(3, { quantity: 42 })
     })
 }
 
