@@ -1,0 +1,5 @@
+pub table UnknownScanSplitRemainderSource(id: Int) { value: Int, }
+pub table UnknownScanSplitRemainderPrefix(id: Int) { value: Int, }
+pub table UnknownScanSplitRemainderUnknown(id: Int) { value: Int, }
+pub table UnknownScanSplitRemainderTail(id: Int) { value: Int, }
+pub table UnknownScanSplitRemainderRows(id: Int) { value: Int, }
