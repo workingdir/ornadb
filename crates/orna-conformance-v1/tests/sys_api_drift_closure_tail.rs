@@ -433,6 +433,26 @@ fn edge_interplay_fixture_retains_unknown_exact_target_across_reference_handoff(
 }
 
 #[test]
+fn edge_interplay_fixture_retains_unknown_exact_count_through_nested_reference_lookup() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Preserve an exact-but-unknown target's nullable count across its References and the
+    // nested to_table lookup; the frozen schema does not promise count presence from exactness.
+    assert!(
+        analysis.is_ok(),
+        "unknown exact parent count must survive nested Reference lookup: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_composes_unknown_target_count_with_inexactness() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
