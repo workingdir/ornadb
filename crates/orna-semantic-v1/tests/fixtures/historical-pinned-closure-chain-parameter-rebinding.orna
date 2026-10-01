@@ -1,0 +1,38 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn rebind_parameter_twice(pin: sys.SnapshotRef) {
+    let original = chained_factory(pin);
+    let original_alias = sys.snapshot(pin);
+    pin = sys.snapshot("HEAD~5");
+    let middle = chained_factory(pin);
+    let middle_alias = sys.snapshot(pin);
+    pin = sys.snapshot("HEAD");
+    let current = chained_factory(pin);
+    {
+        original: original,
+        original_alias: chained_factory(original_alias),
+        middle: middle,
+        middle_alias: forwarded_factory(middle_alias),
+        current: current,
+    }
+}
+
+pub fn each_rebound_chain_keeps_its_pinned_identity() {
+    let incoming = sys.snapshot("HEAD~10");
+    let chain = rebind_parameter_twice(sys.snapshot(incoming));
+    {
+        original: [chain.original, chained_factory(sys.snapshot("HEAD~10"))],
+        original_alias: [
+            chain.original_alias,
+            forwarded_factory(sys.snapshot("HEAD~10")),
+        ],
+        middle: [chain.middle, chained_factory(sys.snapshot("HEAD~5"))],
+        middle_alias: [chain.middle_alias, forwarded_factory(sys.snapshot("HEAD~5"))],
+        current: [chain.current, chained_factory(sys.snapshot("HEAD"))],
+    }
+}
