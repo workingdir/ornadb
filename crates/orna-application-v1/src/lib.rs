@@ -8410,9 +8410,9 @@ mod tests {
 
     #[test]
     fn owner_retry_after_nested_competitor_handoff_reclaims_released_key() {
-        // The reference requires failed rekeys to be atomic but leaves nested retry ordering open;
-        // pin the local handoff behavior by asserting every mutation in source order. The final
-        // retries alternate owner and competitor moves through reused keys.
+        // The reference requires failed rekeys to be atomic but leaves nested retry ordering open.
+        // Local policy: each retry reads the latest activation overlay, and recovery bodies run
+        // in source order. Pin that choice through alternating owner and competitor moves.
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
         let application = authority
