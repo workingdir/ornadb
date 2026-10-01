@@ -15586,6 +15586,65 @@ fn concurrent_fixture_load_orders_keep_cross_depth_tombstones_deterministic() {
 }
 
 #[test]
+fn concurrent_cross_depth_load_budgets_are_isolated_per_merge() {
+    // Each in-flight merge owns its row counter and failure report. A capped
+    // worker must not change the complete result of its concurrent peer.
+    let (base_ok, left_ok, right_ok, source_ok) = cross_depth_load_inputs();
+    let (base_capped, left_capped, right_capped, mut source_capped) =
+        cross_depth_load_inputs();
+    for rows in source_capped.rows.values_mut() {
+        rows.reverse();
+    }
+
+    let start = Arc::new(Barrier::new(2));
+    let start_ok = Arc::clone(&start);
+    let complete = std::thread::spawn(move || {
+        start_ok.wait();
+        let mut source = source_ok;
+        merge_three_way_snapshots(
+            &base_ok,
+            &left_ok,
+            &right_ok,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 5, max_conflicts: 0 },
+        )
+    });
+    let capped = std::thread::spawn(move || {
+        start.wait();
+        merge_three_way_snapshots(
+            &base_capped,
+            &left_capped,
+            &right_capped,
+            &mut source_capped,
+            BranchMergeBudget { max_rows_examined: 4, max_conflicts: 0 },
+        )
+    });
+
+    let plan = complete
+        .join()
+        .expect("complete-load worker finishes")
+        .expect("the exact-budget worker returns a complete plan");
+    assert_eq!(plan.report.rows_examined, 5);
+    let error = capped
+        .join()
+        .expect("capped-load worker finishes")
+        .expect_err("the one-row-short worker stops independently");
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("the capped concurrent load reports its own budget stop")
+    };
+    assert_eq!(report.rows_examined, 5);
+    assert_eq!(report.affected_ranges, [(id(1), KeyRange::all())].into_iter().collect());
+    let MergedSegment::Rows { rows, tombstones, .. } = &plan.tables[&id(1)].segments[0] else {
+        panic!("the successful peer retains a complete cross-depth segment")
+    };
+    assert!(rows.is_empty());
+    assert_eq!(
+        tombstones,
+        &[string("root"), string("root/child"), string("root/child/deep")],
+    );
+}
+
+#[test]
 fn fixture_ancestor_tombstone_preserves_deeper_rows_across_ranges() {
     let shallow = parse_fixture(TOMBSTONE_DEPTH_SHALLOW, RowKeyKind::Explicit);
     let middle = parse_fixture(TOMBSTONE_DEPTH_MIDDLE, RowKeyKind::Explicit);
