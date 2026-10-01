@@ -15737,6 +15737,10 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
         status_query([118; 16], [91; 16], terminal_fingerprint);
     let fifth_retry_edge_snapshot_fingerprint =
         request_fingerprint(&fifth_retry_edge_snapshot_query, [1; 16]);
+    let sixth_retry_edge_snapshot_query =
+        status_query([119; 16], [91; 16], terminal_fingerprint);
+    let sixth_retry_edge_snapshot_fingerprint =
+        request_fingerprint(&sixth_retry_edge_snapshot_query, [1; 16]);
     let first_unknown_status = block_on(host.dispatch_frame(
         [6; 16],
         2,
@@ -17721,6 +17725,82 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
         .expect("the fifth fresh terminal snapshot has its own stable retry"),
         fifth_retry_edge_snapshot
     );
+    // The reference leaves another repeated identity conflict unspecified;
+    // pin this accepted response separately from its conflict and fresh retry.
+    let sixth_retry_edge_mismatch_query = status_query(
+        [118; 16],
+        [91; 16],
+        request_fingerprint(&sequential_changed_first_eval, [1; 16]),
+    );
+    let sixth_retry_edge_mismatch = block_on(host.dispatch_frame(
+        [6; 16],
+        24,
+        Frame::Binary(sixth_retry_edge_mismatch_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the fifth retry-edge snapshot rejects a changed same-target fingerprint");
+    assert!(matches!(
+        &sixth_retry_edge_mismatch.message,
+        Message::Diagnostic { .. }
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(fifth_retry_edge_snapshot_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the fifth accepted snapshot survives another retry conflict"),
+        fifth_retry_edge_snapshot
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(sixth_retry_edge_mismatch_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the sixth retry-edge mismatch has its own stable retry"),
+        sixth_retry_edge_mismatch
+    );
+    let sixth_retry_edge_snapshot = block_on(host.dispatch_frame(
+        [6; 16],
+        24,
+        Frame::Binary(sixth_retry_edge_snapshot_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a fresh identity after the sixth retry conflict reads the terminal result");
+    assert!(matches!(
+        &sixth_retry_edge_snapshot.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *fingerprint == terminal_fingerprint
+            && result == &expected_first_terminal_body
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(sixth_retry_edge_snapshot_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the sixth fresh terminal snapshot has its own stable retry"),
+        sixth_retry_edge_snapshot
+    );
     assert_eq!(
         block_on(host.dispatch_frame(
             [6; 16],
@@ -18116,6 +18196,11 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
             [118; 16],
             fifth_retry_edge_snapshot_fingerprint,
             fifth_retry_edge_snapshot,
+        ),
+        (
+            [119; 16],
+            sixth_retry_edge_snapshot_fingerprint,
+            sixth_retry_edge_snapshot,
         ),
         ([97; 16], current_first_status_fingerprint, current_first_status),
         ([98; 16], current_second_status_fingerprint, current_second_status),
