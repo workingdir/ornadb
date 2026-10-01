@@ -13877,6 +13877,243 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
             if status.state == orna_runtime_v1::RequestState::Completed
                 && status.fingerprint == fifteenth_failure_query_fingerprint
     ));
+
+    // The reference is silent about replaying the terminal Eval itself
+    // between retarget-mismatch frames. Keep its stored failure and all three
+    // rejected status payload snapshots independent across that ordering.
+    let sixteenth_failure_query = Envelope {
+        request: Some([109; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let sixteenth_failure_query_fingerprint =
+        request_fingerprint(&sixteenth_failure_query, [1; 16]);
+    let sixteenth_failure_status = block_on(host.dispatch_frame(
+        [6; 16],
+        99,
+        Frame::Binary(sixteenth_failure_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a sixteenth status identity observes the retained terminal failure");
+    assert!(matches!(
+        &sixteenth_failure_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(returned),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *returned == fingerprint
+            && result == &expected_failure
+    ));
+
+    let retargeted_sixteenth_query = Envelope {
+        request: Some([109; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [92; 16],
+            fingerprint: request_fingerprint(&other_eval, [1; 16]),
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let retargeted_sixteenth_response = block_on(host.dispatch_frame(
+        [6; 16],
+        99,
+        Frame::Binary(retargeted_sixteenth_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("retargeting the admitted status identity returns a mismatch");
+    assert!(matches!(
+        &retargeted_sixteenth_response.message,
+        Message::Diagnostic { .. }
+    ));
+
+    let terminal_eval_replay_frame = eval_with_context([1; 16], [91; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&terminal_eval_replay_frame, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    let terminal_eval_replay = block_on(host.dispatch_frame(
+        [6; 16],
+        99,
+        Frame::Binary(terminal_eval_replay_frame.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the original failed Eval still replays between retarget frames");
+    assert_eq!(terminal_eval_replay, exact_retry);
+    assert_eq!(
+        terminal_eval_replay
+            .encode(Limits::default().protocol)
+            .unwrap(),
+        terminal_bytes
+    );
+
+    let second_retargeted_sixteenth_query = Envelope {
+        request: Some([109; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [92; 16],
+            fingerprint: request_fingerprint(&alternate_target_eval, [1; 16]),
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let second_retargeted_sixteenth_response = block_on(host.dispatch_frame(
+        [6; 16],
+        99,
+        Frame::Binary(second_retargeted_sixteenth_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a second target fingerprint returns a distinct mismatch");
+    assert!(matches!(
+        &second_retargeted_sixteenth_response.message,
+        Message::Diagnostic { .. }
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            99,
+            Frame::Binary(fifteenth_failure_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("another accepted status frame remains unchanged during retarget retries"),
+        fifteenth_failure_status
+    );
+
+    let third_retargeted_sixteenth_query = Envelope {
+        request: Some([109; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [92; 16],
+            fingerprint: request_fingerprint(
+                &eval_with_context([1; 16], [92; 16], [19; 16], None),
+                [1; 16],
+            ),
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let third_retargeted_sixteenth_response = block_on(host.dispatch_frame(
+        [6; 16],
+        99,
+        Frame::Binary(third_retargeted_sixteenth_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a third retargeted status payload also returns a mismatch");
+    assert!(matches!(
+        &third_retargeted_sixteenth_response.message,
+        Message::Diagnostic { .. }
+    ));
+
+    let eval_reusing_sixteenth_query = eval_with_context([1; 16], [109; 16], [20; 16], None);
+    assert!(matches!(
+        Envelope::decode(&eval_reusing_sixteenth_query, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            99,
+            Frame::Binary(eval_reusing_sixteenth_query),
+            &mut application,
+        )),
+        Err(Error::RequestMismatch)
+    );
+
+    for (frame, expected, label) in [
+        (
+            retargeted_sixteenth_query,
+            retargeted_sixteenth_response,
+            "the first mismatch replays after Eval and cross-kind retries",
+        ),
+        (
+            second_retargeted_sixteenth_query,
+            second_retargeted_sixteenth_response,
+            "the second mismatch keeps its own replay snapshot",
+        ),
+        (
+            third_retargeted_sixteenth_query,
+            third_retargeted_sixteenth_response,
+            "the third mismatch replays with the earlier payloads retained",
+        ),
+    ] {
+        assert_eq!(
+            block_on(host.dispatch_frame(
+                [6; 16],
+                99,
+                Frame::Binary(frame),
+                &mut application,
+            ))
+            .unwrap()
+            .response
+            .expect(label),
+            expected
+        );
+    }
+    let final_terminal_eval_replay = block_on(host.dispatch_frame(
+        [6; 16],
+        99,
+        Frame::Binary(terminal_eval_replay_frame),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the original Eval failure replays after every retarget frame");
+    assert_eq!(final_terminal_eval_replay, exact_retry);
+    assert_eq!(
+        final_terminal_eval_replay
+            .encode(Limits::default().protocol)
+            .unwrap(),
+        terminal_bytes
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            99,
+            Frame::Binary(sixteenth_failure_query),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the accepted status identity remains replayable after all rejections"),
+        sixteenth_failure_status
+    );
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [1; 16],
+            request_id: [109; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == sixteenth_failure_query_fingerprint
+    ));
     assert_eq!(application.calls, 1);
 
     drop(host);
