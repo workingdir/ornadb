@@ -15061,6 +15061,68 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
                 && status.fingerprint == second_fresh_status_fingerprint
     ));
 
+    let second_status_retarget_eval = eval_with_context([1; 16], [92; 16], [9; 16], None);
+    let second_status_retarget_query = Envelope {
+        request: Some([95; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [92; 16],
+            fingerprint: request_fingerprint(&second_status_retarget_eval, [1; 16]),
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let second_status_retarget_mismatch = block_on(host.dispatch_frame(
+        [6; 16],
+        69,
+        Frame::Binary(second_status_retarget_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("retargeting the second fresh status identity returns a mismatch");
+    assert!(matches!(
+        &second_status_retarget_mismatch.message,
+        Message::Diagnostic { .. }
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            70,
+            Frame::Binary(terminal_eval.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the terminal failure replays between second-identity retries"),
+        terminal_eval_replay
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            71,
+            Frame::Binary(second_fresh_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the original second status identity still replays after retarget"),
+        second_fresh_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            72,
+            Frame::Binary(second_status_retarget_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the second-identity retarget mismatch has its own replay snapshot"),
+        second_status_retarget_mismatch
+    );
+
     let eval_reusing_second_fresh_status_identity =
         eval_with_context([1; 16], [95; 16], [8; 16], None);
     assert!(matches!(
@@ -15075,7 +15137,7 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     assert_eq!(
         block_on(host.dispatch_frame(
             [6; 16],
-            69,
+            73,
             Frame::Binary(eval_reusing_second_fresh_status_identity),
             &mut application,
         )),
@@ -15084,7 +15146,7 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     assert_eq!(
         block_on(host.dispatch_frame(
             [6; 16],
-            70,
+            74,
             Frame::Binary(second_fresh_status_query.clone()),
             &mut application,
         ))
@@ -15101,49 +15163,49 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
             Frame::Binary(repeated_same_target_query.clone()),
             repeated_same_target_mismatch.clone(),
             "the second mismatch starts the second fresh-status cycle",
-            71,
+            75,
         ),
         (
             Frame::Binary(terminal_eval.clone()),
             terminal_eval_replay.clone(),
             "the terminal failure replays before the second fresh status retry",
-            72,
-        ),
-        (
-            Frame::Binary(second_fresh_status_query.clone()),
-            second_fresh_status.clone(),
-            "the second fresh status identity replays after terminal failure",
-            73,
-        ),
-        (
-            Frame::Binary(same_target_wrong_fingerprint_query.clone()),
-            same_target_fingerprint_mismatch.clone(),
-            "the first mismatch follows the second fresh status replay",
-            74,
-        ),
-        (
-            Frame::Binary(terminal_eval.clone()),
-            terminal_eval_replay.clone(),
-            "the terminal failure remains stable after the first mismatch",
-            75,
-        ),
-        (
-            Frame::Binary(repeated_same_target_query.clone()),
-            repeated_same_target_mismatch.clone(),
-            "the second mismatch remains independent through the status replay",
             76,
         ),
         (
             Frame::Binary(second_fresh_status_query.clone()),
             second_fresh_status.clone(),
-            "the second fresh status response stays replayable at cycle end",
+            "the second fresh status identity replays after terminal failure",
             77,
+        ),
+        (
+            Frame::Binary(same_target_wrong_fingerprint_query.clone()),
+            same_target_fingerprint_mismatch.clone(),
+            "the first mismatch follows the second fresh status replay",
+            78,
+        ),
+        (
+            Frame::Binary(terminal_eval.clone()),
+            terminal_eval_replay.clone(),
+            "the terminal failure remains stable after the first mismatch",
+            79,
+        ),
+        (
+            Frame::Binary(repeated_same_target_query.clone()),
+            repeated_same_target_mismatch.clone(),
+            "the second mismatch remains independent through the status replay",
+            80,
+        ),
+        (
+            Frame::Binary(second_fresh_status_query.clone()),
+            second_fresh_status.clone(),
+            "the second fresh status response stays replayable at cycle end",
+            81,
         ),
         (
             Frame::Binary(fresh_status_query.clone()),
             fresh_status.clone(),
             "the first fresh status identity remains distinct from the second",
-            78,
+            82,
         ),
     ] {
         assert_eq!(
