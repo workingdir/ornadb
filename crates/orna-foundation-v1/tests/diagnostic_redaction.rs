@@ -17963,3 +17963,163 @@ fn nested_empty_alias_tails_survive_deep_clone_growth_replay() {
         reverse_projection["causes"]
     );
 }
+
+#[test]
+fn deepest_empty_alias_tail_growth_stays_with_its_cloned_chain() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let diagnostic = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(message).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let empty_tail = || {
+        diagnostic(
+            "ORNA-E-DEEPEST-EMPTY-ALIAS-TAIL",
+            "deepest empty alias tail secret",
+        )
+    };
+    let make_wire = |reverse: bool| {
+        let shared_leaf = diagnostic(
+            "ORNA-E-DEEPEST-EMPTY-ALIAS",
+            "leaf alias secret",
+        )
+        .with_cause(empty_tail());
+        let shared_middle = diagnostic(
+            "ORNA-E-DEEPEST-EMPTY-ALIAS",
+            "middle alias secret",
+        )
+        .with_cause(shared_leaf.clone())
+        .with_cause(shared_leaf.clone());
+        let shared_outer = diagnostic(
+            "ORNA-E-DEEPEST-EMPTY-ALIAS",
+            "outer alias secret",
+        )
+        .with_cause(shared_middle.clone())
+        .with_cause(shared_middle.clone());
+
+        let grown_leaf = shared_leaf.clone().with_cause(empty_tail());
+        let grown_middle = shared_middle.clone().with_cause(grown_leaf);
+        let grown_outer = shared_outer.clone().with_cause(grown_middle);
+        let aliases = if reverse {
+            vec![shared_outer, grown_outer]
+        } else {
+            vec![grown_outer, shared_outer]
+        };
+        aliases
+            .into_iter()
+            .fold(
+                diagnostic("ORNA-E-DEEPEST-EMPTY-ALIAS-ROOT", "root secret"),
+                |root, alias| root.with_cause(alias),
+            )
+            .redacted()
+            .encode_ovb()
+            .unwrap()
+    };
+    fn deepest_empty_alias_shape(diagnostic: &serde_json::Value) -> Vec<Vec<Vec<usize>>> {
+        let aliases = diagnostic["causes"].as_array().unwrap();
+        assert_eq!(aliases.len(), 2);
+        aliases
+            .iter()
+            .map(|outer| {
+                assert_eq!(outer["code"], "ORNA-E-DEEPEST-EMPTY-ALIAS");
+                outer["causes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|middle| {
+                        assert_eq!(middle["code"], "ORNA-E-DEEPEST-EMPTY-ALIAS");
+                        middle["causes"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|leaf| {
+                                assert_eq!(leaf["code"], "ORNA-E-DEEPEST-EMPTY-ALIAS");
+                                let tails = leaf["causes"].as_array().unwrap();
+                                assert!(tails.iter().all(|tail| {
+                                    tail["code"] == "ORNA-E-DEEPEST-EMPTY-ALIAS-TAIL"
+                                        && tail["causes"].as_array().unwrap().is_empty()
+                                }));
+                                tails.len()
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        for note in diagnostic["notes"].as_array().unwrap() {
+            assert_eq!(note, "<redacted>");
+        }
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+
+    let forward_wire = make_wire(false);
+    let reverse_wire = make_wire(true);
+    let forward = Diagnostic::decode_ovb(&forward_wire).unwrap();
+    let reverse = Diagnostic::decode_ovb(&reverse_wire).unwrap();
+    let forward_projection = serde_json::to_value(&forward).unwrap();
+    let reverse_projection = serde_json::to_value(&reverse).unwrap();
+    assert_redacted_tree(&forward_projection);
+    assert_redacted_tree(&reverse_projection);
+
+    // ORNA-SECRET-002 leaves equal-code order unspecified; this proof follows insertion order.
+    let grown_shape = vec![vec![1, 1], vec![1, 1], vec![1, 1, 2]];
+    let shared_shape = vec![vec![1, 1], vec![1, 1]];
+    let forward_shape = vec![grown_shape.clone(), shared_shape.clone()];
+    let reverse_shape = vec![shared_shape, grown_shape];
+    assert_eq!(deepest_empty_alias_shape(&forward_projection), forward_shape);
+    assert_eq!(deepest_empty_alias_shape(&reverse_projection), reverse_shape);
+
+    let mut replacement = forward.clone();
+    replacement.clone_from(&reverse);
+    assert_eq!(
+        deepest_empty_alias_shape(&serde_json::to_value(&replacement).unwrap()),
+        reverse_shape
+    );
+    replacement.clone_from(&forward);
+    assert_eq!(replacement, forward);
+
+    let forward_json = serde_json::to_vec(&forward).unwrap();
+    let reverse_json = serde_json::to_vec(&reverse).unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"root secret".as_slice(),
+            b"outer alias secret".as_slice(),
+            b"middle alias secret".as_slice(),
+            b"leaf alias secret".as_slice(),
+            b"deepest empty alias tail secret".as_slice(),
+        ])
+    {
+        for bytes in [&forward_json, &reverse_json, &forward_wire, &reverse_wire] {
+            assert!(!bytes
+                .windows(disclosure.len())
+                .any(|window| window == disclosure));
+        }
+    }
+    assert_eq!(
+        serde_json::to_value(Diagnostic::decode_ovb(&forward_wire).unwrap()).unwrap()["causes"],
+        forward_projection["causes"]
+    );
+    assert_eq!(
+        serde_json::to_value(Diagnostic::decode_ovb(&reverse_wire).unwrap()).unwrap()["causes"],
+        reverse_projection["causes"]
+    );
+}
