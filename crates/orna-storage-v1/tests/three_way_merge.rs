@@ -15621,3 +15621,75 @@ fn path_depth_tombstones_resolve_at_adjacent_segment_boundaries() {
     assert_eq!(tombstones, &[child_key]);
     assert!(matches!(&segments[2], MergedSegment::Reuse { from: MergeSide::Left, .. }));
 }
+
+#[test]
+fn checkpoint_tombstones_at_multiple_depths_preserve_deeper_and_prefix_states() {
+    let deleted_row = parse_fixture(BASE, RowKeyKind::Explicit);
+    let prefix_delete_id = b"consumer/res".to_vec();
+    let prefix_survivor_id = b"consumer/reserve".to_vec();
+    let root_delete_id = b"consumer/reset".to_vec();
+    let child_delete_id = b"consumer/reset/child".to_vec();
+    let deep_reset_id = b"consumer/reset/child/deep".to_vec();
+    let root_extension_id = b"consumer/resetting".to_vec();
+    let prefix_delete = parse_checkpoint_fixture(CHECKPOINT_BASE);
+    let prefix_survivor = parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS);
+    let root_delete = parse_checkpoint_fixture(CHECKPOINT_EDITED);
+    let child_delete = parse_checkpoint_fixture(CHECKPOINT_TAIL_BASE);
+    let deep_base = parse_checkpoint_fixture(CHECKPOINT_TAIL_LEFT);
+    let deep_reset = parse_checkpoint_fixture(CHECKPOINT_RESET);
+    let root_extension = parse_checkpoint_fixture(CHECKPOINT_TAIL_RIGHT);
+
+    // The reference specifies exact three-way row changes and opaque
+    // checkpoint identity, but not prefix cascading for path-shaped IDs. Keep
+    // each map key independent: delete a prefix, an ancestor and a child on
+    // different sides while retaining their neighboring and deeper entries.
+    for row_delete_on_left in [true, false] {
+        for deep_reset_on_left in [true, false] {
+            let mut source = FixtureRows::default();
+            source.add(MergeSide::Base, b"base", vec![deleted_row.clone()]);
+            source.add(MergeSide::Left, b"left", if row_delete_on_left { Vec::new() } else { vec![deleted_row.clone()] });
+            source.add(MergeSide::Right, b"right", if row_delete_on_left { vec![deleted_row.clone()] } else { Vec::new() });
+
+            let mut base = snapshot(schema(true, FieldType::Str), manifest(1, 10, b"base"), None);
+            let mut left = snapshot(schema(true, FieldType::Str), manifest(2, 11, b"left"), None);
+            let mut right = snapshot(schema(true, FieldType::Str), manifest(3, 12, b"right"), None);
+            for branch in [&mut base, &mut left, &mut right] {
+                branch.checkpoints.insert(prefix_delete_id.clone(), prefix_delete.clone());
+                branch.checkpoints.insert(prefix_survivor_id.clone(), prefix_survivor.clone());
+                branch.checkpoints.insert(root_delete_id.clone(), root_delete.clone());
+                branch.checkpoints.insert(child_delete_id.clone(), child_delete.clone());
+                branch.checkpoints.insert(deep_reset_id.clone(), deep_base.clone());
+                branch.checkpoints.insert(root_extension_id.clone(), root_extension.clone());
+            }
+            left.checkpoints.remove(prefix_delete_id.as_slice());
+            left.checkpoints.remove(child_delete_id.as_slice());
+            right.checkpoints.remove(root_delete_id.as_slice());
+            let reset_side = if deep_reset_on_left { &mut left } else { &mut right };
+            reset_side.checkpoints.insert(deep_reset_id.clone(), deep_reset.clone());
+
+            let plan = merge_three_way_snapshots(
+                &base,
+                &left,
+                &right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 100, max_conflicts: 0 },
+            ).unwrap();
+
+            assert_eq!(plan.report.conflicts_lower_bound, 0);
+            assert!(plan.report.affected_checkpoints.is_empty());
+            assert_eq!(source.visited.len(), 3);
+            assert!(!plan.checkpoints.contains_key(prefix_delete_id.as_slice()));
+            assert!(!plan.checkpoints.contains_key(root_delete_id.as_slice()));
+            assert!(!plan.checkpoints.contains_key(child_delete_id.as_slice()));
+            assert_eq!(plan.checkpoints.get(prefix_survivor_id.as_slice()), Some(&prefix_survivor));
+            assert_eq!(plan.checkpoints.get(deep_reset_id.as_slice()), Some(&deep_reset));
+            assert_eq!(plan.checkpoints.get(root_extension_id.as_slice()), Some(&root_extension));
+
+            let MergedSegment::Rows { rows, tombstones, .. } = &plan.tables[&id(1)].segments[0] else {
+                panic!("the fixture row tombstone resolves alongside the depth-spanning checkpoint map")
+            };
+            assert!(rows.is_empty());
+            assert_eq!(tombstones, &[deleted_row.key.clone()]);
+        }
+    }
+}
