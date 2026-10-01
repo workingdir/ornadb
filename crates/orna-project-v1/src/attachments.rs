@@ -8192,6 +8192,10 @@ mod tests {
                     shared_repository.clone(),
                 ),
                 (
+                    "nested_archive_copy_archive_copy_archive".to_owned(),
+                    shared_repository.clone(),
+                ),
+                (
                     "archive_copy_archive_archive".to_owned(),
                     shared_repository.clone(),
                 ),
@@ -8527,11 +8531,18 @@ mod tests {
                 "nested_archive_copy_archive {long_revision_commit}\n"
             ),
         );
+        let expanded_deeper_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!(
+                "nested_archive_copy_archive_copy {expanded_deep_commit}\n"
+            ),
+        );
         let expanded_short_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
             &format!(
-                "nested_archive {short_revision_commit}\nnested_archive_copy {middle_revision_commit}\nnested_archive_copy_archive {long_revision_commit}\nnested_archive_copy_archive_copy {expanded_deep_commit}\n"
+                "nested_archive {short_revision_commit}\nnested_archive_copy {middle_revision_commit}\nnested_archive_copy_archive {long_revision_commit}\nnested_archive_copy_archive_copy {expanded_deep_commit}\nnested_archive_copy_archive_copy_archive {expanded_deeper_commit}\n"
             ),
         );
         let expanded_short_replacement = PinnedDatabase::resolve(
@@ -8726,6 +8737,39 @@ mod tests {
                 .unwrap()
                 .pin(),
             short_pin.pin()
+        );
+        // A further repeated suffix is unspecified too; v1 preserves it as
+        // its own pin and carries the existing deeper closure through it.
+        let nested_archive_deeper_pin = expanded_short_session
+            .database("nested_archive_copy_archive_copy_archive")
+            .unwrap()
+            .pin();
+        assert_eq!(
+            nested_archive_deeper_pin.name(),
+            "nested_archive_copy_archive_copy_archive"
+        );
+        assert_eq!(
+            nested_archive_deeper_pin.commit().as_str(),
+            expanded_deeper_commit
+        );
+        let expanded_deeper_child = resolver
+            .resolve_for_parent(
+                expanded_short_session
+                    .database("nested_archive_copy_archive_copy_archive")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            expanded_deeper_child.primary().pin().name(),
+            "nested_archive_copy_archive_copy_archive"
+        );
+        assert_eq!(
+            expanded_deeper_child
+                .database("nested_archive_copy_archive_copy")
+                .unwrap()
+                .pin(),
+            expanded_deep_child.primary().pin()
         );
         assert_eq!(
             root_session
