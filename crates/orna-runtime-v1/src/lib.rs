@@ -21181,6 +21181,206 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_six_nested_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(85), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on six successive nested rejects. None
+        // satisfy take(2), so preserve the innermost missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-nested-six-rejects-then-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (29, 160),
+            "take(2) stays short across six nested rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_seven_nested_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(86), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on seven successive nested rejects. None
+        // satisfy take(2), so preserve the innermost missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-nested-seven-rejects-then-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (30, 182),
+            "take(2) stays short across seven nested rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_eight_nested_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(87), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on eight successive nested rejects. None
+        // satisfy take(2), so preserve the innermost missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-nested-eight-rejects-then-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (31, 204),
+            "take(2) stays short across eight nested rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_nine_nested_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(88), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on nine successive nested rejects. None
+        // satisfy take(2), so preserve the innermost missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-nested-nine-rejects-then-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (32, 226),
+            "take(2) stays short across nine nested rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_ten_nested_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(89), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on ten successive nested rejects. None
+        // satisfy take(2), so preserve the innermost missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-nested-ten-rejects-then-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (33, 248),
+            "take(2) stays short across ten nested rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
     async fn query_take_four_reaches_lookup_failure_after_reject_after_seven_six_split() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;

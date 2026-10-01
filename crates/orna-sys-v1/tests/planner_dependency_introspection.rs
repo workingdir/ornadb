@@ -11919,3 +11919,472 @@ fn explain_closes_three_partial_half_block_writes_from_partial_scan_bound() {
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
 }
+
+#[test]
+fn explain_closes_three_partial_half_block_scans_across_unknown_joins() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN is silent on totaling partial scans across unknown joins.
+    // Preserve each 2-KiB scan as its own one-unit 4-KiB lower bound. Three
+    // scans close a rows-only source bound at MAX-3 exactly; one more source
+    // row crosses MAX. Unknown joins and explicit materialization keep the
+    // reported exact work unknown.
+    let scan_statistics = || {
+        Some(QuerySourceStatistics {
+            estimated_rows: None,
+            estimated_bytes: Some(2_048),
+            mutable_branch: None,
+        })
+    };
+    let explain = |source_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:three-partial-half-block-scans-join-tail"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: None,
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanFirst"),
+                    statistics: scan_statistics(),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownSecond"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanMiddle"),
+                    statistics: scan_statistics(),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownThird"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanLast"),
+                    statistics: scan_statistics(),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:three-partial-half-block-scans")),
+        })
+        .expect("three partial half-block scans across unknown joins")
+    };
+
+    let exact = explain(u64::MAX - 3);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let source = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanSource"))
+        })
+        .expect("rows-only source lower bound");
+    assert_eq!(source.estimated_rows(), Some(u64::MAX - 3));
+    assert_eq!(source.estimated_bytes(), None);
+    assert_eq!(source.estimated_work(), None);
+    for table in [
+        "table:ByteWorkThreeScanFirst",
+        "table:ByteWorkThreeScanMiddle",
+        "table:ByteWorkThreeScanLast",
+    ] {
+        let scan = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("partial half-block scan");
+        assert_eq!(scan.estimated_rows(), None);
+        assert_eq!(scan.estimated_bytes(), Some(2_048));
+        assert_eq!(scan.estimated_work(), None);
+    }
+    for table in [
+        "table:ByteWorkThreeScanUnknownFirst",
+        "table:ByteWorkThreeScanUnknownSecond",
+        "table:ByteWorkThreeScanUnknownThird",
+    ] {
+        let scan = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("unknown scan gap");
+        assert_eq!(scan.estimated_work(), None);
+    }
+    let joins = exact
+        .nodes()
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Join)
+        .collect::<Vec<_>>();
+    assert_eq!(joins.len(), 6);
+    assert!(joins.iter().all(|node| node.estimated_work().is_none()));
+
+    let overflow = explain(u64::MAX - 2);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "three independently rounded scan bounds take the source past MAX"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("partial half-block scan overflow through unknown joins");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
+
+#[test]
+fn explain_closes_three_partial_half_block_scans_and_writes_across_unknown_tails() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN is silent on combining partial scan and write bounds through
+    // unknown join gaps and mutation resets. Keep each 2-KiB operation as a
+    // one-unit 4-KiB lower bound. Three scans and three writes close a
+    // rows-only source bound at MAX-6 exactly; one extra source row signals
+    // overflow. Materialization remains an unknown tail.
+    let scan_statistics = || {
+        Some(QuerySourceStatistics {
+            estimated_rows: None,
+            estimated_bytes: Some(2_048),
+            mutable_branch: None,
+        })
+    };
+    let write = |table: &str, bytes: Option<u64>| QueryMutationDescription {
+        table: obj(table),
+        kind: QueryMutationKind::Update,
+        estimated_affected_rows: None,
+        estimated_write_bytes: bytes,
+        estimated_table_rows_before: Some(1),
+    };
+    let explain = |source_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:three-partial-half-block-scan-write-tail"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: None,
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanFirst"),
+                    statistics: scan_statistics(),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownSecond"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanMiddle"),
+                    statistics: scan_statistics(),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownThird"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanLast"),
+                    statistics: scan_statistics(),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                write("table:ByteWorkThreeScanFirst", Some(2_048)),
+                write("table:ByteWorkThreeScanUnknownFirst", None),
+                write("table:ByteWorkThreeScanMiddle", Some(2_048)),
+                write("table:ByteWorkThreeScanUnknownSecond", None),
+                write("table:ByteWorkThreeScanLast", Some(2_048)),
+            ],
+            materialize_into: Some(obj("materialization:three-partial-half-block-scan-write")),
+        })
+        .expect("three partial half-block scans and writes across unknown tails")
+    };
+
+    let exact = explain(u64::MAX - 6);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let source = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanSource"))
+        })
+        .expect("rows-only source lower bound");
+    assert_eq!(source.estimated_rows(), Some(u64::MAX - 6));
+    assert_eq!(source.estimated_bytes(), None);
+    assert_eq!(source.estimated_work(), None);
+    for table in [
+        "table:ByteWorkThreeScanFirst",
+        "table:ByteWorkThreeScanMiddle",
+        "table:ByteWorkThreeScanLast",
+    ] {
+        let scan = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("partial half-block scan");
+        assert_eq!(scan.estimated_rows(), None);
+        assert_eq!(scan.estimated_bytes(), Some(2_048));
+        assert_eq!(scan.estimated_work(), None);
+
+        let write = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Invoke && node.object() == Some(&obj(table)))
+            .expect("partial half-block write");
+        assert_eq!(write.estimated_rows(), None);
+        assert_eq!(write.estimated_bytes(), Some(2_048));
+        assert_eq!(write.estimated_work(), None);
+    }
+    for table in [
+        "table:ByteWorkThreeScanUnknownFirst",
+        "table:ByteWorkThreeScanUnknownSecond",
+    ] {
+        let unknown_write = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Invoke && node.object() == Some(&obj(table)))
+            .expect("unknown mutation reset");
+        assert_eq!(unknown_write.estimated_work(), None);
+    }
+
+    let overflow = explain(u64::MAX - 5);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the three scan and three write lower bounds take the source past MAX"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("partial scan and write overflow through unknown tails");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
+
+#[test]
+fn explain_closes_three_partial_half_block_scans_and_writes_with_source_remainder() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN is silent on carrying a partial source remainder together
+    // with three independently rounded partial scans and writes. Preserve
+    // one 4-KiB lower-bound unit for each 2-KiB operation. Seven such units
+    // plus the row-only closing write reach MAX exactly at MAX-7; one more
+    // row overflows through the unknown gaps and materialization tail.
+    let scan_statistics = || {
+        Some(QuerySourceStatistics {
+            estimated_rows: None,
+            estimated_bytes: Some(2_048),
+            mutable_branch: None,
+        })
+    };
+    let partial_write = |table: &str| QueryMutationDescription {
+        table: obj(table),
+        kind: QueryMutationKind::Update,
+        estimated_affected_rows: None,
+        estimated_write_bytes: Some(2_048),
+        estimated_table_rows_before: Some(1),
+    };
+    let unknown_write = |table: &str| QueryMutationDescription {
+        table: obj(table),
+        kind: QueryMutationKind::Update,
+        estimated_affected_rows: None,
+        estimated_write_bytes: None,
+        estimated_table_rows_before: None,
+    };
+    let explain = |closing_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:three-partial-half-block-source-remainder"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanFirst"),
+                    statistics: scan_statistics(),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownSecond"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanMiddle"),
+                    statistics: scan_statistics(),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownThird"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanLast"),
+                    statistics: scan_statistics(),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                partial_write("table:ByteWorkThreeScanFirst"),
+                unknown_write("table:ByteWorkThreeScanUnknownFirst"),
+                partial_write("table:ByteWorkThreeScanMiddle"),
+                unknown_write("table:ByteWorkThreeScanUnknownSecond"),
+                partial_write("table:ByteWorkThreeScanLast"),
+                QueryMutationDescription {
+                    table: obj("table:ByteWorkThreeScanLast"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(closing_rows),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(closing_rows),
+                },
+            ],
+            materialize_into: Some(obj("materialization:three-partial-half-block-source-remainder")),
+        })
+        .expect("source remainder, three partial scans, and three partial writes")
+    };
+
+    let exact = explain(u64::MAX - 7);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let source = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanSource"))
+        })
+        .expect("partial source remainder");
+    assert_eq!(source.estimated_rows(), None);
+    assert_eq!(source.estimated_bytes(), Some(2_048));
+    assert_eq!(source.estimated_work(), None);
+    for table in [
+        "table:ByteWorkThreeScanFirst",
+        "table:ByteWorkThreeScanMiddle",
+        "table:ByteWorkThreeScanLast",
+    ] {
+        let scan = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("partial half-block scan");
+        assert_eq!(scan.estimated_rows(), None);
+        assert_eq!(scan.estimated_bytes(), Some(2_048));
+        assert_eq!(scan.estimated_work(), None);
+    }
+    let partial_writes = exact
+        .nodes()
+        .iter()
+        .filter(|node| {
+            node.kind() == PlanNodeKind::Invoke
+                && node.estimated_bytes() == Some(2_048)
+                && [
+                    "table:ByteWorkThreeScanFirst",
+                    "table:ByteWorkThreeScanMiddle",
+                    "table:ByteWorkThreeScanLast",
+                ]
+                .iter()
+                .any(|table| node.object() == Some(&obj(table)))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(partial_writes.len(), 3);
+    assert!(partial_writes.iter().all(|node| {
+        node.estimated_rows().is_none() && node.estimated_work().is_none()
+    }));
+    let closing_write = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Invoke
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+                && node.estimated_rows() == Some(u64::MAX - 7)
+        })
+        .expect("row-only write closes the seven partial-byte lower bounds");
+    assert_eq!(closing_write.estimated_bytes(), None);
+    assert_eq!(closing_write.estimated_work(), None);
+
+    let overflow = explain(u64::MAX - 6);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one extra closing row carries the source and six operation bounds past MAX"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("three partial scan and write source-remainder overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
