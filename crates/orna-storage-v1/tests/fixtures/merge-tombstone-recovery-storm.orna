@@ -1,0 +1,5 @@
+{
+  id: "root/child/deep/storm/seed",
+  name: "Storm row",
+  city: "London",
+}
