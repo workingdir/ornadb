@@ -15698,6 +15698,10 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
     let terminal_after_replay_query = status_query([108; 16], [91; 16], terminal_fingerprint);
     let terminal_after_replay_fingerprint =
         request_fingerprint(&terminal_after_replay_query, [1; 16]);
+    let after_retry_sweep_terminal_query =
+        status_query([109; 16], [91; 16], terminal_fingerprint);
+    let after_retry_sweep_terminal_fingerprint =
+        request_fingerprint(&after_retry_sweep_terminal_query, [1; 16]);
     let first_unknown_status = block_on(host.dispatch_frame(
         [6; 16],
         2,
@@ -16715,6 +16719,85 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
         .expect("the third fresh terminal identity has its own stable retry"),
         terminal_after_replay
     );
+    // A fresh terminal snapshot after replaying the sequential identities has
+    // independent identity and does not displace any accepted response.
+    let after_retry_sweep_terminal = block_on(host.dispatch_frame(
+        [6; 16],
+        24,
+        Frame::Binary(after_retry_sweep_terminal_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a fresh identity after the retry sweep reads the terminal result");
+    assert!(matches!(
+        &after_retry_sweep_terminal.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *fingerprint == terminal_fingerprint
+            && result == &expected_first_terminal_body
+    ));
+    // The reference specifies retry identity, but not snapshot retention
+    // across this replay sweep; keep every earlier response independently pinned.
+    for (query, expected, label) in [
+        (
+            &next_fresh_terminal_first_query,
+            &next_fresh_terminal_first,
+            "the oldest sequential terminal response remains pinned",
+        ),
+        (
+            &replayed_eval_fresh_terminal_query,
+            &replayed_eval_fresh_terminal,
+            "the next sequential terminal response remains pinned",
+        ),
+        (
+            &sequential_terminal_mismatch_query,
+            &sequential_terminal_mismatch,
+            "the independent mismatch diagnostic remains pinned",
+        ),
+        (
+            &post_mismatch_fresh_terminal_query,
+            &post_mismatch_fresh_terminal,
+            "the post-mismatch response remains pinned",
+        ),
+        (
+            &final_sequential_terminal_query,
+            &final_sequential_terminal,
+            "the later sequential terminal response remains pinned",
+        ),
+        (
+            &terminal_after_replay_query,
+            &terminal_after_replay,
+            "the replay-following terminal response remains pinned",
+        ),
+    ] {
+        let replay = block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect(label);
+        assert_eq!(&replay, expected, "{label}");
+    }
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(after_retry_sweep_terminal_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the terminal snapshot after the retry sweep has its own retry"),
+        after_retry_sweep_terminal
+    );
     assert_eq!(
         block_on(host.dispatch_frame(
             [6; 16],
@@ -17060,6 +17143,11 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
             [108; 16],
             terminal_after_replay_fingerprint,
             terminal_after_replay,
+        ),
+        (
+            [109; 16],
+            after_retry_sweep_terminal_fingerprint,
+            after_retry_sweep_terminal,
         ),
         ([97; 16], current_first_status_fingerprint, current_first_status),
         ([98; 16], current_second_status_fingerprint, current_second_status),
