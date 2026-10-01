@@ -13359,3 +13359,183 @@ fn replayed_error_tail_order_is_stable_between_siblings() {
     assert_redacted_tree(&decoded);
     assert_eq!(decoded["causes"], projection["causes"]);
 }
+
+#[test]
+fn replayed_error_tail_order_survives_an_interposed_error_sibling() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let admitted = |code: &str, severity: DiagnosticSeverity, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            severity,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let make_wire = |payload: &str, tail_codes: [&str; 2]| {
+        let terminal = admitted(
+            "ORNA-E-REPLAY-INTERPOSED-TERMINAL",
+            DiagnosticSeverity::Error,
+            payload,
+        )
+        .with_cause(admitted(
+            tail_codes[0],
+            DiagnosticSeverity::Error,
+            &format!("{payload} first tail secret"),
+        ))
+        .with_cause(admitted(
+            tail_codes[1],
+            DiagnosticSeverity::Error,
+            &format!("{payload} second tail secret"),
+        ));
+        let parent = admitted(
+            "ORNA-E-REPLAY-INTERPOSED-PARENT",
+            DiagnosticSeverity::Error,
+            payload,
+        )
+        .with_cause(terminal);
+        admitted(
+            "ORNA-E-REPLAY-INTERPOSED-ROOT",
+            DiagnosticSeverity::Error,
+            payload,
+        )
+        .with_cause(parent)
+        .encode_ovb()
+        .unwrap()
+    };
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    fn tail_entries(diagnostic: &serde_json::Value) -> Vec<(String, String)> {
+        let terminal = &diagnostic["causes"][0]["causes"][0];
+        terminal["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tail| {
+                (
+                    tail["code"].as_str().unwrap().to_owned(),
+                    tail["severity"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    let forward_wire = make_wire(
+        "forward interposed replay payload",
+        [
+            "ORNA-E-REPLAY-INTERPOSED-TAIL-A",
+            "ORNA-E-REPLAY-INTERPOSED-TAIL-B",
+        ],
+    );
+    let reverse_wire = make_wire(
+        "reverse interposed replay payload",
+        [
+            "ORNA-E-REPLAY-INTERPOSED-TAIL-B",
+            "ORNA-E-REPLAY-INTERPOSED-TAIL-A",
+        ],
+    );
+    let replay_forward = || Diagnostic::decode_ovb(&forward_wire).unwrap();
+    let replay_reverse = || Diagnostic::decode_ovb(&reverse_wire).unwrap();
+    let mut receiver = replay_forward();
+    let forward_snapshot = receiver.clone();
+    receiver.clone_from(&replay_reverse());
+    let reverse_snapshot = receiver.clone();
+    receiver.clone_from(&replay_forward());
+    assert_eq!(receiver, forward_snapshot);
+
+    // ORNA-SECRET-002 requires redaction but does not specify sibling ordering;
+    // retain append order around each replayed error tail.
+    let outer = admitted(
+        "ORNA-E-REPLAY-INTERPOSED-OUTER",
+        DiagnosticSeverity::Error,
+        "public interposed replay admission",
+    )
+    .with_cause(admitted(
+        "ORNA-E-REPLAY-INTERPOSED-BEFORE",
+        DiagnosticSeverity::Warning,
+        "outer sibling payload",
+    ))
+    .with_cause(forward_snapshot)
+    .with_cause(admitted(
+        "ORNA-E-REPLAY-INTERPOSED-ERROR-TAIL",
+        DiagnosticSeverity::Error,
+        "interposed error tail secret",
+    ))
+    .with_cause(reverse_snapshot)
+    .with_cause(admitted(
+        "ORNA-E-REPLAY-INTERPOSED-AFTER",
+        DiagnosticSeverity::Warning,
+        "outer sibling payload",
+    ));
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["severity"], "error");
+    assert_eq!(projection["message"], "public interposed replay admission");
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 5);
+    assert_eq!(
+        causes
+            .iter()
+            .map(|cause| cause["code"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "ORNA-E-REPLAY-INTERPOSED-BEFORE",
+            "ORNA-E-REPLAY-INTERPOSED-ROOT",
+            "ORNA-E-REPLAY-INTERPOSED-ERROR-TAIL",
+            "ORNA-E-REPLAY-INTERPOSED-ROOT",
+            "ORNA-E-REPLAY-INTERPOSED-AFTER",
+        ],
+    );
+    for cause in causes {
+        assert_redacted_tree(cause);
+    }
+    let tails = [tail_entries(&causes[1]), tail_entries(&causes[3])];
+    assert_eq!(
+        tails,
+        [
+            vec![
+                ("ORNA-E-REPLAY-INTERPOSED-TAIL-A".to_owned(), "error".to_owned()),
+                ("ORNA-E-REPLAY-INTERPOSED-TAIL-B".to_owned(), "error".to_owned()),
+            ],
+            vec![
+                ("ORNA-E-REPLAY-INTERPOSED-TAIL-B".to_owned(), "error".to_owned()),
+                ("ORNA-E-REPLAY-INTERPOSED-TAIL-A".to_owned(), "error".to_owned()),
+            ],
+        ],
+    );
+
+    let json = serde_json::to_vec(&outer).unwrap();
+    let encoded = outer.encode_ovb().unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"forward interposed replay payload".as_slice(),
+            b"reverse interposed replay payload".as_slice(),
+            b"outer sibling payload".as_slice(),
+            b"interposed error tail secret".as_slice(),
+            b"forward interposed replay payload first tail secret".as_slice(),
+            b"forward interposed replay payload second tail secret".as_slice(),
+            b"reverse interposed replay payload first tail secret".as_slice(),
+            b"reverse interposed replay payload second tail secret".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
+    assert_redacted_tree(&decoded);
+    assert_eq!(decoded["causes"], projection["causes"]);
+}
