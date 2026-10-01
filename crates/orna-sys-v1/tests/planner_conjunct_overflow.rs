@@ -29,7 +29,8 @@ fn explain_conjunct_filter(rows: Option<u64>) -> orna_sys_v1::ExplainedPlan {
 
 fn explain_conjunct_limit_chain(
     rows: Option<u64>,
-    limits: &[u64],
+    first_limit: Option<u64>,
+    following_limits: &[u64],
 ) -> Result<orna_sys_v1::ExplainedPlan, orna_sys_v1::ExplainError> {
     explain_query_with_limit_chain(
         &QueryPlanDescription {
@@ -45,11 +46,11 @@ fn explain_conjunct_limit_chain(
             projections: Vec::new(),
             distinct: false,
             ordering: Vec::new(),
-            limit: None,
+            limit: first_limit,
             mutations: Vec::new(),
             materialize_into: None,
         },
-        limits,
+        following_limits,
     )
 }
 
@@ -121,8 +122,8 @@ fn conjunct_overflow_crosses_limit_chain_after_a_representable_prefix() {
 
     let source_rows = u64::MAX / 3;
     let filter_rows = source_rows.div_ceil(2);
-    let first = explain_conjunct_limit_chain(Some(source_rows), &[u64::MAX])
-        .expect("one representable limit stage");
+    let first = explain_conjunct_limit_chain(Some(source_rows), Some(u64::MAX), &[])
+        .expect("one representable described limit stage");
     let first_limit = first.root();
     assert_eq!(first_limit.kind(), PlanNodeKind::Limit);
     assert_eq!(first_limit.estimated_work(), Some(filter_rows));
@@ -130,8 +131,8 @@ fn conjunct_overflow_crosses_limit_chain_after_a_representable_prefix() {
     assert_eq!(first.plan().estimated_cost(), Some(first_cost.as_str()));
     assert_eq!(first_limit.details().get("estimated_cost_overflow"), None);
 
-    let overflow = explain_conjunct_limit_chain(Some(source_rows), &[u64::MAX, u64::MAX])
-        .expect("two-limit chain crossing MAX");
+    let overflow = explain_conjunct_limit_chain(Some(source_rows), Some(u64::MAX), &[u64::MAX])
+        .expect("second limit crosses MAX");
     assert_eq!(overflow.plan().estimated_cost(), None);
     assert_eq!(overflow.root().estimated_rows(), Some(filter_rows));
     assert_eq!(overflow.root().estimated_work(), Some(filter_rows));
@@ -149,7 +150,7 @@ fn conjunct_overflow_crosses_limit_chain_after_a_representable_prefix() {
         2
     );
 
-    let zero_tail = explain_conjunct_limit_chain(Some(source_rows), &[u64::MAX, u64::MAX, 0])
+    let zero_tail = explain_conjunct_limit_chain(Some(source_rows), Some(u64::MAX), &[u64::MAX, 0])
         .expect("overflow followed by output-zero limit");
     assert_eq!(zero_tail.root().estimated_rows(), Some(0));
     assert_eq!(zero_tail.root().estimated_work(), Some(filter_rows));
@@ -159,7 +160,7 @@ fn conjunct_overflow_crosses_limit_chain_after_a_representable_prefix() {
         "a later LIMIT 0 cannot clear overflow already established in the chain"
     );
 
-    let unknown = explain_conjunct_limit_chain(None, &[u64::MAX, u64::MAX, 0])
+    let unknown = explain_conjunct_limit_chain(None, Some(u64::MAX), &[u64::MAX, 0])
         .expect("unknown conjunct statistics across limit chain");
     assert_eq!(unknown.plan().estimated_cost(), None);
     assert_eq!(
@@ -169,7 +170,7 @@ fn conjunct_overflow_crosses_limit_chain_after_a_representable_prefix() {
 
     let too_many_limits = vec![0; MAX_PLAN_NODES];
     assert_eq!(
-        explain_conjunct_limit_chain(Some(source_rows), &too_many_limits),
+        explain_conjunct_limit_chain(Some(source_rows), None, &too_many_limits),
         Err(ExplainError::TooManyNodes)
     );
 }
