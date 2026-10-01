@@ -1052,6 +1052,28 @@ fn request_fingerprint(bytes: &[u8], session: [u8; 16]) -> [u8; 32] {
     canonical_request_fingerprint(session, &envelope, Limits::default().protocol).unwrap()
 }
 
+fn replay_durable_status_snapshots(
+    host: &mut LiveHost,
+    attachment: [u8; 16],
+    snapshots: &[(Vec<u8>, Envelope)],
+    sequence: &mut u64,
+    application: &mut UnitApplication,
+) {
+    for (query, expected) in snapshots {
+        let replay = block_on(host.dispatch_frame(
+            attachment,
+            *sequence,
+            Frame::Binary(query.clone()),
+            application,
+        ))
+        .unwrap()
+        .response
+        .expect("each previously pinned status identity remains available");
+        assert_eq!(&replay, expected);
+        *sequence += 1;
+    }
+}
+
 fn remove_test_repository(root: &Path) {
     fs::remove_dir_all(root).unwrap();
 }
@@ -5678,41 +5700,57 @@ fn durable_status_snapshots_survive_repeated_owner_handoffs() {
         }))
         .unwrap();
 
-        for (query, expected) in &snapshots {
-            let replay = block_on(host.dispatch_frame(
-                attachment,
+        let mut current_attachment = attachment;
+        for reconnect in 0..=2 {
+            if reconnect > 0 {
+                let next_attachment = [30 + handoff * 2 + reconnect - 1; 16];
+                let outcome = block_on(host.resume(ResumeRequest {
+                    id: session,
+                    origin: &origin(),
+                    credential: &credential,
+                    attachment: next_attachment,
+                    now: sequence,
+                }))
+                .unwrap();
+                assert!(matches!(
+                    outcome,
+                    orna_security_v1::AttachOutcome::Replaced(previous)
+                        if previous == orna_security_v1::AttachmentId::new(current_attachment)
+                ));
+                current_attachment = next_attachment;
+            }
+
+            replay_durable_status_snapshots(
+                &mut host,
+                current_attachment,
+                &snapshots,
+                &mut sequence,
+                &mut application,
+            );
+
+            let fresh_request = status_request([83 + handoff * 3 + reconnect; 16]);
+            let fresh = block_on(host.dispatch_frame(
+                current_attachment,
                 sequence,
-                Frame::Binary(query.clone()),
+                Frame::Binary(fresh_request.clone()),
                 &mut application,
             ))
             .unwrap()
             .response
-            .expect("every prior query identity remains replayable after takeover");
-            assert_eq!(&replay, expected);
+            .expect("a new query observes the recovered Orphaned state");
+            assert!(matches!(
+                &fresh.message,
+                Message::RequestStatusResult {
+                    target,
+                    state: orna_protocol_v1::RequestState::Orphaned,
+                    fingerprint: Some(fingerprint),
+                    result: Some(_),
+                } if *target == [81; 16] && *fingerprint == target_fingerprint
+            ));
+            snapshots.push((fresh_request, fresh));
             sequence += 1;
         }
 
-        let fresh_request = status_request([83 + handoff; 16]);
-        let fresh = block_on(host.dispatch_frame(
-            attachment,
-            sequence,
-            Frame::Binary(fresh_request.clone()),
-            &mut application,
-        ))
-        .unwrap()
-        .response
-        .expect("a new query observes the recovered Orphaned state");
-        assert!(matches!(
-            &fresh.message,
-            Message::RequestStatusResult {
-                target,
-                state: orna_protocol_v1::RequestState::Orphaned,
-                fingerprint: Some(fingerprint),
-                result: Some(_),
-            } if *target == [81; 16] && *fingerprint == target_fingerprint
-        ));
-        snapshots.push((fresh_request, fresh));
-        sequence += 1;
         current_owner = replacement;
         drop(host);
     }
