@@ -14805,6 +14805,57 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     }
     assert_eq!(application.calls, 1);
 
+    // The reference is silent on repeating the reverse-phase cycle; each
+    // same-target diagnostic remains independently replayable after a further
+    // terminal failure replay.
+    for (frame, expected, label, now) in [
+        (
+            Frame::Binary(repeated_same_target_query.clone()),
+            repeated_same_target_mismatch.clone(),
+            "the second mismatch starts the repeated reverse-phase cycle",
+            48,
+        ),
+        (
+            Frame::Binary(terminal_eval.clone()),
+            terminal_eval_replay.clone(),
+            "the terminal failure replays after the repeated cycle starts",
+            49,
+        ),
+        (
+            Frame::Binary(same_target_wrong_fingerprint_query.clone()),
+            same_target_fingerprint_mismatch.clone(),
+            "the first mismatch replays in the repeated reverse phase",
+            50,
+        ),
+        (
+            Frame::Binary(terminal_eval.clone()),
+            terminal_eval_replay.clone(),
+            "the terminal failure remains stable through the repeated cycle",
+            51,
+        ),
+        (
+            Frame::Binary(repeated_same_target_query.clone()),
+            repeated_same_target_mismatch.clone(),
+            "the second mismatch replays after repeated terminal failure replay",
+            52,
+        ),
+        (
+            Frame::Binary(same_target_wrong_fingerprint_query.clone()),
+            same_target_fingerprint_mismatch.clone(),
+            "the first mismatch closes the repeated reverse phase",
+            53,
+        ),
+    ] {
+        assert_eq!(
+            block_on(host.dispatch_frame([6; 16], now, frame, &mut application))
+                .unwrap()
+                .response
+                .expect(label),
+            expected
+        );
+    }
+    assert_eq!(application.calls, 1);
+
     let fresh_status_query = Envelope {
         request: Some([94; 16]),
         watch: None,
@@ -14819,7 +14870,7 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     let fresh_status_fingerprint = request_fingerprint(&fresh_status_query, [1; 16]);
     let fresh_status = block_on(host.dispatch_frame(
         [6; 16],
-        48,
+        54,
         Frame::Binary(fresh_status_query),
         &mut application,
     ))
