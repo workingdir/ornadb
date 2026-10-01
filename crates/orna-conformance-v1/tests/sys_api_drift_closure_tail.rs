@@ -393,6 +393,26 @@ fn edge_interplay_fixture_composes_unknown_target_count_with_exactness() {
 }
 
 #[test]
+fn edge_interplay_fixture_composes_unknown_target_count_with_inexactness() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The frozen schema does not couple a nullable row_count with row_count_exact; keep the
+    // unknown/inexact combination representable after resolving the target through a closure.
+    assert!(
+        analysis.is_ok(),
+        "unknown target-count and inexactness predicates must compose: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_composes_present_target_count_with_inexactness() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
