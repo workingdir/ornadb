@@ -15908,11 +15908,164 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
         .expect("the original first identity remains pinned after both mismatch cycles"),
         first_unknown_status
     );
+
+    // A fresh identity reads the terminal target state while both older
+    // identities keep their admitted Unknown snapshots and independent retry
+    // records. The reference does not define this fresh-versus-pinned order.
+    let current_first_status_query = status_query([97; 16], [91; 16], terminal_fingerprint);
+    let current_first_status_fingerprint =
+        request_fingerprint(&current_first_status_query, [1; 16]);
+    let expected_first_terminal_body =
+        ResultBody::from_result(&terminal_eval_replay, Limits::default().protocol).unwrap();
+    let current_first_status = block_on(host.dispatch_frame(
+        [6; 16],
+        21,
+        Frame::Binary(current_first_status_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a new first-target status identity reads the terminal failure");
+    assert!(matches!(
+        &current_first_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *fingerprint == terminal_fingerprint
+            && result == &expected_first_terminal_body
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            22,
+            Frame::Binary(second_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the earlier second identity still returns its pinned Unknown response"),
+        second_unknown_status
+    );
+
+    let current_second_status_query = status_query([98; 16], [92; 16], other_fingerprint);
+    let current_second_status_fingerprint =
+        request_fingerprint(&current_second_status_query, [1; 16]);
+    let expected_second_terminal_body =
+        ResultBody::from_result(&other_eval_replay, Limits::default().protocol).unwrap();
+    let current_second_status = block_on(host.dispatch_frame(
+        [6; 16],
+        23,
+        Frame::Binary(current_second_status_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a new second-target status identity reads its terminal failure");
+    assert!(matches!(
+        &current_second_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [92; 16]
+            && *fingerprint == other_fingerprint
+            && result == &expected_second_terminal_body
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(first_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the earlier first identity still returns its pinned Unknown response"),
+        first_unknown_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            25,
+            Frame::Binary(retargeted_first_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the first identity's retarget diagnostic survives fresh terminal snapshots"),
+        retargeted_first_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            26,
+            Frame::Binary(other_eval.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the second terminal target remains replayable between fresh queries"),
+        other_eval_replay
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            27,
+            Frame::Binary(current_first_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the fresh first-target terminal snapshot replays independently"),
+        current_first_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            28,
+            Frame::Binary(current_second_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the fresh second-target terminal snapshot replays independently"),
+        current_second_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            29,
+            Frame::Binary(second_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the second identity remains pinned after fresh terminal snapshots"),
+        second_unknown_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            30,
+            Frame::Binary(first_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the first identity remains pinned after fresh terminal snapshots"),
+        first_unknown_status
+    );
     assert_eq!(application.calls, 2);
 
     for (request_id, fingerprint, expected) in [
         ([93; 16], first_status_fingerprint, first_unknown_status),
         ([95; 16], second_status_fingerprint, second_unknown_status),
+        ([97; 16], current_first_status_fingerprint, current_first_status),
+        ([98; 16], current_second_status_fingerprint, current_second_status),
     ] {
         let status = block_on(open_durable_state(&repository).request_status_for_identity(
             RequestIdentity {
