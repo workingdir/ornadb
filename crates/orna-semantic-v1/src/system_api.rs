@@ -704,7 +704,7 @@ impl SystemApi {
 
 pub(crate) fn embedded_system_api() -> &'static SystemApi {
     static API: OnceLock<SystemApi> = OnceLock::new();
-    API.get_or_init(|| SystemApi::embedded().expect("checked-in sys API must remain valid"))
+    API.get_or_init(|| SystemApi::embedded().expect("embedded generated sys API must remain valid"))
 }
 
 fn resolve_fields<'a>(

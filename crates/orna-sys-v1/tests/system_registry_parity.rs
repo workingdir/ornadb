@@ -5,32 +5,29 @@ use std::{
 };
 
 use orna_sys_v1::{
-    SystemProviderAbi, system_api_json, system_binding_stubs, system_dispatch_table,
-    system_provider_abi_json,
+    SystemProviderAbi, system_api_json, system_api_schema_json, system_binding_stubs,
+    system_dispatch_table, system_provider_abi_json,
 };
+use sha2::{Digest, Sha256};
 use serde_json::Value;
 
 #[path = "../build_support.rs"]
 mod build_support;
 
-const PUBLISHED_SYS_API: &str = include_str!("../../../api/sys.json");
+const SYS_API_V1_SHA256: &str = "b569785bfaa204b366b2cee444c01a9aa8dd74c710852fdad925dcfae60a256f";
 
 fn regenerate() -> build_support::GeneratedSysArtifacts {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let workspace = manifest
-        .parent()
-        .and_then(Path::parent)
-        .expect("sys crate is two levels below the workspace root");
     let collector = build_support::collect_rust_sources(&manifest.join("src"))
         .expect("annotated implementation methods form a valid registry");
-    let registry: Value = serde_json::from_slice(
-        &fs::read(manifest.join("src/system_api_inventory.json")).expect("read type inventory"),
-    )
-    .expect("type inventory is JSON");
-    let schema: Value = serde_json::from_slice(
-        &fs::read(workspace.join("api/sys.schema.json")).expect("read published JSON Schema"),
-    )
-    .expect("published schema is JSON");
+    let registry = collector
+        .type_graph
+        .clone()
+        .expect("annotated implementation registry owns the sys type graph");
+    let schema = collector
+        .schema
+        .clone()
+        .expect("annotated implementation registry owns the schema contract");
 
     build_support::generate_sys_artifacts(&collector.functions, registry, &schema)
         .expect("annotated registry regenerates all sys binding artifacts")
@@ -62,12 +59,19 @@ fn generated_modules(root: &Path) -> BTreeMap<String, String> {
 }
 
 #[test]
-fn generated_sys_artifacts_regenerate_byte_for_byte_from_annotated_registry() {
+fn generated_sys_artifacts_regenerate_byte_for_byte_across_fresh_registry_builds() {
     let regenerated = regenerate();
+    let second_build = regenerate();
+    assert_eq!(
+        regenerated, second_build,
+        "independent registry collection and generation runs must emit identical artifacts"
+    );
     let out_dir = Path::new(env!("OUT_DIR"));
 
-    assert_eq!(regenerated.api_json, PUBLISHED_SYS_API);
     assert_eq!(regenerated.api_json, system_api_json());
+    let api_hash = format!("{:x}", Sha256::digest(regenerated.api_json.as_bytes()));
+    assert_eq!(api_hash, SYS_API_V1_SHA256, "on-demand API retains the frozen 1.0 bytes");
+    assert_eq!(regenerated.schema_json, system_api_schema_json());
     assert_eq!(
         regenerated.provider_abi_json,
         system_provider_abi_json(),
@@ -82,6 +86,11 @@ fn generated_sys_artifacts_regenerate_byte_for_byte_from_annotated_registry() {
     assert_eq!(
         fs::read_to_string(out_dir.join("api_sys.json")).expect("read build API artifact"),
         regenerated.api_json
+    );
+    assert_eq!(
+        fs::read_to_string(out_dir.join("system_api_schema.json"))
+            .expect("read build schema artifact"),
+        regenerated.schema_json
     );
     assert_eq!(
         fs::read_to_string(out_dir.join("system_provider_abi.json"))
@@ -103,6 +112,15 @@ fn generated_sys_artifacts_regenerate_byte_for_byte_from_annotated_registry() {
         .expect("regenerated dispatch table is valid");
     assert_eq!(system_dispatch_table(), &regenerated_table);
     let api: Value = serde_json::from_str(&regenerated.api_json).expect("regenerated API JSON");
+    let schema: Value =
+        serde_json::from_str(&regenerated.schema_json).expect("generated system API schema");
+    assert_eq!(
+        build_support::canonical_pretty_json(&schema).unwrap() + "\n",
+        regenerated.schema_json,
+        "embedded schema serialization is deterministic"
+    );
+    build_support::validate_published_schema_shape(&api, &schema)
+        .expect("generated API document matches its embedded schema");
     let function_ids = api["functions"]
         .as_array()
         .expect("generated API functions")
