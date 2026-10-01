@@ -21570,3 +21570,123 @@ fn decoded_repeated_diagnostic_references_keep_alias_slot_order() {
         }
     }
 }
+
+#[test]
+fn decoded_alias_replacement_keeps_sibling_snapshot_order() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let diagnostic = |code: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let decoded_alias = |code: &str, reference: [u8; 16], order: [&str; 2]| {
+        let source = diagnostic(code)
+            .with_reference(reference)
+            .with_cause(diagnostic(order[0]))
+            .with_cause(diagnostic(order[1]))
+            .redacted();
+        Diagnostic::decode_ovb(&source.encode_ovb().unwrap()).unwrap()
+    };
+    let decoded_base = decoded_alias(
+        "ORNA-E-ALIAS-REPLACE-BASE",
+        [0x31; 16],
+        ["ORNA-E-ALIAS-REPLACE-A", "ORNA-E-ALIAS-REPLACE-B"],
+    );
+    let decoded_replacement = decoded_alias(
+        "ORNA-E-ALIAS-REPLACE-SOURCE",
+        [0x42; 16],
+        ["ORNA-E-ALIAS-REPLACE-B", "ORNA-E-ALIAS-REPLACE-A"],
+    );
+    let mut replaced_alias = decoded_base.clone();
+    let sibling_snapshot = decoded_base.clone();
+    replaced_alias.clone_from(&decoded_replacement);
+    let composed = diagnostic("ORNA-E-ALIAS-REPLACE-ROOT")
+        .with_cause(replaced_alias)
+        .with_cause(diagnostic("ORNA-E-ALIAS-REPLACE-EMPTY"))
+        .with_cause(sibling_snapshot)
+        .with_cause(decoded_base.clone())
+        .redacted();
+
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        assert!(diagnostic["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|note| note == "<redacted>"));
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    fn assert_alias(
+        alias: &serde_json::Value,
+        code: &str,
+        reference: &str,
+        order: [&str; 2],
+    ) {
+        assert_eq!(alias["code"].as_str(), Some(code));
+        assert_eq!(alias["reference"].as_str(), Some(reference));
+        assert_eq!(
+            alias["causes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|cause| cause["code"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            order
+        );
+    }
+
+    let projection = serde_json::to_value(&composed).unwrap();
+    assert_redacted_tree(&projection);
+    let aliases = projection["causes"].as_array().unwrap();
+    assert_eq!(aliases.len(), 4);
+    assert_alias(
+        &aliases[0],
+        "ORNA-E-ALIAS-REPLACE-SOURCE",
+        "42424242-4242-4242-4242-424242424242",
+        ["ORNA-E-ALIAS-REPLACE-B", "ORNA-E-ALIAS-REPLACE-A"],
+    );
+    assert_eq!(aliases[1]["code"], "ORNA-E-ALIAS-REPLACE-EMPTY");
+    assert!(aliases[1]["causes"].as_array().unwrap().is_empty());
+    assert_alias(
+        &aliases[2],
+        "ORNA-E-ALIAS-REPLACE-BASE",
+        "31313131-3131-3131-3131-313131313131",
+        ["ORNA-E-ALIAS-REPLACE-A", "ORNA-E-ALIAS-REPLACE-B"],
+    );
+    assert_eq!(aliases[2], aliases[3]);
+    assert_eq!(
+        serde_json::to_value(&decoded_base).unwrap()["causes"],
+        aliases[2]["causes"]
+    );
+
+    let wire = composed.encode_ovb().unwrap();
+    let replayed = Diagnostic::decode_ovb(&wire).unwrap();
+    let replayed_projection = serde_json::to_value(&replayed).unwrap();
+    assert_redacted_tree(&replayed_projection);
+    assert_eq!(replayed_projection, projection);
+    let json = serde_json::to_vec(&replayed_projection).unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([fixture.as_bytes()])
+    {
+        for bytes in [&json, &wire] {
+            assert!(!bytes
+                .windows(disclosure.len())
+                .any(|window| window == disclosure));
+        }
+    }
+}
