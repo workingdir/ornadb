@@ -16375,6 +16375,76 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
         .expect("the later fresh terminal snapshot has its own stable retry"),
         replayed_eval_fresh_terminal
     );
+    // Preserve both sequential terminal identities if the newest identity is
+    // retried with a different fingerprint for the same completed target.
+    let sequential_changed_first_eval =
+        eval_with_context([1; 16], [91; 16], [6; 16], None);
+    let sequential_terminal_mismatch_query = status_query(
+        [105; 16],
+        [91; 16],
+        request_fingerprint(&sequential_changed_first_eval, [1; 16]),
+    );
+    let sequential_terminal_mismatch = block_on(host.dispatch_frame(
+        [6; 16],
+        24,
+        Frame::Binary(sequential_terminal_mismatch_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the newest fresh terminal identity rejects a changed same-target fingerprint");
+    assert!(matches!(
+        &sequential_terminal_mismatch.message,
+        Message::Diagnostic { .. }
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(next_fresh_terminal_first_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the earlier sequential terminal identity stays pinned through the mismatch"),
+        next_fresh_terminal_first
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(replayed_eval_fresh_terminal_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the newest accepted terminal snapshot stays pinned through the mismatch"),
+        replayed_eval_fresh_terminal
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(terminal_eval.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("terminal Eval replay leaves the mismatch diagnostic stable"),
+        terminal_eval_replay
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(sequential_terminal_mismatch_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the sequential terminal mismatch has its own stable retry"),
+        sequential_terminal_mismatch
+    );
     assert_eq!(
         block_on(host.dispatch_frame(
             [6; 16],
