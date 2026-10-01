@@ -15679,6 +15679,10 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
         status_query([103; 16], [92; 16], other_fingerprint);
     let fresh_terminal_after_mixed_retries_fingerprint =
         request_fingerprint(&fresh_terminal_after_mixed_retries_query, [1; 16]);
+    let next_fresh_terminal_first_query =
+        status_query([104; 16], [91; 16], terminal_fingerprint);
+    let next_fresh_terminal_first_fingerprint =
+        request_fingerprint(&next_fresh_terminal_first_query, [1; 16]);
     let first_unknown_status = block_on(host.dispatch_frame(
         [6; 16],
         2,
@@ -16287,6 +16291,40 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
             && *fingerprint == other_fingerprint
             && result == &expected_second_terminal_body
     ));
+    // The reference leaves the order of fresh terminal reads across both
+    // completed targets open; pin a newer first-target response independently.
+    let next_fresh_terminal_first = block_on(host.dispatch_frame(
+        [6; 16],
+        24,
+        Frame::Binary(next_fresh_terminal_first_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a later fresh identity reads the first target as Terminal");
+    assert!(matches!(
+        &next_fresh_terminal_first.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *fingerprint == terminal_fingerprint
+            && result == &expected_first_terminal_body
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(fresh_terminal_after_mixed_retries_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the earlier fresh second-target terminal snapshot remains pinned"),
+        fresh_terminal_after_mixed_retries
+    );
     assert_eq!(
         block_on(host.dispatch_frame(
             [6; 16],
@@ -16595,6 +16633,11 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
             [103; 16],
             fresh_terminal_after_mixed_retries_fingerprint,
             fresh_terminal_after_mixed_retries,
+        ),
+        (
+            [104; 16],
+            next_fresh_terminal_first_fingerprint,
+            next_fresh_terminal_first,
         ),
         ([97; 16], current_first_status_fingerprint, current_first_status),
         ([98; 16], current_second_status_fingerprint, current_second_status),
