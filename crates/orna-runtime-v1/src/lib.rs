@@ -23827,6 +23827,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_take_two_preserves_results_across_conjunct_filter_splits() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=10)
+            .map(|row_id| {
+                let title = if matches!(row_id, 7 | 9) {
+                    "later"
+                } else {
+                    "current"
+                };
+                let target = if matches!(row_id, 8 | 10) { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(128), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // ORNA-CFLOW-002 fixes && order and short-circuiting. The reference
+        // does not state whether splitting that conjunction into ordered
+        // filters changes work at a take(2) leaf boundary; preserve the same
+        // prefix and skip the bad lookup on the first-conjunct rejection.
+        let (combined, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-take-two-conjunctive-leaf-prefix.orna"
+            ),
+        );
+        assert_eq!(
+            combined.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(2u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 3),
+            "the combined predicate skips row eight's lookup and stops at its second match"
+        );
+
+        let (split, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-take-two-split-conjunct-leaf-prefix.orna"
+            ),
+        );
+        assert_eq!(
+            split.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(2u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 3),
+            "ordered filter stages preserve the combined predicate's bounded work"
+        );
+    }
+
+    #[tokio::test]
     async fn query_projection_failures_recover_at_the_outer_boundary() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
