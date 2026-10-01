@@ -20315,6 +20315,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_take_three_stops_before_immediate_fourth_match() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=21)
+            .map(|row_id| {
+                let title = if row_id == 8 || row_id == 15 || row_id == 20 || row_id == 21 {
+                    "later"
+                } else {
+                    "current"
+                };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, 99)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(64), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference leaves take(3)'s immediate fourth-match boundary
+        // implicit. Stop on row 20 and keep the adjacent fourth match and
+        // the failing union source unevaluated.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-three-thirteen-rejects-split-seven-six-before-immediate-fourth-match.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(20u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (20, 20),
+            "take(3) closes at row 20 before the immediate fourth match and failing union source"
+        );
+    }
+
+    #[tokio::test]
     async fn query_take_two_closes_after_thirteen_split_rejects_before_four_tail_rejects() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
