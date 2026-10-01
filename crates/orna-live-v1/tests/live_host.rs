@@ -14505,8 +14505,8 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
             20,
         ),
         (
-            same_target_wrong_fingerprint_query,
-            same_target_fingerprint_mismatch,
+            same_target_wrong_fingerprint_query.clone(),
+            same_target_fingerprint_mismatch.clone(),
             "cross-kind ID reuse preserves the same-target fingerprint mismatch",
             21,
         ),
@@ -14545,13 +14545,53 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     let final_terminal_replay = block_on(host.dispatch_frame(
         [6; 16],
         24,
-        Frame::Binary(terminal_eval),
+        Frame::Binary(terminal_eval.clone()),
         &mut application,
     ))
     .unwrap()
     .response
     .expect("the same failure still replays after retarget and cross-kind retries");
     assert_eq!(final_terminal_replay, terminal_eval_replay);
+    assert_eq!(application.calls, 1);
+
+    // The reference is silent on terminal failure replay between two exact
+    // same-target mismatch retries; preserve the mismatch snapshot on both sides.
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            25,
+            Frame::Binary(same_target_wrong_fingerprint_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the first same-target retry replays its mismatch"),
+        same_target_fingerprint_mismatch
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            26,
+            Frame::Binary(terminal_eval.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the terminal failure replays between same-target retries"),
+        terminal_eval_replay
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            27,
+            Frame::Binary(same_target_wrong_fingerprint_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the same-target retry remains stable after terminal failure replay"),
+        same_target_fingerprint_mismatch
+    );
     assert_eq!(application.calls, 1);
 
     let fresh_status_query = Envelope {
@@ -14568,7 +14608,7 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     let fresh_status_fingerprint = request_fingerprint(&fresh_status_query, [1; 16]);
     let fresh_status = block_on(host.dispatch_frame(
         [6; 16],
-        25,
+        28,
         Frame::Binary(fresh_status_query),
         &mut application,
     ))
