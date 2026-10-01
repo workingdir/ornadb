@@ -822,6 +822,18 @@ impl std::error::Error for ExplainError {}
 /// requested. Statistics are estimates supplied by the snapshot adapter, and
 /// actual fields remain absent because explain does not execute the query.
 pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_with_limit_chain(query, &[])
+}
+
+/// Explains a query followed by additional ordered limit stages.
+///
+/// The optional `query.limit` is applied first, followed by each value in
+/// `additional_limits`. Every stage retains its own input-row work estimate;
+/// reducing later output cardinality cannot refund work from earlier stages.
+pub fn explain_query_with_limit_chain(
+    query: &QueryPlanDescription,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
     if invalid_reference(query.snapshot.as_str()) {
         return Err(ExplainError::InvalidSnapshot);
     }
@@ -856,6 +868,7 @@ pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, Expl
         .saturating_add(usize::from(query.distinct))
         .saturating_add(usize::from(!query.ordering.is_empty()))
         .saturating_add(usize::from(query.limit.is_some()))
+        .saturating_add(additional_limits.len())
         .saturating_add(query.mutations.len())
         .saturating_add(usize::from(query.materialize_into.is_some()));
     if operator_bound > MAX_PLAN_NODES {
@@ -1032,15 +1045,15 @@ pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, Expl
             work,
         );
     }
-    if let Some(limit) = query.limit {
-        let cardinality = limit_cardinality(current_cardinality, limit);
+    for limit in query.limit.iter().chain(additional_limits.iter()) {
+        let cardinality = limit_cardinality(current_cardinality, *limit);
         let work = current_cardinality.rows;
         current = push_unary(
             &mut operators,
             current,
             PlanNodeKind::Limit,
             None,
-            BTreeMap::from([("limit".to_owned(), PlanDetail::Integer(limit))]),
+            BTreeMap::from([("limit".to_owned(), PlanDetail::Integer(*limit))]),
             cardinality,
             work,
         );
