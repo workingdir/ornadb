@@ -293,6 +293,26 @@ fn edge_interplay_fixture_projects_nullable_capture_across_nested_closures() {
 }
 
 #[test]
+fn edge_interplay_fixture_projects_deepest_nullable_column_field() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The frozen schema does not relate anchor defaults or middle-sibling docs to a candidate
+    // Column's computed_expression; preserve the candidate's nullable type at the third row.
+    assert!(
+        analysis.is_ok(),
+        "nested Column closures must retain the deepest nullable projection: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn runtime_publication_counters_do_not_leak_into_frozen_sys_types() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-internal-publication-metadata.orna",
