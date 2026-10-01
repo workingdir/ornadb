@@ -473,6 +473,26 @@ fn edge_interplay_fixture_null_filters_exact_region_count_after_row_handoff() {
 }
 
 #[test]
+fn edge_interplay_fixture_null_filters_exact_count_after_projection_handoff() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Project row_count from exact rows before entering the callback that null-filters it.
+    // The frozen schema does not make this nullable count present from exactness alone.
+    assert!(
+        analysis.is_ok(),
+        "the projected exact count must remain nullable across the handoff: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_projects_unknown_exact_target_count_through_columns() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
