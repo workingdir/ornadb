@@ -10559,7 +10559,7 @@ fn explain_closes_first_byte_work_across_three_scans_at_max() {
     // Keep per-scan 4-KiB rounding explicit: a known zero-byte scan contributes
     // zero, while either one-byte scan contributes one full local unit. Three
     // known scan costs must remain visible across the three unknown joins.
-    let explain = |source_rows, scan_bytes: [u64; 3]| {
+    let explain = |source_rows, source_bytes, scan_bytes: [u64; 3]| {
         let scan_stats = |bytes| {
             Some(QuerySourceStatistics {
                 estimated_rows: Some(0),
@@ -10572,7 +10572,7 @@ fn explain_closes_first_byte_work_across_three_scans_at_max() {
             source: obj("table:ByteWorkThreeScanSource"),
             source_statistics: Some(QuerySourceStatistics {
                 estimated_rows: Some(source_rows),
-                estimated_bytes: Some(0),
+                estimated_bytes: Some(source_bytes),
                 mutable_branch: None,
             }),
             joins: vec![
@@ -10618,7 +10618,7 @@ fn explain_closes_first_byte_work_across_three_scans_at_max() {
         .expect("known zero- and one-byte scans separated by unknown joins")
     };
 
-    let exact = explain(u64::MAX - 2, [0, 1, 1]);
+    let exact = explain(u64::MAX - 2, 0, [0, 1, 1]);
     assert_eq!(exact.plan().estimated_cost(), None);
     assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
     let nodes = exact.nodes();
@@ -10652,7 +10652,7 @@ fn explain_closes_first_byte_work_across_three_scans_at_max() {
 
     // Close all three scan-local first-byte contributions at MAX. Aggregating
     // their three raw bytes first would charge one block rather than three.
-    let all_first_bytes = explain(u64::MAX - 3, [1, 1, 1]);
+    let all_first_bytes = explain(u64::MAX - 3, 0, [1, 1, 1]);
     assert_eq!(all_first_bytes.plan().estimated_cost(), None);
     assert_eq!(
         all_first_bytes
@@ -10683,7 +10683,7 @@ fn explain_closes_first_byte_work_across_three_scans_at_max() {
         assert_eq!(scan.estimated_work(), Some(1));
     }
 
-    let all_first_overflow = explain(u64::MAX - 2, [1, 1, 1]);
+    let all_first_overflow = explain(u64::MAX - 2, 0, [1, 1, 1]);
     assert_eq!(all_first_overflow.plan().estimated_cost(), None);
     assert_eq!(
         all_first_overflow
@@ -10698,7 +10698,7 @@ fn explain_closes_first_byte_work_across_three_scans_at_max() {
     // closer to MAX makes the known lower bound overflow regardless of which
     // two of the three scan positions carry that first byte.
     for scan_bytes in [[1, 1, 0], [1, 0, 1], [0, 1, 1]] {
-        let overflow = explain(u64::MAX - 1, scan_bytes);
+        let overflow = explain(u64::MAX - 1, 0, scan_bytes);
         assert_eq!(overflow.plan().estimated_cost(), None);
         assert_eq!(
             overflow.root().details().get("estimated_cost_overflow"),
@@ -10706,4 +10706,48 @@ fn explain_closes_first_byte_work_across_three_scans_at_max() {
             "each one-byte scan contributes its own block across unknown gaps"
         );
     }
+
+    // Include the source's own first byte in the same closure. Four separate
+    // one-byte scans each round to one unit, so MAX-4 source rows close exactly;
+    // combining their raw bytes before rounding would charge a single unit.
+    let source_and_scans_exact = explain(u64::MAX - 4, 1, [1, 1, 1]);
+    assert_eq!(source_and_scans_exact.plan().estimated_cost(), None);
+    assert_eq!(
+        source_and_scans_exact
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        None
+    );
+    let source_and_scans_nodes = source_and_scans_exact.nodes();
+    let source = source_and_scans_nodes
+        .iter()
+        .find(|node| node.object() == Some(&obj("table:ByteWorkThreeScanSource")))
+        .unwrap();
+    assert_eq!(source.estimated_bytes(), Some(1));
+    assert_eq!(source.estimated_work(), Some(u64::MAX - 3));
+    for name in [
+        "table:ByteWorkThreeScanFirst",
+        "table:ByteWorkThreeScanMiddle",
+        "table:ByteWorkThreeScanLast",
+    ] {
+        assert_eq!(
+            source_and_scans_nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap()
+                .estimated_work(),
+            Some(1)
+        );
+    }
+
+    let source_and_scans_overflow = explain(u64::MAX - 3, 1, [1, 1, 1]);
+    assert_eq!(source_and_scans_overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        source_and_scans_overflow
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
 }
