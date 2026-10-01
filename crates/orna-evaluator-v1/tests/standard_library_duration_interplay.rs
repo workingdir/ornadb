@@ -5326,3 +5326,38 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_twenty_third_doubling(
         );
     }
 }
+
+#[test]
+fn positive_factor_rescaled_tails_close_after_one_hundred_twenty_fourth_doubling() {
+    // The reference is silent at this next scale. Continue the symmetric edge
+    // correction by doubling the prior tail to 63,802,943,797,675,961,899,382,738,893.456539648 seconds
+    // around 21,267,647,932,558,653,966,460,912,964,485,513,216 minutes, pinning 14769199953165731921153411780892717d 12h 16m.
+    // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
+    ] {
+        assert_eq!(session.submit(source), Ok(None), "{source}");
+    }
+
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-fourth-doubling-from-below-psz4m.orna"),
+        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-fourth-doubling-from-above-psz4m.orna"),
+    ] {
+        let result = session.submit(source);
+        assert_eq!(
+            result,
+            Ok(Some(texts(&[
+                "14769199953165731921153411780892717d 12h 16m",
+                "354460798875977566107681882741425220:16:00",
+                "14769199953165731921153411780892717 days, 12 hours, 16 minutes",
+                "P14769199953165731921153411780892717DT12H16M",
+            ]))),
+            "{source}; diagnostic={}",
+            result.as_ref().err().map_or("none", |error| error.code())
+        );
+    }
+}
