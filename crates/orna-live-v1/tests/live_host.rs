@@ -13406,6 +13406,248 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
             if status.state == orna_runtime_v1::RequestState::Completed
                 && status.fingerprint == twelfth_failure_query_fingerprint
     ));
+
+    // The reference does not order a different retarget mismatch around an
+    // intervening Eval collision. Keep both rejected payloads replayable over
+    // later frames while a new status query observes the original failure.
+    let thirteenth_failure_query = Envelope {
+        request: Some([106; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let thirteenth_failure_query_fingerprint =
+        request_fingerprint(&thirteenth_failure_query, [1; 16]);
+    let thirteenth_failure_status = block_on(host.dispatch_frame(
+        [6; 16],
+        97,
+        Frame::Binary(thirteenth_failure_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a thirteenth fresh status identity observes the retained failure");
+    assert!(matches!(
+        &thirteenth_failure_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(returned),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *returned == fingerprint
+            && result == &expected_failure
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            98,
+            Frame::Binary(thirteenth_failure_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the accepted status snapshot replays before retargeting"),
+        thirteenth_failure_status
+    );
+
+    let retargeted_thirteenth_query = Envelope {
+        request: Some([106; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [92; 16],
+            fingerprint: request_fingerprint(&other_eval, [1; 16]),
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let retargeted_thirteenth_response = block_on(host.dispatch_frame(
+        [6; 16],
+        99,
+        Frame::Binary(retargeted_thirteenth_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("retargeting the thirteenth status identity returns a mismatch");
+    assert!(matches!(
+        &retargeted_thirteenth_response.message,
+        Message::Diagnostic { .. }
+    ));
+
+    let eval_reusing_thirteenth_query =
+        eval_with_context([1; 16], [106; 16], [13; 16], None);
+    assert!(matches!(
+        Envelope::decode(&eval_reusing_thirteenth_query, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    // This test session expires at 100, so remaining distinct frames stay at 99.
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            99,
+            Frame::Binary(eval_reusing_thirteenth_query.clone()),
+            &mut application,
+        )),
+        Err(Error::RequestMismatch)
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            99,
+            Frame::Binary(retargeted_thirteenth_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the rejected retarget replays after the first Eval collision"),
+        retargeted_thirteenth_response
+    );
+
+    let second_retargeted_thirteenth_query = Envelope {
+        request: Some([106; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [92; 16],
+            fingerprint: request_fingerprint(&alternate_target_eval, [1; 16]),
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let second_retargeted_thirteenth_response = block_on(host.dispatch_frame(
+        [6; 16],
+        99,
+        Frame::Binary(second_retargeted_thirteenth_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a second retarget payload also mismatches the accepted identity");
+    assert!(matches!(
+        &second_retargeted_thirteenth_response.message,
+        Message::Diagnostic { .. }
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            99,
+            Frame::Binary(eval_reusing_thirteenth_query),
+            &mut application,
+        )),
+        Err(Error::RequestMismatch)
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            99,
+            Frame::Binary(second_retargeted_thirteenth_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the second retarget mismatch replays after the Eval retry"),
+        second_retargeted_thirteenth_response
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            99,
+            Frame::Binary(retargeted_thirteenth_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the first retarget mismatch remains independently replayable"),
+        retargeted_thirteenth_response
+    );
+
+    let fourteenth_failure_query = Envelope {
+        request: Some([107; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let fourteenth_failure_query_fingerprint =
+        request_fingerprint(&fourteenth_failure_query, [1; 16]);
+    let fourteenth_failure_status = block_on(host.dispatch_frame(
+        [6; 16],
+        99,
+        Frame::Binary(fourteenth_failure_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a fourteenth fresh status frame observes the retained failure");
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            99,
+            Frame::Binary(fourteenth_failure_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the fourteenth status result replays exactly"),
+        fourteenth_failure_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            99,
+            Frame::Binary(second_retargeted_thirteenth_query),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the second retarget mismatch survives the later fresh status"),
+        second_retargeted_thirteenth_response
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            99,
+            Frame::Binary(thirteenth_failure_query),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the original accepted status snapshot survives all mismatch frames"),
+        thirteenth_failure_status
+    );
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [1; 16],
+            request_id: [106; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == thirteenth_failure_query_fingerprint
+    ));
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [1; 16],
+            request_id: [107; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == fourteenth_failure_query_fingerprint
+    ));
     assert_eq!(application.calls, 1);
 
     drop(host);
