@@ -110,6 +110,8 @@ const BYTE_ROUNDING_UNKNOWN_GAP_EDGE_TAIL: &str =
     include_str!("fixtures/byte_rounding_unknown_gap_edge_tail.orna");
 const KNOWN_BYTE_ROUNDING_RESET_TAIL: &str =
     include_str!("fixtures/known_byte_rounding_reset_tail.orna");
+const KNOWN_BYTE_ROUNDING_THREE_RESET_TAIL: &str =
+    include_str!("fixtures/known_byte_rounding_three_reset_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -10157,4 +10159,173 @@ fn explain_closes_known_scan_rounding_with_reset_materialization_after_unknowns(
     assert_eq!(nodes[last_reset].estimated_work(), Some(3));
     assert_eq!(nodes[first_reset].estimated_work(), Some(2));
     assert_eq!(nodes[last_scan].parent(), nodes[first_reset].inputs().first());
+}
+
+#[test]
+fn explain_closes_known_byte_work_across_three_resets_after_unknown() {
+    let parsed = orna_syntax_v1::parse_module(KNOWN_BYTE_ROUNDING_THREE_RESET_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 6);
+
+    // ORNA-PLAN is silent on byte rounding across successive cardinality
+    // resets. Keep the pragmatic local 4-KiB ceiling: each known write adds
+    // its own block contribution, prior reset work stays in the known lower
+    // bound, and materialization prices only the last reset's output. The
+    // one unknown join makes the displayed total unavailable; a chosen source
+    // remainder still lets the local scan/write/materialization tail close
+    // exactly at MAX.
+    let explain = |scan_bytes, write_bytes: [u64; 3]| {
+        let scan_stats = Some(QuerySourceStatistics {
+            estimated_rows: Some(1),
+            estimated_bytes: Some(scan_bytes),
+            mutable_branch: None,
+        });
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:known-byte-rounding-three-reset-tail"),
+            source: obj("table:KnownByteRoundingThreeResetSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 11),
+                estimated_bytes: Some(4_096),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:KnownByteRoundingThreeResetUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:KnownByteRoundingThreeResetScan"),
+                    statistics: scan_stats,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: [
+                (
+                    "table:KnownByteRoundingThreeResetFirst",
+                    write_bytes[0],
+                ),
+                (
+                    "table:KnownByteRoundingThreeResetMiddle",
+                    write_bytes[1],
+                ),
+                (
+                    "table:KnownByteRoundingThreeResetLast",
+                    write_bytes[2],
+                ),
+            ]
+            .into_iter()
+            .map(|(table, bytes)| QueryMutationDescription {
+                table: obj(table),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(1),
+                estimated_write_bytes: Some(bytes),
+                estimated_table_rows_before: Some(1),
+            })
+            .collect(),
+            materialize_into: Some(obj("materialization:known-byte-rounding-three-reset-tail")),
+        })
+        .expect("known scan and repeated reset byte work after unknown join")
+    };
+
+    for write_bytes in [[2_048; 3], [4_095, 4_096, 1]] {
+        let exact = explain(4_095, write_bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let nodes = exact.nodes();
+        let named_node = |name: &str| {
+            nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap()
+        };
+        assert_eq!(
+            named_node("table:KnownByteRoundingThreeResetSource").estimated_work(),
+            Some(u64::MAX - 10)
+        );
+        assert_eq!(
+            named_node("table:KnownByteRoundingThreeResetUnknown").estimated_work(),
+            None
+        );
+        assert_eq!(
+            named_node("table:KnownByteRoundingThreeResetScan").estimated_work(),
+            Some(2)
+        );
+        for name in [
+            "table:KnownByteRoundingThreeResetFirst",
+            "table:KnownByteRoundingThreeResetMiddle",
+            "table:KnownByteRoundingThreeResetLast",
+        ] {
+            assert_eq!(named_node(name).estimated_work(), Some(2));
+        }
+        assert_eq!(exact.root().estimated_work(), Some(2));
+    }
+
+    let cleared_output = explain(4_095, [2_048, 2_048, 0]);
+    assert_eq!(cleared_output.plan().estimated_cost(), None);
+    assert_eq!(cleared_output.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(cleared_output.root().estimated_bytes(), Some(0));
+    assert_eq!(cleared_output.root().estimated_work(), Some(1));
+    assert_eq!(
+        cleared_output.nodes().iter().find(|node| {
+            node.object() == Some(&obj("table:KnownByteRoundingThreeResetLast"))
+        }).unwrap().estimated_work(),
+        Some(1)
+    );
+
+    for write_bytes in [
+        [4_097, 2_048, 2_048],
+        [2_048, 4_097, 2_048],
+        [2_048, 2_048, 4_097],
+    ] {
+        let overflow = explain(4_095, write_bytes);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "each write rounding edge survives a later cardinality reset"
+        );
+    }
+
+    let overflow = explain(4_095, [2_048, 2_048, 4_097]);
+    let nodes = overflow.nodes();
+    let position = |kind, name: &str| {
+        nodes
+            .iter()
+            .position(|node| node.kind() == kind && node.object() == Some(&obj(name)))
+            .expect("fixture-backed plan node appears")
+    };
+    let root = position(
+        PlanNodeKind::Materialize,
+        "materialization:known-byte-rounding-three-reset-tail",
+    );
+    let last_reset = position(
+        PlanNodeKind::Invoke,
+        "table:KnownByteRoundingThreeResetLast",
+    );
+    let middle_reset = position(
+        PlanNodeKind::Invoke,
+        "table:KnownByteRoundingThreeResetMiddle",
+    );
+    let first_reset = position(
+        PlanNodeKind::Invoke,
+        "table:KnownByteRoundingThreeResetFirst",
+    );
+    let source = position(
+        PlanNodeKind::Scan,
+        "table:KnownByteRoundingThreeResetSource",
+    );
+    assert!(root < last_reset);
+    assert!(last_reset < middle_reset);
+    assert!(middle_reset < first_reset);
+    assert!(first_reset < source);
+    assert_eq!(nodes[root].estimated_work(), Some(3));
+    assert_eq!(nodes[last_reset].estimated_work(), Some(3));
+    assert_eq!(nodes[middle_reset].estimated_work(), Some(2));
+    assert_eq!(nodes[first_reset].estimated_work(), Some(2));
 }
