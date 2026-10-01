@@ -10816,6 +10816,47 @@ fn explain_closes_first_byte_work_across_three_scans_at_max() {
         );
     }
 
+    // ORNA-PLAN leaves byte aggregation across unknown scan gaps unspecified;
+    // preserve source-local 4-KiB rounding as the source crosses that boundary.
+    // The paired scan first bytes then close at MAX in every scan placement.
+    for (source_bytes, exact_source_rows) in [(4_096, u64::MAX - 3), (4_097, u64::MAX - 4)] {
+        for scan_bytes in [[1, 1, 0], [1, 0, 1], [0, 1, 1]] {
+            let exact = explain(exact_source_rows, source_bytes, scan_bytes);
+            assert_eq!(exact.plan().estimated_cost(), None);
+            assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+            let exact_nodes = exact.nodes();
+            let source = exact_nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj("table:ByteWorkThreeScanSource")))
+                .unwrap();
+            assert_eq!(source.estimated_bytes(), Some(source_bytes));
+            assert_eq!(source.estimated_work(), Some(u64::MAX - 2));
+            for (name, bytes) in [
+                "table:ByteWorkThreeScanFirst",
+                "table:ByteWorkThreeScanMiddle",
+                "table:ByteWorkThreeScanLast",
+            ]
+            .into_iter()
+            .zip(scan_bytes)
+            {
+                let scan = exact_nodes
+                    .iter()
+                    .find(|node| node.object() == Some(&obj(name)))
+                    .unwrap();
+                assert_eq!(scan.estimated_bytes(), Some(bytes));
+                assert_eq!(scan.estimated_work(), Some(bytes));
+            }
+
+            let overflow = explain(exact_source_rows + 1, source_bytes, scan_bytes);
+            assert_eq!(overflow.plan().estimated_cost(), None);
+            assert_eq!(
+                overflow.root().details().get("estimated_cost_overflow"),
+                Some(&PlanDetail::Boolean(true)),
+                "source-local byte rounding and paired scan units overflow together"
+            );
+        }
+    }
+
     // Pin the source-only remainder, then move one scan's first byte across
     // each of the three unknown-gap positions. Each placement closes at MAX
     // with one row unit left; moving the source one row nearer overflows.
