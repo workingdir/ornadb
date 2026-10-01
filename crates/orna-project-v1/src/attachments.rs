@@ -8184,6 +8184,10 @@ mod tests {
                 ("nested_archive".to_owned(), shared_repository.clone()),
                 ("nested_archive_copy".to_owned(), shared_repository.clone()),
                 (
+                    "nested_archive_copy_archive".to_owned(),
+                    shared_repository.clone(),
+                ),
+                (
                     "archive_copy_archive_archive".to_owned(),
                     shared_repository.clone(),
                 ),
@@ -8516,7 +8520,7 @@ mod tests {
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
             &format!(
-                "nested_archive {short_revision_commit}\nnested_archive_copy {middle_revision_commit}\n"
+                "nested_archive {short_revision_commit}\nnested_archive_copy {middle_revision_commit}\nnested_archive_copy_archive {long_revision_commit}\n"
             ),
         );
         let expanded_short_replacement = PinnedDatabase::resolve(
@@ -8596,6 +8600,53 @@ mod tests {
             .unwrap();
         assert_eq!(
             expanded_short_child
+                .database("archive")
+                .unwrap()
+                .pin(),
+            short_pin.pin()
+        );
+        let nested_archive_long_pin = expanded_short_session
+            .database("nested_archive_copy_archive")
+            .unwrap()
+            .pin();
+        assert_eq!(
+            nested_archive_long_pin.name(),
+            "nested_archive_copy_archive"
+        );
+        assert_eq!(
+            nested_archive_long_pin.commit().as_str(),
+            long_revision_commit
+        );
+        assert_ne!(nested_archive_long_pin, long_pin.pin());
+        let expanded_long_child = resolver
+            .resolve_for_parent(
+                expanded_short_session
+                    .database("nested_archive_copy_archive")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            expanded_long_child.primary().pin().name(),
+            "nested_archive_copy_archive"
+        );
+        assert_eq!(
+            expanded_long_child
+                .database("archive_copy")
+                .unwrap()
+                .pin(),
+            middle_pin.pin()
+        );
+        let expanded_long_grandchild = resolver
+            .resolve_for_parent(
+                expanded_long_child
+                    .database("archive_copy")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            expanded_long_grandchild
                 .database("archive")
                 .unwrap()
                 .pin(),
