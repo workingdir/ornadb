@@ -978,7 +978,7 @@ fn validate_payload(payload: &NormativePayloadTrace) -> Result<()> {
     Ok(())
 }
 fn schema_profile_members(root: &Path) -> Result<Vec<InventoryEntry>> {
-    let sys: Value = read_json(root, "api/sys.json")?;
+    let sys = load_sys_api(root)?;
     let live: Value = read_json(root, "profiles/live-messages.json")?;
     let session: Value = read_json(root, "profiles/session.schema.json")?;
     let mut ids = BTreeSet::new();
@@ -1006,6 +1006,14 @@ fn schema_profile_members(root: &Path) -> Result<Vec<InventoryEntry>> {
             status: Status::SpecifiedModelOnly,
         })
         .collect())
+}
+
+fn load_sys_api(root: &Path) -> Result<Value> {
+    if root.join("api/sys.json").is_file() {
+        return read_json(root, "api/sys.json");
+    }
+    serde_json::from_str(&orna_sys_v1::system_api_json())
+        .map_err(|error| err(format!("parse embedded sys API artifact: {error}")))
 }
 fn named_object_members(
     value: &Value,
@@ -1205,6 +1213,20 @@ mod tests {
                 && payload.implementation_refs.is_empty()
                 && payload.test_refs.is_empty()
         }));
+    }
+    #[test]
+    fn workspace_without_checked_in_api_uses_embedded_sys_registry() {
+        let root = std::env::temp_dir().join(format!(
+            "orna-traceability-no-api-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create workspace without api folder");
+        let api = load_sys_api(&root).expect("use embedded generated sys API");
+        fs::remove_dir_all(&root).expect("remove temporary workspace");
+        assert_eq!(api["functions"].as_array().unwrap().len(), 66);
     }
     #[test]
     fn model_and_skipped_entries_never_pass() {
