@@ -1,0 +1,15 @@
+pub fn nested(flag: Bool): String {
+    "before {case flag {
+        true: {
+            case flag {
+                true 0
+                self: "self arm"
+                Packet{payload: [false, true], point: Point{x: false}} if flag: "packet {case flag {
+                    true: "deep true"
+                    false: "deep false"
+                }}"
+            }
+        },
+        false: "fallback"
+    }} after"
+}
