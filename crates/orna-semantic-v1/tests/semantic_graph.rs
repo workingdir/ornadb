@@ -2659,6 +2659,33 @@ fn equivalent_head_selectors_share_historical_callable_context() {
     assert!(result.is_ok(), "{:?}", result.diagnostics);
 }
 
+#[test]
+fn reassigned_dynamic_selector_does_not_reuse_a_historical_pin() {
+    let source = include_str!("fixtures/historical-dynamic-pin-reassignment.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new("historical-dynamic-pin-reassignment.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn reused_dynamic_snapshot_ref_preserves_its_historical_pin() {
+    let source = include_str!("fixtures/historical-dynamic-pin-reused.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new("historical-dynamic-pin-reused.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
 fn historical_nested_callable_catalogue() -> Catalogue {
     let continuation = Type::Function {
         parameters: Vec::new(),
