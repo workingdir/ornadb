@@ -15090,3 +15090,74 @@ fn nested_checkpoint_reset_extensions_merge_as_independent_fixture_states() {
         assert_eq!(plan.checkpoints[sibling_id.as_slice()], base_state);
     }
 }
+
+#[test]
+fn nested_checkpoint_reset_conflicts_preserve_fixture_states_and_identity() {
+    let checkpoint_id = b"consumer/reset/root/child/leaf/tail".to_vec();
+    let base_state = parse_checkpoint_fixture(CHECKPOINT_BASE);
+    let reset_state = parse_checkpoint_fixture(CHECKPOINT_RESET);
+    let advance_state = parse_checkpoint_fixture(CHECKPOINT_EDITED);
+
+    // Reset-to-no-position is still a present checkpoint. Against a deletion
+    // or an independently advanced position, it conflicts with the full
+    // fixture states intact, whichever side contains the reset.
+    for reset_left in [true, false] {
+        for conflict_with_delete in [true, false] {
+            let other_state = if conflict_with_delete {
+                None
+            } else {
+                Some(advance_state.clone())
+            };
+            let (left_state, right_state) = if reset_left {
+                (Some(reset_state.clone()), other_state)
+            } else {
+                (other_state, Some(reset_state.clone()))
+            };
+
+            let mut base = snapshot(
+                schema(true, FieldType::Str),
+                manifest(1, 1, b"same"),
+                None,
+            );
+            let mut left = snapshot(
+                schema(true, FieldType::Str),
+                manifest(1, 1, b"same"),
+                None,
+            );
+            let mut right = snapshot(
+                schema(true, FieldType::Str),
+                manifest(1, 1, b"same"),
+                None,
+            );
+            base.checkpoints.insert(checkpoint_id.clone(), base_state.clone());
+            if let Some(state) = left_state.as_ref() {
+                left.checkpoints.insert(checkpoint_id.clone(), state.clone());
+            }
+            if let Some(state) = right_state.as_ref() {
+                right.checkpoints.insert(checkpoint_id.clone(), state.clone());
+            }
+
+            let mut source = FixtureRows::default();
+            let error = merge_three_way_snapshots(&base, &left, &right, &mut source, budget())
+                .unwrap_err();
+            let BranchMergeError::Conflicts { conflicts, report } = error else {
+                panic!("nested reset diverging from deletion or advance remains unresolved")
+            };
+            assert_eq!(
+                conflicts,
+                vec![BranchMergeConflict::CheckpointConflict {
+                    id: checkpoint_id.clone(),
+                    conflict: orna_evolution_v1::CheckpointMergeConflict {
+                        base: Some(base_state.clone()),
+                        left: left_state,
+                        right: right_state,
+                    },
+                }]
+            );
+            assert_eq!(report.conflicts_lower_bound, 1);
+            assert_eq!(report.affected_checkpoints.len(), 1);
+            assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
+            assert!(source.visited.is_empty());
+        }
+    }
+}
