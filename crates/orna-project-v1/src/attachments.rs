@@ -8195,6 +8195,8 @@ mod tests {
             format!("{nested_archive_tail_25_closure_alias}_archive");
         let nested_archive_tail_27_closure_alias =
             format!("{nested_archive_tail_26_closure_alias}_archive");
+        let nested_archive_tail_28_closure_alias =
+            format!("{nested_archive_tail_27_closure_alias}_archive");
         let loader = ProjectLoader::default();
         let app = PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader)
             .unwrap();
@@ -8328,6 +8330,10 @@ mod tests {
                 ),
                 (
                     nested_archive_tail_27_closure_alias.clone(),
+                    shared_repository.clone(),
+                ),
+                (
+                    nested_archive_tail_28_closure_alias.clone(),
                     shared_repository.clone(),
                 ),
                 (
@@ -8869,11 +8875,18 @@ mod tests {
                 "{nested_archive_tail_26_closure_alias} {expanded_tail_26_closure_commit}\n"
             ),
         );
+        let expanded_tail_28_closure_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!(
+                "{nested_archive_tail_27_closure_alias} {expanded_tail_27_closure_commit}\n"
+            ),
+        );
         let expanded_short_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
             &format!(
-                "nested_archive {short_revision_commit}\nnested_archive_copy {middle_revision_commit}\nnested_archive_copy_archive {long_revision_commit}\nnested_archive_copy_archive_copy {expanded_deep_commit}\nnested_archive_copy_archive_copy_archive {expanded_deeper_commit}\nnested_archive_copy_archive_copy_archive_copy {expanded_deepest_commit}\nnested_archive_copy_archive_copy_archive_copy_archive {expanded_deeper_deepest_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy {expanded_final_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_next_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_further_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_extreme_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_extreme_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_supreme_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_ultimate_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_penultimate_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_last_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_final_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_final_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_closure_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_extended_closure_tail_commit}\n{nested_archive_final_extended_closure_tail_alias} {expanded_final_extended_closure_tail_commit}\n{nested_archive_next_extended_closure_tail_alias} {expanded_next_extended_closure_tail_commit}\n{nested_archive_terminal_extended_closure_tail_alias} {expanded_terminal_extended_closure_tail_commit}\n{nested_archive_ultimate_extended_closure_tail_alias} {expanded_ultimate_extended_closure_tail_commit}\n{nested_archive_tail_22_closure_alias} {expanded_tail_22_closure_commit}\n{nested_archive_tail_23_closure_alias} {expanded_tail_23_closure_commit}\n{nested_archive_tail_24_closure_alias} {expanded_tail_24_closure_commit}\n{nested_archive_tail_25_closure_alias} {expanded_tail_25_closure_commit}\n{nested_archive_tail_26_closure_alias} {expanded_tail_26_closure_commit}\n{nested_archive_tail_27_closure_alias} {expanded_tail_27_closure_commit}\n"
+                "nested_archive {short_revision_commit}\nnested_archive_copy {middle_revision_commit}\nnested_archive_copy_archive {long_revision_commit}\nnested_archive_copy_archive_copy {expanded_deep_commit}\nnested_archive_copy_archive_copy_archive {expanded_deeper_commit}\nnested_archive_copy_archive_copy_archive_copy {expanded_deepest_commit}\nnested_archive_copy_archive_copy_archive_copy_archive {expanded_deeper_deepest_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy {expanded_final_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_next_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_further_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_extreme_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_extreme_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_supreme_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_ultimate_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_penultimate_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_last_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_final_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_final_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_closure_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_extended_closure_tail_commit}\n{nested_archive_final_extended_closure_tail_alias} {expanded_final_extended_closure_tail_commit}\n{nested_archive_next_extended_closure_tail_alias} {expanded_next_extended_closure_tail_commit}\n{nested_archive_terminal_extended_closure_tail_alias} {expanded_terminal_extended_closure_tail_commit}\n{nested_archive_ultimate_extended_closure_tail_alias} {expanded_ultimate_extended_closure_tail_commit}\n{nested_archive_tail_22_closure_alias} {expanded_tail_22_closure_commit}\n{nested_archive_tail_23_closure_alias} {expanded_tail_23_closure_commit}\n{nested_archive_tail_24_closure_alias} {expanded_tail_24_closure_commit}\n{nested_archive_tail_25_closure_alias} {expanded_tail_25_closure_commit}\n{nested_archive_tail_26_closure_alias} {expanded_tail_26_closure_commit}\n{nested_archive_tail_27_closure_alias} {expanded_tail_27_closure_commit}\n{nested_archive_tail_28_closure_alias} {expanded_tail_28_closure_commit}\n"
             ),
         );
         let expanded_short_replacement = PinnedDatabase::resolve(
@@ -10025,6 +10038,39 @@ mod tests {
                 .unwrap()
                 .pin(),
             nested_archive_tail_26_closure_pin
+        );
+        // The reference is silent on the twenty-eighth suffix; v1
+        // preserves its alias identity and previous-terminal link.
+        let nested_archive_tail_28_closure_pin = expanded_short_session
+            .database(&nested_archive_tail_28_closure_alias)
+            .unwrap()
+            .pin();
+        assert_eq!(
+            nested_archive_tail_28_closure_pin.name(),
+            nested_archive_tail_28_closure_alias.as_str()
+        );
+        assert_eq!(
+            nested_archive_tail_28_closure_pin.commit().as_str(),
+            expanded_tail_28_closure_commit
+        );
+        let expanded_tail_28_closure_child = resolver
+            .resolve_for_parent(
+                expanded_short_session
+                    .database(&nested_archive_tail_28_closure_alias)
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            expanded_tail_28_closure_child.primary().pin().name(),
+            nested_archive_tail_28_closure_alias.as_str()
+        );
+        assert_eq!(
+            expanded_tail_28_closure_child
+                .database(&nested_archive_tail_27_closure_alias)
+                .unwrap()
+                .pin(),
+            nested_archive_tail_27_closure_pin
         );
         assert_eq!(
             root_session
