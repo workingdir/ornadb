@@ -10750,4 +10750,55 @@ fn explain_closes_first_byte_work_across_three_scans_at_max() {
             .get("estimated_cost_overflow"),
         Some(&PlanDetail::Boolean(true))
     );
+
+    // Pin the source-only remainder, then move one scan's first byte across
+    // each of the three unknown-gap positions. Each placement closes at MAX
+    // with one row unit left; moving the source one row nearer overflows.
+    let source_only_first_byte = explain(u64::MAX - 1, 1, [0, 0, 0]);
+    assert_eq!(source_only_first_byte.plan().estimated_cost(), None);
+    assert_eq!(
+        source_only_first_byte
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        None
+    );
+    assert_eq!(
+        source_only_first_byte
+            .nodes()
+            .iter()
+            .find(|node| node.object() == Some(&obj("table:ByteWorkThreeScanSource")))
+            .unwrap()
+            .estimated_work(),
+        Some(u64::MAX)
+    );
+
+    for scan_bytes in [[1, 0, 0], [0, 1, 0], [0, 0, 1]] {
+        let exact = explain(u64::MAX - 2, 1, scan_bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let exact_nodes = exact.nodes();
+        for (name, bytes) in [
+            "table:ByteWorkThreeScanFirst",
+            "table:ByteWorkThreeScanMiddle",
+            "table:ByteWorkThreeScanLast",
+        ]
+        .into_iter()
+        .zip(scan_bytes)
+        {
+            let scan = exact_nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap();
+            assert_eq!(scan.estimated_bytes(), Some(bytes));
+            assert_eq!(scan.estimated_work(), Some(bytes));
+        }
+        let overflow = explain(u64::MAX - 1, 1, scan_bytes);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "a first byte in each scan position crosses the source remainder"
+        );
+    }
 }
