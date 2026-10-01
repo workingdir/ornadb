@@ -834,6 +834,27 @@ pub fn explain_query_with_limit_chain(
     query: &QueryPlanDescription,
     additional_limits: &[u64],
 ) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_with_disjunct_limit_chain(query, 1, additional_limits)
+}
+
+/// Explains a predicate expanded into disjunctive branches followed by an
+/// ordered limit chain.
+///
+/// ORNA-PLAN leaves disjunct selectivity and cost estimates unspecified; this
+/// adapter uses the following deterministic fallback in the absence of
+/// histograms. Each disjunct is estimated to match half of the input rows.
+/// The planner assumes independent branch selectivity, so the OR output
+/// estimate is `input * (1 - 0.5^disjunct_count)` rounded up and capped by the
+/// input. Each expanded branch examines the full input; later limits retain
+/// that work and cannot refund it. A zero branch count is invalid.
+pub fn explain_query_with_disjunct_limit_chain(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0 || (disjunct_count > 1 && query.predicate.is_none()) {
+        return Err(ExplainError::InvalidExpression);
+    }
     if invalid_reference(query.snapshot.as_str()) {
         return Err(ExplainError::InvalidSnapshot);
     }
@@ -953,16 +974,40 @@ pub fn explain_query_with_limit_chain(
         current_cardinality = cardinality;
     }
     if let Some(predicate) = &query.predicate {
-        // The typed expression reference is opaque here. Keep the stable
-        // one-filter/50% fallback even for a conjunctive expression: without
-        // term or row-value statistics, counting `&&` terms or inferring a
-        // short-circuit result would fabricate work and selectivity evidence.
-        let cardinality = scale_cardinality(current_cardinality, 1, 2);
-        let work = current_cardinality.rows;
-        let details = BTreeMap::from([(
-            "selectivity_assumption".to_owned(),
-            PlanDetail::Text("0.5_no_histogram".to_owned()),
-        )]);
+        // Expression references are opaque to this planner. A caller that
+        // supplies an expanded disjunction count gets one half-selective
+        // independent branch per disjunct; the default count of one preserves
+        // the historical single-filter fallback.
+        let (cardinality, work, mut details) = if disjunct_count == 1 {
+            (
+                scale_cardinality(current_cardinality, 1, 2),
+                current_cardinality.rows,
+                BTreeMap::from([(
+                    "selectivity_assumption".to_owned(),
+                    PlanDetail::Text("0.5_no_histogram".to_owned()),
+                )]),
+            )
+        } else {
+            (
+                disjunction_cardinality(current_cardinality, disjunct_count),
+                current_cardinality
+                    .rows
+                    .and_then(|rows| rows.checked_mul(disjunct_count)),
+                BTreeMap::from([
+                    (
+                        "selectivity_assumption".to_owned(),
+                        PlanDetail::Text("0.5_per_disjunct_independent_or".to_owned()),
+                    ),
+                    (
+                        "disjunct_count".to_owned(),
+                        PlanDetail::Integer(disjunct_count),
+                    ),
+                ]),
+            )
+        };
+        if current_cardinality.rows.is_some() && work.is_none() {
+            record_work_overflow(&mut details);
+        }
         current = push_unary(
             &mut operators,
             current,
@@ -1293,6 +1338,27 @@ fn scale_cardinality(cardinality: Cardinality, numerator: u64, denominator: u64)
         bytes: cardinality
             .bytes
             .and_then(|bytes| scale_count(bytes, numerator, denominator)),
+    }
+}
+
+fn disjunction_cardinality(cardinality: Cardinality, disjunct_count: u64) -> Cardinality {
+    // Independent 50% arms leave one half of the input unmatched per branch.
+    // At 64 arms, the unmatched integer row count is necessarily zero for a
+    // u64 estimate, so both rows and bytes saturate to their input estimates.
+    let (matched_numerator, total_denominator) = if disjunct_count >= u64::BITS.into() {
+        (1, 1)
+    } else {
+        let denominator = 1u64 << disjunct_count;
+        (denominator - 1, denominator)
+    };
+    Cardinality {
+        rows: cardinality.rows.and_then(|rows| {
+            scale_count(rows, matched_numerator, total_denominator).map(|matched| matched.min(rows))
+        }),
+        bytes: cardinality.bytes.and_then(|bytes| {
+            scale_count(bytes, matched_numerator, total_denominator)
+                .map(|matched| matched.min(bytes))
+        }),
     }
 }
 

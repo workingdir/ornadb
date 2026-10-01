@@ -1929,6 +1929,14 @@ enum RelationRow {
     End,
 }
 impl Context<'_, '_> {
+    fn effect_value(&mut self, value: &CanonicalValue) -> Result<Value, EvaluationError> {
+        // Effect results cross a canonical boundary. Apply the depth limit to
+        // the returned value's own structure from its root, independently of
+        // the source call stack. Otherwise a handler can commit an effect and
+        // result decoding can then fail only because that caller was deep.
+        Value::from_canonical(value, self, 0)
+    }
+
     fn step(&mut self) -> Result<(), EvaluationError> {
         if let Some(cancellation) = self.cancellation {
             cancellation.check()?;
@@ -4575,7 +4583,7 @@ impl Context<'_, '_> {
                 .checked_add(debited)
                 .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
             if let Some(value) = result? {
-                return Value::from_canonical(&value, self, depth + 1);
+                return self.effect_value(&value);
             }
         }
         // `uuid7()` is an activation-scoped intrinsic. Like `now()`, it is
@@ -4603,7 +4611,7 @@ impl Context<'_, '_> {
                 .checked_add(debited)
                 .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
             if let Some(value) = result? {
-                return Value::from_canonical(&value, self, depth + 1);
+                return self.effect_value(&value);
             }
         }
         if matches!(callee, Expr::Name { text, .. } if text == "error")
@@ -4866,7 +4874,7 @@ impl Context<'_, '_> {
                     .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
                 let handled = result?;
                 if let Some(value) = handled {
-                    return Value::from_canonical(&value, self, depth + 1);
+                    return self.effect_value(&value);
                 }
             }
             if self.reject_unhandled_field_calls
