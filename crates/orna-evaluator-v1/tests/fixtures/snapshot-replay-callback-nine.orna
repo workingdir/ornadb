@@ -1,1 +1,1 @@
-std.collection.map([9], value => std.math.increment(value))
+std.collection.map([9], value => shift(value))
