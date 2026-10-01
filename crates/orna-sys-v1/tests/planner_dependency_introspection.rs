@@ -104,6 +104,8 @@ const SPLIT_BYTE_WORK_UNKNOWN_EDGE_TAIL: &str =
     include_str!("fixtures/split_byte_work_unknown_edge_tail.orna");
 const MULTI_UNKNOWN_BYTE_WORK_EDGE_TAIL: &str =
     include_str!("fixtures/multi_unknown_byte_work_edge_tail.orna");
+const BYTE_WORK_UNKNOWN_GAP_ROUNDING_EDGE_TAIL: &str =
+    include_str!("fixtures/byte_work_unknown_gap_rounding_edge_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -9661,4 +9663,156 @@ fn explain_retains_split_byte_work_across_unknown_scan_gaps() {
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
         node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
     }));
+}
+
+#[test]
+fn explain_rounds_byte_work_per_scan_across_unknown_gaps_at_max() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_UNKNOWN_GAP_ROUNDING_EDGE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 6);
+
+    // ORNA-PLAN does not define byte-work rounding across unknown joins.
+    // Continue the pragmatic local 4-KiB model: each partial byte-only scan
+    // rounds independently, even when two unknown scans separate the three
+    // known scans. Three half-block scans therefore contribute three units;
+    // aggregating their bytes first would contribute only two. The known
+    // source work leaves exactly those three units before u64::MAX.
+    let explain = |source_rows, before_bytes, between_bytes, after_bytes| {
+        let byte_stats = |bytes| {
+            Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(bytes),
+                mutable_branch: None,
+            })
+        };
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:byte-work-unknown-gap-rounding-edge"),
+            source: obj("table:ByteWorkUnknownGapSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(4_096),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkUnknownGapBefore"),
+                    statistics: byte_stats(before_bytes),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkUnknownGapFirstUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkUnknownGapBetween"),
+                    statistics: byte_stats(between_bytes),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkUnknownGapLastUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkUnknownGapAfter"),
+                    statistics: byte_stats(after_bytes),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: None,
+        })
+        .expect("byte work with partial estimates split across unknown joins")
+    };
+
+    for (exact, byte_sizes) in [
+        (
+            explain(u64::MAX - 4, 2_048, 2_048, 2_048),
+            [2_048, 2_048, 2_048],
+        ),
+        (
+            explain(u64::MAX - 4, 4_095, 4_096, 1),
+            [4_095, 4_096, 1],
+        ),
+    ] {
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let nodes = exact.nodes();
+        let source_position = nodes
+            .iter()
+            .position(|node| node.object() == Some(&obj("table:ByteWorkUnknownGapSource")))
+            .unwrap();
+        assert_eq!(nodes[source_position].estimated_work(), Some(u64::MAX - 3));
+        for (name, bytes) in [
+            "table:ByteWorkUnknownGapBefore",
+            "table:ByteWorkUnknownGapBetween",
+            "table:ByteWorkUnknownGapAfter",
+        ]
+        .into_iter()
+        .zip(byte_sizes)
+        {
+            let scan = nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap();
+            assert_eq!(scan.estimated_bytes(), Some(bytes));
+            assert_eq!(scan.estimated_work(), None);
+            assert_eq!(scan.details().get("estimated_work_overflow"), None);
+        }
+    }
+
+    for overflow in [
+        explain(u64::MAX - 4, 4_097, 2_048, 2_048),
+        explain(u64::MAX - 4, 2_048, 4_097, 2_048),
+        explain(u64::MAX - 4, 2_048, 2_048, 4_097),
+    ] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "one scan crossing a 4-KiB boundary overflows the exact known-work tail"
+        );
+        let nodes = overflow.nodes();
+        let named_position = |name: &str| {
+            nodes
+                .iter()
+                .position(|node| node.object() == Some(&obj(name)))
+                .unwrap()
+        };
+        let source = named_position("table:ByteWorkUnknownGapSource");
+        let before = named_position("table:ByteWorkUnknownGapBefore");
+        let unknown_first = named_position("table:ByteWorkUnknownGapFirstUnknown");
+        let between = named_position("table:ByteWorkUnknownGapBetween");
+        let unknown_last = named_position("table:ByteWorkUnknownGapLastUnknown");
+        let after = named_position("table:ByteWorkUnknownGapAfter");
+        assert!(source < before);
+        assert!(before < unknown_first);
+        assert!(unknown_first < between);
+        assert!(between < unknown_last);
+        assert!(unknown_last < after);
+        assert_eq!(nodes[unknown_first].estimated_work(), None);
+        assert_eq!(nodes[unknown_last].estimated_work(), None);
+        assert!(nodes.iter().all(|node| {
+            node.actual_rows().is_none() && node.actual_bytes().is_none()
+        }));
+    }
+
+    // At a source remainder one unit closer to MAX, independent rounding of
+    // each half-block scan proves overflow. Aggregating the 6-KiB scan bytes
+    // before rounding would contribute only two units and fit exactly.
+    let split_rounding_overflow = explain(u64::MAX - 3, 2_048, 2_048, 2_048);
+    assert_eq!(split_rounding_overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        split_rounding_overflow
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
 }
