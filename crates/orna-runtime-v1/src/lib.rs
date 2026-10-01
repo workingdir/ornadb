@@ -21391,6 +21391,26 @@ mod tests {
             "last() traverses two rejects before match two and leaves four trailing rejects unopened"
         );
 
+        // The reference is silent when two inter-match rejects lead directly
+        // into a four-row trailing tail. Complete take(2), then leave all
+        // four trailing rejects and the failing source unopened.
+        let (last_closes_before_four_reject_tail_after_two_interleaved, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-four-trailing-rejects-after-two-interleaved.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_before_four_reject_tail_after_two_interleaved.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 8),
+            "last() traverses two inter-match rejects, then leaves the four-reject tail unopened"
+        );
+
         // The reference is silent when the entire bracketed candidate tail
         // is rejected before take(2) naturally exhausts. The empty last()
         // result keeps its explicit coalesce fallback.
