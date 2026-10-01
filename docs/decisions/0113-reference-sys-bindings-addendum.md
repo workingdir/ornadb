@@ -68,3 +68,7 @@ The parity proof also pins the generated `sys.invoke<T>` declaration whose type-
 ## Follow-on proof note: generic start keyword alias (issue #5655)
 
 A sibling fixture pins `sys.start<T>` through the same keyword alias path, including the separate-transaction default and `sys.InvocationHandle<T>` result. The proof checks that the generated declaration parses, retains the registry operation's invoke role, type-witness alias, default, and result type, and appears byte-for-byte in the generated bundle. This extends syntax coverage without adding a second artifact source.
+
+## Follow-on proof note: generic start overload alias parity (issue #5665)
+
+An in-crate fixture now pins the erased `sys.start(Value)` and generic `sys.start<T>` declarations together. It proves both overload dispatch markers remain present in generated order and only the generic overload aliases the reserved registry parameter `as` to grammar-valid `as_`; both parsed result types still resolve to their respective registry contracts. The fixture remains a local compile-time include and adds no generated artifact or API change.
