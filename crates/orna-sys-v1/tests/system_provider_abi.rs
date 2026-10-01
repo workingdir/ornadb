@@ -386,12 +386,26 @@ fn dispatch_enforces_the_full_failure_set_for_every_operation() {
     }
 
     let missing_operation = "sys.fixture.missing";
+    let mut missing_precondition_called = false;
+    let mut missing_handler_called = false;
     assert_eq!(
-        table.dispatch(missing_operation, |_| Ok(()), |_| Ok::<(), FailureCode>(())),
+        table.dispatch(
+            missing_operation,
+            |_| {
+                missing_precondition_called = true;
+                Ok(())
+            },
+            |_| {
+                missing_handler_called = true;
+                Ok::<(), FailureCode>(())
+            }
+        ),
         Err(ProviderDiagnostic::UnknownOperation(
             orna_sys_v1::OperationId::new(missing_operation).unwrap()
         ))
     );
+    assert!(!missing_precondition_called);
+    assert!(!missing_handler_called);
 }
 
 #[test]
