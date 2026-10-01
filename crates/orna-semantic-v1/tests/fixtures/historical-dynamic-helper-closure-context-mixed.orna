@@ -1,0 +1,18 @@
+pub fn pinned_factory(selector: Str) =
+    sys.database.as_of(sys.snapshot(selector)).energy.factory;
+
+pub fn forwarded_pinned_factory(selector: Str) = pinned_factory(selector);
+
+pub fn helper_calls_with_distinct_dynamic_selectors_do_not_compose() {
+    let before = forwarded_pinned_factory("HEAD~10");
+    let current = forwarded_pinned_factory("HEAD");
+    [before, current]
+}
+
+pub fn helper_calls_after_dynamic_selector_reassignment_do_not_compose() {
+    let selector = "HEAD~10";
+    let before = forwarded_pinned_factory(selector);
+    selector = "HEAD";
+    let current = forwarded_pinned_factory(selector);
+    [before, current]
+}
