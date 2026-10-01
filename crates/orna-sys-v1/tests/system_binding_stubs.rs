@@ -423,6 +423,37 @@ fn generated_invoke_generic_keyword_overloads_match_the_in_crate_fixture() {
             signature.parameters.len(),
             operation.signature.parameters.len()
         );
+        for (parsed_parameter, registered_parameter) in signature
+            .parameters
+            .iter()
+            .zip(&operation.signature.parameters)
+        {
+            let parameter_source = &fixture[parsed_parameter.span.start..parsed_parameter.span.end];
+            let (parameter_name, _) = parameter_source
+                .split_once(": ")
+                .expect("invoke overload parameters have explicit types");
+            let expected_name = if index == 1 && registered_parameter.name == "as" {
+                "as_"
+            } else {
+                registered_parameter.name.as_str()
+            };
+            assert_eq!(parameter_name, expected_name);
+            assert_eq!(
+                resolve_type(
+                    parsed_parameter
+                        .annotation
+                        .as_ref()
+                        .expect("typed invoke overload parameter")
+                )
+                .expect("supported invoke overload parameter type"),
+                registered_parameter.ty
+            );
+            let parsed_default = parsed_parameter
+                .default
+                .as_ref()
+                .map(|default| &fixture[default.span().start..default.span().end]);
+            assert_eq!(parsed_default, registered_parameter.default.as_deref());
+        }
         assert_eq!(
             signature.parameters.iter().any(|parameter| {
                 let source = &fixture[parameter.span.start..parameter.span.end];
