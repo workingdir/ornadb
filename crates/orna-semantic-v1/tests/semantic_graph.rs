@@ -2896,6 +2896,19 @@ fn different_resolved_snapshots_stay_separate_across_pinned_closure_chains() {
 }
 
 #[test]
+fn rebinding_snapshot_pin_preserves_old_and_specializes_new_closure_chains() {
+    let source = include_str!("fixtures/historical-pinned-closure-chain-rebinding.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-rebinding.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
