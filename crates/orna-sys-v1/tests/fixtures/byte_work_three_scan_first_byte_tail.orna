@@ -1,0 +1,7 @@
+pub table ByteWorkThreeScanSource(id: Int) { value: Int, }
+pub table ByteWorkThreeScanUnknownFirst(id: Int) { value: Int, }
+pub table ByteWorkThreeScanFirst(id: Int) { value: Int, }
+pub table ByteWorkThreeScanUnknownSecond(id: Int) { value: Int, }
+pub table ByteWorkThreeScanMiddle(id: Int) { value: Int, }
+pub table ByteWorkThreeScanUnknownThird(id: Int) { value: Int, }
+pub table ByteWorkThreeScanLast(id: Int) { value: Int, }
