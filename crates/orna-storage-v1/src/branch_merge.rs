@@ -133,7 +133,8 @@ pub trait BranchRowSource {
 pub struct BranchMergeBudget {
     /// Per-invocation cap; concurrent merge plans do not share row counters.
     pub max_rows_examined: usize,
-    /// Per-invocation cap; concurrent merge plans do not share conflict counts.
+    /// Per-invocation cap on materialized conflict details; clean tombstones
+    /// do not count against it, and concurrent plans do not share the count.
     pub max_conflicts: usize,
 }
 
@@ -219,6 +220,14 @@ pub struct BranchMergePlan {
 
 /// Computes a complete semantic merge plan or returns bounded conflict facts.
 /// It never writes files, advances refs, or mutates input snapshots.
+///
+/// Row conflicts are visited in canonical primary-key order after each source
+/// range has been read completely. This ordering is independent of adapter
+/// visitation order and remains the same for fresh concurrent retries after a
+/// recoverable read failure. Clean tombstones do not consume conflict budget.
+/// If the conflict budget is exceeded, the result contains no partial conflict
+/// list or candidate plan; its lower bound includes the first conflict beyond
+/// the configured limit, and its affected ranges identify the bounded scan.
 pub fn merge_three_way_snapshots<R: BranchRowSource>(
     base: &ThreeWaySnapshot,
     left: &ThreeWaySnapshot,
