@@ -41,7 +41,13 @@ fn main() {
                                 Note.rekey(2, 5);
                                 Note.rekey(3, 2);
                                 Note.rekey(5, 3);
-                                Note.update(3, { quantity: 27 })
+                                Note.update(3, { quantity: 27 });
+                                Note.rekey(3, 2) |? (competitor_retries_after_owner_reuses_handoff => {
+                                    Note.rekey(2, 5);
+                                    Note.rekey(3, 2);
+                                    Note.rekey(5, 3);
+                                    Note.update(3, { quantity: 14 })
+                                })
                             })
                         })
                     })
