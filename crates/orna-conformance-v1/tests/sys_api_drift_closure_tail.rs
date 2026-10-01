@@ -656,6 +656,26 @@ fn edge_interplay_fixture_returns_present_count_after_filter_tail() {
 }
 
 #[test]
+fn edge_interplay_fixture_returns_present_count_after_inner_filter_tail() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Handoff inside the callback, filter there, then return the value through the outer map.
+    // The reference keeps row_count nullable and leaves this closure composition unspecified.
+    assert!(
+        analysis.is_ok(),
+        "the present exact count must survive an inner filter and outer return: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_projects_unknown_exact_target_count_through_columns() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
