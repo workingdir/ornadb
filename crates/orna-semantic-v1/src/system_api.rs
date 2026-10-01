@@ -1,4 +1,4 @@
-//! The checked-in `api/sys.json` contract, decoded without a second schema.
+//! The generated `sys` contract, decoded without a second schema.
 //!
 //! This module is deliberately a descriptor boundary: it validates portable
 //! names and type references before the semantic layer uses them, but it does
@@ -9,8 +9,14 @@ use std::{
     sync::OnceLock,
 };
 
-const EMBEDDED_SYSTEM_API: &str = include_str!("../../../api/sys.json");
 const MAX_JSON_NESTING_DEPTH: usize = 128;
+
+fn generated_system_api_json() -> &'static str {
+    static GENERATED: OnceLock<String> = OnceLock::new();
+    GENERATED
+        .get_or_init(orna_sys_v1::system_api_json)
+        .as_str()
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SystemApi {
@@ -23,7 +29,6 @@ pub(crate) struct SystemApi {
     removed: BTreeMap<String, RemovedName>,
     enums: BTreeMap<String, BTreeSet<String>>,
     failure_codes: BTreeSet<String>,
-    provider_operations: BTreeMap<String, orna_sys_v1::OperationContract>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -155,21 +160,24 @@ pub(crate) enum SystemApiError {
 
 impl SystemApi {
     pub(crate) fn embedded() -> Result<Self, SystemApiError> {
-        let mut api = Self::from_json(EMBEDDED_SYSTEM_API)?;
-        api.bind_provider_abi()?;
+        let api = Self::from_json(generated_system_api_json())?;
+        api.validate_dispatch_table(orna_sys_v1::system_dispatch_table())?;
         Ok(api)
     }
 
-    fn bind_provider_abi(&mut self) -> Result<(), SystemApiError> {
-        let abi = orna_sys_v1::system_provider_abi();
-        abi.validate()
+    fn validate_dispatch_table(
+        &self,
+        table: &orna_sys_v1::SystemDispatchTable,
+    ) -> Result<(), SystemApiError> {
+        table
+            .validate()
             .map_err(|_| SystemApiError::ProviderAbiMismatch)?;
-        if abi.operations().count() != self.inventory.functions {
+        if table.operations().count() != self.inventory.functions {
             return Err(SystemApiError::ProviderAbiMismatch);
         }
-        let mut contracts = BTreeMap::new();
+        let mut linked = 0usize;
         for descriptor in self.functions.values().flatten() {
-            let contract = abi
+            let contract = table
                 .operation(&descriptor.label)
                 .ok_or(SystemApiError::ProviderAbiMismatch)?;
             let expected_effect = match contract.effects.iter().next() {
@@ -178,18 +186,50 @@ impl SystemApi {
                 Some(orna_sys_v1::SystemEffect::Admin) => SystemEffect::Admin,
                 None => return Err(SystemApiError::ProviderAbiMismatch),
             };
+            let expected_preconditions = descriptor
+                .preconditions
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let registered_preconditions = contract
+                .preconditions
+                .iter()
+                .map(|precondition| precondition.declaration.as_str())
+                .collect::<Vec<_>>();
+            let namespace = descriptor
+                .label
+                .find(['(', '<'])
+                .map_or(descriptor.label.as_str(), |end| &descriptor.label[..end]);
+            let expected_failures = self
+                .failure_codes
+                .iter()
+                .filter(|code| {
+                    code.as_str() == namespace
+                        || code
+                            .strip_prefix(namespace)
+                            .is_some_and(|tail| tail.starts_with('.'))
+                })
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            let registered_failures = contract
+                .failures
+                .iter()
+                .map(orna_sys_v1::FailureCode::as_str)
+                .filter(|code| !code.starts_with("sys.abi."))
+                .collect::<BTreeSet<_>>();
             if contract.signature.source != descriptor.signature
                 || contract.effects.iter().count() != 1
                 || expected_effect != descriptor.effect
+                || registered_preconditions != expected_preconditions
+                || registered_failures != expected_failures
             {
                 return Err(SystemApiError::ProviderAbiMismatch);
             }
-            contracts.insert(descriptor.label.clone(), contract.clone());
+            linked += 1;
         }
-        if contracts.len() != abi.operations().count() {
+        if linked != table.operations().count() {
             return Err(SystemApiError::ProviderAbiMismatch);
         }
-        self.provider_operations = contracts;
         Ok(())
     }
 
@@ -530,7 +570,6 @@ impl SystemApi {
             removed,
             enums,
             failure_codes,
-            provider_operations: BTreeMap::new(),
         })
     }
 
@@ -550,7 +589,7 @@ impl SystemApi {
 
     #[cfg(test)]
     pub(crate) fn provider_operation(&self, name: &str) -> Option<&orna_sys_v1::OperationContract> {
-        self.provider_operations.get(name)
+        orna_sys_v1::system_dispatch_table().operation(name)
     }
 
     /// The portable failure-code vocabulary declared by `api/sys.json`.
@@ -915,7 +954,11 @@ fn validate_function_metadata(
     snapshot_rule: Option<&str>,
 ) -> Result<(), SystemApiError> {
     let requires_contract = label.starts_with("sys.admin.");
-    let requires_preconditions = FUNCTIONS_WITH_PRECONDITIONS.contains(&label);
+    let requires_preconditions = orna_sys_v1::system_dispatch_table()
+        .operation(label)
+        .map_or(preconditions.is_some(), |operation| {
+            !operation.preconditions.is_empty()
+        });
     let requires_ownership = matches!(label, "sys.start(Value)" | "sys.start<T>");
     let requires_snapshot_rule = matches!(
         label,
@@ -939,28 +982,6 @@ fn validate_function_metadata(
 fn blank(value: &str) -> bool {
     value.trim().is_empty()
 }
-
-// These are the exact callable labels carrying the normative `preconditions`
-// member in api/sys.json.  Applicability is keyed by the full label so a
-// precondition cannot be silently inherited by an unrelated overload.
-const FUNCTIONS_WITH_PRECONDITIONS: &[&str] = &[
-    "sys.admin.checkout(SnapshotRef)",
-    "sys.admin.checkout(CommitRef)",
-    "sys.admin.checkout(BranchRef)",
-    "sys.admin.checkout(TagRef)",
-    "sys.admin.checkout(GitOid)",
-    "sys.admin.checkout(Str)",
-    "sys.admin.create_branch(SnapshotRef)",
-    "sys.admin.create_branch(CommitRef)",
-    "sys.admin.create_branch(BranchRef)",
-    "sys.admin.create_branch(TagRef)",
-    "sys.admin.create_branch(GitOid)",
-    "sys.admin.create_branch(Str)",
-    "sys.admin.retry_failure",
-    "sys.admin.skip_failure",
-    "sys.admin.replay_failure",
-    "sys.admin.resolve_failure",
-];
 
 fn parse_effect(effect: &str) -> Result<SystemEffect, SystemApiError> {
     match effect {
@@ -1930,7 +1951,7 @@ mod tests {
     use super::*;
 
     fn document() -> serde_json::Value {
-        serde_json::from_str(EMBEDDED_SYSTEM_API).unwrap()
+        serde_json::from_str(generated_system_api_json()).unwrap()
     }
 
     fn value_type(document: &mut serde_json::Value) -> &mut serde_json::Value {
@@ -1995,6 +2016,12 @@ mod tests {
                 .iter()
                 .any(|failure| failure.as_str() == "sys.abi.precondition_failed")
         );
+        assert!(std::ptr::eq(
+            contract,
+            orna_sys_v1::system_dispatch_table()
+                .operation("sys.admin.checkout(SnapshotRef)")
+                .unwrap()
+        ));
         let descriptor = api
             .function("sys.admin.checkout")
             .unwrap()
@@ -2002,12 +2029,47 @@ mod tests {
             .find(|descriptor| descriptor.label == "sys.admin.checkout(SnapshotRef)")
             .unwrap();
         assert_eq!(descriptor.effect, SystemEffect::Admin);
+        assert_eq!(
+            descriptor.preconditions.as_deref(),
+            contract
+                .preconditions
+                .first()
+                .map(|precondition| precondition.declaration.as_str())
+        );
+    }
+
+    #[test]
+    fn semantic_admission_rejects_precondition_and_failure_vocab_drift() {
+        let table = orna_sys_v1::system_dispatch_table();
+
+        let mut mismatched_precondition = document();
+        let checkout = function_index(&mismatched_precondition, "sys.admin.checkout(SnapshotRef)");
+        mismatched_precondition["functions"][checkout]["preconditions"] =
+            serde_json::json!("different precondition declaration");
+        let api = SystemApi::from_json(&mismatched_precondition.to_string()).unwrap();
+        assert_eq!(
+            api.validate_dispatch_table(table),
+            Err(SystemApiError::ProviderAbiMismatch)
+        );
+
+        let mut mismatched_failure = document();
+        let failure_codes = mismatched_failure["failure_codes"].as_array_mut().unwrap();
+        let code = failure_codes
+            .iter_mut()
+            .find(|code| **code == "sys.invoke.argument_missing")
+            .unwrap();
+        *code = serde_json::json!("sys.invoke.argument_missing.relabelled");
+        let api = SystemApi::from_json(&mismatched_failure.to_string()).unwrap();
+        assert_eq!(
+            api.validate_dispatch_table(table),
+            Err(SystemApiError::ProviderAbiMismatch)
+        );
     }
 
     #[test]
     fn parsed_descriptor_retains_declared_members() {
         let api = SystemApi::embedded().unwrap();
-        let raw = raw_document(EMBEDDED_SYSTEM_API).unwrap();
+        let raw = raw_document(generated_system_api_json()).unwrap();
 
         // This deliberately derives every expected member from the same raw
         // descriptor that the loader consumes. It checks retained-loader
@@ -2382,7 +2444,7 @@ mod tests {
 
     #[test]
     fn function_metadata_is_required_by_applicable_contract() {
-        let raw = raw_document(EMBEDDED_SYSTEM_API).unwrap();
+        let raw = raw_document(generated_system_api_json()).unwrap();
         let declared_preconditions = raw
             .functions
             .iter()
@@ -2390,12 +2452,12 @@ mod tests {
             .map(|function| function.name.as_str())
             .collect::<BTreeSet<_>>();
         assert_eq!(
-            declared_preconditions.len(),
-            FUNCTIONS_WITH_PRECONDITIONS.len()
-        );
-        assert_eq!(
             declared_preconditions,
-            FUNCTIONS_WITH_PRECONDITIONS.iter().copied().collect()
+            orna_sys_v1::system_dispatch_table()
+                .operations()
+                .filter(|operation| !operation.preconditions.is_empty())
+                .map(|operation| operation.id.as_str())
+                .collect()
         );
 
         let mut blank_purpose = document();
@@ -2577,7 +2639,7 @@ mod tests {
         }
 
         let mut invalid_key_path = document();
-        let raw = raw_document(EMBEDDED_SYSTEM_API).unwrap();
+        let raw = raw_document(generated_system_api_json()).unwrap();
         let (relation_index, dotted_path) = raw
             .relations
             .iter()
@@ -2820,7 +2882,7 @@ mod tests {
 
     #[test]
     fn duplicate_json_members_are_rejected_at_the_sys_api_boundary() {
-        let mut nested_object = EMBEDDED_SYSTEM_API.to_owned();
+        let mut nested_object = generated_system_api_json().to_owned();
         let insertion = nested_object
             .find(r#""counts": {"#)
             .expect("the API document has a counts object")
@@ -2831,7 +2893,7 @@ mod tests {
             Err(SystemApiError::InvalidJson)
         );
 
-        let mut nested_array = EMBEDDED_SYSTEM_API.to_owned();
+        let mut nested_array = generated_system_api_json().to_owned();
         let array = nested_array
             .find(r#""singletons": ["#)
             .expect("the API document has a singleton array");
@@ -2861,7 +2923,7 @@ mod tests {
     fn deeply_nested_json_is_rejected_before_stack_exhaustion() {
         let opening = "[".repeat(MAX_JSON_NESTING_DEPTH + 1);
         let closing = "]".repeat(MAX_JSON_NESTING_DEPTH + 1);
-        let mut deeply_nested = EMBEDDED_SYSTEM_API.to_owned();
+        let mut deeply_nested = generated_system_api_json().to_owned();
         let insertion = deeply_nested
             .rfind('}')
             .expect("the API document has a root object");

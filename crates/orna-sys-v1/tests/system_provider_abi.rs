@@ -1,11 +1,13 @@
 use orna_sys_v1::{
-    AbiType, AbiVersion, EffectSet, ProviderDiagnostic, ProviderId, ProviderOffer,
-    ProviderRoleRegistry, SemanticRoleId, SystemEffect, system_provider_abi,
+    AbiType, AbiVersion, EffectSet, FailureCode, ProviderDiagnostic, ProviderId, ProviderOffer,
+    ProviderRoleRegistry, SemanticRoleId, SystemEffect, system_dispatch_table,
+    system_provider_abi,
 };
 
 #[test]
 fn generated_provider_abi_carries_typed_operation_contracts_and_roles() {
-    let abi = system_provider_abi();
+    let abi = system_dispatch_table();
+    assert!(std::ptr::eq(abi, system_provider_abi()));
     abi.validate()
         .expect("all required baked roles have compatible providers");
     assert_eq!(
@@ -80,8 +82,69 @@ fn generated_provider_abi_carries_typed_operation_contracts_and_roles() {
 }
 
 #[test]
+fn dispatch_table_enforces_registered_preconditions_and_failure_vocabularies() {
+    let table = system_dispatch_table();
+    let operation = "sys.admin.checkout(SnapshotRef)";
+    let contract = table.operation(operation).expect("typed operation lookup");
+    assert!(!contract.preconditions.is_empty());
+
+    let accepted = table
+        .check_preconditions(operation, |_| Ok(()))
+        .expect("every registered precondition is checked before dispatch");
+    assert_eq!(accepted.id, contract.id);
+
+    let dispatched = table
+        .dispatch(operation, |_| Ok(()), |selected| {
+            assert_eq!(selected.id, contract.id);
+            Ok("native")
+        })
+        .expect("dispatch invokes the handler with its selected contract");
+    assert_eq!(dispatched, orna_sys_v1::SystemDispatchResult::Returned("native"));
+
+    let precondition_failure = FailureCode::new("sys.abi.precondition_failed").unwrap();
+    assert_eq!(
+        table.check_preconditions(operation, |_| Err(precondition_failure.clone())),
+        Err(ProviderDiagnostic::PreconditionFailed {
+            operation: contract.id.clone(),
+            code: precondition_failure.clone(),
+        })
+    );
+    let mut handler_called = false;
+    assert_eq!(
+        table
+            .dispatch(
+                operation,
+                |_| Err(precondition_failure.clone()),
+                |_| {
+                    handler_called = true;
+                    Ok(())
+                }
+            )
+            .unwrap(),
+        orna_sys_v1::SystemDispatchResult::Failed(precondition_failure)
+    );
+    assert!(!handler_called, "a failed precondition prevents dispatch");
+
+    let undeclared = FailureCode::new("sys.storage.corrupt").unwrap();
+    assert_eq!(
+        table.validate_failure(operation, &undeclared),
+        Err(ProviderDiagnostic::UndeclaredFailure {
+            operation: contract.id.clone(),
+            code: undeclared.clone(),
+        })
+    );
+    assert_eq!(
+        table.dispatch(operation, |_| Ok(()), |_| Err::<(), _>(undeclared.clone())),
+        Err(ProviderDiagnostic::UndeclaredFailure {
+            operation: contract.id.clone(),
+            code: undeclared,
+        })
+    );
+}
+
+#[test]
 fn provider_linkage_reports_missing_version_effect_and_duplicate_gaps() {
-    let abi = system_provider_abi();
+    let abi = system_dispatch_table();
     let role = abi.role("langitem.sys.invoke").unwrap().clone();
     let role_id = SemanticRoleId::new("langitem.sys.invoke").unwrap();
     let alternate = ProviderId::new("thirdparty.invoke").unwrap();
