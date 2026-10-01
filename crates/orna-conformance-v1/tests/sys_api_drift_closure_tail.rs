@@ -433,6 +433,26 @@ fn edge_interplay_fixture_retains_unknown_exact_count_across_documented_column_f
 }
 
 #[test]
+fn edge_interplay_fixture_retains_unknown_exact_count_across_optional_unkeyed_column_filter() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Optionality and key position constrain child Columns independently from parent row_count;
+    // retain the nullable exact-but-unknown count through both filters.
+    assert!(
+        analysis.is_ok(),
+        "optional unkeyed Column filtering must retain the unknown exact parent count: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_retains_unknown_exact_target_across_reference_handoff() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
