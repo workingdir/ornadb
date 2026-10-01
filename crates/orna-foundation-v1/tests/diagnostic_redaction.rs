@@ -20732,3 +20732,137 @@ fn deep_decoded_tail_containment_keeps_the_middle_empty() {
         }
     }
 }
+
+#[test]
+fn composed_deep_decoded_branches_keep_opposite_tails_contained() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let diagnostic = |code: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let decoded_empty = Diagnostic::decode_ovb(
+        &diagnostic("ORNA-E-DEEP-PAIR-EMPTY")
+            .redacted()
+            .encode_ovb()
+            .unwrap(),
+    )
+    .unwrap();
+    let make_deep_branch = |tag: &str, first_tail: &str, second_tail: &str| {
+        let mut branch = diagnostic(&format!("ORNA-E-DEEP-PAIR-{tag}-ORDERED"))
+            .with_cause(diagnostic(first_tail))
+            .with_cause(diagnostic(second_tail))
+            .redacted();
+        for level in 0..5 {
+            branch = diagnostic(&format!("ORNA-E-DEEP-PAIR-{tag}-LEVEL-{level}"))
+                .with_cause(decoded_empty.clone())
+                .with_cause(branch)
+                .redacted();
+            branch = Diagnostic::decode_ovb(&branch.encode_ovb().unwrap()).unwrap();
+        }
+        branch
+    };
+    let branch_ba = make_deep_branch(
+        "BA",
+        "ORNA-E-DEEP-PAIR-B",
+        "ORNA-E-DEEP-PAIR-A",
+    );
+    let branch_ab = make_deep_branch(
+        "AB",
+        "ORNA-E-DEEP-PAIR-A",
+        "ORNA-E-DEEP-PAIR-B",
+    );
+    let composed = diagnostic("ORNA-E-DEEP-PAIR-OUTER")
+        .with_cause(branch_ba)
+        .with_cause(decoded_empty)
+        .with_cause(branch_ab)
+        .redacted();
+
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        assert!(diagnostic["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|note| note == "<redacted>"));
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    fn assert_deep_branch(
+        branch: &serde_json::Value,
+        tag: &str,
+        first_tail: &str,
+        second_tail: &str,
+    ) {
+        let mut terminal = branch;
+        for level in (0..5).rev() {
+            let expected_code = format!("ORNA-E-DEEP-PAIR-{tag}-LEVEL-{level}");
+            assert_eq!(terminal["code"].as_str(), Some(expected_code.as_str()));
+            let causes = terminal["causes"].as_array().unwrap();
+            assert_eq!(causes.len(), 2);
+            assert_eq!(causes[0]["code"], "ORNA-E-DEEP-PAIR-EMPTY");
+            assert!(causes[0]["causes"].as_array().unwrap().is_empty());
+            terminal = &causes[1];
+        }
+        let expected_ordered = format!("ORNA-E-DEEP-PAIR-{tag}-ORDERED");
+        assert_eq!(terminal["code"].as_str(), Some(expected_ordered.as_str()));
+        assert_eq!(
+            terminal["causes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|cause| cause["code"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [first_tail, second_tail]
+        );
+    }
+
+    let projection = serde_json::to_value(&composed).unwrap();
+    assert_redacted_tree(&projection);
+    let siblings = projection["causes"].as_array().unwrap();
+    assert_eq!(siblings.len(), 3);
+    assert_eq!(siblings[1]["code"], "ORNA-E-DEEP-PAIR-EMPTY");
+    assert!(siblings[1]["causes"].as_array().unwrap().is_empty());
+    assert_deep_branch(
+        &siblings[0],
+        "BA",
+        "ORNA-E-DEEP-PAIR-B",
+        "ORNA-E-DEEP-PAIR-A",
+    );
+    assert_deep_branch(
+        &siblings[2],
+        "AB",
+        "ORNA-E-DEEP-PAIR-A",
+        "ORNA-E-DEEP-PAIR-B",
+    );
+
+    let wire = composed.encode_ovb().unwrap();
+    let replayed = Diagnostic::decode_ovb(&wire).unwrap();
+    let replayed_projection = serde_json::to_value(&replayed).unwrap();
+    assert_redacted_tree(&replayed_projection);
+    assert_eq!(replayed_projection, projection);
+    let json = serde_json::to_vec(&replayed_projection).unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([fixture.as_bytes()])
+    {
+        for bytes in [&json, &wire] {
+            assert!(!bytes
+                .windows(disclosure.len())
+                .any(|window| window == disclosure));
+        }
+    }
+}
