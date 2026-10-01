@@ -283,10 +283,7 @@ impl DependencyGraph {
         if objects.len() > MAX_DEPENDENCY_OBJECTS {
             return Err(DependencyGraphError::TooManyObjects);
         }
-        if objects
-            .iter()
-            .any(|object| invalid_reference(object.as_str()))
-        {
+        if objects.iter().any(|object| invalid_reference(object.as_str())) {
             return Err(DependencyGraphError::InvalidObject);
         }
 
@@ -298,15 +295,19 @@ impl DependencyGraph {
             if !objects.contains(&edge.from) || !objects.contains(&edge.to) {
                 return Err(DependencyGraphError::UnknownEndpoint);
             }
-            if edge.span.as_ref().is_some_and(|span| {
-                invalid_reference(span.file.as_str())
-                    || span.start_byte > span.end_byte
-                    || span.start_line == 0
-                    || span.start_column == 0
-                    || span.end_line == 0
-                    || span.end_column == 0
-                    || (span.start_line, span.start_column) > (span.end_line, span.end_column)
-            }) {
+            if edge
+                .span
+                .as_ref()
+                .is_some_and(|span| {
+                    invalid_reference(span.file.as_str())
+                        || span.start_byte > span.end_byte
+                        || span.start_line == 0
+                        || span.start_column == 0
+                        || span.end_line == 0
+                        || span.end_column == 0
+                        || (span.start_line, span.start_column) > (span.end_line, span.end_column)
+                })
+            {
                 return Err(DependencyGraphError::InvalidSpan);
             }
             if edge
@@ -842,10 +843,10 @@ pub fn explain_query_with_limit_chain(
 /// ORNA-PLAN leaves disjunct selectivity and cost estimates unspecified; this
 /// adapter uses the following deterministic fallback in the absence of
 /// histograms. Each disjunct is estimated to match half of the input rows.
-/// The planner assumes independent branch selectivity, so the OR
-/// output estimate is `input * (1 - 0.5^disjunct_count)` rounded up and capped
-/// by the input. Each expanded branch examines the full input; later limits
-/// retain that work and cannot refund it. A zero branch count is invalid.
+/// The planner assumes independent branch selectivity, so the OR output
+/// estimate is `input * (1 - 0.5^disjunct_count)` rounded up and capped by the
+/// input. Each expanded branch examines the full input; later limits retain
+/// that work and cannot refund it. A zero branch count is invalid.
 pub fn explain_query_with_disjunct_limit_chain(
     query: &QueryPlanDescription,
     disjunct_count: u64,
@@ -875,12 +876,7 @@ pub fn explain_query_with_disjunct_limit_chain(
         || query
             .source_statistics
             .iter()
-            .chain(
-                query
-                    .joins
-                    .iter()
-                    .filter_map(|join| join.statistics.as_ref()),
-            )
+            .chain(query.joins.iter().filter_map(|join| join.statistics.as_ref()))
             .filter_map(|statistics| statistics.mutable_branch.as_ref())
             .any(|branch| invalid_reference(&branch.name))
     {
@@ -904,12 +900,7 @@ pub fn explain_query_with_disjunct_limit_chain(
         .iter()
         .chain(query.projections.iter())
         .chain(query.ordering.iter().map(|ordering| &ordering.expression))
-        .chain(
-            query
-                .joins
-                .iter()
-                .filter_map(|join| join.predicate.as_ref()),
-        )
+        .chain(query.joins.iter().filter_map(|join| join.predicate.as_ref()))
         .any(|expression| invalid_reference(expression.as_str()))
     {
         return Err(ExplainError::InvalidExpression);
@@ -919,13 +910,7 @@ pub fn explain_query_with_disjunct_limit_chain(
         .len()
         .saturating_add(query.ordering.len())
         .saturating_add(usize::from(query.predicate.is_some()))
-        .saturating_add(
-            query
-                .joins
-                .iter()
-                .filter(|join| join.predicate.is_some())
-                .count(),
-        )
+        .saturating_add(query.joins.iter().filter(|join| join.predicate.is_some()).count())
         > MAX_PLAN_EXPRESSIONS
     {
         return Err(ExplainError::TooManyExpressions);
@@ -939,11 +924,7 @@ pub fn explain_query_with_disjunct_limit_chain(
     );
     let mut current_cardinality = source_cardinality(query.source_statistics.as_ref());
     for join in &query.joins {
-        let right = push_scan(
-            &mut operators,
-            join.source.clone(),
-            join.statistics.as_ref(),
-        );
+        let right = push_scan(&mut operators, join.source.clone(), join.statistics.as_ref());
         let right_cardinality = source_cardinality(join.statistics.as_ref());
         let cardinality = join_cardinality(
             current_cardinality,
@@ -961,8 +942,10 @@ pub fn explain_query_with_disjunct_limit_chain(
             .rows
             .zip(right_cardinality.rows)
             .is_some_and(|(left, right)| left.checked_add(right).is_none());
-        let mut details =
-            BTreeMap::from([("strategy".to_owned(), PlanDetail::Text("hash".to_owned()))]);
+        let mut details = BTreeMap::from([(
+            "strategy".to_owned(),
+            PlanDetail::Text("hash".to_owned()),
+        )]);
         if work_overflow {
             record_work_overflow(&mut details);
         }
@@ -972,7 +955,10 @@ pub fn explain_query_with_disjunct_limit_chain(
                 PlanDetail::Text("0.1_no_histogram".to_owned()),
             );
         } else {
-            details.insert("join_type".to_owned(), PlanDetail::Text("cross".to_owned()));
+            details.insert(
+                "join_type".to_owned(),
+                PlanDetail::Text("cross".to_owned()),
+            );
         }
         let prior = current;
         current = operators.len();
@@ -1059,9 +1045,7 @@ pub fn explain_query_with_disjunct_limit_chain(
         // The reference names no standalone DISTINCT plan kind. Aggregate is
         // the existing 1.0 logical operator for duplicate elimination.
         let cardinality = scale_cardinality(current_cardinality, 1, 2);
-        let work = current_cardinality
-            .rows
-            .and_then(|rows| rows.checked_mul(2));
+        let work = current_cardinality.rows.and_then(|rows| rows.checked_mul(2));
         let mut details = BTreeMap::from([
             (
                 "operation".to_owned(),
@@ -1123,17 +1107,12 @@ pub fn explain_query_with_disjunct_limit_chain(
     let mut table_rows = BTreeMap::<ObjectRef, Option<u64>>::new();
     table_rows.insert(
         query.source.clone(),
-        query
-            .source_statistics
-            .as_ref()
-            .and_then(|stats| stats.estimated_rows),
+        query.source_statistics.as_ref().and_then(|stats| stats.estimated_rows),
     );
     for join in &query.joins {
         table_rows.insert(
             join.source.clone(),
-            join.statistics
-                .as_ref()
-                .and_then(|stats| stats.estimated_rows),
+            join.statistics.as_ref().and_then(|stats| stats.estimated_rows),
         );
     }
     for mutation in &query.mutations {
@@ -1152,10 +1131,16 @@ pub fn explain_query_with_disjunct_limit_chain(
             ),
         ]);
         if let Some(before) = before {
-            details.insert("table_rows_before".to_owned(), PlanDetail::Integer(before));
+            details.insert(
+                "table_rows_before".to_owned(),
+                PlanDetail::Integer(before),
+            );
         }
         if let Some(after) = after {
-            details.insert("table_rows_after".to_owned(), PlanDetail::Integer(after));
+            details.insert(
+                "table_rows_after".to_owned(),
+                PlanDetail::Integer(after),
+            );
         }
         if let Some(affected) = mutation.estimated_affected_rows {
             details.insert("affected_rows".to_owned(), PlanDetail::Integer(affected));
@@ -1380,7 +1365,9 @@ fn disjunction_cardinality(cardinality: Cardinality, disjunct_count: u64) -> Car
 fn limit_cardinality(cardinality: Cardinality, limit: u64) -> Cardinality {
     let rows = cardinality.rows.map(|rows| rows.min(limit));
     let bytes = match (cardinality.rows, cardinality.bytes, rows) {
-        (Some(before), Some(bytes), Some(after)) if before > 0 => scale_count(bytes, after, before),
+        (Some(before), Some(bytes), Some(after)) if before > 0 => {
+            scale_count(bytes, after, before)
+        }
         (Some(0), Some(_), Some(_)) => Some(0),
         (_, bytes, _) => bytes,
     };
@@ -1426,8 +1413,11 @@ fn mutation_work(affected_rows: Option<u64>, write_bytes: Option<u64>) -> Option
 
 fn partial_scan_or_mutation_work_lower_bound(operator: &Operator) -> Option<u64> {
     let has_row_byte_work_model = operator.kind == PlanNodeKind::Scan
-        || (operator.kind == PlanNodeKind::Invoke && operator.details.contains_key("mutation"));
-    if !has_row_byte_work_model || operator.details.contains_key("estimated_work_overflow") {
+        || (operator.kind == PlanNodeKind::Invoke
+            && operator.details.contains_key("mutation"));
+    if !has_row_byte_work_model
+        || operator.details.contains_key("estimated_work_overflow")
+    {
         return None;
     }
 
@@ -1465,7 +1455,9 @@ fn mutated_table_rows(
 /// Statically known calls and reads are visible; non-executable type/import
 /// edges remain available from the dependency relation instead of being
 /// misrepresented as runtime work.
-pub fn explain_function(function: &FunctionPlanDescription) -> Result<ExplainedPlan, ExplainError> {
+pub fn explain_function(
+    function: &FunctionPlanDescription,
+) -> Result<ExplainedPlan, ExplainError> {
     if invalid_reference(function.snapshot.as_str()) {
         return Err(ExplainError::InvalidSnapshot);
     }
