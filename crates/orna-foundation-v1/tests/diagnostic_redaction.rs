@@ -19358,8 +19358,7 @@ fn zero_cause_five_level_aliases_preserve_distinct_leaf_tail_order() {
 
     let mut ordered_shape = Vec::new();
     collect_leaf_tail_codes(&aliases[1], 4, &mut ordered_shape);
-    // Parent order among same-code aliases is unspecified; each leaf's cause list is ordered.
-    ordered_shape.sort();
+    // ORNA represents causes as ordered Error values, so retain the construction path order.
     let mut expected_ordered_shape = vec![Vec::<String>::new(); 14];
     expected_ordered_shape.extend([
         vec![
@@ -19371,7 +19370,6 @@ fn zero_cause_five_level_aliases_preserve_distinct_leaf_tail_order() {
             "ORNA-E-ZERO-ALIAS-ORDER-A".to_owned(),
         ],
     ]);
-    expected_ordered_shape.sort();
     assert_eq!(ordered_shape, expected_ordered_shape);
 
     let json = serde_json::to_vec(&decoded).unwrap();
