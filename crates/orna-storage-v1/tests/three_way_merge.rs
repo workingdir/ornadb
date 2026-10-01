@@ -24,6 +24,7 @@ const CHECKPOINT_TAIL_BASE: &str = include_str!("fixtures/merge-checkpoint-tail-
 const CHECKPOINT_TAIL_LEFT: &str = include_str!("fixtures/merge-checkpoint-tail-left.orna");
 const CHECKPOINT_TAIL_RIGHT: &str = include_str!("fixtures/merge-checkpoint-tail-right.orna");
 const TOMBSTONE_DEPTH_SHALLOW: &str = include_str!("fixtures/merge-tombstone-depth-shallow.orna");
+const TOMBSTONE_DEPTH_MIDDLE: &str = include_str!("fixtures/merge-tombstone-depth-middle.orna");
 const TOMBSTONE_DEPTH_DEEP: &str = include_str!("fixtures/merge-tombstone-depth-deep.orna");
 
 fn id(value: u8) -> ObjectId {
