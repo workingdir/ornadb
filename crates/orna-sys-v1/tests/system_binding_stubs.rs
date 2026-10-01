@@ -469,3 +469,127 @@ fn generated_invoke_generic_keyword_overloads_match_the_in_crate_fixture() {
         );
     }
 }
+
+#[test]
+fn generated_invocation_overload_families_match_the_registry_as_a_set() {
+    let bundle = system_binding_stubs();
+    let families = [
+        (
+            GENERIC_INVOKE_KEYWORD_OVERLOAD_FIXTURE,
+            ["sys.invoke(Value)", "sys.invoke<T>"],
+            "invoke",
+            "langitem.sys.invoke",
+        ),
+        (
+            GENERIC_START_KEYWORD_OVERLOAD_FIXTURE,
+            ["sys.start(Value)", "sys.start<T>"],
+            "start",
+            "langitem.sys.start",
+        ),
+    ];
+    let mut previous_bundle_position = None;
+    for (fixture, expected_operations, function_name, role_name) in families {
+        let fixture = fixture.trim_end();
+        let parsed = parse_module(fixture);
+        assert!(
+            parsed.is_ok(),
+            "invocation overload fixtures must parse in supported Orna grammar: {:?}",
+            parsed.diagnostics
+        );
+        assert_eq!(parsed.value.items.len(), expected_operations.len());
+        let markers = fixture
+            .lines()
+            .filter_map(|line| line.strip_prefix("// sys-op: "))
+            .collect::<Vec<_>>();
+        assert_eq!(markers, expected_operations);
+
+        for block in fixture.split("\n\n") {
+            let block = block.trim_end();
+            let position = bundle
+                .find(block)
+                .expect("each overload fixture block is emitted in the generated bundle");
+            if let Some(previous) = previous_bundle_position {
+                assert!(
+                    previous < position,
+                    "invoke and start overload pairs retain registry emission order"
+                );
+            }
+            previous_bundle_position = Some(position);
+        }
+
+        for (index, (item, operation_name)) in parsed
+            .value
+            .items
+            .iter()
+            .zip(expected_operations)
+            .enumerate()
+        {
+            let Declaration::Function { signature, .. } = &item.declaration else {
+                panic!("each invocation overload must be a function declaration")
+            };
+            let operation = system_provider_abi()
+                .operation(operation_name)
+                .expect("invocation overload dispatch entry");
+            assert_eq!(operation.effects, EffectSet::one(SystemEffect::Invoke));
+            assert_eq!(
+                operation.role.as_ref().map(|role| role.as_str()),
+                Some(role_name)
+            );
+            assert_eq!(signature.name, function_name);
+            assert_eq!(
+                signature
+                    .generics
+                    .iter()
+                    .map(|generic| generic.name.as_str())
+                    .collect::<Vec<_>>(),
+                operation
+                    .signature
+                    .type_parameters
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                signature.parameters.len(),
+                operation.signature.parameters.len()
+            );
+            for (parsed_parameter, registered_parameter) in signature
+                .parameters
+                .iter()
+                .zip(&operation.signature.parameters)
+            {
+                let parameter_source =
+                    &fixture[parsed_parameter.span.start..parsed_parameter.span.end];
+                let (parameter_name, _) = parameter_source
+                    .split_once(": ")
+                    .expect("overload fixture parameter has an explicit type");
+                let expected_name = if index == 1 && registered_parameter.name == "as" {
+                    "as_"
+                } else {
+                    registered_parameter.name.as_str()
+                };
+                assert_eq!(parameter_name, expected_name);
+                assert_eq!(
+                    resolve_type(
+                        parsed_parameter
+                            .annotation
+                            .as_ref()
+                            .expect("typed overload parameter")
+                    )
+                    .expect("supported overload parameter type"),
+                    registered_parameter.ty
+                );
+                let parsed_default = parsed_parameter
+                    .default
+                    .as_ref()
+                    .map(|default| &fixture[default.span().start..default.span().end]);
+                assert_eq!(parsed_default, registered_parameter.default.as_deref());
+            }
+            assert_eq!(
+                resolve_type(signature.result.as_ref().expect("typed overload result"))
+                    .expect("supported overload result type"),
+                operation.signature.result
+            );
+        }
+    }
+}
