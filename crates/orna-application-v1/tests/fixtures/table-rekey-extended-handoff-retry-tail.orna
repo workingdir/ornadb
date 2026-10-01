@@ -20,7 +20,18 @@ fn continue_after_twelfth_handoff() {
         Note.rekey(2, 6);
         Note.rekey(3, 2);
         Note.rekey(6, 3);
-        Note.update(3, { quantity: 34 })
+        Note.update(3, { quantity: 34 });
+        continue_after_thirteenth_handoff()
+    })
+}
+
+fn continue_after_thirteenth_handoff() {
+    Note.rekey(3, 2) |? (competitor_retries_after_fourteenth_handoff => {
+        Note.update(3, { quantity: 35 });
+        Note.rekey(2, 6);
+        Note.rekey(3, 2);
+        Note.rekey(6, 3);
+        Note.update(3, { quantity: 38 })
     })
 }
 
