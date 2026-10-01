@@ -13619,3 +13619,109 @@ fn explain_closes_partial_half_block_scan_after_unknown_prefix() {
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
 }
+
+#[test]
+fn explain_preserves_partial_half_block_scan_overflow_through_unknown_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN is silent on combining partial scan work with later unknown
+    // join and mutation tails. Keep the byte-only half-block's one-unit lower
+    // bound; once it takes complete source work past MAX, unknown tails must
+    // preserve the proven aggregate overflow.
+    let explain = |source_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-half-block-preserve-tail"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanFirst"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(2_048),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownThird"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:ByteWorkThreeScanLast"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: None,
+                estimated_write_bytes: None,
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: Some(obj("materialization:partial-half-block-preserve-tail")),
+        })
+        .expect("partial half-block scan with unknown join and mutation tails")
+    };
+
+    let exact = explain(u64::MAX - 2);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let partial_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanFirst"))
+        })
+        .expect("byte-only partial half-block scan");
+    assert_eq!(partial_scan.estimated_rows(), None);
+    assert_eq!(partial_scan.estimated_bytes(), Some(2_048));
+    assert_eq!(partial_scan.estimated_work(), None);
+
+    let overflow = explain(u64::MAX - 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the scan lower bound proves overflow before the unknown tails"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    let unknown_join = overflow
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanUnknownThird"))
+        })
+        .expect("unknown join after the partial scan");
+    assert_eq!(unknown_join.estimated_work(), None);
+    let unknown_update = overflow
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Invoke
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("unknown mutation after the join tail");
+    assert_eq!(unknown_update.estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("partial half-block scan overflow preserved through unknown tails");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
