@@ -2585,7 +2585,7 @@ fn http_create_and_resume_negotiate_and_replace_connections() {
 }
 
 #[test]
-fn running_status_snapshot_survives_http_reconnect_before_eval_completion() {
+fn running_status_snapshot_survives_successive_http_reconnects_after_eval_completion() {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
 
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
@@ -2765,6 +2765,90 @@ fn running_status_snapshot_survives_http_reconnect_before_eval_completion() {
             && *fingerprint == target_fingerprint
             && result == &expected_result
     ));
+
+    let pinned_terminal_snapshot = fresh.clone();
+    let (_, mut final_socket) = resume_transport_session_with_socket(
+        &mut transport,
+        &mut issuer,
+        &mut authority,
+        &mut deletion,
+        &new_token,
+        [6; 16],
+        [7; 16],
+        8,
+    );
+    assert_eq!(
+        block_on(transport.receive_with_application(
+            &mut new_socket,
+            8,
+            &masked_binary_payload(&status_request([73; 16])),
+            &mut application,
+        )),
+        Err(Error::Closed),
+        "the second handoff retires the prior attachment"
+    );
+
+    let running_retry = block_on(transport.receive_with_application(
+        &mut final_socket,
+        9,
+        &masked_binary_payload(&status_request([72; 16])),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("the original Running snapshot survives both reconnects");
+    let WebSocketOutput::Binary { payload, .. } = running_retry else {
+        panic!("the replayed Running response is binary");
+    };
+    assert_eq!(
+        Envelope::decode(&payload, Limits::default().protocol).unwrap(),
+        pinned_snapshot
+    );
+
+    let terminal_retry = block_on(transport.receive_with_application(
+        &mut final_socket,
+        10,
+        &masked_binary_payload(&status_request([73; 16])),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("the Terminal snapshot pinned after the first reconnect survives the second");
+    let WebSocketOutput::Binary { payload, .. } = terminal_retry else {
+        panic!("the replayed Terminal response is binary");
+    };
+    assert_eq!(
+        Envelope::decode(&payload, Limits::default().protocol).unwrap(),
+        pinned_terminal_snapshot
+    );
+
+    let latest = block_on(transport.receive_with_application(
+        &mut final_socket,
+        11,
+        &masked_binary_payload(&status_request([74; 16])),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("a fresh query after the second reconnect still sees Terminal");
+    let WebSocketOutput::Binary { payload, .. } = latest else {
+        panic!("a fresh status response is binary");
+    };
+    let latest = Envelope::decode(&payload, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        &latest.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [71; 16]
+            && *fingerprint == target_fingerprint
+            && result == &expected_result
+    ));
     assert_eq!(application.calls, 1);
 }
 
@@ -2839,12 +2923,12 @@ fn resume_transport_session_with_socket(
 }
 
 #[test]
-fn terminal_status_snapshot_survives_http_reconnect() {
+fn terminal_status_snapshot_survives_successive_http_reconnects() {
     terminal_status_snapshot_survives_http_reconnect_with(UnitEvalOutcome::Unit);
 }
 
 #[test]
-fn terminal_failure_status_snapshot_survives_http_reconnect() {
+fn terminal_failure_status_snapshot_survives_successive_http_reconnects() {
     terminal_status_snapshot_survives_http_reconnect_with(UnitEvalOutcome::SemanticFailure);
 }
 
@@ -2939,7 +3023,7 @@ fn terminal_status_snapshot_survives_http_reconnect_with(eval_outcome: UnitEvalO
             && result == &expected_result
     ));
 
-    let (_, mut new_socket) = resume_transport_session_with_socket(
+    let (new_token, mut new_socket) = resume_transport_session_with_socket(
         &mut transport,
         &mut issuer,
         &mut authority,
@@ -2966,11 +3050,76 @@ fn terminal_status_snapshot_survives_http_reconnect_with(eval_outcome: UnitEvalO
         Envelope::decode(&payload, Limits::default().protocol).unwrap(),
         pinned_snapshot
     );
+
+    let (_, mut final_socket) = resume_transport_session_with_socket(
+        &mut transport,
+        &mut issuer,
+        &mut authority,
+        &mut deletion,
+        &new_token,
+        [6; 16],
+        [7; 16],
+        5,
+    );
+    assert_eq!(
+        block_on(transport.receive_with_application(
+            &mut new_socket,
+            5,
+            &masked_binary_payload(&status_request([82; 16])),
+            &mut application,
+        )),
+        Err(Error::Closed),
+        "the second handoff retires the previous attachment"
+    );
+
+    let replay = block_on(transport.receive_with_application(
+        &mut final_socket,
+        6,
+        &masked_binary_payload(&status_request([82; 16])),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("the Terminal snapshot survives both reconnects");
+    let WebSocketOutput::Binary { payload, .. } = replay else {
+        panic!("the replayed status response is binary");
+    };
+    assert_eq!(
+        Envelope::decode(&payload, Limits::default().protocol).unwrap(),
+        pinned_snapshot
+    );
+
+    let fresh = block_on(transport.receive_with_application(
+        &mut final_socket,
+        7,
+        &masked_binary_payload(&status_request([83; 16])),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("a fresh status query still sees the terminal target after both reconnects");
+    let WebSocketOutput::Binary { payload, .. } = fresh else {
+        panic!("the fresh status response is binary");
+    };
+    let fresh = Envelope::decode(&payload, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        &fresh.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [81; 16]
+            && *fingerprint == target_fingerprint
+            && result == &expected_result
+    ));
     assert_eq!(application.calls, 1);
 }
 
 #[test]
-fn unknown_status_snapshot_survives_http_reconnect_and_target_id_reuse() {
+fn unknown_status_snapshot_survives_successive_http_reconnects_and_target_id_reuse() {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
 
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
@@ -3036,7 +3185,7 @@ fn unknown_status_snapshot_survives_http_reconnect_and_target_id_reuse() {
         } if *target == [91; 16]
     ));
 
-    let (_, mut new_socket) = resume_transport_session_with_socket(
+    let (new_token, mut new_socket) = resume_transport_session_with_socket(
         &mut transport,
         &mut issuer,
         &mut authority,
@@ -3101,6 +3250,90 @@ fn unknown_status_snapshot_survives_http_reconnect_and_target_id_reuse() {
     let fresh = Envelope::decode(&payload, Limits::default().protocol).unwrap();
     assert!(matches!(
         &fresh.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *fingerprint == target_fingerprint
+            && result == &expected_result
+    ));
+
+    let pinned_terminal_snapshot = fresh.clone();
+    let (_, mut final_socket) = resume_transport_session_with_socket(
+        &mut transport,
+        &mut issuer,
+        &mut authority,
+        &mut deletion,
+        &new_token,
+        [6; 16],
+        [7; 16],
+        6,
+    );
+    assert_eq!(
+        block_on(transport.receive_with_application(
+            &mut new_socket,
+            7,
+            &masked_binary_payload(&status_request([93; 16])),
+            &mut application,
+        )),
+        Err(Error::Closed),
+        "the second handoff retires the previous attachment"
+    );
+
+    let unknown_retry = block_on(transport.receive_with_application(
+        &mut final_socket,
+        8,
+        &masked_binary_payload(&status_request([92; 16])),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("the original Unknown snapshot survives both reconnects");
+    let WebSocketOutput::Binary { payload, .. } = unknown_retry else {
+        panic!("the replayed Unknown response is binary");
+    };
+    assert_eq!(
+        Envelope::decode(&payload, Limits::default().protocol).unwrap(),
+        pinned_snapshot
+    );
+
+    let terminal_retry = block_on(transport.receive_with_application(
+        &mut final_socket,
+        9,
+        &masked_binary_payload(&status_request([93; 16])),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("the Terminal snapshot pinned after the first reconnect survives the second");
+    let WebSocketOutput::Binary { payload, .. } = terminal_retry else {
+        panic!("the replayed Terminal response is binary");
+    };
+    assert_eq!(
+        Envelope::decode(&payload, Limits::default().protocol).unwrap(),
+        pinned_terminal_snapshot
+    );
+
+    let latest = block_on(transport.receive_with_application(
+        &mut final_socket,
+        10,
+        &masked_binary_payload(&status_request([94; 16])),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("a fresh query after the second reconnect still sees Terminal");
+    let WebSocketOutput::Binary { payload, .. } = latest else {
+        panic!("a fresh status response is binary");
+    };
+    let latest = Envelope::decode(&payload, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        &latest.message,
         Message::RequestStatusResult {
             target,
             state: orna_protocol_v1::RequestState::Terminal,
