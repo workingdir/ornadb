@@ -1,8 +1,17 @@
+use std::collections::BTreeSet;
+
 use orna_sys_v1::{
     AbiType, AbiVersion, EffectSet, FailureCode, ProviderDiagnostic, ProviderId, ProviderOffer,
-    ProviderRoleRegistry, SemanticRoleId, SystemEffect, system_dispatch_table,
+    ProviderRoleRegistry, SemanticRoleId, SystemEffect, system_api_json, system_dispatch_table,
     system_provider_abi,
 };
+use serde_json::Value;
+
+const SHARED_PROVIDER_FAILURES: [&str; 3] = [
+    "sys.abi.precondition_failed",
+    "sys.abi.unavailable",
+    "sys.abi.provider_failed",
+];
 
 #[test]
 fn generated_provider_abi_carries_typed_operation_contracts_and_roles() {
@@ -193,5 +202,132 @@ fn provider_linkage_reports_missing_version_effect_and_duplicate_gaps() {
             effects: role.effects,
         }),
         Err(ProviderDiagnostic::DuplicateRoleProvider(role_id))
+    );
+}
+
+#[test]
+fn every_dispatch_operation_matches_its_published_failure_vocabulary() {
+    let api: Value = serde_json::from_str(&system_api_json()).unwrap();
+    let declared_failures = api["failure_codes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|code| code.as_str().unwrap().to_owned())
+        .collect::<BTreeSet<_>>();
+    let functions = api["functions"].as_array().unwrap();
+    let table = system_dispatch_table();
+    assert_eq!(table.operations().count(), functions.len());
+
+    let mut public_operation_ids = BTreeSet::new();
+    for function in functions {
+        let operation_id = function["name"].as_str().unwrap();
+        public_operation_ids.insert(operation_id);
+        let contract = table
+            .operation(operation_id)
+            .unwrap_or_else(|| panic!("missing typed operation `{operation_id}`"));
+        assert_eq!(contract.signature.source, function["signature"]);
+
+        let namespace = operation_id
+            .find(['(', '<'])
+            .map_or(operation_id, |end| &operation_id[..end]);
+        let expected_failures = declared_failures
+            .iter()
+            .filter(|code| {
+                *code == namespace
+                    || code
+                        .strip_prefix(namespace)
+                        .is_some_and(|tail| tail.starts_with('.'))
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let registered_failures = contract
+            .failures
+            .iter()
+            .filter(|code| !SHARED_PROVIDER_FAILURES.contains(&code.as_str()))
+            .map(|code| code.as_str().to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            registered_failures, expected_failures,
+            "portable failure vocabulary for `{operation_id}`"
+        );
+        for code in SHARED_PROVIDER_FAILURES {
+            assert!(
+                contract
+                    .declares_failure(&FailureCode::new(code).unwrap()),
+                "shared provider boundary code `{code}` is absent from `{operation_id}`"
+            );
+        }
+    }
+    assert_eq!(
+        public_operation_ids,
+        table
+            .operations()
+            .map(|operation| operation.id.as_str())
+            .collect(),
+        "published operations and typed dispatch entries remain 1:1"
+    );
+}
+
+#[test]
+fn provider_diagnostic_codes_stay_outside_the_public_failure_catalog() {
+    let api: Value = serde_json::from_str(&system_api_json()).unwrap();
+    let public_failures = api["failure_codes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|code| code.as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    let role = SemanticRoleId::new("langitem.fixture.role").unwrap();
+    let operation = orna_sys_v1::OperationId::new("sys.fixture.operation").unwrap();
+    let failure = FailureCode::new("sys.abi.precondition_failed").unwrap();
+    let diagnostics = [
+        ProviderDiagnostic::UnknownRole(role.clone()),
+        ProviderDiagnostic::UnknownOperation(operation.clone()),
+        ProviderDiagnostic::PreconditionFailed {
+            operation: operation.clone(),
+            code: failure,
+        },
+        ProviderDiagnostic::DuplicateRoleContract(role.clone()),
+        ProviderDiagnostic::RoleUnavailable {
+            role: role.clone(),
+            version: AbiVersion::V1_0,
+        },
+        ProviderDiagnostic::DuplicateRoleProvider(role.clone()),
+        ProviderDiagnostic::RoleVersionMismatch {
+            role: role.clone(),
+            required: AbiVersion::V1_0,
+            provided: AbiVersion { major: 2, minor: 0 },
+        },
+        ProviderDiagnostic::EffectIncompatible(role),
+        ProviderDiagnostic::UndeclaredFailure {
+            operation,
+            code: FailureCode::new("sys.storage.corrupt").unwrap(),
+        },
+        ProviderDiagnostic::ProviderNotExecutable(
+            SemanticRoleId::new("langitem.fixture.provider").unwrap(),
+        ),
+    ];
+    let diagnostic_codes = diagnostics
+        .iter()
+        .map(ProviderDiagnostic::code)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        diagnostic_codes,
+        BTreeSet::from([
+            "sys.abi.duplicate_role_contract",
+            "sys.abi.duplicate_role_provider",
+            "sys.abi.effect_incompatible",
+            "sys.abi.precondition_failed",
+            "sys.abi.provider_not_executable",
+            "sys.abi.role_unavailable",
+            "sys.abi.role_version_mismatch",
+            "sys.abi.undeclared_failure",
+            "sys.abi.unknown_operation",
+            "sys.abi.unknown_role",
+        ])
+    );
+    assert!(
+        diagnostic_codes.is_disjoint(&public_failures),
+        "provider linkage diagnostics are not portable 1.0 operation failures"
     );
 }
