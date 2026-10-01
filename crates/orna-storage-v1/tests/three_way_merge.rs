@@ -29,6 +29,20 @@ const CHECKPOINT_TAIL_RIGHT: &str = include_str!("fixtures/merge-checkpoint-tail
 const TOMBSTONE_DEPTH_SHALLOW: &str = include_str!("fixtures/merge-tombstone-depth-shallow.orna");
 const TOMBSTONE_DEPTH_MIDDLE: &str = include_str!("fixtures/merge-tombstone-depth-middle.orna");
 const TOMBSTONE_DEPTH_DEEP: &str = include_str!("fixtures/merge-tombstone-depth-deep.orna");
+const TOMBSTONE_RECOVERY_STORM: &str = include_str!("fixtures/merge-tombstone-recovery-storm.orna");
+const TOMBSTONE_STORM_KEYS: &[&str] = &[
+    "a",
+    "root",
+    "root/child",
+    "root/child/deep",
+    "root/child/deep/storm/a",
+    "root/child/deep/storm/b",
+    "root/child/deep/storm/c",
+    "root/child/deep/storm/d",
+    "root/child/deep/storm/e",
+    "root/child/deep/storm/f",
+    "z",
+];
 
 fn id(value: u8) -> ObjectId {
     ObjectId::new([value; 16])
@@ -243,6 +257,39 @@ impl BranchRowSource for RecoveringFixtureRows {
         if self.fail_first_load {
             self.fail_first_load = false;
             return Err("fixture row source stopped at recovery boundary".into());
+        }
+        self.source.visit_rows(side, table, segment, range, visitor)
+    }
+}
+
+struct PartialRecoveringFixtureRows {
+    source: FixtureRows,
+    fail_after_rows: Option<usize>,
+    rows_delivered_before_failure: usize,
+}
+
+impl BranchRowSource for PartialRecoveringFixtureRows {
+    fn visit_rows(
+        &mut self,
+        side: MergeSide,
+        table: ObjectId,
+        segment: Option<&RowSegmentManifest>,
+        range: &KeyRange,
+        visitor: &mut dyn FnMut(KeyedRow) -> bool,
+    ) -> Result<(), String> {
+        if let Some(limit) = self.fail_after_rows.take() {
+            let mut delivered = 0;
+            let mut partial_visitor = |row| {
+                if delivered == limit {
+                    return false;
+                }
+                delivered += 1;
+                visitor(row)
+            };
+            self.source
+                .visit_rows(side, table, segment, range, &mut partial_visitor)?;
+            self.rows_delivered_before_failure = delivered;
+            return Err("fixture row source failed after partial storm delivery".into());
         }
         self.source.visit_rows(side, table, segment, range, visitor)
     }
@@ -15703,6 +15750,66 @@ fn unaligned_tombstone_inputs(
     (base, left, right, source)
 }
 
+fn recovery_tombstone_storm_inputs(
+    layout: u8,
+    edit_right: bool,
+    reverse_rows: bool,
+) -> (
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    FixtureRows,
+) {
+    let template = parse_fixture(TOMBSTONE_RECOVERY_STORM, RowKeyKind::Explicit);
+    let mut base_rows = TOMBSTONE_STORM_KEYS
+        .iter()
+        .map(|key| rekey_row(&template, key))
+        .collect::<Vec<_>>();
+    let mut left_rows = Vec::new();
+    let mut right_rows = if edit_right {
+        base_rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| edit_name(row, &format!("right edit {index}")))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if reverse_rows {
+        base_rows.reverse();
+        left_rows.reverse();
+        right_rows.reverse();
+    }
+
+    // Each layout uses different boundaries so recovery retries exercise the
+    // complete-table fallback as well as different source visitation orders.
+    let (base_bounds, left_bounds, right_bounds) = if layout == 0 {
+        (&["root/child"][..], &[][..], &["root/child/deep"][..])
+    } else {
+        (&[][..], &["root/child/deep"][..], &["root/child"][..])
+    };
+    let base = snapshot(
+        string_key_schema(),
+        logical_split_manifest(81 + layout * 3, base_bounds),
+        None,
+    );
+    let left = snapshot(
+        string_key_schema(),
+        logical_split_manifest(82 + layout * 3, left_bounds),
+        None,
+    );
+    let right = snapshot(
+        string_key_schema(),
+        logical_split_manifest(83 + layout * 3, right_bounds),
+        None,
+    );
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"", base_rows);
+    source.add(MergeSide::Left, b"", left_rows);
+    source.add(MergeSide::Right, b"", right_rows);
+    (base, left, right, source)
+}
+
 #[test]
 fn concurrent_unaligned_split_tombstones_keep_logical_order() {
     let (base_a, left_a, right_a, source_a) = unaligned_tombstone_inputs(0, false, false);
@@ -15915,6 +16022,174 @@ fn concurrent_recovery_retries_preserve_tombstone_conflict_order() {
     assert_eq!(conflict_keys, vec![string("root/child"), string("z")]);
     assert_eq!(report.rows_examined, 8);
     assert_eq!(report.conflicts_lower_bound, 2);
+    assert_eq!(report.affected_ranges, [(id(1), KeyRange::all())].into_iter().collect());
+}
+
+#[test]
+fn concurrent_recovery_tombstone_storms_keep_canonical_key_order() {
+    // MERGE-005 bounds work but does not prescribe output ordering after a
+    // partial row-source recovery. Fresh retries use canonical key order.
+    let row_budget = TOMBSTONE_STORM_KEYS.len();
+    let (base, left, right, source) = recovery_tombstone_storm_inputs(0, false, false);
+    let mut interrupted = PartialRecoveringFixtureRows {
+        source,
+        fail_after_rows: Some(4),
+        rows_delivered_before_failure: 0,
+    };
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: row_budget, max_conflicts: 0 },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed after partial storm delivery".into(),
+        }),
+    );
+    assert_eq!(interrupted.rows_delivered_before_failure, 4);
+
+    let (base_a, left_a, right_a, source_a) = recovery_tombstone_storm_inputs(0, false, false);
+    let (base_b, left_b, right_b, source_b) = recovery_tombstone_storm_inputs(1, false, true);
+    let start = Arc::new(Barrier::new(2));
+    let start_a = Arc::clone(&start);
+    let retry_a = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: source_a,
+            first_load: Some(start_a),
+        };
+        merge_three_way_snapshots(
+            &base_a,
+            &left_a,
+            &right_a,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: row_budget, max_conflicts: 0 },
+        )
+    });
+    let retry_b = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: source_b,
+            first_load: Some(start),
+        };
+        merge_three_way_snapshots(
+            &base_b,
+            &left_b,
+            &right_b,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: row_budget, max_conflicts: 0 },
+        )
+    });
+    let plan_a = retry_a.join().expect("first storm retry completes").unwrap();
+    let plan_b = retry_b.join().expect("second storm retry completes").unwrap();
+    assert_eq!(plan_a, plan_b, "layout and concurrent row visitation do not reorder tombstones");
+    let [MergedSegment::Rows { range, rows, tombstones }] =
+        plan_a.tables[&id(1)].segments.as_slice()
+    else {
+        panic!("the recovered storm materializes one complete key range")
+    };
+    assert_eq!(*range, KeyRange::all());
+    assert!(rows.is_empty());
+    assert_eq!(
+        tombstones,
+        &TOMBSTONE_STORM_KEYS.iter().map(|key| string(key)).collect::<Vec<_>>(),
+    );
+    assert_eq!(plan_a.report.rows_examined, row_budget);
+    assert_eq!(plan_a.report.conflicts_lower_bound, 0);
+}
+
+#[test]
+fn concurrent_recovery_tombstone_conflict_storm_respects_the_detail_budget() {
+    // A recovered conflict storm reports its full canonical sequence when it
+    // fits; over budget, the first omitted conflict still advances the lower
+    // bound and leaves the candidate unavailable.
+    let row_budget = TOMBSTONE_STORM_KEYS.len() * 2;
+    let conflict_budget = TOMBSTONE_STORM_KEYS.len();
+    let (base, left, right, source) = recovery_tombstone_storm_inputs(0, true, false);
+    let mut interrupted = PartialRecoveringFixtureRows {
+        source,
+        fail_after_rows: Some(4),
+        rows_delivered_before_failure: 0,
+    };
+    assert!(matches!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: row_budget, max_conflicts: conflict_budget },
+        ),
+        Err(BranchMergeError::RowRead { .. }),
+    ));
+    assert_eq!(interrupted.rows_delivered_before_failure, 4);
+
+    let (base_a, left_a, right_a, source_a) = recovery_tombstone_storm_inputs(0, true, false);
+    let (base_b, left_b, right_b, source_b) = recovery_tombstone_storm_inputs(1, true, true);
+    let start = Arc::new(Barrier::new(2));
+    let start_a = Arc::clone(&start);
+    let retry_a = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: source_a,
+            first_load: Some(start_a),
+        };
+        merge_three_way_snapshots(
+            &base_a,
+            &left_a,
+            &right_a,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: row_budget, max_conflicts: conflict_budget },
+        )
+    });
+    let retry_b = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: source_b,
+            first_load: Some(start),
+        };
+        merge_three_way_snapshots(
+            &base_b,
+            &left_b,
+            &right_b,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: row_budget, max_conflicts: conflict_budget },
+        )
+    });
+    let result_a = retry_a.join().expect("first conflict storm retry completes");
+    let result_b = retry_b.join().expect("second conflict storm retry completes");
+    assert_eq!(result_a, result_b, "recovery and source order preserve conflict diagnostics");
+    let BranchMergeError::Conflicts { conflicts, report } = result_a.unwrap_err() else {
+        panic!("the exact conflict detail budget retains the full storm")
+    };
+    let conflict_keys = conflicts
+        .iter()
+        .map(|conflict| match conflict {
+            BranchMergeConflict::Row {
+                conflict: orna_evolution_v1::RowMergeConflict::DeleteAndEdit { key, .. },
+                ..
+            } => key.clone(),
+            other => panic!("unexpected recovery storm conflict: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        conflict_keys,
+        TOMBSTONE_STORM_KEYS.iter().map(|key| string(key)).collect::<Vec<_>>(),
+    );
+    assert_eq!(report.rows_examined, row_budget);
+    assert_eq!(report.conflicts_lower_bound, conflict_budget);
+
+    let (base, left, right, mut source) = recovery_tombstone_storm_inputs(1, true, true);
+    let error = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: row_budget, max_conflicts: 3 },
+    )
+    .unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("the first storm conflict above budget stops planning")
+    };
+    assert_eq!(report.rows_examined, row_budget);
+    assert_eq!(report.conflicts_lower_bound, 4);
     assert_eq!(report.affected_ranges, [(id(1), KeyRange::all())].into_iter().collect());
 }
 
