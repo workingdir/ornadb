@@ -413,6 +413,26 @@ fn edge_interplay_fixture_composes_unknown_target_count_with_inexactness() {
 }
 
 #[test]
+fn edge_interplay_fixture_filters_unknown_inexact_count_after_closure_handoff() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The published API does not couple row_count exactness to count presence; preserve the
+    // nullable count when it crosses another closure and is then checked for null.
+    assert!(
+        analysis.is_ok(),
+        "unknown inexact target count must remain nullable across the handoff: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_composes_present_target_count_with_inexactness() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
