@@ -12007,7 +12007,7 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
     let failure_after_reused_eval = block_on(host.dispatch_frame(
         [6; 16],
         19,
-        Frame::Binary(failure_query_after_reused_eval),
+        Frame::Binary(failure_query_after_reused_eval.clone()),
         &mut application,
     ))
     .unwrap()
@@ -12026,9 +12026,48 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
     ));
     assert_eq!(application.calls, 1);
 
+    let eval_reusing_second_failure_query = eval_with_context([1; 16], [95; 16], [3; 16], None);
+    assert!(matches!(
+        Envelope::decode(&eval_reusing_second_failure_query, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    // The reference is silent on Eval reuse of this second status identity;
+    // retain its terminal snapshot through repeated cross-kind mismatches.
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            20,
+            Frame::Binary(eval_reusing_second_failure_query.clone()),
+            &mut application,
+        )),
+        Err(Error::RequestMismatch)
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            21,
+            Frame::Binary(eval_reusing_second_failure_query),
+            &mut application,
+        )),
+        Err(Error::RequestMismatch)
+    );
+    let exact_second_failure_query_retry = block_on(host.dispatch_frame(
+        [6; 16],
+        22,
+        Frame::Binary(failure_query_after_reused_eval),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the second status identity still replays its terminal failure");
+    assert_eq!(exact_second_failure_query_retry, failure_after_reused_eval);
+    assert_eq!(application.calls, 1);
+
     let exact_failure_query_retry = block_on(host.dispatch_frame(
         [6; 16],
-        20,
+        23,
         Frame::Binary(failure_status_query),
         &mut application,
     ))
