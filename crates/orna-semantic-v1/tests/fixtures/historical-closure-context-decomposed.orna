@@ -1,0 +1,14 @@
+pub fn decomposed_historical_callable() {
+    let selected = sys.snapshot("HEAD~10");
+    let historical = sys.database.as_of(selected);
+    let energy = historical.energy;
+    let daily = energy.daily;
+    daily()
+}
+
+pub fn repeated_pin_context_composes() {
+    let selected = sys.snapshot("HEAD~10");
+    let first = sys.database.as_of(selected);
+    let second = sys.database.as_of(selected);
+    [first.energy.daily, second.energy.daily]
+}
