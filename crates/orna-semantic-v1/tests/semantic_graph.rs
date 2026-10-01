@@ -2830,6 +2830,26 @@ fn calls_to_dynamic_pin_helpers_keep_call_site_identity() {
 }
 
 #[test]
+fn reassigned_dynamic_selector_keeps_helper_closure_pins_distinct() {
+    let source = include_str!("fixtures/historical-dynamic-helper-reassignment.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-dynamic-helper-reassignment.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
 fn dynamic_helper_literal_head_context_matches_symbolic_head() {
     let source = include_str!("fixtures/historical-dynamic-helper-head-context.orna");
     let result = analyze_with_catalogue(
