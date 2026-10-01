@@ -15687,6 +15687,10 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
         status_query([105; 16], [91; 16], terminal_fingerprint);
     let replayed_eval_fresh_terminal_fingerprint =
         request_fingerprint(&replayed_eval_fresh_terminal_query, [1; 16]);
+    let post_mismatch_fresh_terminal_query =
+        status_query([106; 16], [91; 16], terminal_fingerprint);
+    let post_mismatch_fresh_terminal_fingerprint =
+        request_fingerprint(&post_mismatch_fresh_terminal_query, [1; 16]);
     let first_unknown_status = block_on(host.dispatch_frame(
         [6; 16],
         2,
@@ -16445,6 +16449,77 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
         .expect("the sequential terminal mismatch has its own stable retry"),
         sequential_terminal_mismatch
     );
+    // The reference does not define a fresh snapshot after a sequential
+    // terminal identity mismatch; retain the completed target result under a
+    // new identity while preserving both older snapshots and the diagnostic.
+    let post_mismatch_fresh_terminal = block_on(host.dispatch_frame(
+        [6; 16],
+        24,
+        Frame::Binary(post_mismatch_fresh_terminal_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a fresh identity after the mismatch reads the retained terminal result");
+    assert!(matches!(
+        &post_mismatch_fresh_terminal.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *fingerprint == terminal_fingerprint
+            && result == &expected_first_terminal_body
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(next_fresh_terminal_first_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the earlier sequential terminal snapshot remains pinned after a later fresh read"),
+        next_fresh_terminal_first
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(replayed_eval_fresh_terminal_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the next sequential terminal snapshot remains pinned after a later fresh read"),
+        replayed_eval_fresh_terminal
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(sequential_terminal_mismatch_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the mismatch diagnostic remains independently replayable"),
+        sequential_terminal_mismatch
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(post_mismatch_fresh_terminal_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the fresh terminal snapshot after mismatch has a stable retry"),
+        post_mismatch_fresh_terminal
+    );
     assert_eq!(
         block_on(host.dispatch_frame(
             [6; 16],
@@ -16775,6 +16850,11 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
             [105; 16],
             replayed_eval_fresh_terminal_fingerprint,
             replayed_eval_fresh_terminal,
+        ),
+        (
+            [106; 16],
+            post_mismatch_fresh_terminal_fingerprint,
+            post_mismatch_fresh_terminal,
         ),
         ([97; 16], current_first_status_fingerprint, current_first_status),
         ([98; 16], current_second_status_fingerprint, current_second_status),
