@@ -385,6 +385,22 @@ fn annotation_metadata_and_generated_inventory_fail_closed() {
         "failure-code declarations must remain unique"
     );
 
+    for invalid_code in ["vendor.failure", "sys.only", "sys.Upper.case", "sys.trailing."] {
+        let mut malformed_failure_code = generated.clone();
+        malformed_failure_code["failure_codes"][0] = serde_json::json!(invalid_code);
+        let error = build_support::validate_api_document(&malformed_failure_code).unwrap_err();
+        assert!(
+            error.contains("failure_codes[0] must be a qualified lowercase `sys` failure code"),
+            "the build-time catalog validator must match semantic admission's code grammar for {invalid_code}: {error}"
+        );
+    }
+
+    let mut valid_additive_failure_code = generated.clone();
+    valid_additive_failure_code["failure_codes"][0] =
+        serde_json::json!("sys.vendor.future_code");
+    build_support::validate_api_document(&valid_additive_failure_code)
+        .expect("qualified lowercase failure codes remain additive");
+
     let mut wrong_effect = generated.clone();
     let invoke = wrong_effect["functions"]
         .as_array_mut()
@@ -936,6 +952,8 @@ fn generic_type_graph_fixture_resolves_through_the_published_inventory() {
             "await_result",
             "attribution_rows",
             "query_plan",
+            "metadata_query",
+            "nested_metadata_rows",
         ]
     );
 
@@ -965,6 +983,14 @@ fn generic_type_graph_fixture_resolves_through_the_published_inventory() {
         (
             "query_plan",
             "fn sys.fixture.query_plan<T>(query: Query<T>): sys.Plan",
+        ),
+        (
+            "metadata_query",
+            "fn sys.fixture.metadata_query<T>(query: Query<sys.ValueMetadata<T>>): Query<sys.ValueMetadata<T>>",
+        ),
+        (
+            "nested_metadata_rows",
+            "fn sys.fixture.nested_metadata_rows<T>(rows: Relation<sys.ValueMetadata<[T?]>>): Relation<sys.ValueMetadata<[T?]>>",
         ),
     ];
     let functions = api["functions"]
