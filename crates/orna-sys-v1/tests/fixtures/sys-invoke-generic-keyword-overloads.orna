@@ -1,0 +1,8 @@
+// sys-module: sys
+// sys-op: sys.invoke(Value)
+pub fn invoke(function: sys.FunctionRef, arguments: sys.ArgumentMap, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.inherit, idempotency_key: Str? = null): sys.Value = error(code: "sys.binding.stub", message: "generated declaration stub");
+
+// sys-module: sys
+// sys-op: sys.invoke<T>
+// sys-parameter-alias: as=as_
+pub fn invoke<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap, as_: T, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.inherit, idempotency_key: Str? = null): T = error(code: "sys.binding.stub", message: "generated declaration stub");
