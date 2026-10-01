@@ -9274,6 +9274,179 @@ fn even_sibling_recoveries_preserve_ten_closures_before_text_tail() {
     // before literal text; preserve intervening closures and the final segment.
 }
 
+// The reference is silent on this repeated even-position recovery pattern. Keep
+// the pragmatic contract explicit: each diagnostic is localized and every sibling
+// closure, nested case tail, and final text segment remains in the parse tree.
+fn assert_even_sibling_recoveries_preserve_closures_before_text_tail(
+    source: &str,
+    labels: &[&str],
+    malformed_patterns: &[(&str, usize, usize)],
+) {
+    let parsed = parse_module(source);
+    assert_eq!(parsed.diagnostics.len(), malformed_patterns.len(), "{:?}", parsed.diagnostics);
+    for (diagnostic, (pattern, offset, width)) in
+        parsed.diagnostics.iter().zip(malformed_patterns.iter().copied())
+    {
+        let start = source.find(pattern).expect("malformed sibling arm") + offset;
+        assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+        assert_eq!(diagnostic.message, "expected `:` after case pattern");
+        assert_eq!(diagnostic.span.start, start, "{diagnostic:?}");
+        assert_eq!(diagnostic.span.end, start + width, "{diagnostic:?}");
+    }
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block { tail: Some(root_tail), .. } = body else {
+        panic!("expected the root case tail");
+    };
+    let Expr::Control { arms: root_arms, .. } = root_tail.as_ref() else {
+        panic!("expected the root case expression");
+    };
+    let Expr::InterpolatedString { segments, .. } = &root_arms[0].body else {
+        panic!("root arm lost its interpolated string");
+    };
+    assert_eq!(segments.len(), labels.len() * 2 + 1, "{segments:?}");
+    for (index, label) in labels.iter().copied().enumerate() {
+        assert!(matches!(&segments[index * 2], StringSegment::Text { text, .. } if text == label));
+        let StringSegment::Expression { value: Expr::Lambda { body: closure_body, .. }, .. } =
+            &segments[index * 2 + 1]
+        else {
+            panic!("sibling closure {index} was lost: {segments:?}");
+        };
+        let Expr::Block { statements, tail: Some(closure_tail), .. } = closure_body.as_ref() else {
+            panic!("sibling closure {index} lost its case or following tail");
+        };
+        let [Statement::Let { .. }, Statement::Control { value: Expr::Control { arms, .. }, .. }] =
+            statements.as_slice()
+        else {
+            panic!("closure {index} lost its statement boundary: {statements:?}");
+        };
+        assert_eq!(arms.len(), if index % 2 == 1 { 1 } else { 2 }, "closure {index}: {arms:?}");
+        let Expr::Lambda { body: suffix_body, .. } = closure_tail.as_ref() else {
+            panic!("closure {index} lost its following closure tail");
+        };
+        let Expr::Block { tail: Some(suffix_tail), .. } = suffix_body.as_ref() else {
+            panic!("closure {index} following lambda lost its case tail");
+        };
+        assert!(matches!(suffix_tail.as_ref(), Expr::Control { .. }));
+    }
+    let final_text_index = labels.len() * 2;
+    assert!(matches!(&segments[final_text_index], StringSegment::Text { text, .. } if text == " end"));
+}
+
+#[test]
+fn even_sibling_recoveries_preserve_eleven_closures_before_text_tail() {
+    let source = include_str!("fixtures/malformed-even-eleven-sibling-closures-before-text-tail.orna");
+    let labels = ["one ", " two ", " three ", " four ", " five ", " six ", " seven ", " eight ", " nine ", " ten ", " eleven "];
+    let malformed = [("false 1", 6, 1), ("false 3", 6, 1), ("false 5", 6, 1), ("false 7", 6, 1), ("false 9", 6, 1)];
+    assert_even_sibling_recoveries_preserve_closures_before_text_tail(source, &labels, &malformed);
+}
+
+#[test]
+fn even_sibling_recoveries_preserve_twelve_closures_before_text_tail() {
+    let source = include_str!("fixtures/malformed-even-twelve-sibling-closures-before-text-tail.orna");
+    let labels = ["one ", " two ", " three ", " four ", " five ", " six ", " seven ", " eight ", " nine ", " ten ", " eleven ", " twelve "];
+    let malformed = [("false 1", 6, 1), ("false 3", 6, 1), ("false 5", 6, 1), ("false 7", 6, 1), ("false 9", 6, 1), ("false 11", 6, 2)];
+    assert_even_sibling_recoveries_preserve_closures_before_text_tail(source, &labels, &malformed);
+}
+
+#[test]
+fn even_sibling_recoveries_preserve_thirteen_closures_before_text_tail() {
+    let source = include_str!("fixtures/malformed-even-thirteen-sibling-closures-before-text-tail.orna");
+    let labels = ["one ", " two ", " three ", " four ", " five ", " six ", " seven ", " eight ", " nine ", " ten ", " eleven ", " twelve ", " thirteen "];
+    let malformed = [("false 1", 6, 1), ("false 3", 6, 1), ("false 5", 6, 1), ("false 7", 6, 1), ("false 9", 6, 1), ("false 11", 6, 2)];
+    assert_even_sibling_recoveries_preserve_closures_before_text_tail(source, &labels, &malformed);
+}
+
+#[test]
+fn even_sibling_recoveries_preserve_fourteen_closures_before_text_tail() {
+    let source = include_str!("fixtures/malformed-even-fourteen-sibling-closures-before-text-tail.orna");
+    let labels = ["one ", " two ", " three ", " four ", " five ", " six ", " seven ", " eight ", " nine ", " ten ", " eleven ", " twelve ", " thirteen ", " fourteen "];
+    let malformed = [("false 1", 6, 1), ("false 3", 6, 1), ("false 5", 6, 1), ("false 7", 6, 1), ("false 9", 6, 1), ("false 11", 6, 2), ("false 13", 6, 2)];
+    assert_even_sibling_recoveries_preserve_closures_before_text_tail(source, &labels, &malformed);
+}
+
+#[test]
+fn even_sibling_recoveries_preserve_fifteen_closures_before_text_tail() {
+    let source = include_str!("fixtures/malformed-even-fifteen-sibling-closures-before-text-tail.orna");
+    let labels = ["one ", " two ", " three ", " four ", " five ", " six ", " seven ", " eight ", " nine ", " ten ", " eleven ", " twelve ", " thirteen ", " fourteen ", " fifteen "];
+    let malformed = [("false 1", 6, 1), ("false 3", 6, 1), ("false 5", 6, 1), ("false 7", 6, 1), ("false 9", 6, 1), ("false 11", 6, 2), ("false 13", 6, 2)];
+    assert_even_sibling_recoveries_preserve_closures_before_text_tail(source, &labels, &malformed);
+}
+
+#[test]
+fn even_sibling_recoveries_preserve_sixteen_closures_before_text_tail() {
+    let source = include_str!("fixtures/malformed-even-sixteen-sibling-closures-before-text-tail.orna");
+    let parsed = parse_module(source);
+
+    let malformed_patterns = [
+        ("false 1", 6, 1),
+        ("false 3", 6, 1),
+        ("false 5", 6, 1),
+        ("false 7", 6, 1),
+        ("false 9", 6, 1),
+        ("false 11", 6, 2),
+        ("false 13", 6, 2),
+        ("false 15", 6, 2),
+    ];
+    assert_eq!(parsed.diagnostics.len(), malformed_patterns.len(), "{:?}", parsed.diagnostics);
+    for (diagnostic, (pattern, offset, width)) in parsed.diagnostics.iter().zip(malformed_patterns) {
+        let start = source.find(pattern).expect("malformed sibling arm") + offset;
+        assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+        assert_eq!(diagnostic.message, "expected `:` after case pattern");
+        assert_eq!(diagnostic.span.start, start, "{diagnostic:?}");
+        assert_eq!(diagnostic.span.end, start + width, "{diagnostic:?}");
+    }
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block { tail: Some(root_tail), .. } = body else {
+        panic!("expected the root case tail");
+    };
+    let Expr::Control { arms: root_arms, .. } = root_tail.as_ref() else {
+        panic!("expected the root case expression");
+    };
+    let Expr::InterpolatedString { segments, .. } = &root_arms[0].body else {
+        panic!("root arm lost its interpolated string");
+    };
+    let labels = [
+        "one ", " two ", " three ", " four ", " five ", " six ", " seven ", " eight ",
+        " nine ", " ten ", " eleven ", " twelve ", " thirteen ", " fourteen ", " fifteen ",
+        " sixteen ",
+    ];
+    assert_eq!(segments.len(), labels.len() * 2 + 1, "{segments:?}");
+    for (index, label) in labels.into_iter().enumerate() {
+        assert!(matches!(&segments[index * 2], StringSegment::Text { text, .. } if text == label));
+        let StringSegment::Expression { value: Expr::Lambda { body: closure_body, .. }, .. } =
+            &segments[index * 2 + 1]
+        else {
+            panic!("sibling closure {index} was lost: {segments:?}");
+        };
+        let Expr::Block { statements, tail: Some(closure_tail), .. } = closure_body.as_ref() else {
+            panic!("sibling closure {index} lost its case or following tail");
+        };
+        let [Statement::Let { .. }, Statement::Control { value: Expr::Control { arms, .. }, .. }] =
+            statements.as_slice()
+        else {
+            panic!("closure {index} lost its statement boundary: {statements:?}");
+        };
+        assert_eq!(arms.len(), if index % 2 == 1 { 1 } else { 2 }, "closure {index}: {arms:?}");
+        let Expr::Lambda { body: suffix_body, .. } = closure_tail.as_ref() else {
+            panic!("closure {index} lost its following closure tail");
+        };
+        let Expr::Block { tail: Some(suffix_tail), .. } = suffix_body.as_ref() else {
+            panic!("closure {index} following lambda lost its case tail");
+        };
+        assert!(matches!(suffix_tail.as_ref(), Expr::Control { .. }));
+    }
+    assert!(matches!(&segments[32], StringSegment::Text { text, .. } if text == " end"));
+
+    // The reference is silent on even-position recoveries across sixteen siblings
+    // before literal text; preserve intervening closures and the final segment.
+}
+
 #[test]
 fn three_sibling_closure_tails_survive_independent_recoveries() {
     let source = include_str!("fixtures/malformed-recovery-with-three-sibling-closure-tails.orna");
