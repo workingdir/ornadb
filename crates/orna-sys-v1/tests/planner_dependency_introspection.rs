@@ -10751,6 +10751,44 @@ fn explain_closes_first_byte_work_across_three_scans_at_max() {
         Some(&PlanDetail::Boolean(true))
     );
 
+    // Pair the source's first-byte unit with two scan-local first-byte units.
+    // Each pair of scan positions must close at MAX, then overflow one row
+    // earlier, regardless of which scan carries the zero-byte remainder.
+    for scan_bytes in [[1, 1, 0], [1, 0, 1], [0, 1, 1]] {
+        let exact = explain(u64::MAX - 3, 1, scan_bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let exact_nodes = exact.nodes();
+        let source = exact_nodes
+            .iter()
+            .find(|node| node.object() == Some(&obj("table:ByteWorkThreeScanSource")))
+            .unwrap();
+        assert_eq!(source.estimated_work(), Some(u64::MAX - 2));
+        for (name, bytes) in [
+            "table:ByteWorkThreeScanFirst",
+            "table:ByteWorkThreeScanMiddle",
+            "table:ByteWorkThreeScanLast",
+        ]
+        .into_iter()
+        .zip(scan_bytes)
+        {
+            let scan = exact_nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap();
+            assert_eq!(scan.estimated_bytes(), Some(bytes));
+            assert_eq!(scan.estimated_work(), Some(bytes));
+        }
+
+        let overflow = explain(u64::MAX - 2, 1, scan_bytes);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "two scan-local first-byte units cross the source remainder"
+        );
+    }
+
     // Pin the source-only remainder, then move one scan's first byte across
     // each of the three unknown-gap positions. Each placement closes at MAX
     // with one row unit left; moving the source one row nearer overflows.
