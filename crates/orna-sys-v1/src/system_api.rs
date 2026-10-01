@@ -71,7 +71,8 @@ pub struct SystemApiFunctionBindings;
 
 impl SystemApiFunctionBindings {
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.meta","purpose":"Return safe static/nominal/codec/protocol metadata for a value.","signature":"fn sys.meta<T>(value: T): sys.ValueMetadata<T>"}"###
+        function = r###"{"effect":"read","name":"sys.meta","purpose":"Return safe static/nominal/codec/protocol metadata for a value.","signature":"fn sys.meta<T>(value: T): sys.ValueMetadata<T>"}"###,
+        role = "langitem.sys.meta@1.0"
     )]
     pub fn sys_meta(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.meta")
@@ -239,7 +240,8 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.explain(Query)","purpose":"Return structured query plan.","signature":"fn sys.explain<T>(query: Query<T>): sys.Plan"}"###
+        function = r###"{"effect":"read","name":"sys.explain(Query)","purpose":"Return structured query plan.","signature":"fn sys.explain<T>(query: Query<T>): sys.Plan"}"###,
+        role = "langitem.sys.explain@1.0"
     )]
     pub fn sys_explain_query(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.explain(Query)")
@@ -247,7 +249,8 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.explain(FunctionRef)","purpose":"Return structured function/effect plan.","signature":"fn sys.explain(function: sys.FunctionRef): sys.Plan"}"###
+        function = r###"{"effect":"read","name":"sys.explain(FunctionRef)","purpose":"Return structured function/effect plan.","signature":"fn sys.explain(function: sys.FunctionRef): sys.Plan"}"###,
+        role = "langitem.sys.explain@1.0"
     )]
     pub fn sys_explain_function_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.explain(FunctionRef)")
@@ -255,7 +258,8 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.explain(Diagnostic)","purpose":"Return structured causal explanation.","signature":"fn sys.explain(diagnostic: sys.Diagnostic): sys.Explanation"}"###
+        function = r###"{"effect":"read","name":"sys.explain(Diagnostic)","purpose":"Return structured causal explanation.","signature":"fn sys.explain(diagnostic: sys.Diagnostic): sys.Explanation"}"###,
+        role = "langitem.sys.explain@1.0"
     )]
     pub fn sys_explain_diagnostic(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.explain(Diagnostic)")
@@ -287,7 +291,8 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
-        function = r###"{"effect":"invoke","name":"sys.invoke(Value)","purpose":"Reflectively invoke and return an explicitly erased value envelope.","signature":"fn sys.invoke(function: sys.FunctionRef, arguments: sys.ArgumentMap, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.inherit, idempotency_key: Str? = null): sys.Value","snapshot_rule":"An omitted at selects the FunctionRef pin; an explicit different database or snapshot fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access."}"###
+        function = r###"{"effect":"invoke","name":"sys.invoke(Value)","purpose":"Reflectively invoke and return an explicitly erased value envelope.","signature":"fn sys.invoke(function: sys.FunctionRef, arguments: sys.ArgumentMap, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.inherit, idempotency_key: Str? = null): sys.Value","snapshot_rule":"An omitted at selects the FunctionRef pin; an explicit different database or snapshot fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access."}"###,
+        role = "langitem.sys.invoke@1.0"
     )]
     pub fn sys_invoke_value(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.invoke(Value)")
@@ -295,7 +300,8 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
-        function = r###"{"effect":"invoke","name":"sys.invoke<T>","purpose":"Reflectively invoke after validating the declared result against an explicit type witness.","signature":"fn sys.invoke<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap, as: T, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.inherit, idempotency_key: Str? = null): T","snapshot_rule":"An omitted at selects the FunctionRef pin; an explicit different database or snapshot fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access."}"###
+        function = r###"{"effect":"invoke","name":"sys.invoke<T>","purpose":"Reflectively invoke after validating the declared result against an explicit type witness.","signature":"fn sys.invoke<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap, as: T, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.inherit, idempotency_key: Str? = null): T","snapshot_rule":"An omitted at selects the FunctionRef pin; an explicit different database or snapshot fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access."}"###,
+        role = "langitem.sys.invoke@1.0"
     )]
     pub fn sys_invoke_t(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.invoke<T>")
@@ -303,7 +309,8 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
-        function = r###"{"effect":"invoke","name":"sys.start(Value)","ownership":"Current operation owns the child, except a direct REPL sys.start expression/binding is session-owned. Inherit transaction mode is rejected; separate/read_only are permitted.","purpose":"Start an awaitable invocation with an explicitly erased result.","signature":"fn sys.start(function: sys.FunctionRef, arguments: sys.ArgumentMap, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.separate, idempotency_key: Str? = null): sys.InvocationHandle<sys.Value>","snapshot_rule":"An omitted at selects the FunctionRef pin; an explicit different database or snapshot fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access."}"###
+        function = r###"{"effect":"invoke","name":"sys.start(Value)","ownership":"Current operation owns the child, except a direct REPL sys.start expression/binding is session-owned. Inherit transaction mode is rejected; separate/read_only are permitted.","purpose":"Start an awaitable invocation with an explicitly erased result.","signature":"fn sys.start(function: sys.FunctionRef, arguments: sys.ArgumentMap, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.separate, idempotency_key: Str? = null): sys.InvocationHandle<sys.Value>","snapshot_rule":"An omitted at selects the FunctionRef pin; an explicit different database or snapshot fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access."}"###,
+        role = "langitem.sys.start@1.0"
     )]
     pub fn sys_start_value(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.start(Value)")
@@ -311,7 +318,8 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
-        function = r###"{"effect":"invoke","name":"sys.start<T>","ownership":"Current operation owns the child, except a direct REPL sys.start expression/binding is session-owned. Inherit transaction mode is rejected; separate/read_only are permitted.","purpose":"Start an awaitable invocation after validating an explicit result type witness.","signature":"fn sys.start<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap, as: T, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.separate, idempotency_key: Str? = null): sys.InvocationHandle<T>","snapshot_rule":"An omitted at selects the FunctionRef pin; an explicit different database or snapshot fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access."}"###
+        function = r###"{"effect":"invoke","name":"sys.start<T>","ownership":"Current operation owns the child, except a direct REPL sys.start expression/binding is session-owned. Inherit transaction mode is rejected; separate/read_only are permitted.","purpose":"Start an awaitable invocation after validating an explicit result type witness.","signature":"fn sys.start<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap, as: T, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.separate, idempotency_key: Str? = null): sys.InvocationHandle<T>","snapshot_rule":"An omitted at selects the FunctionRef pin; an explicit different database or snapshot fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access."}"###,
+        role = "langitem.sys.start@1.0"
     )]
     pub fn sys_start_t(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.start<T>")
@@ -319,7 +327,8 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
-        function = r###"{"effect":"invoke","name":"sys.await","purpose":"Wait for a terminal result; timeout does not cancel.","signature":"fn sys.await<T>(invocation: sys.InvocationHandle<T>, timeout: Duration? = null): sys.InvocationResult<T>"}"###
+        function = r###"{"effect":"invoke","name":"sys.await","purpose":"Wait for a terminal result; timeout does not cancel.","signature":"fn sys.await<T>(invocation: sys.InvocationHandle<T>, timeout: Duration? = null): sys.InvocationResult<T>"}"###,
+        role = "langitem.sys.await@1.0"
     )]
     pub fn sys_await(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.await")
@@ -327,7 +336,8 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
-        function = r###"{"effect":"invoke","name":"sys.cancel","purpose":"Idempotently request invocation cancellation.","signature":"fn sys.cancel<T>(invocation: sys.InvocationHandle<T>, reason: Str? = null): Bool"}"###
+        function = r###"{"effect":"invoke","name":"sys.cancel","purpose":"Idempotently request invocation cancellation.","signature":"fn sys.cancel<T>(invocation: sys.InvocationHandle<T>, reason: Str? = null): Bool"}"###,
+        role = "langitem.sys.cancel@1.0"
     )]
     pub fn sys_cancel(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.cancel")
