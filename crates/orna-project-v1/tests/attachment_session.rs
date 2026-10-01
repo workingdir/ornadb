@@ -439,6 +439,155 @@ fn nested_closure_module_routes_follow_exact_parent_aliases() {
     assert_eq!(root.database("archive_copy").unwrap().pin().commit().as_str(), long_parent_commit);
 }
 
+#[test]
+fn alternating_aliases_follow_each_selected_historical_closure_parent() {
+    let package_source = include_str!("fixtures/attach-package.orna");
+    let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
+
+    let short_leaf_source = package_source.replace("42", "50");
+    let short_leaf_commit = write_commit(
+        shared_dir.path(),
+        &[("main.orna", &short_leaf_source)],
+        "short route leaf snapshot",
+    );
+    let short_middle_source = package_source.replace("42", "51");
+    let short_middle_manifest = format!("archive {short_leaf_commit}\n");
+    let short_middle_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &short_middle_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &short_middle_manifest),
+        ],
+        "short route middle snapshot",
+    );
+    let prefixed_alias_source = package_source.replace("42", "52");
+    let prefixed_alias_commit = write_commit(
+        shared_dir.path(),
+        &[("main.orna", &prefixed_alias_source)],
+        "longer alias route snapshot",
+    );
+    let short_parent_source = package_source.replace("42", "43");
+    let short_parent_manifest = format!(
+        "archive_copy {short_middle_commit}\narchive_copy_archive {prefixed_alias_commit}\n"
+    );
+    let short_parent_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &short_parent_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &short_parent_manifest),
+        ],
+        "short route parent snapshot",
+    );
+
+    let long_leaf_source = package_source.replace("42", "60");
+    let long_leaf_commit = write_commit(
+        shared_dir.path(),
+        &[("main.orna", &long_leaf_source)],
+        "long route leaf snapshot",
+    );
+    let long_middle_source = package_source.replace("42", "61");
+    let long_middle_manifest = format!("archive_copy {long_leaf_commit}\n");
+    let long_middle_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &long_middle_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &long_middle_manifest),
+        ],
+        "long route middle snapshot",
+    );
+    let long_parent_source = package_source.replace("42", "44");
+    let long_parent_manifest = format!("archive {long_middle_commit}\n");
+    let long_parent_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &long_parent_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &long_parent_manifest),
+        ],
+        "long route parent snapshot",
+    );
+
+    let root_manifest = format!(
+        "archive {short_parent_commit}\narchive_copy {long_parent_commit}\n"
+    );
+    let (_root_dir, root_repository, root_commit) = repository(&[
+        ("main.orna", include_str!("fixtures/attach-primary.orna")),
+        (PACKAGE_PIN_MANIFEST_PATH, &root_manifest),
+    ]);
+    let loader = ProjectLoader::default();
+    let primary = PinnedDatabase::resolve("app", root_repository, &root_commit, loader).unwrap();
+    let resolver = PackageResolver::new(
+        [
+            ("archive".to_owned(), shared_repository.clone()),
+            ("archive_copy".to_owned(), shared_repository.clone()),
+            ("archive_copy_archive".to_owned(), shared_repository),
+        ],
+        loader,
+    )
+    .unwrap();
+
+    let root = resolver.resolve_for_parent(primary).unwrap();
+    assert_module_route(&root, "archive.orna", "= 43");
+    assert_module_route(&root, "archive_copy.orna", "= 44");
+
+    let short_parent = root.database("archive").unwrap().clone();
+    let short_closure = resolver.resolve_for_parent(short_parent).unwrap();
+    assert_module_route(&short_closure, "main.orna", "= 43");
+    assert_module_route(&short_closure, "archive_copy.orna", "= 51");
+    assert_module_route(&short_closure, "archive_copy_archive.orna", "= 52");
+    assert_eq!(
+        short_closure
+            .database("archive_copy")
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        short_middle_commit
+    );
+    assert_eq!(
+        short_closure
+            .database("archive_copy_archive")
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        prefixed_alias_commit
+    );
+    let short_middle = short_closure.database("archive_copy").unwrap().clone();
+    let short_middle_closure = resolver.resolve_for_parent(short_middle).unwrap();
+    assert_module_route(&short_middle_closure, "main.orna", "= 51");
+    assert_module_route(&short_middle_closure, "archive.orna", "= 50");
+    assert_eq!(
+        short_middle_closure.primary().pin().commit().as_str(),
+        short_middle_commit
+    );
+    assert_eq!(
+        short_middle_closure.database("archive").unwrap().pin().commit().as_str(),
+        short_leaf_commit
+    );
+
+    let long_parent = root.database("archive_copy").unwrap().clone();
+    let long_closure = resolver.resolve_for_parent(long_parent).unwrap();
+    assert_module_route(&long_closure, "main.orna", "= 44");
+    assert_module_route(&long_closure, "archive.orna", "= 61");
+    let long_middle = long_closure.database("archive").unwrap().clone();
+    let long_middle_closure = resolver.resolve_for_parent(long_middle).unwrap();
+    assert_module_route(&long_middle_closure, "main.orna", "= 61");
+    assert_module_route(&long_middle_closure, "archive_copy.orna", "= 60");
+    assert_eq!(
+        long_middle_closure.primary().pin().commit().as_str(),
+        long_middle_commit
+    );
+    assert_eq!(
+        long_middle_closure
+            .database("archive_copy")
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        long_leaf_commit
+    );
+}
+
 fn assert_module_route(session: &AttachedDatabaseSession, path: &str, source_marker: &str) {
     assert!(
         session
