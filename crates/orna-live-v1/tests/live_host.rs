@@ -15791,7 +15791,124 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
         .expect("the original second identity is isolated from its retarget retry"),
         second_unknown_status
     );
-    assert_eq!(application.calls, 1);
+
+    // The reference leaves the two-snapshot cycle unspecified after both
+    // targets become terminal; keep each accepted response isolated while
+    // the first identity is also retargeted across those completed targets.
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            12,
+            Frame::Binary(other_eval.clone()),
+            &mut application,
+        )),
+        Err(Error::ApplicationRejected)
+    );
+    assert_eq!(application.calls, 2);
+    let other_eval_replay = block_on(host.dispatch_frame(
+        [6; 16],
+        13,
+        Frame::Binary(other_eval.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the second target retains its terminal failure");
+    assert!(matches!(
+        &other_eval_replay.message,
+        Message::Result {
+            status: ResultStatus::Failure,
+            fingerprint,
+            ..
+        } if *fingerprint == other_fingerprint
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            14,
+            Frame::Binary(first_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the first response remains pinned after both targets terminate"),
+        first_unknown_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            15,
+            Frame::Binary(second_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the second response remains pinned to its own target"),
+        second_unknown_status
+    );
+    let retargeted_first_status_query = status_query([93; 16], [92; 16], other_fingerprint);
+    let retargeted_first_status = block_on(host.dispatch_frame(
+        [6; 16],
+        16,
+        Frame::Binary(retargeted_first_status_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the first identity rejects reuse against the other terminal target");
+    assert!(matches!(
+        &retargeted_first_status.message,
+        Message::Diagnostic { .. }
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            17,
+            Frame::Binary(second_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the second identity stays isolated across the first identity mismatch"),
+        second_unknown_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            18,
+            Frame::Binary(other_eval.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the second terminal Eval replays between status identity retries"),
+        other_eval_replay
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            19,
+            Frame::Binary(retargeted_first_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the first identity mismatch keeps its own stable retry snapshot"),
+        retargeted_first_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            20,
+            Frame::Binary(first_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the original first identity remains pinned after both mismatch cycles"),
+        first_unknown_status
+    );
+    assert_eq!(application.calls, 2);
 
     for (request_id, fingerprint, expected) in [
         ([93; 16], first_status_fingerprint, first_unknown_status),
