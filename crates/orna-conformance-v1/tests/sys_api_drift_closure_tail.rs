@@ -413,6 +413,26 @@ fn edge_interplay_fixture_projects_unknown_exact_target_count_through_columns() 
 }
 
 #[test]
+fn edge_interplay_fixture_retains_unknown_exact_count_across_documented_column_filter() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Column documentation does not constrain the parent Table's count; preserve its nullable
+    // row_count after filtering child rows by docs.
+    assert!(
+        analysis.is_ok(),
+        "documented Column filtering must retain the unknown exact parent count: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_retains_unknown_exact_target_across_reference_handoff() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
