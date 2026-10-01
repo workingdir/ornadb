@@ -1,0 +1,6 @@
+pub fn recovered(flag: Bool): Str =
+    "prefix {(value: Box<List<Int,>>) => { case flag {
+        true: value,
+        false: "fallback"
+    } }} suffix";
+pub fn later(): Bool = true;
