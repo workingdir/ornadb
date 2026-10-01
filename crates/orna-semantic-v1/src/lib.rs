@@ -7489,14 +7489,16 @@ fn infer(
             let callee = infer(callee, scope, local, diagnostics);
             let mut effects = callee.effects.clone();
             effects.join(&intrinsic);
-            let call_parameters = match &callee.ty {
-                Type::Function {
-                    parameters,
-                    parameter_names,
-                    ..
-                } => Some((parameters.as_slice(), parameter_names.as_deref())),
-                _ => None,
-            };
+            let call_parameters = callable_function_type(&callee.ty).and_then(|function_type| {
+                match function_type {
+                    Type::Function {
+                        parameters,
+                        parameter_names,
+                        ..
+                    } => Some((parameters.as_slice(), parameter_names.as_deref())),
+                    _ => None,
+                }
+            });
             let values = arguments
                 .iter()
                 .enumerate()
@@ -7523,13 +7525,14 @@ fn infer(
                     effects,
                 };
             }
-            match callee.ty {
-                Type::Function {
+            let historical_context = historical_callable_context(&callee.ty).cloned();
+            match callable_function_type(&callee.ty).cloned() {
+                Some(Type::Function {
                     parameters,
                     parameter_names,
                     result,
                     default_parameters,
-                } => {
+                }) => {
                     check_call_arguments(
                         &parameters,
                         parameter_names.as_deref(),
@@ -7539,12 +7542,17 @@ fn infer(
                         None,
                         diagnostics,
                     );
+                    let result = specialize_historical_database_result(&result, &values)
+                        .unwrap_or_else(|| result.as_ref().clone());
                     Inferred {
-                        ty: *result,
+                        ty: historical_context.as_ref().map_or_else(
+                            || result.clone(),
+                            |snapshot| bind_historical_closure_context(snapshot, &result),
+                        ),
                         effects,
                     }
                 }
-                Type::Error => Inferred {
+                _ if callee.ty == Type::Error => Inferred {
                     ty: Type::Error,
                     effects,
                 },
@@ -13877,6 +13885,11 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
     if matches!(expected, Type::Error) || matches!(actual, Type::Error) {
         return true;
     }
+    if expected == &Type::Named("sys.SnapshotRef".into())
+        && is_contextual_snapshot_ref(actual)
+    {
+        return true;
+    }
     match (expected, actual) {
         (Type::Optional(_), Type::Null) => true,
         // Optional parameters accept their non-null payload directly; callers
@@ -13952,7 +13965,7 @@ fn intrinsic_value_type(name: &str) -> Option<Type> {
             Type::Stream(Box::new(Type::Error)),
         )),
         "half_even" => Some(Type::Named("std.Rounding".into())),
-        "CWD" | "HEAD" => Some(Type::Named("sys.SnapshotRef".into())),
+        "CWD" | "HEAD" => Some(contextual_snapshot_ref(&format!("selector:{name}"))),
         _ => None,
     }
 }
@@ -14175,7 +14188,7 @@ fn infer_descriptor_system_path(
         return DescriptorPathInference::Resolved(Inferred {
             ty: function(
                 vec![Type::Named("sys.SnapshotRef".into())],
-                historical_database_type(),
+                historical_database_type(Type::Named("sys.SnapshotRef".into())),
             ),
             effects: descriptor_effects(system_api::SystemEffect::Read),
         });
@@ -14429,9 +14442,18 @@ fn infer_descriptor_system_call(
         });
     };
     effects.join(&descriptor_effects(function.effect));
+    let result = descriptor_call_type(&function.result, &function.type_parameters)
+        .expect("supported descriptor functions have concrete types");
+    let result = if path == ["sys", "snapshot"] {
+        arguments
+            .first()
+            .map(|argument| snapshot_selector_context(&argument.value))
+            .unwrap_or(result)
+    } else {
+        result
+    };
     Some(Inferred {
-        ty: descriptor_call_type(&function.result, &function.type_parameters)
-            .expect("supported descriptor functions have concrete types"),
+        ty: result,
         effects,
     })
 }
@@ -15971,10 +15993,63 @@ fn infer_nominal_conversion_call(
     })
 }
 
-fn historical_database_type() -> Type {
+fn contextual_snapshot_ref(selector: &str) -> Type {
+    Type::Applied {
+        base: "sys.SnapshotRefContext".into(),
+        arguments: vec![Type::Named(selector.to_owned())],
+    }
+}
+
+fn is_contextual_snapshot_ref(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Applied { base, arguments }
+            if base == "sys.SnapshotRefContext" && arguments.len() == 1
+    )
+}
+
+/// Gives a selected history root a type-level context key so decomposing its
+/// namespace or callable path does not erase which selected snapshot it came
+/// from. Literal selectors use their decoded value; dynamic selectors use a
+/// conservative expression key because this semantic slice does not execute
+/// or constant-fold selector expressions.
+fn snapshot_selector_context(expression: &Expr) -> Type {
+    let selector = match expression {
+        Expr::Literal {
+            text,
+            kind: orna_syntax_v1::LiteralKind::String,
+            ..
+        } => serde_json::from_str::<String>(text)
+            .unwrap_or_else(|_| text.trim_matches('"').to_owned()),
+        Expr::Name { text, .. } if matches!(text.as_str(), "CWD" | "HEAD") => text.clone(),
+        Expr::Name { text, .. } => format!("dynamic:{text}"),
+        Expr::Group { inner, .. } => {
+            return snapshot_selector_context(inner);
+        }
+        _ => format!("dynamic:{expression:?}"),
+    };
+    contextual_snapshot_ref(&format!("selector:{selector}"))
+}
+
+fn specialize_historical_database_result(result: &Type, arguments: &[Type]) -> Option<Type> {
+    let Type::Applied { base, arguments: result_arguments } = result else {
+        return None;
+    };
+    if base != "sys.DatabaseSnapshot" || result_arguments.len() != 1 {
+        return None;
+    }
+    Some(historical_database_type(
+        arguments
+            .first()
+            .cloned()
+            .unwrap_or_else(|| Type::Named("sys.SnapshotRef".into())),
+    ))
+}
+
+fn historical_database_type(snapshot: Type) -> Type {
     Type::Applied {
         base: "sys.DatabaseSnapshot".into(),
-        arguments: vec![Type::Named("sys.SnapshotRef".into())],
+        arguments: vec![snapshot],
     }
 }
 
@@ -15989,6 +16064,96 @@ fn historical_table_type(snapshot: &Type, table: &str) -> Type {
     Type::Applied {
         base: "sys.HistoricalTable".into(),
         arguments: vec![snapshot.clone(), Type::Named(table.into())],
+    }
+}
+
+fn historical_callable_type(snapshot: &Type, callable: &Type) -> Type {
+    Type::Applied {
+        base: "sys.HistoricalCallable".into(),
+        arguments: vec![snapshot.clone(), callable.clone()],
+    }
+}
+
+fn historical_callable_context(ty: &Type) -> Option<&Type> {
+    let Type::Applied { base, arguments } = ty else {
+        return None;
+    };
+    (base == "sys.HistoricalCallable")
+        .then(|| match arguments.as_slice() {
+            [snapshot, Type::Function { .. }] => Some(snapshot),
+            _ => None,
+        })
+        .flatten()
+}
+
+fn callable_function_type(ty: &Type) -> Option<&Type> {
+    match ty {
+        Type::Function { .. } => Some(ty),
+        Type::Applied { base, arguments } if base == "sys.HistoricalCallable" => {
+            match arguments.as_slice() {
+                [_, function @ Type::Function { .. }] => Some(function),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Rebind callable values returned through a historical function to the
+/// selected snapshot context, including callables nested in simple products.
+fn bind_historical_closure_context(snapshot: &Type, ty: &Type) -> Type {
+    match ty {
+        Type::Function {
+            parameters,
+            parameter_names,
+            default_parameters,
+            result,
+        } => historical_callable_type(
+            snapshot,
+            &Type::Function {
+                parameters: parameters.clone(),
+                parameter_names: parameter_names.clone(),
+                default_parameters: default_parameters.clone(),
+                result: Box::new(bind_historical_closure_context(snapshot, result)),
+            },
+        ),
+        Type::List(element) => Type::List(Box::new(bind_historical_closure_context(
+            snapshot, element,
+        ))),
+        Type::Relation(element) => Type::Relation(Box::new(bind_historical_closure_context(
+            snapshot, element,
+        ))),
+        Type::Stream(element) => Type::Stream(Box::new(bind_historical_closure_context(
+            snapshot, element,
+        ))),
+        Type::Optional(element) => Type::Optional(Box::new(bind_historical_closure_context(
+            snapshot, element,
+        ))),
+        Type::Record(fields) => Type::Record(
+            fields
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.clone(),
+                        bind_historical_closure_context(snapshot, value),
+                    )
+                })
+                .collect(),
+        ),
+        Type::Tuple(elements) => Type::Tuple(
+            elements
+                .iter()
+                .map(|element| bind_historical_closure_context(snapshot, element))
+                .collect(),
+        ),
+        Type::Applied { base, arguments } if base != "sys.HistoricalCallable" => Type::Applied {
+            base: base.clone(),
+            arguments: arguments
+                .iter()
+                .map(|argument| bind_historical_closure_context(snapshot, argument))
+                .collect(),
+        },
+        _ => ty.clone(),
     }
 }
 
@@ -16109,7 +16274,11 @@ fn infer_historical_member(
             });
         }
         return Some(Inferred {
-            ty: symbol.ty.clone(),
+            ty: if symbol.kind == SymbolKind::Function {
+                bind_historical_closure_context(snapshot, &symbol.ty)
+            } else {
+                symbol.ty.clone()
+            },
             effects: {
                 let mut effects = symbol.effects.clone();
                 effects.effects.insert("database read".into());

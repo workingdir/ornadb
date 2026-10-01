@@ -1,0 +1,4 @@
+pub fn incomplete(flag: Bool): Int { case flag {
+true: case flag {
+true 0,
+false: 1

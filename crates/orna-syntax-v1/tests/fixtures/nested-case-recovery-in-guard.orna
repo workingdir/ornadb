@@ -1,0 +1,7 @@
+pub fn guard(flag: Bool): Int { case flag {
+true if case flag {
+true 0,
+false: true
+}: 1,
+false: 2
+}}
