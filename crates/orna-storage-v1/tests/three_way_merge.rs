@@ -24,6 +24,7 @@ const CHECKPOINT_TAIL_BASE: &str = include_str!("fixtures/merge-checkpoint-tail-
 const CHECKPOINT_TAIL_LEFT: &str = include_str!("fixtures/merge-checkpoint-tail-left.orna");
 const CHECKPOINT_TAIL_RIGHT: &str = include_str!("fixtures/merge-checkpoint-tail-right.orna");
 const TOMBSTONE_DEPTH_SHALLOW: &str = include_str!("fixtures/merge-tombstone-depth-shallow.orna");
+const TOMBSTONE_DEPTH_MIDDLE: &str = include_str!("fixtures/merge-tombstone-depth-middle.orna");
 const TOMBSTONE_DEPTH_DEEP: &str = include_str!("fixtures/merge-tombstone-depth-deep.orna");
 
 fn id(value: u8) -> ObjectId {
@@ -136,6 +137,27 @@ fn manifest(digest: u8, segment_digest: u8, locator: &[u8]) -> TableManifest {
         digest: [digest; 32],
         segments: vec![RowSegmentManifest { locator: locator.to_vec(), range: KeyRange::all(), digest: [segment_digest; 32] }],
     }
+}
+
+fn depth_split_manifest(digest: u8, segment_digests: [u8; 3], locators: [&[u8]; 3]) -> TableManifest {
+    let middle = string("root/child").encode().unwrap();
+    let deep = string("root/child/deep").encode().unwrap();
+    let ranges = [
+        KeyRange::new(None, Some(middle.clone())).unwrap(),
+        KeyRange::new(Some(middle), Some(deep.clone())).unwrap(),
+        KeyRange::new(Some(deep), None).unwrap(),
+    ];
+    let segments = ranges
+        .into_iter()
+        .zip(segment_digests)
+        .zip(locators)
+        .map(|((range, segment_digest), locator)| RowSegmentManifest {
+            locator: locator.to_vec(),
+            range,
+            digest: [segment_digest; 32],
+        })
+        .collect();
+    TableManifest { digest: [digest; 32], segments }
 }
 
 fn snapshot(schema: Schema, manifest: TableManifest, checkpoint: Option<CheckpointGeneration>) -> ThreeWaySnapshot {
@@ -15383,6 +15405,132 @@ fn fixture_nested_delete_edit_conflicts_follow_logical_key_order() {
 }
 
 #[test]
+fn fixture_depth_split_tombstones_follow_table_wide_primary_key_order() {
+    let shallow = parse_fixture(TOMBSTONE_DEPTH_SHALLOW, RowKeyKind::Explicit);
+    let middle = parse_fixture(TOMBSTONE_DEPTH_MIDDLE, RowKeyKind::Explicit);
+    let deep = parse_fixture(TOMBSTONE_DEPTH_DEEP, RowKeyKind::Explicit);
+
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"split-base-shallow", vec![shallow.clone()]);
+    source.add(MergeSide::Base, b"split-base-middle", vec![middle.clone()]);
+    source.add(MergeSide::Base, b"split-base-deep", vec![deep.clone()]);
+    source.add(MergeSide::Left, b"split-left-shallow", Vec::new());
+    source.add(MergeSide::Left, b"split-left-middle", vec![middle]);
+    source.add(MergeSide::Left, b"split-left-deep", Vec::new());
+    source.add(MergeSide::Right, b"split-right-shallow", Vec::new());
+    source.add(MergeSide::Right, b"split-right-middle", Vec::new());
+    source.add(MergeSide::Right, b"split-right-deep", vec![deep]);
+
+    let base = snapshot(
+        string_key_schema(),
+        depth_split_manifest(1, [1, 2, 3], [b"split-base-shallow", b"split-base-middle", b"split-base-deep"]),
+        None,
+    );
+    let left = snapshot(
+        string_key_schema(),
+        depth_split_manifest(2, [4, 5, 6], [b"split-left-shallow", b"split-left-middle", b"split-left-deep"]),
+        None,
+    );
+    let right = snapshot(
+        string_key_schema(),
+        depth_split_manifest(3, [7, 8, 9], [b"split-right-shallow", b"split-right-middle", b"split-right-deep"]),
+        None,
+    );
+
+    let plan = merge_three_way_snapshots(&base, &left, &right, &mut source, budget())
+        .expect("depth-separated deletes resolve as exact tombstones");
+    let segments = &plan.tables[&id(1)].segments;
+    assert_eq!(segments.len(), 3);
+    let ordered_tombstones = segments
+        .iter()
+        .flat_map(|segment| match segment {
+            MergedSegment::Rows { rows, tombstones, .. } => {
+                assert!(rows.is_empty());
+                tombstones.clone()
+            }
+            other => panic!("each changed depth range materializes: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ordered_tombstones,
+        vec![string("root"), string("root/child"), string("root/child/deep")],
+        "walking materialized segments preserves table-wide key order across depth boundaries",
+    );
+    assert_eq!(plan.report.rows_examined, 5);
+    assert_eq!(source.visited.len(), 9);
+}
+
+#[test]
+fn fixture_ancestor_tombstone_preserves_deeper_rows_across_ranges() {
+    let shallow = parse_fixture(TOMBSTONE_DEPTH_SHALLOW, RowKeyKind::Explicit);
+    let middle = parse_fixture(TOMBSTONE_DEPTH_MIDDLE, RowKeyKind::Explicit);
+    let deep = parse_fixture(TOMBSTONE_DEPTH_DEEP, RowKeyKind::Explicit);
+    let edited_deep = edit_name(&deep, "edited descendant");
+
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"preserve-base-shallow", vec![shallow.clone()]);
+    source.add(MergeSide::Base, b"preserve-base-middle", vec![middle.clone()]);
+    source.add(MergeSide::Base, b"preserve-base-deep", vec![deep.clone()]);
+    source.add(MergeSide::Left, b"preserve-left-shallow", Vec::new());
+    source.add(MergeSide::Left, b"preserve-left-middle", vec![middle.clone()]);
+    source.add(MergeSide::Left, b"preserve-left-deep", vec![deep.clone()]);
+    source.add(MergeSide::Right, b"preserve-right-shallow", vec![shallow]);
+    source.add(MergeSide::Right, b"preserve-right-middle", vec![middle.clone()]);
+    source.add(MergeSide::Right, b"preserve-right-deep", vec![edited_deep.clone()]);
+
+    let base = snapshot(
+        string_key_schema(),
+        depth_split_manifest(
+            10,
+            [10, 11, 12],
+            [b"preserve-base-shallow", b"preserve-base-middle", b"preserve-base-deep"],
+        ),
+        None,
+    );
+    let left = snapshot(
+        string_key_schema(),
+        depth_split_manifest(
+            11,
+            [13, 14, 15],
+            [b"preserve-left-shallow", b"preserve-left-middle", b"preserve-left-deep"],
+        ),
+        None,
+    );
+    let right = snapshot(
+        string_key_schema(),
+        depth_split_manifest(
+            12,
+            [16, 17, 18],
+            [b"preserve-right-shallow", b"preserve-right-middle", b"preserve-right-deep"],
+        ),
+        None,
+    );
+
+    let plan = merge_three_way_snapshots(&base, &left, &right, &mut source, budget())
+        .expect("deleting a parent key does not delete its children");
+    let segments = &plan.tables[&id(1)].segments;
+    let MergedSegment::Rows { rows, tombstones, .. } = &segments[0] else {
+        panic!("the shallow parent range materializes its tombstone")
+    };
+    assert!(rows.is_empty());
+    assert_eq!(tombstones, &[string("root")]);
+
+    let MergedSegment::Rows { rows, tombstones, .. } = &segments[1] else {
+        panic!("the middle child range materializes independently")
+    };
+    assert_eq!(rows, &[middle]);
+    assert!(tombstones.is_empty());
+
+    let MergedSegment::Rows { rows, tombstones, .. } = &segments[2] else {
+        panic!("the deep child edit materializes independently")
+    };
+    assert_eq!(rows, &[edited_deep]);
+    assert!(tombstones.is_empty());
+    assert_eq!(plan.report.rows_examined, 8);
+    assert_eq!(source.visited.len(), 9);
+}
+
+#[test]
 fn unilateral_row_and_checkpoint_tombstones_resolve_in_both_orientations() {
     let deleted_row = parse_fixture(BASE, RowKeyKind::Explicit);
     let deleted_checkpoint_id = b"consumer/deleted-beside-row".to_vec();
@@ -15508,5 +15656,325 @@ fn nested_checkpoint_tombstones_pair_with_same_side_row_delete_and_disjoint_edit
         };
         assert_eq!(rows, &[edited_retained_row.clone()]);
         assert_eq!(tombstones, &[deleted_row.key.clone()]);
+    }
+}
+
+#[test]
+fn path_depth_tombstones_resolve_at_adjacent_segment_boundaries() {
+    let shallow = parse_fixture(TOMBSTONE_DEPTH_SHALLOW, RowKeyKind::Explicit);
+    let middle = rekey_row(&shallow, "root/child");
+    let deep = parse_fixture(TOMBSTONE_DEPTH_DEEP, RowKeyKind::Explicit);
+    let boundary_row = rekey_row(&shallow, "z");
+    let sibling = rekey_row(&shallow, "zz");
+    let sibling_edit = edit_name(&sibling, "edited at upper boundary");
+    let boundary = boundary_row.key.encode().unwrap();
+    assert!(deep.key.encode().unwrap() > boundary, "the deep path's encoded length sorts after the shorter boundary");
+
+    // The reference defines three-way per-key changes but is silent on
+    // path-depth ordering. Use canonical primary-key order for the split:
+    // root, child and deep child are before `z` even though the deep key's
+    // encoded bytes sort after `z`. The `z` tombstone is exactly the inclusive
+    // lower boundary of the next range.
+    let shallow_range = KeyRange::new(None, Some(boundary.clone())).unwrap();
+    let boundary_range = KeyRange::new(Some(boundary.clone()), None).unwrap();
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"base-depth", vec![shallow.clone(), middle.clone(), deep.clone()]);
+    source.add(MergeSide::Left, b"left-depth", vec![middle.clone()]);
+    source.add(MergeSide::Right, b"right-depth", vec![deep.clone()]);
+    source.add(MergeSide::Base, b"base-boundary", vec![boundary_row.clone(), sibling.clone()]);
+    source.add(MergeSide::Left, b"left-boundary", vec![sibling.clone()]);
+    source.add(MergeSide::Right, b"right-boundary", vec![boundary_row.clone(), sibling_edit.clone()]);
+
+    let split_manifest = |table_digest, segment_digests: [u8; 2], locators: [&[u8]; 2]| {
+        TableManifest {
+            digest: [table_digest; 32],
+            segments: vec![
+                RowSegmentManifest {
+                    locator: locators[0].to_vec(),
+                    range: shallow_range.clone(),
+                    digest: [segment_digests[0]; 32],
+                },
+                RowSegmentManifest {
+                    locator: locators[1].to_vec(),
+                    range: boundary_range.clone(),
+                    digest: [segment_digests[1]; 32],
+                },
+            ],
+        }
+    };
+    let base = snapshot(
+        string_key_schema(),
+        split_manifest(1, [10, 20], [b"base-depth", b"base-boundary"]),
+        None,
+    );
+    let left = snapshot(
+        string_key_schema(),
+        split_manifest(2, [11, 21], [b"left-depth", b"left-boundary"]),
+        None,
+    );
+    let right = snapshot(
+        string_key_schema(),
+        split_manifest(3, [12, 22], [b"right-depth", b"right-boundary"]),
+        None,
+    );
+
+    let plan = merge_three_way_snapshots(&base, &left, &right, &mut source, budget()).unwrap();
+    assert_eq!(plan.report.conflicts_lower_bound, 0);
+    assert_eq!(source.visited, vec![
+        (MergeSide::Base, b"base-depth".to_vec()),
+        (MergeSide::Left, b"left-depth".to_vec()),
+        (MergeSide::Right, b"right-depth".to_vec()),
+        (MergeSide::Base, b"base-boundary".to_vec()),
+        (MergeSide::Left, b"left-boundary".to_vec()),
+        (MergeSide::Right, b"right-boundary".to_vec()),
+    ]);
+
+    let segments = &plan.tables[&id(1)].segments;
+    assert_eq!(segments.len(), 2);
+    let MergedSegment::Rows { range, rows, tombstones, .. } = &segments[0] else {
+        panic!("the depth-ordered nested tombstones materialize before the short boundary key")
+    };
+    assert_eq!(range.end.as_deref(), Some(boundary.as_slice()));
+    assert!(rows.is_empty());
+    assert_eq!(tombstones, &[string("root"), string("root/child"), string("root/child/deep")]);
+    let MergedSegment::Rows { range, rows, tombstones, .. } = &segments[1] else {
+        panic!("the short boundary tombstone merges with its disjoint fixture edit")
+    };
+    assert_eq!(range.start.as_deref(), Some(boundary.as_slice()));
+    assert_eq!(rows, &[sibling_edit]);
+    assert_eq!(tombstones, &[boundary_row.key.clone()]);
+}
+
+#[test]
+fn checkpoint_tombstones_at_multiple_depths_preserve_deeper_and_prefix_states() {
+    let deleted_row = parse_fixture(BASE, RowKeyKind::Explicit);
+    let prefix_delete_id = b"consumer/res".to_vec();
+    let prefix_survivor_id = b"consumer/reserve".to_vec();
+    let root_delete_id = b"consumer/reset".to_vec();
+    let child_delete_id = b"consumer/reset/child".to_vec();
+    let deep_reset_id = b"consumer/reset/child/deep".to_vec();
+    let root_extension_id = b"consumer/resetting".to_vec();
+    let prefix_delete = parse_checkpoint_fixture(CHECKPOINT_BASE);
+    let prefix_survivor = parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS);
+    let root_delete = parse_checkpoint_fixture(CHECKPOINT_EDITED);
+    let child_delete = parse_checkpoint_fixture(CHECKPOINT_TAIL_BASE);
+    let deep_base = parse_checkpoint_fixture(CHECKPOINT_TAIL_LEFT);
+    let deep_reset = parse_checkpoint_fixture(CHECKPOINT_RESET);
+    let root_extension = parse_checkpoint_fixture(CHECKPOINT_TAIL_RIGHT);
+
+    // The reference specifies exact three-way row changes and opaque
+    // checkpoint identity, but not prefix cascading for path-shaped IDs. Keep
+    // each map key independent: delete a prefix, an ancestor and a child on
+    // different sides while retaining their neighboring and deeper entries.
+    for row_delete_on_left in [true, false] {
+        for deep_reset_on_left in [true, false] {
+            let mut source = FixtureRows::default();
+            source.add(MergeSide::Base, b"base", vec![deleted_row.clone()]);
+            source.add(MergeSide::Left, b"left", if row_delete_on_left { Vec::new() } else { vec![deleted_row.clone()] });
+            source.add(MergeSide::Right, b"right", if row_delete_on_left { vec![deleted_row.clone()] } else { Vec::new() });
+
+            let mut base = snapshot(schema(true, FieldType::Str), manifest(1, 10, b"base"), None);
+            let mut left = snapshot(schema(true, FieldType::Str), manifest(2, 11, b"left"), None);
+            let mut right = snapshot(schema(true, FieldType::Str), manifest(3, 12, b"right"), None);
+            for branch in [&mut base, &mut left, &mut right] {
+                branch.checkpoints.insert(prefix_delete_id.clone(), prefix_delete.clone());
+                branch.checkpoints.insert(prefix_survivor_id.clone(), prefix_survivor.clone());
+                branch.checkpoints.insert(root_delete_id.clone(), root_delete.clone());
+                branch.checkpoints.insert(child_delete_id.clone(), child_delete.clone());
+                branch.checkpoints.insert(deep_reset_id.clone(), deep_base.clone());
+                branch.checkpoints.insert(root_extension_id.clone(), root_extension.clone());
+            }
+            left.checkpoints.remove(prefix_delete_id.as_slice());
+            left.checkpoints.remove(child_delete_id.as_slice());
+            right.checkpoints.remove(root_delete_id.as_slice());
+            let reset_side = if deep_reset_on_left { &mut left } else { &mut right };
+            reset_side.checkpoints.insert(deep_reset_id.clone(), deep_reset.clone());
+
+            let plan = merge_three_way_snapshots(
+                &base,
+                &left,
+                &right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 100, max_conflicts: 0 },
+            ).unwrap();
+
+            assert_eq!(plan.report.conflicts_lower_bound, 0);
+            assert!(plan.report.affected_checkpoints.is_empty());
+            assert_eq!(source.visited.len(), 3);
+            assert!(!plan.checkpoints.contains_key(prefix_delete_id.as_slice()));
+            assert!(!plan.checkpoints.contains_key(root_delete_id.as_slice()));
+            assert!(!plan.checkpoints.contains_key(child_delete_id.as_slice()));
+            assert_eq!(plan.checkpoints.get(prefix_survivor_id.as_slice()), Some(&prefix_survivor));
+            assert_eq!(plan.checkpoints.get(deep_reset_id.as_slice()), Some(&deep_reset));
+            assert_eq!(plan.checkpoints.get(root_extension_id.as_slice()), Some(&root_extension));
+
+            let MergedSegment::Rows { rows, tombstones, .. } = &plan.tables[&id(1)].segments[0] else {
+                panic!("the fixture row tombstone resolves alongside the depth-spanning checkpoint map")
+            };
+            assert!(rows.is_empty());
+            assert_eq!(tombstones, &[deleted_row.key.clone()]);
+        }
+    }
+}
+
+#[test]
+fn fixture_depth_tombstones_between_split_conflicts_follow_logical_range_order() {
+    let shallow = parse_fixture(TOMBSTONE_DEPTH_SHALLOW, RowKeyKind::Explicit);
+    let middle = parse_fixture(TOMBSTONE_DEPTH_MIDDLE, RowKeyKind::Explicit);
+    let deep = parse_fixture(TOMBSTONE_DEPTH_DEEP, RowKeyKind::Explicit);
+    let tail = rekey_row(&shallow, "z");
+    let middle_edit = edit_name(&middle, "edited middle child");
+    let tail_edit = edit_name(&tail, "edited short tail");
+
+    let middle_boundary = middle.key.encode().unwrap();
+    let deep_boundary = deep.key.encode().unwrap();
+    let tail_boundary = tail.key.encode().unwrap();
+    assert!(
+        tail_boundary < deep_boundary,
+        "the short tail key encodes before the deep key despite following it logically",
+    );
+    let ranges = [
+        KeyRange::new(None, Some(middle_boundary.clone())).unwrap(),
+        KeyRange::new(Some(middle_boundary), Some(deep_boundary.clone())).unwrap(),
+        KeyRange::new(Some(deep_boundary), Some(tail_boundary.clone())).unwrap(),
+        KeyRange::new(Some(tail_boundary), None).unwrap(),
+    ];
+    let split_manifest = |table_digest, segment_digests: [u8; 4], locators: [&[u8]; 4]| {
+        TableManifest {
+            digest: [table_digest; 32],
+            segments: (0..4)
+                .map(|index| RowSegmentManifest {
+                    locator: locators[index].to_vec(),
+                    range: ranges[index].clone(),
+                    digest: [segment_digests[index]; 32],
+                })
+                .collect(),
+        }
+    };
+    let build_inputs = || {
+        let mut source = FixtureRows::default();
+        source.add(MergeSide::Base, b"interaction-base-root", vec![shallow.clone()]);
+        source.add(MergeSide::Left, b"interaction-left-root", Vec::new());
+        source.add(MergeSide::Right, b"interaction-right-root", Vec::new());
+
+        source.add(MergeSide::Base, b"interaction-base-middle", vec![middle.clone()]);
+        source.add(MergeSide::Left, b"interaction-left-middle", Vec::new());
+        source.add(MergeSide::Right, b"interaction-right-middle", vec![middle_edit.clone()]);
+
+        source.add(MergeSide::Base, b"interaction-base-deep", vec![deep.clone()]);
+        source.add(MergeSide::Left, b"interaction-left-deep", Vec::new());
+        source.add(MergeSide::Right, b"interaction-right-deep", vec![deep.clone()]);
+
+        source.add(MergeSide::Base, b"interaction-base-tail", vec![tail.clone()]);
+        source.add(MergeSide::Left, b"interaction-left-tail", vec![tail_edit.clone()]);
+        source.add(MergeSide::Right, b"interaction-right-tail", Vec::new());
+
+        let base = snapshot(
+            string_key_schema(),
+            split_manifest(
+                1,
+                [1, 2, 3, 4],
+                [
+                    b"interaction-base-root",
+                    b"interaction-base-middle",
+                    b"interaction-base-deep",
+                    b"interaction-base-tail",
+                ],
+            ),
+            None,
+        );
+        let left = snapshot(
+            string_key_schema(),
+            split_manifest(
+                2,
+                [5, 6, 7, 8],
+                [
+                    b"interaction-left-root",
+                    b"interaction-left-middle",
+                    b"interaction-left-deep",
+                    b"interaction-left-tail",
+                ],
+            ),
+            None,
+        );
+        let right = snapshot(
+            string_key_schema(),
+            split_manifest(
+                3,
+                [9, 10, 11, 12],
+                [
+                    b"interaction-right-root",
+                    b"interaction-right-middle",
+                    b"interaction-right-deep",
+                    b"interaction-right-tail",
+                ],
+            ),
+            None,
+        );
+        (base, left, right, source)
+    };
+    let all_visits = [
+        (MergeSide::Base, b"interaction-base-root".to_vec()),
+        (MergeSide::Left, b"interaction-left-root".to_vec()),
+        (MergeSide::Right, b"interaction-right-root".to_vec()),
+        (MergeSide::Base, b"interaction-base-middle".to_vec()),
+        (MergeSide::Left, b"interaction-left-middle".to_vec()),
+        (MergeSide::Right, b"interaction-right-middle".to_vec()),
+        (MergeSide::Base, b"interaction-base-deep".to_vec()),
+        (MergeSide::Left, b"interaction-left-deep".to_vec()),
+        (MergeSide::Right, b"interaction-right-deep".to_vec()),
+        (MergeSide::Base, b"interaction-base-tail".to_vec()),
+        (MergeSide::Left, b"interaction-left-tail".to_vec()),
+        (MergeSide::Right, b"interaction-right-tail".to_vec()),
+    ];
+
+    // A clean parent tombstone precedes a delete/edit conflict; another clean
+    // tombstone separates that conflict from a later tail conflict. None of
+    // the tombstones consumes the shared conflict budget.
+    for (max_conflicts, reached_ranges, rows_examined, conflict_count) in
+        [(0, 2, 3, 1), (1, 4, 7, 2), (2, 4, 7, 2)]
+    {
+        let (base, left, right, mut source) = build_inputs();
+        let result = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 100, max_conflicts },
+        );
+        assert_eq!(source.visited, all_visits[..reached_ranges * 3]);
+
+        let (conflicts, report) = if max_conflicts < 2 {
+            let BranchMergeError::BudgetExceeded { report } = result.unwrap_err() else {
+                panic!("the first conflict beyond this budget stops the range walk")
+            };
+            (None, report)
+        } else {
+            let BranchMergeError::Conflicts { conflicts, report } = result.unwrap_err() else {
+                panic!("both ordered conflicts fit at the exact budget")
+            };
+            (Some(conflicts), report)
+        };
+        assert_eq!(report.conflicts_lower_bound, conflict_count);
+        assert_eq!(report.rows_examined, rows_examined);
+        assert_eq!(report.affected_ranges.len(), reached_ranges);
+        for range in ranges.iter().take(reached_ranges) {
+            assert!(report.affected_ranges.contains(&(id(1), range.clone())));
+        }
+        assert!(report.affected_checkpoints.is_empty());
+
+        if let Some(conflicts) = conflicts {
+            let conflict_keys = conflicts
+                .iter()
+                .map(|conflict| match conflict {
+                    BranchMergeConflict::Row {
+                        conflict: orna_evolution_v1::RowMergeConflict::DeleteAndEdit { key, .. },
+                        ..
+                    } => key.clone(),
+                    other => panic!("unexpected split-depth conflict: {other:?}"),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(conflict_keys, vec![middle.key.clone(), tail.key.clone()]);
+        }
     }
 }
