@@ -14256,6 +14256,26 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
         Message::Diagnostic { .. }
     ));
 
+    // The reference is silent on interleaving terminal replay between two
+    // rejected retarget payloads; keep the stored failure stable while the
+    // same status-query identity is presented with its next fingerprint.
+    let terminal_replay_between_retargets = block_on(host.dispatch_frame(
+        [6; 16],
+        6,
+        Frame::Binary(terminal_eval.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the terminal Eval replays between distinct retarget mismatches");
+    assert_eq!(
+        terminal_replay_between_retargets
+            .encode(Limits::default().protocol)
+            .unwrap(),
+        retained_failure_bytes
+    );
+    assert_eq!(application.calls, 1);
+
     let alternate_target_eval = eval_with_context([1; 16], [92; 16], [5; 16], None);
     let alternate_retarget_query = Envelope {
         request: Some([93; 16]),
@@ -14270,7 +14290,7 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     .unwrap();
     let alternate_retarget_mismatch = block_on(host.dispatch_frame(
         [6; 16],
-        6,
+        7,
         Frame::Binary(alternate_retarget_query.clone()),
         &mut application,
     ))
@@ -14284,7 +14304,7 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
 
     let terminal_eval_replay = block_on(host.dispatch_frame(
         [6; 16],
-        7,
+        8,
         Frame::Binary(terminal_eval.clone()),
         &mut application,
     ))
@@ -14311,13 +14331,13 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
             retargeted_status_query.clone(),
             retarget_mismatch.clone(),
             "the first rejected retarget replays after terminal Eval replay",
-            8,
+            9,
         ),
         (
             alternate_retarget_query.clone(),
             alternate_retarget_mismatch.clone(),
             "the alternate rejected retarget replays independently",
-            9,
+            10,
         ),
     ] {
         assert_eq!(
@@ -14336,7 +14356,7 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     assert_eq!(
         block_on(host.dispatch_frame(
             [6; 16],
-            10,
+            11,
             Frame::Binary(accepted_status_query.clone()),
             &mut application,
         ))
@@ -14356,7 +14376,7 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     assert_eq!(
         block_on(host.dispatch_frame(
             [6; 16],
-            11,
+            12,
             Frame::Binary(eval_reusing_status_identity),
             &mut application,
         )),
@@ -14367,13 +14387,13 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
             retargeted_status_query,
             retarget_mismatch,
             "cross-kind ID reuse preserves the first mismatch replay",
-            12,
+            13,
         ),
         (
             alternate_retarget_query,
             alternate_retarget_mismatch,
             "cross-kind ID reuse preserves the alternate mismatch replay",
-            13,
+            14,
         ),
     ] {
         assert_eq!(
@@ -14392,7 +14412,7 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     assert_eq!(
         block_on(host.dispatch_frame(
             [6; 16],
-            14,
+            15,
             Frame::Binary(accepted_status_query.clone()),
             &mut application,
         ))
@@ -14403,7 +14423,7 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     );
     let final_terminal_replay = block_on(host.dispatch_frame(
         [6; 16],
-        15,
+        16,
         Frame::Binary(terminal_eval),
         &mut application,
     ))
@@ -14427,7 +14447,7 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     let fresh_status_fingerprint = request_fingerprint(&fresh_status_query, [1; 16]);
     let fresh_status = block_on(host.dispatch_frame(
         [6; 16],
-        16,
+        17,
         Frame::Binary(fresh_status_query),
         &mut application,
     ))
