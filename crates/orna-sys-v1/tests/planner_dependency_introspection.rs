@@ -11241,3 +11241,52 @@ fn explain_keeps_half_block_source_on_scan_fallback_at_max() {
     );
     assert_eq!(overflow.plan().estimated_cost(), None);
 }
+
+#[test]
+fn explain_keeps_half_block_source_scan_fallback_partial() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN-003 specifies the scan fallback, not an exact price for
+    // incomplete statistics. The known half-block rounds to a one-unit lower
+    // bound, but unknown rows keep both local work and the plan total absent.
+    let explain = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:partial-half-block-source-fallback"),
+        source: obj("table:ByteWorkThreeScanSource"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: None,
+            estimated_bytes: Some(2_048),
+            mutable_branch: None,
+        }),
+        joins: Vec::new(),
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("scan fallback with partial half-block source statistics");
+
+    assert_eq!(explain.nodes().len(), 1);
+    assert_eq!(explain.root().kind(), PlanNodeKind::Scan);
+    assert_eq!(
+        explain.root().object(),
+        Some(&obj("table:ByteWorkThreeScanSource"))
+    );
+    assert_eq!(explain.root().estimated_rows(), None);
+    assert_eq!(explain.root().estimated_bytes(), Some(2_048));
+    assert_eq!(explain.root().estimated_work(), None);
+    assert_eq!(
+        explain.root().details().get("estimated_work_overflow"),
+        None,
+        "a partial lower bound is neither an exact cost nor an overflow"
+    );
+    assert_eq!(explain.plan().estimated_cost(), None);
+    let surface = serde_json::to_value(&explain).expect("partial scan fallback surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert!(surface["nodes"][0].get("actual_rows").is_none());
+    assert!(surface["nodes"][0].get("actual_bytes").is_none());
+}
