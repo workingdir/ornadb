@@ -8210,7 +8210,7 @@ mod tests {
         let long_pin = historical.database("archive_copy_archive").unwrap().clone();
         let replacement_short = PinnedDatabase::resolve(
             "archive",
-            shared_repository,
+            shared_repository.clone(),
             &long_revision_commit,
             loader,
         )
@@ -8305,7 +8305,7 @@ mod tests {
             long_endpoint_session.database("archive_copy").unwrap().pin(),
             rebound_session.database("archive_copy").unwrap().pin()
         );
-        let rebound_child_session = resolver
+        let mut rebound_child_session = resolver
             .resolve_for_parent(
                 rebound_session
                     .database("archive_copy")
@@ -8332,6 +8332,81 @@ mod tests {
                 .unwrap()
                 .pin(),
             rebound_child_session.database("archive").unwrap().pin()
+        );
+
+        let nested_child_sibling = resolver
+            .resolve_for_parent(
+                rebound_session
+                    .database("archive_copy")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        let nested_replacement_short = PinnedDatabase::resolve(
+            "archive",
+            shared_repository.clone(),
+            &long_revision_commit,
+            loader,
+        )
+        .unwrap();
+
+        // The reference specifies historical pins but is silent on rebinding
+        // a nested short alias to a commit that carries the middle alias too.
+        // V1 keeps both names and leaves independently resolved siblings intact.
+        rebound_child_session.detach_database("archive").unwrap();
+        rebound_child_session
+            .attach_database(nested_replacement_short.clone())
+            .unwrap();
+        assert_eq!(
+            rebound_child_session.primary().pin().commit().as_str(),
+            middle_revision_commit
+        );
+        assert_eq!(
+            rebound_child_session
+                .database("archive")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            long_revision_commit
+        );
+        assert_eq!(
+            nested_child_sibling
+                .database("archive")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            short_revision_commit
+        );
+
+        let nested_rebound_session = resolver
+            .resolve_for_parent(nested_replacement_short)
+            .unwrap();
+        assert_eq!(nested_rebound_session.primary().pin().name(), "archive");
+        assert_eq!(
+            nested_rebound_session
+                .database("archive_copy")
+                .unwrap()
+                .pin(),
+            rebound_session.database("archive_copy").unwrap().pin()
+        );
+        let nested_rebound_child_session = resolver
+            .resolve_for_parent(
+                nested_rebound_session
+                    .database("archive_copy")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            nested_rebound_child_session
+                .database("archive")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            short_revision_commit
         );
         assert_eq!(
             root_session
