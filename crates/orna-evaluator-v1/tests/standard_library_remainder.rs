@@ -25,6 +25,27 @@ fn option_decimal(coefficient: i64, exponent10: i64) -> CanonicalValue {
     CanonicalValue::new(Value::option(Some(value)).unwrap().raw().clone()).unwrap()
 }
 
+fn pinned_collection_session() -> AdmittedReplSession {
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-use-collection-alias-yfifu.orna")),
+        Ok(None)
+    );
+    session
+}
+
+fn assert_collection_proofs(session: &mut AdmittedReplSession, source: &str, proofs: usize) {
+    let parsed = orna_syntax_v1::parse_repl(source);
+    assert!(parsed.is_ok(), "collection fixture syntax: {:?}", parsed.diagnostics);
+    let actual = session
+        .submit(source)
+        .unwrap_or_else(|error| panic!("pinned collection callback fixture rejected: {}", error.code()));
+    assert_eq!(
+        actual,
+        Some(canonical(Raw::Array(vec![Raw::Bool(true); proofs])))
+    );
+}
+
 #[test]
 fn pinned_collection_helpers_bind_for_collection_and_query_exports() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
@@ -110,6 +131,44 @@ fn pinned_collection_helpers_bind_for_collection_and_query_exports() {
             .unwrap_err()
             .code(),
         "ORNA-EVAL-VALUE"
+    );
+}
+
+#[test]
+fn pinned_collection_transform_callbacks_keep_captured_values() {
+    let mut session = pinned_collection_session();
+    assert_collection_proofs(
+        &mut session,
+        include_str!("fixtures/stdlib-collection-captured-transform-callbacks-yfifu.orna"),
+        5,
+    );
+}
+
+#[test]
+fn pinned_collection_predicate_callbacks_keep_captured_values() {
+    let mut session = pinned_collection_session();
+    assert_collection_proofs(
+        &mut session,
+        include_str!("fixtures/stdlib-collection-captured-predicate-callbacks-yfifu.orna"),
+        6,
+    );
+}
+
+#[test]
+fn pinned_collection_asof_selectors_keep_captured_values() {
+    let mut session = pinned_collection_session();
+    let source = include_str!("fixtures/stdlib-collection-captured-asof-selectors-yfifu.orna");
+    let parsed = orna_syntax_v1::parse_repl(source);
+    assert!(parsed.is_ok(), "collection fixture syntax: {:?}", parsed.diagnostics);
+    let actual = session
+        .submit(source)
+        .unwrap_or_else(|error| panic!("pinned as-of callback fixture rejected: {}", error.code()));
+    assert_eq!(
+        actual,
+        Some(canonical(Raw::Array(vec![
+            Raw::Array(vec![ints(&[5, 1])]),
+            Raw::Array(vec![ints(&[11, 1])]),
+        ])))
     );
 }
 
