@@ -21233,3 +21233,99 @@ fn third_decoded_opposite_tail_replacement_keeps_its_generation_order() {
         }
     }
 }
+
+#[test]
+fn decoded_three_cause_opposite_tails_keep_their_order() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let diagnostic = |code: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let ordered_branch = |side: &str, order: [&str; 3]| {
+        let branch_code = format!("ORNA-E-OPPOSITE-THREE-{side}-BRANCH");
+        let mut branch = diagnostic(&branch_code);
+        for tail in order {
+            branch = branch.with_cause(diagnostic(&format!(
+                "ORNA-E-OPPOSITE-THREE-{side}-{tail}"
+            )));
+        }
+        branch
+    };
+    let source = diagnostic("ORNA-E-OPPOSITE-THREE-ROOT")
+        .with_cause(ordered_branch("LEFT", ["C", "B", "A"]))
+        .with_cause(diagnostic("ORNA-E-OPPOSITE-THREE-EMPTY"))
+        .with_cause(ordered_branch("RIGHT", ["A", "B", "C"]))
+        .redacted();
+    let decoded = Diagnostic::decode_ovb(&source.encode_ovb().unwrap()).unwrap();
+    let mut receiver = diagnostic("ORNA-E-OPPOSITE-THREE-STALE-ROOT")
+        .with_cause(ordered_branch("STALE", ["A", "B", "C"]))
+        .redacted();
+
+    receiver.clone_from(&decoded);
+    let projection = serde_json::to_value(&receiver).unwrap();
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        assert!(diagnostic["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|note| note == "<redacted>"));
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    fn assert_tail_order(branch: &serde_json::Value, side: &str, expected: [&str; 3]) {
+        let branch_code = format!("ORNA-E-OPPOSITE-THREE-{side}-BRANCH");
+        assert_eq!(branch["code"].as_str(), Some(branch_code.as_str()));
+        assert_eq!(
+            branch["causes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|cause| cause["code"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>(),
+            expected
+                .map(|tail| format!("ORNA-E-OPPOSITE-THREE-{side}-{tail}"))
+                .to_vec()
+        );
+    }
+
+    assert_redacted_tree(&projection);
+    assert_eq!(projection["code"], "ORNA-E-OPPOSITE-THREE-ROOT");
+    let branches = projection["causes"].as_array().unwrap();
+    assert_eq!(branches.len(), 3);
+    assert_tail_order(&branches[0], "LEFT", ["C", "B", "A"]);
+    assert_eq!(branches[1]["code"], "ORNA-E-OPPOSITE-THREE-EMPTY");
+    assert!(branches[1]["causes"].as_array().unwrap().is_empty());
+    assert_tail_order(&branches[2], "RIGHT", ["A", "B", "C"]);
+
+    let wire = receiver.encode_ovb().unwrap();
+    let replayed = Diagnostic::decode_ovb(&wire).unwrap();
+    let replayed_projection = serde_json::to_value(&replayed).unwrap();
+    assert_redacted_tree(&replayed_projection);
+    assert_eq!(replayed_projection, projection);
+    let json = serde_json::to_vec(&replayed_projection).unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([fixture.as_bytes()])
+    {
+        for bytes in [&json, &wire] {
+            assert!(!bytes
+                .windows(disclosure.len())
+                .any(|window| window == disclosure));
+        }
+    }
+}
