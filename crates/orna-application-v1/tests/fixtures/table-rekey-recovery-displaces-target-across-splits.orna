@@ -1,0 +1,31 @@
+pub table Note(id: Int) {
+    text: Str,
+    quantity: Int,
+}
+
+fn competitor_retries_after_blocker_moves() {
+    Note.rekey(2, 3)
+        |? (blocked => {
+            Note.rekey(3, 4);
+            Note.rekey(2, 3)
+        });
+    Note.update(3, { quantity: 21 });
+}
+
+fn owner_retries_after_competitor_moves() {
+    Note.rekey(1, 3)
+        |? (occupied => {
+            Note.rekey(3, 5);
+            Note.update(5, { quantity: 22 });
+            Note.rekey(1, 3)
+        })
+}
+
+fn first_recovery() {
+    competitor_retries_after_blocker_moves();
+    owner_retries_after_competitor_moves();
+    Note.update(3, { quantity: 11 })
+}
+
+fn main() = Note.rekey(1, 2)
+    |? (owner_target_occupied => first_recovery());
