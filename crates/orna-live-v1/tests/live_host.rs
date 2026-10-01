@@ -14928,8 +14928,8 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
             56,
         ),
         (
-            Frame::Binary(fresh_status_query),
-            fresh_status,
+            Frame::Binary(fresh_status_query.clone()),
+            fresh_status.clone(),
             "the admitted status query replays inside the reverse-phase cycle",
             57,
         ),
@@ -14941,15 +14941,71 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
         ),
         (
             Frame::Binary(terminal_eval.clone()),
-            terminal_eval_replay,
+            terminal_eval_replay.clone(),
             "the terminal Eval remains stable after the status replay",
             59,
         ),
         (
             Frame::Binary(repeated_same_target_query.clone()),
-            repeated_same_target_mismatch,
+            repeated_same_target_mismatch.clone(),
             "the second mismatch closes the interleaved reverse phase",
             60,
+        ),
+    ] {
+        assert_eq!(
+            block_on(host.dispatch_frame([6; 16], now, frame, &mut application))
+                .unwrap()
+                .response
+                .expect(label),
+            expected
+        );
+    }
+    assert_eq!(application.calls, 1);
+
+    // Pin a second placement of the same fresh status replay, between reverse-
+    // phase retries on both sides of another terminal Eval replay.
+    for (frame, expected, label, now) in [
+        (
+            Frame::Binary(repeated_same_target_query.clone()),
+            repeated_same_target_mismatch.clone(),
+            "the second mismatch begins the repeated status interleave",
+            61,
+        ),
+        (
+            Frame::Binary(fresh_status_query.clone()),
+            fresh_status.clone(),
+            "fresh status replays before the next terminal Eval retry",
+            62,
+        ),
+        (
+            Frame::Binary(terminal_eval.clone()),
+            terminal_eval_replay.clone(),
+            "the terminal Eval replays after fresh status",
+            63,
+        ),
+        (
+            Frame::Binary(same_target_wrong_fingerprint_query.clone()),
+            same_target_fingerprint_mismatch.clone(),
+            "the first mismatch follows the repeated fresh status replay",
+            64,
+        ),
+        (
+            Frame::Binary(fresh_status_query.clone()),
+            fresh_status.clone(),
+            "the same fresh status remains replayable between mismatch retries",
+            65,
+        ),
+        (
+            Frame::Binary(terminal_eval.clone()),
+            terminal_eval_replay.clone(),
+            "the terminal Eval remains stable after the second status replay",
+            66,
+        ),
+        (
+            Frame::Binary(repeated_same_target_query.clone()),
+            repeated_same_target_mismatch,
+            "the second mismatch closes the repeated fresh-status interleave",
+            67,
         ),
     ] {
         assert_eq!(
