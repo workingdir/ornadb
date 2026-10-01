@@ -2874,7 +2874,7 @@ fn explain_local_work_overflow_is_explicit_on_cost_and_write_tails() {
     assert_eq!(explained.plan().estimated_cost(), None);
     assert_eq!(
         explained.root().details().get("estimated_cost_overflow"),
-        None
+        Some(&PlanDetail::Boolean(true))
     );
     for kind in [
         PlanNodeKind::Materialize,
@@ -4032,7 +4032,10 @@ fn explain_closes_max_byte_write_rounding_at_local_work_boundary() {
         Some(&PlanDetail::Boolean(true)),
         "one more affected row exceeds representable write work"
     );
-    assert_eq!(overflow.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
     let surface = serde_json::to_value(&overflow).expect("max-byte local overflow surface");
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_work_overflow"], true);
@@ -4568,8 +4571,8 @@ fn explain_marks_max_source_rounding_overflow_on_materialization_closure_tail() 
     // ORNA-PLAN leaves byte-cost units unspecified. Under the established
     // 4-KiB heuristic, MAX bytes round to 2^52 blocks. The exact row boundary
     // gives both scan and materialization local work of MAX; one more row
-    // makes each local sum unrepresentable, which stays distinct from an
-    // aggregate overflow computed from exact local contributions.
+    // makes each local sum unrepresentable. That local proof also proves the
+    // full nonnegative plan cost overflows, even though exact work is omitted.
     const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
     let closing_rows = u64::MAX - MAX_BYTE_BLOCKS;
     let explain_with_rows = |rows| {
@@ -4615,7 +4618,10 @@ fn explain_marks_max_source_rounding_overflow_on_materialization_closure_tail() 
             "the extra row crosses the MAX-plus-rounded-source-bytes boundary"
         );
     }
-    assert_eq!(overflow.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
 
     let surface = serde_json::to_value(&overflow)
         .expect("max-source materialization local overflow surface");
@@ -5098,7 +5104,7 @@ fn explain_closes_first_max_source_remainder_at_local_work_boundary() {
             .root()
             .details()
             .get("estimated_cost_overflow"),
-        None
+        Some(&PlanDetail::Boolean(true))
     );
     for node in local_overflow.nodes() {
         assert_eq!(node.estimated_work(), None);
@@ -13820,9 +13826,9 @@ fn explain_keeps_local_scan_overflow_visible_through_limit_tail() {
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
     assert_eq!(parsed.value.items.len(), 7);
 
-    // ORNA-PLAN leaves this local-overflow/limit interaction unspecified.
-    // Keep scan rounding local: MAX rows plus a 2-KiB half-block overflows
-    // the scan, while the limit's own rows-read estimate remains valid at MAX.
+    // ORNA-PLAN does not define this local-overflow/limit interaction. A
+    // scan that already exceeds MAX proves the plan cost overflows regardless
+    // of the smaller output row bound.
     let explained = explain_query(&QueryPlanDescription {
         snapshot: SnapshotRef::descriptive("snapshot:local-scan-overflow-limit-tail"),
         source: obj("table:ByteWorkThreeScanSource"),
@@ -13847,7 +13853,10 @@ fn explain_keeps_local_scan_overflow_visible_through_limit_tail() {
     assert_eq!(explained.root().estimated_rows(), Some(10));
     assert_eq!(explained.root().estimated_work(), Some(u64::MAX));
     assert_eq!(explained.root().details().get("estimated_work_overflow"), None);
-    assert_eq!(explained.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
     assert_eq!(explained.plan().estimated_cost(), None);
 
     let scan = explained
@@ -13867,6 +13876,7 @@ fn explain_keeps_local_scan_overflow_visible_through_limit_tail() {
     );
     let surface = serde_json::to_value(&explained).expect("local scan overflow limit surface");
     assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
     assert!(surface["nodes"][0].get("estimated_work_overflow").is_none());
     assert_eq!(surface["nodes"][1]["details"]["estimated_work_overflow"], true);
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
@@ -13880,9 +13890,9 @@ fn explain_keeps_join_scan_overflow_visible_through_limit_tail() {
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
     assert_eq!(parsed.value.items.len(), 7);
 
-    // ORNA-PLAN leaves local overflow on a joined scan beneath a limit
-    // unspecified. Keep the scan-local half-block rounding: the byte-only
-    // source is unknown, and MAX rows plus 2 KiB overflows the joined scan.
+    // ORNA-PLAN does not define local overflow on a joined scan beneath a
+    // limit. Preserve the scan marker and promote it to plan overflow because
+    // this nonnegative scan contribution alone exceeds MAX.
     let explained = explain_query(&QueryPlanDescription {
         snapshot: SnapshotRef::descriptive("snapshot:join-scan-overflow-limit-tail"),
         source: obj("table:ByteWorkThreeScanUnknownFirst"),
@@ -13910,7 +13920,10 @@ fn explain_keeps_join_scan_overflow_visible_through_limit_tail() {
     assert_eq!(explained.root().estimated_rows(), None);
     assert_eq!(explained.root().estimated_work(), None);
     assert_eq!(explained.root().details().get("estimated_work_overflow"), None);
-    assert_eq!(explained.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
     assert_eq!(explained.plan().estimated_cost(), None);
     let scan = explained
         .nodes()
@@ -13982,7 +13995,10 @@ fn explain_preserves_late_join_scan_overflow_through_unknown_join_and_limit() {
     assert_eq!(explained.root().estimated_rows(), None);
     assert_eq!(explained.root().estimated_work(), None);
     assert_eq!(explained.root().details().get("estimated_work_overflow"), None);
-    assert_eq!(explained.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
     assert_eq!(explained.plan().estimated_cost(), None);
     assert!(explained.nodes().iter().any(|node| {
         node.kind() == PlanNodeKind::Scan
@@ -14062,7 +14078,10 @@ fn explain_preserves_join_scan_overflow_through_unknown_suffix_and_limit() {
     assert_eq!(explained.root().estimated_rows(), None);
     assert_eq!(explained.root().estimated_work(), None);
     assert_eq!(explained.root().details().get("estimated_work_overflow"), None);
-    assert_eq!(explained.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
     assert_eq!(explained.plan().estimated_cost(), None);
     let scan = explained
         .nodes()
@@ -14148,7 +14167,10 @@ fn explain_preserves_join_scan_overflow_across_materialization_tail() {
     assert_eq!(explained.root().estimated_rows(), None);
     assert_eq!(explained.root().estimated_work(), None);
     assert_eq!(explained.root().details().get("estimated_work_overflow"), None);
-    assert_eq!(explained.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
     assert_eq!(explained.plan().estimated_cost(), None);
     let scan = explained
         .nodes()
@@ -14251,7 +14273,10 @@ fn explain_preserves_two_join_scan_overflows_across_unknown_materialized_tail() 
     assert_eq!(explained.root().estimated_rows(), None);
     assert_eq!(explained.root().estimated_work(), None);
     assert_eq!(explained.root().details().get("estimated_work_overflow"), None);
-    assert_eq!(explained.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
     assert_eq!(explained.plan().estimated_cost(), None);
     for table in [
         "table:ByteWorkThreeScanFirst",
@@ -14425,7 +14450,10 @@ fn explain_keeps_join_scan_overflow_visible_through_sort_limit_tail() {
     assert_eq!(explained.root().estimated_rows(), None);
     assert_eq!(explained.root().estimated_work(), None);
     assert_eq!(explained.root().details().get("estimated_work_overflow"), None);
-    assert_eq!(explained.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
     assert_eq!(explained.plan().estimated_cost(), None);
     let scan = explained
         .nodes()
@@ -14639,8 +14667,8 @@ fn explain_keeps_join_scan_overflow_through_predicate_max_limit_tail() {
     assert_eq!(parsed.value.items.len(), 7);
 
     // ORNA-PLAN leaves local joined-scan overflow through predicate selectivity
-    // and a MAX limit unspecified. Keep scan work overflow local while the
-    // established 10% fallback lowers the join and limit row estimate.
+    // and a MAX limit unspecified. Keep its proof on the scan and plan while
+    // the established 10% fallback lowers output estimates.
     let explained = explain_query(&QueryPlanDescription {
         snapshot: SnapshotRef::descriptive("snapshot:join-scan-predicate-max-limit-tail"),
         source: obj("table:ByteWorkThreeScanSource"),
@@ -14678,7 +14706,10 @@ fn explain_keeps_join_scan_overflow_through_predicate_max_limit_tail() {
     assert_eq!(explained.root().estimated_bytes(), Some(selected_rows));
     assert_eq!(explained.root().estimated_work(), Some(selected_rows));
     assert_eq!(explained.plan().estimated_cost(), None);
-    assert_eq!(explained.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
 
     let scan = explained
         .nodes()

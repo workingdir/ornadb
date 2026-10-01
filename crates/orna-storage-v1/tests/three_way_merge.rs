@@ -923,6 +923,83 @@ fn zero_conflict_budget_allows_row_tombstone_and_checkpoint_deletes() {
 }
 
 #[test]
+fn fixture_reset_stays_present_between_prefix_and_deep_checkpoint_tombstones() {
+    let reset_id = b"consumer/reset".to_vec();
+    let prefix_tombstone_id = b"consumer/res".to_vec();
+    let child_tombstone_id = [reset_id.as_slice(), b"/child".as_slice()].concat();
+    let mut deep_tombstone_id = child_tombstone_id.clone();
+    for _ in 0..103 {
+        deep_tombstone_id.extend_from_slice(b"/child");
+    }
+    let added_reset_id = b"consumer/z-reset-created".to_vec();
+    let retained_id = b"consumer/z-retained".to_vec();
+    let base_checkpoint = parse_checkpoint_fixture(CHECKPOINT_BASE);
+    let reset_checkpoint = parse_checkpoint_fixture(CHECKPOINT_RESET);
+    let retained_checkpoint = parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS);
+
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"base", vec![parse_fixture(BASE, RowKeyKind::Explicit)]);
+    source.add(MergeSide::Left, b"left", Vec::new());
+    source.add(MergeSide::Right, b"right", Vec::new());
+
+    let mut base = snapshot(schema(true, FieldType::Str), manifest(1, 1, b"base"), None);
+    let mut left = snapshot(schema(true, FieldType::Str), manifest(2, 2, b"left"), None);
+    let mut right = snapshot(schema(true, FieldType::Str), manifest(3, 3, b"right"), None);
+
+    // A present positionless reset wins over the unchanged side. The shorter
+    // prefix and both child depths are separate checkpoint identities whose
+    // clean deletions must not remove or recreate the reset entry.
+    base.checkpoints.insert(reset_id.clone(), base_checkpoint.clone());
+    left.checkpoints.insert(reset_id.clone(), reset_checkpoint.clone());
+    right.checkpoints.insert(reset_id.clone(), base_checkpoint.clone());
+
+    base.checkpoints.insert(prefix_tombstone_id.clone(), base_checkpoint.clone());
+    right.checkpoints.insert(prefix_tombstone_id.clone(), base_checkpoint.clone());
+    base.checkpoints.insert(child_tombstone_id.clone(), base_checkpoint.clone());
+    left.checkpoints.insert(child_tombstone_id.clone(), base_checkpoint.clone());
+    base.checkpoints.insert(deep_tombstone_id.clone(), base_checkpoint.clone());
+
+    // A reset may also be introduced when both branches agree; keep an
+    // unchanged cursorless checkpoint beside it to distinguish presence from
+    // deletion throughout the complete plan.
+    left.checkpoints.insert(added_reset_id.clone(), reset_checkpoint.clone());
+    right.checkpoints.insert(added_reset_id.clone(), reset_checkpoint.clone());
+    for branch in [&mut base, &mut left, &mut right] {
+        branch.checkpoints.insert(retained_id.clone(), retained_checkpoint.clone());
+    }
+
+    let plan = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 100, max_conflicts: 0 },
+    )
+    .expect("fixture resets and tombstones resolve without checkpoint conflicts");
+
+    assert_eq!(plan.report.conflicts_lower_bound, 0);
+    assert_eq!(plan.report.rows_examined, 1);
+    assert!(plan.report.affected_checkpoints.is_empty());
+    assert_eq!(
+        plan.checkpoints.keys().cloned().collect::<Vec<_>>(),
+        vec![reset_id.clone(), added_reset_id.clone(), retained_id.clone()],
+    );
+    assert_eq!(plan.checkpoints.get(reset_id.as_slice()), Some(&reset_checkpoint));
+    assert_eq!(plan.checkpoints.get(added_reset_id.as_slice()), Some(&reset_checkpoint));
+    assert_eq!(plan.checkpoints.get(retained_id.as_slice()), Some(&retained_checkpoint));
+    assert!(!plan.checkpoints.contains_key(prefix_tombstone_id.as_slice()));
+    assert!(!plan.checkpoints.contains_key(child_tombstone_id.as_slice()));
+    assert!(!plan.checkpoints.contains_key(deep_tombstone_id.as_slice()));
+    assert_eq!(source.visited.len(), 3);
+
+    let MergedSegment::Rows { rows, tombstones, .. } = &plan.tables[&id(1)].segments[0] else {
+        panic!("the row deletion resolves alongside reset and checkpoint tombstones")
+    };
+    assert!(rows.is_empty());
+    assert_eq!(tombstones, &[integer(1)]);
+}
+
+#[test]
 fn segmented_zero_conflict_budget_stops_after_tombstone_before_checkpoints() {
     let candidate_a = integer(10);
     let candidate_b = integer(20);
@@ -13308,6 +13385,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
     let reset_extension_tail_100 = [reset_extension_tail_99.as_slice(), b"/child".as_slice()].concat();
     let reset_extension_tail_101 = [reset_extension_tail_100.as_slice(), b"/leaf".as_slice()].concat();
     let reset_extension_tail_102 = [reset_extension_tail_101.as_slice(), b"/tail".as_slice()].concat();
+    let reset_extension_tail_103 = [reset_extension_tail_102.as_slice(), b"/child".as_slice()].concat();
     let opposite_full_base_delete_before_reset_id =
         b"consumer/zzzy-opposite-full-base-delete-before-reset".to_vec();
     let same_side_full_base_delete_before_reset_id =
@@ -14414,6 +14492,13 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
         } else {
             left.checkpoints.insert(reset_extension_tail_102.clone(), full_checkpoint.clone());
         }
+        base.checkpoints.insert(reset_extension_tail_103.clone(), full_checkpoint.clone());
+        // Continue beneath the tail with a same-side child tombstone.
+        if tail_reset_left {
+            right.checkpoints.insert(reset_extension_tail_103.clone(), full_checkpoint.clone());
+        } else {
+            left.checkpoints.insert(reset_extension_tail_103.clone(), full_checkpoint.clone());
+        }
         base.checkpoints.insert(
             opposite_full_base_delete_before_reset_id.clone(),
             full_checkpoint.clone(),
@@ -14694,6 +14779,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
                     assert!(!report.affected_checkpoints.contains(reset_extension_tail_100.as_slice()));
                     assert!(!report.affected_checkpoints.contains(reset_extension_tail_101.as_slice()));
                     assert!(!report.affected_checkpoints.contains(reset_extension_tail_102.as_slice()));
+                    assert!(!report.affected_checkpoints.contains(reset_extension_tail_103.as_slice()));
                     assert!(!report.affected_checkpoints.contains(opposite_full_base_delete_before_reset_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_before_reset_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_before_first_checkpoint_conflict_id.as_slice()));
@@ -14847,6 +14933,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
                 assert!(!report.affected_checkpoints.contains(reset_extension_tail_100.as_slice()));
                 assert!(!report.affected_checkpoints.contains(reset_extension_tail_101.as_slice()));
                 assert!(!report.affected_checkpoints.contains(reset_extension_tail_102.as_slice()));
+                assert!(!report.affected_checkpoints.contains(reset_extension_tail_103.as_slice()));
                 assert!(!report.affected_checkpoints.contains(opposite_full_base_delete_before_reset_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_before_reset_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_before_first_checkpoint_conflict_id.as_slice()));
@@ -15018,4 +15105,136 @@ fn unavailable_or_pruned_rows_fail_closed_instead_of_becoming_deletes() {
             message: "segment is pruned or unavailable".into(),
         }
     );
+}
+
+#[test]
+fn nested_checkpoint_reset_extensions_merge_as_independent_fixture_states() {
+    let root_id = b"consumer/reset-root".to_vec();
+    let child_id = [root_id.as_slice(), b"/child".as_slice()].concat();
+    let leaf_id = [child_id.as_slice(), b"/leaf".as_slice()].concat();
+    let sibling_id = [root_id.as_slice(), b"-sibling".as_slice()].concat();
+    let created_id = [leaf_id.as_slice(), b"/new".as_slice()].concat();
+    let base_state = parse_checkpoint_fixture(CHECKPOINT_BASE);
+    let reset_state = parse_checkpoint_fixture(CHECKPOINT_RESET);
+
+    // Checkpoint identities are exact stable keys. A slash-shaped extension
+    // has no cascading reset semantics; equal reset fixtures coalesce, and
+    // independent one-sided resets compose regardless of branch orientation.
+    for root_reset_left in [true, false] {
+        let mut base = snapshot(
+            schema(true, FieldType::Str),
+            manifest(1, 1, b"same"),
+            None,
+        );
+        let mut left = snapshot(
+            schema(true, FieldType::Str),
+            manifest(1, 1, b"same"),
+            None,
+        );
+        let mut right = snapshot(
+            schema(true, FieldType::Str),
+            manifest(1, 1, b"same"),
+            None,
+        );
+
+        for checkpoint_id in [&root_id, &child_id, &leaf_id, &sibling_id] {
+            base.checkpoints.insert(checkpoint_id.clone(), base_state.clone());
+            left.checkpoints.insert(checkpoint_id.clone(), base_state.clone());
+            right.checkpoints.insert(checkpoint_id.clone(), base_state.clone());
+        }
+
+        if root_reset_left {
+            left.checkpoints.insert(root_id.clone(), reset_state.clone());
+            right.checkpoints.insert(leaf_id.clone(), reset_state.clone());
+            left.checkpoints.insert(created_id.clone(), reset_state.clone());
+        } else {
+            right.checkpoints.insert(root_id.clone(), reset_state.clone());
+            left.checkpoints.insert(leaf_id.clone(), reset_state.clone());
+            right.checkpoints.insert(created_id.clone(), reset_state.clone());
+        }
+        left.checkpoints.insert(child_id.clone(), reset_state.clone());
+        right.checkpoints.insert(child_id.clone(), reset_state.clone());
+
+        let mut source = FixtureRows::default();
+        let plan = merge_three_way_snapshots(&base, &left, &right, &mut source, budget()).unwrap();
+
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        assert!(source.visited.is_empty());
+        assert_eq!(plan.checkpoints.len(), 5);
+        for checkpoint_id in [&root_id, &child_id, &leaf_id, &created_id] {
+            assert_eq!(plan.checkpoints[checkpoint_id.as_slice()], reset_state);
+        }
+        assert_eq!(plan.checkpoints[sibling_id.as_slice()], base_state);
+    }
+}
+
+#[test]
+fn nested_checkpoint_reset_conflicts_preserve_fixture_states_and_identity() {
+    let checkpoint_id = b"consumer/reset/root/child/leaf/tail".to_vec();
+    let base_state = parse_checkpoint_fixture(CHECKPOINT_BASE);
+    let reset_state = parse_checkpoint_fixture(CHECKPOINT_RESET);
+    let advance_state = parse_checkpoint_fixture(CHECKPOINT_EDITED);
+
+    // Reset-to-no-position is still a present checkpoint. Against a deletion
+    // or an independently advanced position, it conflicts with the full
+    // fixture states intact, whichever side contains the reset.
+    for reset_left in [true, false] {
+        for conflict_with_delete in [true, false] {
+            let other_state = if conflict_with_delete {
+                None
+            } else {
+                Some(advance_state.clone())
+            };
+            let (left_state, right_state) = if reset_left {
+                (Some(reset_state.clone()), other_state)
+            } else {
+                (other_state, Some(reset_state.clone()))
+            };
+
+            let mut base = snapshot(
+                schema(true, FieldType::Str),
+                manifest(1, 1, b"same"),
+                None,
+            );
+            let mut left = snapshot(
+                schema(true, FieldType::Str),
+                manifest(1, 1, b"same"),
+                None,
+            );
+            let mut right = snapshot(
+                schema(true, FieldType::Str),
+                manifest(1, 1, b"same"),
+                None,
+            );
+            base.checkpoints.insert(checkpoint_id.clone(), base_state.clone());
+            if let Some(state) = left_state.as_ref() {
+                left.checkpoints.insert(checkpoint_id.clone(), state.clone());
+            }
+            if let Some(state) = right_state.as_ref() {
+                right.checkpoints.insert(checkpoint_id.clone(), state.clone());
+            }
+
+            let mut source = FixtureRows::default();
+            let error = merge_three_way_snapshots(&base, &left, &right, &mut source, budget())
+                .unwrap_err();
+            let BranchMergeError::Conflicts { conflicts, report } = error else {
+                panic!("nested reset diverging from deletion or advance remains unresolved")
+            };
+            assert_eq!(
+                conflicts,
+                vec![BranchMergeConflict::CheckpointConflict {
+                    id: checkpoint_id.clone(),
+                    conflict: orna_evolution_v1::CheckpointMergeConflict {
+                        base: Some(base_state.clone()),
+                        left: left_state,
+                        right: right_state,
+                    },
+                }]
+            );
+            assert_eq!(report.conflicts_lower_bound, 1);
+            assert_eq!(report.affected_checkpoints.len(), 1);
+            assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
+            assert!(source.visited.is_empty());
+        }
+    }
 }
