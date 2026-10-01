@@ -5,7 +5,7 @@ use std::{
 
 mod build_support;
 
-use build_support::{Collector, validate_api_document, validate_collection};
+use build_support::{Collector, canonical_pretty_json, validate_api_document, validate_collection};
 use serde_json::{Value, json};
 
 fn rust_sources(root: &Path, output: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -22,16 +22,18 @@ fn rust_sources(root: &Path, output: &mut Vec<PathBuf>) -> std::io::Result<()> {
     Ok(())
 }
 
-fn descriptor_constant(method: &str) -> String {
-    format!("{}_DESCRIPTOR", method.to_ascii_uppercase())
-}
-
 fn main() {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
+    let workspace = manifest
+        .parent()
+        .and_then(Path::parent)
+        .expect("orna-sys-v1 must be two levels below the workspace root");
     let source_root = manifest.join("src");
-    let base_path = manifest.join("src/system_api_base.json");
+    let api_path = workspace.join("api/sys.json");
+    let schema_path = workspace.join("api/sys.schema.json");
     let build_support_path = manifest.join("build_support.rs");
-    println!("cargo:rerun-if-changed={}", base_path.display());
+    println!("cargo:rerun-if-changed={}", api_path.display());
+    println!("cargo:rerun-if-changed={}", schema_path.display());
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", build_support_path.display());
     // Watch the directory recursively so adding a new annotated module also
@@ -59,9 +61,21 @@ fn main() {
     validate_collection(&collector.functions)
         .expect("annotated system API collection must be unique and internally consistent");
 
-    let base_text = fs::read_to_string(&base_path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", base_path.display()));
-    let mut api: Value = serde_json::from_str(&base_text).expect("valid system API base JSON");
+    let schema_text = fs::read_to_string(&schema_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", schema_path.display()));
+    let schema: Value = serde_json::from_str(&schema_text).expect("valid published JSON Schema");
+    assert_eq!(
+        schema["$schema"].as_str(),
+        Some("https://json-schema.org/draft/2020-12/schema"),
+        "published system API schema must use JSON Schema 2020-12"
+    );
+    assert_eq!(schema["type"].as_str(), Some("object"));
+
+    // The normative API artifact owns the non-function type/relation graph;
+    // function declarations are replaced by the build-time method collection.
+    let base_text = fs::read_to_string(&api_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", api_path.display()));
+    let mut api: Value = serde_json::from_str(&base_text).expect("valid normative system API JSON");
     let functions = collector
         .functions
         .iter()
@@ -75,36 +89,9 @@ fn main() {
 
     validate_api_document(&api).expect("generated system API schema is internally consistent");
 
-    let mut generated_json = serde_json::to_string_pretty(&api).expect("serialize system API");
+    let mut generated_json = canonical_pretty_json(&api).expect("serialize system API canonically");
     generated_json.push('\n');
-
-    let mut generated_rust = String::new();
-    for function in &collector.functions {
-        let metadata = &function.metadata;
-        let constant = descriptor_constant(&function.method);
-        let effect = match metadata["effect"].as_str().expect("validated effect") {
-            "read" => "Read",
-            "invoke" => "Invoke",
-            "admin" => "Admin",
-            _ => unreachable!("effect was validated"),
-        };
-        generated_rust.push_str(&format!(
-            "pub const {constant}: SystemFunctionDescriptor = SystemFunctionDescriptor {{\n\
-             name: {name:?}, effect: SystemEffect::{effect}, signature: {signature:?}, purpose: {purpose:?},\n\
-             }};\n",
-            name = metadata["name"].as_str().expect("validated name"),
-            signature = metadata["signature"].as_str().expect("validated signature"),
-            purpose = metadata["purpose"].as_str().expect("validated purpose"),
-        ));
-    }
-    generated_rust.push_str("\npub static SYSTEM_FUNCTION_DESCRIPTORS: &[SystemFunctionDescriptor] = &[\n");
-    for function in &collector.functions {
-        generated_rust.push_str(&format!("    {},\n", descriptor_constant(&function.method)));
-    }
-    generated_rust.push_str("];\n");
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("build output directory"));
     fs::write(out_dir.join("api_sys.json"), generated_json).expect("write generated api/sys.json");
-    fs::write(out_dir.join("system_api_catalog.rs"), generated_rust)
-        .expect("write generated Rust descriptor catalog");
 }
