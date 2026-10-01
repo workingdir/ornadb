@@ -42,6 +42,94 @@ pub fn canonical_pretty_json(value: &Value) -> Result<String, serde_json::Error>
     serde_json::to_string_pretty(&sort(value.clone()))
 }
 
+/// Assemble the published artifact from the registry-owned non-operation
+/// graph and operation descriptors collected from annotated implementations.
+/// Counts are derived here so the checked-in artifact cannot become an input
+/// to its own generator.
+#[allow(dead_code)] // Called by build.rs; integration proofs validate its build output.
+pub fn generate_system_api_document(
+    mut inventory: Value,
+    functions: Vec<Value>,
+) -> Result<Value, String> {
+    let object = inventory
+        .as_object_mut()
+        .ok_or_else(|| "system API registry inventory must be a JSON object".to_owned())?;
+    if object.contains_key("functions") || object.contains_key("counts") {
+        return Err(
+            "system API registry inventory must omit generated functions and counts".to_owned(),
+        );
+    }
+    object.insert("functions".to_owned(), Value::Array(functions));
+
+    let mut counts = serde_json::Map::new();
+    for name in [
+        "singletons",
+        "opaque_identifiers",
+        "reference_aliases",
+        "value_types",
+        "relations",
+        "functions",
+        "failure_codes",
+    ] {
+        let count = object
+            .get(name)
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("system API registry inventory `{name}` must be an array"))?
+            .len();
+        counts.insert(name.to_owned(), Value::from(count));
+    }
+    let enum_count = object
+        .get("enums")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "system API registry inventory `enums` must be an object".to_owned())?
+        .len();
+    counts.insert("enums".to_owned(), Value::from(enum_count));
+    object.insert("counts".to_owned(), Value::Object(counts));
+
+    validate_api_document(&inventory)?;
+    Ok(inventory)
+}
+
+/// Verify that the unchanged published JSON Schema covers exactly the emitted
+/// artifact's root shape. Detailed field and type-graph invariants are checked
+/// by `validate_api_document`.
+pub fn validate_published_schema_shape(api: &Value, schema: &Value) -> Result<(), String> {
+    if schema["$schema"].as_str() != Some("https://json-schema.org/draft/2020-12/schema")
+        || schema["type"].as_str() != Some("object")
+        || schema["additionalProperties"] != Value::Bool(false)
+    {
+        return Err("published system API schema must be a closed 2020-12 object".to_owned());
+    }
+    let artifact_fields = api
+        .as_object()
+        .ok_or_else(|| "generated system API must be a JSON object".to_owned())?
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let schema_fields = schema["properties"]
+        .as_object()
+        .ok_or_else(|| "published system API schema must declare root properties".to_owned())?
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let required_fields = schema["required"]
+        .as_array()
+        .ok_or_else(|| "published system API schema must declare required root fields".to_owned())?
+        .iter()
+        .map(|field| {
+            field.as_str().map(str::to_owned).ok_or_else(|| {
+                "published system API schema has a non-string required field".to_owned()
+            })
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if artifact_fields != schema_fields || artifact_fields != required_fields {
+        return Err(
+            "published system API schema root does not exactly cover generated fields".to_owned(),
+        );
+    }
+    Ok(())
+}
+
 /// Generated Orna source for one typed provider operation.
 pub struct BindingStub {
     pub module: String,
