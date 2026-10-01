@@ -852,7 +852,7 @@ pub fn explain_query_with_disjunct_limit_chain(
     disjunct_count: u64,
     additional_limits: &[u64],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_with_predicate_pressure(query, disjunct_count, None, additional_limits)
+    explain_query_with_predicate_pressure(query, disjunct_count, None, None, additional_limits)
 }
 
 /// Explains a disjunction followed by a left-to-right chain of conjunctive
@@ -876,6 +876,39 @@ pub fn explain_query_with_disjunct_conjunct_limit_chain(
         query,
         disjunct_count,
         Some(conjunct_count),
+        None,
+        additional_limits,
+    )
+}
+
+/// Explains a disjunction whose expanded arms each contain a short-circuiting
+/// chain of conjuncts, followed by ordered limit stages.
+///
+/// ORNA-PLAN does not prescribe selectivity or expanded-filter cost
+/// aggregation. Without histograms, each conjunct is estimated to match half
+/// of its input, arm selectivity is the product of those conjunct estimates,
+/// and arms are treated as independent. Every expanded arm is charged against
+/// the full source input; within an arm, each later conjunct is charged only
+/// against rows surviving its predecessors. Integer match estimates round up
+/// at each arm. `conjunct_count_per_disjunct` and `disjunct_count` must be
+/// nonzero, and their product must fit the plan expression bound.
+pub fn explain_query_with_conjunct_disjunct_limit_chain(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    conjunct_count_per_disjunct: u64,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0 || conjunct_count_per_disjunct == 0 {
+        return Err(ExplainError::InvalidExpression);
+    }
+    if disjunct_count.saturating_mul(conjunct_count_per_disjunct) > MAX_PLAN_EXPRESSIONS as u64 {
+        return Err(ExplainError::TooManyExpressions);
+    }
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        None,
+        Some(conjunct_count_per_disjunct),
         additional_limits,
     )
 }
@@ -884,11 +917,16 @@ fn explain_query_with_predicate_pressure(
     query: &QueryPlanDescription,
     disjunct_count: u64,
     conjunct_count: Option<u64>,
+    conjunct_count_per_disjunct: Option<u64>,
     additional_limits: &[u64],
 ) -> Result<ExplainedPlan, ExplainError> {
     if disjunct_count == 0
         || conjunct_count == Some(0)
-        || ((disjunct_count > 1 || conjunct_count.is_some()) && query.predicate.is_none())
+        || conjunct_count_per_disjunct == Some(0)
+        || ((disjunct_count > 1
+            || conjunct_count.is_some()
+            || conjunct_count_per_disjunct.is_some())
+            && query.predicate.is_none())
     {
         return Err(ExplainError::InvalidExpression);
     }
@@ -1011,11 +1049,46 @@ fn explain_query_with_predicate_pressure(
         current_cardinality = cardinality;
     }
     if let Some(predicate) = &query.predicate {
-        // Expression references are opaque to this planner. A caller that
-        // supplies an expanded disjunction count gets one half-selective
-        // independent branch per disjunct; the default count of one preserves
-        // the historical single-filter fallback.
-        let (cardinality, work, mut details) = if let Some(conjunct_count) = conjunct_count {
+        // Expression references are opaque to this planner. The selected API
+        // shape supplies any branch/conjunct counts; the default count of one
+        // preserves the historical single-filter fallback.
+        let (cardinality, work, mut details) = if let Some(conjunct_count) =
+            conjunct_count_per_disjunct
+        {
+            let (cardinality, work) = conjunctive_disjunction_cardinality_and_work(
+                current_cardinality,
+                disjunct_count,
+                conjunct_count,
+            );
+            (
+                cardinality,
+                work,
+                BTreeMap::from([
+                    (
+                        "selectivity_assumption".to_owned(),
+                        PlanDetail::Text(
+                            "0.5_per_left_to_right_conjunct_independent_disjuncts".to_owned(),
+                        ),
+                    ),
+                    (
+                        "disjunct_count".to_owned(),
+                        PlanDetail::Integer(disjunct_count),
+                    ),
+                    (
+                        "conjunct_count_per_disjunct".to_owned(),
+                        PlanDetail::Integer(conjunct_count),
+                    ),
+                    (
+                        "conjunct_order".to_owned(),
+                        PlanDetail::Text("left_to_right_short_circuit".to_owned()),
+                    ),
+                    (
+                        "expansion_work".to_owned(),
+                        PlanDetail::Text("full_input_per_disjunct".to_owned()),
+                    ),
+                ]),
+            )
+        } else if let Some(conjunct_count) = conjunct_count {
             let (cardinality, work) = disjunction_conjunct_cardinality_and_work(
                 current_cardinality,
                 disjunct_count,
@@ -1478,6 +1551,70 @@ fn disjunction_conjunct_cardinality_and_work(
         work = None;
     }
     (cardinality, work)
+}
+
+fn conjunctive_disjunction_cardinality_and_work(
+    input: Cardinality,
+    disjunct_count: u64,
+    conjunct_count_per_disjunct: u64,
+) -> (Cardinality, Option<u64>) {
+    let mut branch_cardinality = input;
+    let explicit_stages = conjunct_count_per_disjunct.min(u64::BITS.into());
+    let mut branch_work = input.rows.map(|_| 0u64);
+    for _ in 0..explicit_stages {
+        if let (Some(total), Some(rows)) = (branch_work, branch_cardinality.rows) {
+            branch_work = total.checked_add(rows);
+        }
+        branch_cardinality = scale_cardinality(branch_cardinality, 1, 2);
+    }
+
+    // Repeated ceil-halving reaches one row (or zero for an empty input) in
+    // at most 64 stages. Remaining one-row conjuncts are added in one checked
+    // operation rather than iterating over an untrusted count.
+    let remaining_stages = conjunct_count_per_disjunct - explicit_stages;
+    if remaining_stages > 0 {
+        if let (Some(total), Some(rows)) = (branch_work, branch_cardinality.rows) {
+            branch_work = rows
+                .checked_mul(remaining_stages)
+                .and_then(|tail_work| total.checked_add(tail_work));
+        }
+    }
+
+    let work = branch_work.and_then(|per_disjunct| per_disjunct.checked_mul(disjunct_count));
+    let rows = input.rows.map(|rows| {
+        conjunctive_disjunction_rows(rows, disjunct_count, conjunct_count_per_disjunct)
+    });
+    let bytes = input.bytes.map(|bytes| {
+        conjunctive_disjunction_rows(bytes, disjunct_count, conjunct_count_per_disjunct)
+    });
+    (Cardinality { rows, bytes }, work)
+}
+
+fn conjunctive_disjunction_rows(
+    input_rows: u64,
+    disjunct_count: u64,
+    conjunct_count_per_disjunct: u64,
+) -> u64 {
+    if input_rows == 0 {
+        return 0;
+    }
+    if conjunct_count_per_disjunct >= u64::BITS.into() {
+        // The probability per arm is below one row; each rounded arm admits
+        // one row until the source estimate is exhausted.
+        return input_rows.min(disjunct_count);
+    }
+
+    let denominator = 1u128 << conjunct_count_per_disjunct;
+    let mut remaining = input_rows;
+    for _ in 0..disjunct_count {
+        if remaining == 0 {
+            break;
+        }
+        let matched = u64::try_from(u128::from(remaining).div_ceil(denominator))
+            .expect("a rounded branch match cannot exceed its input");
+        remaining -= matched;
+    }
+    input_rows - remaining
 }
 
 fn limit_cardinality(cardinality: Cardinality, limit: u64) -> Cardinality {
