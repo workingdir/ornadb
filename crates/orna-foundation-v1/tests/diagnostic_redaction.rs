@@ -21816,3 +21816,143 @@ fn decoded_diagnostic_reload_preserves_alias_order_and_is_atomic() {
         }
     }
 }
+
+#[test]
+fn diagnostic_reload_rebinds_reused_alias_slots_in_wire_order() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let diagnostic = |code: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let alias = |code: &str, reference: [u8; 16], order: [&str; 2]| {
+        diagnostic(code)
+            .with_reference(reference)
+            .with_cause(diagnostic(order[0]))
+            .with_cause(diagnostic(order[1]))
+    };
+    let previous = diagnostic("ORNA-E-REBIND-PREVIOUS")
+        .with_cause(alias(
+            "ORNA-E-REBIND-A",
+            [0x11; 16],
+            ["ORNA-E-REBIND-OLD-A1", "ORNA-E-REBIND-OLD-A2"],
+        ))
+        .with_cause(diagnostic("ORNA-E-REBIND-EMPTY"))
+        .with_cause(alias(
+            "ORNA-E-REBIND-B",
+            [0x22; 16],
+            ["ORNA-E-REBIND-OLD-B1", "ORNA-E-REBIND-OLD-B2"],
+        ))
+        .with_cause(alias(
+            "ORNA-E-REBIND-A",
+            [0x11; 16],
+            ["ORNA-E-REBIND-OLD-A1", "ORNA-E-REBIND-OLD-A2"],
+        ));
+    let original_snapshot = previous.clone();
+    let incoming = diagnostic("ORNA-E-REBIND-ROOT")
+        .with_cause(alias(
+            "ORNA-E-REBIND-B",
+            [0x22; 16],
+            ["ORNA-E-REBIND-B2", "ORNA-E-REBIND-B1"],
+        ))
+        .with_cause(alias(
+            "ORNA-E-REBIND-A",
+            [0x11; 16],
+            ["ORNA-E-REBIND-A2", "ORNA-E-REBIND-A1"],
+        ))
+        .with_cause(alias(
+            "ORNA-E-REBIND-B",
+            [0x22; 16],
+            ["ORNA-E-REBIND-B2", "ORNA-E-REBIND-B1"],
+        ))
+        .with_cause(diagnostic("ORNA-E-REBIND-EMPTY"));
+    let wire = incoming.encode_ovb().unwrap();
+
+    let mut current = previous;
+    current.reload_ovb(&wire).unwrap();
+    let projection = serde_json::to_value(&current).unwrap();
+    let original_projection = serde_json::to_value(&original_snapshot).unwrap();
+    assert_eq!(original_projection["code"], "ORNA-E-REBIND-PREVIOUS");
+    assert_eq!(
+        original_projection["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cause| cause["code"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "ORNA-E-REBIND-A",
+            "ORNA-E-REBIND-EMPTY",
+            "ORNA-E-REBIND-B",
+            "ORNA-E-REBIND-A"
+        ]
+    );
+    assert_eq!(projection["code"], "ORNA-E-REBIND-ROOT");
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(
+        causes
+            .iter()
+            .map(|cause| cause["code"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "ORNA-E-REBIND-B",
+            "ORNA-E-REBIND-A",
+            "ORNA-E-REBIND-B",
+            "ORNA-E-REBIND-EMPTY"
+        ]
+    );
+    assert_eq!(
+        causes
+            .iter()
+            .map(|cause| cause["reference"].as_str())
+            .collect::<Vec<_>>(),
+        [
+            Some("22222222-2222-2222-2222-222222222222"),
+            Some("11111111-1111-1111-1111-111111111111"),
+            Some("22222222-2222-2222-2222-222222222222"),
+            None
+        ]
+    );
+    for (cause, expected_order) in [
+        (&causes[0], ["ORNA-E-REBIND-B2", "ORNA-E-REBIND-B1"]),
+        (&causes[1], ["ORNA-E-REBIND-A2", "ORNA-E-REBIND-A1"]),
+        (&causes[2], ["ORNA-E-REBIND-B2", "ORNA-E-REBIND-B1"]),
+    ] {
+        assert_eq!(
+            cause["causes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|nested| nested["code"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            expected_order
+        );
+    }
+    assert_eq!(causes[0], causes[2]);
+    let replayed = Diagnostic::decode_ovb(&current.encode_ovb().unwrap()).unwrap();
+    assert_eq!(serde_json::to_value(replayed).unwrap(), projection);
+
+    let json = serde_json::to_vec(&projection).unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([fixture.as_bytes()])
+    {
+        for bytes in [&json, &wire] {
+            assert!(!bytes
+                .windows(disclosure.len())
+                .any(|window| window == disclosure));
+        }
+    }
+}
