@@ -43,6 +43,17 @@ fn repository(files: &[(&str, &str)]) -> (TempDir, Repository, String) {
     (directory, repository, commit)
 }
 
+fn write_commit(directory: &Path, files: &[(&str, &str)], message: &str) -> String {
+    for (path, contents) in files {
+        let path = directory.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+    git(directory, &["add", "--all"]);
+    git(directory, &["commit", "--quiet", "-m", message]);
+    git(directory, &["rev-parse", "HEAD"])
+}
+
 #[test]
 fn attach_and_detach_refusals_preserve_the_primary_and_optional_std() {
     let (_primary_dir, primary_repository, primary_commit) = repository(&[(
@@ -213,4 +224,93 @@ fn package_resolution_treats_missing_manifest_as_empty_and_refuses_wrong_repo_pi
         package_commit.to_uppercase()
     ))
     .is_err());
+}
+
+#[test]
+fn nested_short_and_long_alias_routes_keep_each_historical_parent_pin() {
+    let package_source = include_str!("fixtures/attach-package.orna");
+    let (shared_dir, shared_repository, base_commit) =
+        repository(&[("main.orna", package_source)]);
+    let short_child_manifest = format!("archive {base_commit}\n");
+    let short_child_commit = write_commit(
+        shared_dir.path(),
+        &[(PACKAGE_PIN_MANIFEST_PATH, &short_child_manifest)],
+        "nested short-alias child pin",
+    );
+
+    let short_source = package_source.replace("42", "43");
+    let short_parent_manifest = format!("archive_copy {short_child_commit}\n");
+    let short_parent_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &short_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &short_parent_manifest),
+        ],
+        "nested short-alias parent pin",
+    );
+
+    let long_source = package_source.replace("42", "44");
+    let long_parent_manifest = format!("archive {base_commit}\n");
+    let long_parent_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &long_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &long_parent_manifest),
+        ],
+        "nested long-alias parent pin",
+    );
+
+    // Advancing the repository's HEAD must not retarget either root pin.
+    let latest_manifest = format!(
+        "archive_copy {long_parent_commit}\narchive {short_child_commit}\n"
+    );
+    let latest_commit = write_commit(
+        shared_dir.path(),
+        &[(PACKAGE_PIN_MANIFEST_PATH, &latest_manifest)],
+        "move aliases after historical parents",
+    );
+
+    let root_manifest = format!(
+        "archive {short_parent_commit}\narchive_copy {long_parent_commit}\n"
+    );
+    let (_root_dir, root_repository, root_commit) = repository(&[
+        ("main.orna", include_str!("fixtures/attach-primary.orna")),
+        (PACKAGE_PIN_MANIFEST_PATH, &root_manifest),
+    ]);
+    let loader = ProjectLoader::default();
+    let primary = PinnedDatabase::resolve("app", root_repository, &root_commit, loader).unwrap();
+    let resolver = PackageResolver::new(
+        [
+            ("archive".to_owned(), shared_repository.clone()),
+            ("archive_copy".to_owned(), shared_repository),
+        ],
+        loader,
+    )
+    .unwrap();
+
+    let root = resolver.resolve_for_parent(primary).unwrap();
+    let short = root.database("archive").unwrap().clone();
+    let long = root.database("archive_copy").unwrap().clone();
+    assert_eq!(short.pin().name(), "archive");
+    assert_eq!(short.pin().commit().as_str(), short_parent_commit);
+    assert_eq!(long.pin().name(), "archive_copy");
+    assert_eq!(long.pin().commit().as_str(), long_parent_commit);
+    assert_ne!(short.pin().commit().as_str(), latest_commit);
+
+    let short_closure = resolver.resolve_for_parent(short).unwrap();
+    let short_child = short_closure.database("archive_copy").unwrap().clone();
+    assert_eq!(short_child.pin().commit().as_str(), short_child_commit);
+    let short_leaf_closure = resolver.resolve_for_parent(short_child).unwrap();
+
+    let long_closure = resolver.resolve_for_parent(long).unwrap();
+    let long_leaf = long_closure.database("archive").unwrap();
+    assert_eq!(long_leaf.pin().commit().as_str(), base_commit);
+    assert_eq!(
+        short_leaf_closure.database("archive").unwrap().pin(),
+        long_leaf.pin()
+    );
+    assert_eq!(
+        root.database("archive_copy").unwrap().pin().commit().as_str(),
+        long_parent_commit
+    );
 }
