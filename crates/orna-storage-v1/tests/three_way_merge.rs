@@ -15290,3 +15290,80 @@ fn unilateral_row_and_checkpoint_tombstones_resolve_in_both_orientations() {
         }
     }
 }
+
+#[test]
+fn nested_checkpoint_tombstones_pair_with_same_side_row_delete_and_disjoint_edit() {
+    let deleted_row = parse_fixture(BASE, RowKeyKind::Explicit);
+    let mut retained_row = deleted_row.clone();
+    retained_row.key = integer(2);
+    retained_row.fields.insert(id(2), string("retained row"));
+    let mut edited_retained_row = retained_row.clone();
+    edited_retained_row.fields.insert(id(3), string("Paris"));
+
+    let prefix_id = b"consumer/cach".to_vec();
+    let parent_id = b"consumer/cache".to_vec();
+    let child_id = b"consumer/cache/item".to_vec();
+    let sibling_id = b"consumer/other".to_vec();
+    let prefix_checkpoint = parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS);
+    let parent_checkpoint = parse_checkpoint_fixture(CHECKPOINT_BASE);
+    let child_checkpoint = parse_checkpoint_fixture(CHECKPOINT_EDITED);
+    let sibling_checkpoint = parse_checkpoint_fixture(CHECKPOINT_RESET);
+
+    // Checkpoint IDs are exact byte keys. Deleting a parent ID must not prune
+    // its still-present child or a strict-prefix ID. The row delete shares a
+    // side with the parent tombstone; an independent sibling tombstone and
+    // retained-row edit land on the other side.
+    for row_delete_on_left in [true, false] {
+        let mut source = FixtureRows::default();
+        source.add(MergeSide::Base, b"base", vec![deleted_row.clone(), retained_row.clone()]);
+        source.add(
+            MergeSide::Left,
+            b"left",
+            if row_delete_on_left { vec![retained_row.clone()] } else { vec![deleted_row.clone(), edited_retained_row.clone()] },
+        );
+        source.add(
+            MergeSide::Right,
+            b"right",
+            if row_delete_on_left { vec![deleted_row.clone(), edited_retained_row.clone()] } else { vec![retained_row.clone()] },
+        );
+
+        let mut base = snapshot(schema(true, FieldType::Str), manifest(1, 10, b"base"), None);
+        let mut left = snapshot(schema(true, FieldType::Str), manifest(2, 11, b"left"), None);
+        let mut right = snapshot(schema(true, FieldType::Str), manifest(3, 12, b"right"), None);
+        for branch in [&mut base, &mut left, &mut right] {
+            branch.checkpoints.insert(prefix_id.clone(), prefix_checkpoint.clone());
+            branch.checkpoints.insert(parent_id.clone(), parent_checkpoint.clone());
+            branch.checkpoints.insert(child_id.clone(), child_checkpoint.clone());
+            branch.checkpoints.insert(sibling_id.clone(), sibling_checkpoint.clone());
+        }
+        let (row_delete_side, opposite_side) = if row_delete_on_left {
+            (&mut left, &mut right)
+        } else {
+            (&mut right, &mut left)
+        };
+        row_delete_side.checkpoints.remove(parent_id.as_slice());
+        opposite_side.checkpoints.remove(sibling_id.as_slice());
+
+        let plan = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 0 },
+        ).unwrap();
+
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        assert!(plan.report.affected_checkpoints.is_empty());
+        assert_eq!(source.visited.len(), 3);
+        assert!(!plan.checkpoints.contains_key(parent_id.as_slice()));
+        assert!(!plan.checkpoints.contains_key(sibling_id.as_slice()));
+        assert_eq!(plan.checkpoints.get(prefix_id.as_slice()), Some(&prefix_checkpoint));
+        assert_eq!(plan.checkpoints.get(child_id.as_slice()), Some(&child_checkpoint));
+
+        let MergedSegment::Rows { rows, tombstones, .. } = &plan.tables[&id(1)].segments[0] else {
+            panic!("the disjoint retained-row edit merges beside the row tombstone")
+        };
+        assert_eq!(rows, &[edited_retained_row.clone()]);
+        assert_eq!(tombstones, &[deleted_row.key.clone()]);
+    }
+}
