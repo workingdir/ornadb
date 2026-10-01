@@ -1,0 +1,6 @@
+pub fn metadata_value<T>(value: T): sys.ValueMetadata<T> = sys.meta(value);
+pub fn metadata_relation<T>(rows: Relation<sys.ValueMetadata<T>>): Relation<sys.ValueMetadata<T>> = rows;
+pub fn metadata_list<T>(values: [sys.ValueMetadata<T>?]): [sys.ValueMetadata<T>?] = values;
+pub fn await_result<T>(invocation: sys.InvocationHandle<T>): sys.InvocationResult<T> = sys.await(invocation);
+pub fn attribution_rows<T>(target: sys.RowRef<T>): Relation<sys.Attribution> = sys.blame(target);
+pub fn query_plan<T>(query: Query<T>): sys.Plan = sys.explain(query);

@@ -10,6 +10,7 @@ mod build_support;
 const PUBLISHED_SYS_API: &str = include_str!("../../../api/sys.json");
 const PUBLISHED_SYS_SCHEMA: &str = include_str!("../../../api/sys.schema.json");
 const SYSTEM_API_FIXTURE: &str = include_str!("fixtures/system-api-annotation.orna");
+const GENERIC_TYPE_GRAPH_FIXTURE: &str = include_str!("fixtures/sys-generic-type-graph.orna");
 
 fn assert_canonical_object_key_order(value: &Value) {
     match value {
@@ -908,4 +909,156 @@ fn in_crate_orna_fixture_uses_a_published_collected_api_signature() {
             .unwrap_or_else(|| panic!("missing annotated overload {label}"));
         assert_eq!(function["signature"], signature);
     }
+}
+
+#[test]
+fn generic_type_graph_fixture_resolves_through_the_published_inventory() {
+    let parsed = orna_syntax_v1::parse_module(GENERIC_TYPE_GRAPH_FIXTURE);
+    assert!(
+        parsed.is_ok(),
+        "generic type graph fixture must parse in supported Orna grammar"
+    );
+    let fixture_functions = parsed
+        .value
+        .items
+        .iter()
+        .map(|item| match &item.declaration {
+            orna_syntax_v1::Declaration::Function { signature, .. } => signature.name.as_str(),
+            declaration => panic!("fixture entry must be a function: {declaration:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fixture_functions,
+        [
+            "metadata_value",
+            "metadata_relation",
+            "metadata_list",
+            "await_result",
+            "attribution_rows",
+            "query_plan",
+        ]
+    );
+
+    let mut api: Value = serde_json::from_str(PUBLISHED_SYS_API).expect("published system API JSON");
+    build_support::validate_api_document(&api).expect("published graph is closed before extension");
+    let fixtures = [
+        (
+            "metadata_value",
+            "fn sys.fixture.metadata_value<T>(value: T): sys.ValueMetadata<T>",
+        ),
+        (
+            "metadata_relation",
+            "fn sys.fixture.metadata_relation<T>(rows: Relation<sys.ValueMetadata<T>>): Relation<sys.ValueMetadata<T>>",
+        ),
+        (
+            "metadata_list",
+            "fn sys.fixture.metadata_list<T>(values: [sys.ValueMetadata<T>?]): [sys.ValueMetadata<T>?]",
+        ),
+        (
+            "await_result",
+            "fn sys.fixture.await_result<T>(invocation: sys.InvocationHandle<T>): sys.InvocationResult<T>",
+        ),
+        (
+            "attribution_rows",
+            "fn sys.fixture.attribution_rows<T>(target: sys.RowRef<T>): Relation<sys.Attribution>",
+        ),
+        (
+            "query_plan",
+            "fn sys.fixture.query_plan<T>(query: Query<T>): sys.Plan",
+        ),
+    ];
+    let functions = api["functions"]
+        .as_array_mut()
+        .expect("published functions are an array");
+    for (local_name, signature) in fixtures {
+        let fixture_signature = signature
+            .strip_prefix("fn sys.fixture.")
+            .expect("synthetic system signature has a fixture namespace");
+        assert!(
+            GENERIC_TYPE_GRAPH_FIXTURE.contains(&format!("pub fn {fixture_signature} =")),
+            "fixture declaration must exercise `{signature}`"
+        );
+        functions.push(serde_json::json!({
+            "effect": "read",
+            "name": format!("sys.fixture.{local_name}<T>"),
+            "purpose": "generic type graph test fixture",
+            "signature": signature,
+        }));
+    }
+    api["counts"]["functions"] = serde_json::json!(functions.len());
+    build_support::validate_api_document(&api)
+        .expect("generic, nested, optional, list, Query, Relation, and row types resolve");
+}
+
+#[test]
+fn generic_type_graph_rejects_misapplied_and_unbound_arguments() {
+    let generated: Value = serde_json::from_str(PUBLISHED_SYS_API).unwrap();
+
+    let mut wrong_arity = generated.clone();
+    let meta = wrong_arity["functions"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|function| function["name"] == "sys.meta")
+        .unwrap();
+    meta["signature"] = serde_json::json!(
+        "fn sys.meta<T>(value: sys.ValueMetadata<T, sys.Value>): sys.ValueMetadata<T>"
+    );
+    let error = build_support::validate_api_document(&wrong_arity).unwrap_err();
+    assert!(
+        error.contains("type `sys.ValueMetadata` expects 1 generic argument(s), found 2"),
+        "nested generic applications must match their declared arity: {error}"
+    );
+
+    let mut dangling_nested_argument = generated.clone();
+    let meta = dangling_nested_argument["functions"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|function| function["name"] == "sys.meta")
+        .unwrap();
+    meta["signature"] = serde_json::json!(
+        "fn sys.meta<T>(value: [sys.ValueMetadata<sys.MissingType>?]): sys.ValueMetadata<T>"
+    );
+    let error = build_support::validate_api_document(&dangling_nested_argument).unwrap_err();
+    assert!(
+        error.contains("unresolved system API type `sys.MissingType`"),
+        "nested generic arguments must resolve through the closed inventory: {error}"
+    );
+
+    let mut unbound_function_type = generated.clone();
+    let meta = unbound_function_type["functions"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|function| function["name"] == "sys.meta")
+        .unwrap();
+    meta["signature"] = serde_json::json!(
+        "fn sys.meta<T>(value: sys.InvocationHandle<T>): sys.InvocationResult<U>"
+    );
+    let error = build_support::validate_api_document(&unbound_function_type).unwrap_err();
+    assert!(
+        error.contains("unresolved system API type `U`"),
+        "function signatures must not leak unbound generic variables: {error}"
+    );
+
+    let mut unbound_record_field = generated;
+    let invocation_result = unbound_record_field["value_types"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|value_type| value_type["name"] == "sys.InvocationResult<T>")
+        .unwrap();
+    let value_field = invocation_result["fields"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|field| field["name"] == "value")
+        .unwrap();
+    value_field["type"] = serde_json::json!("sys.ValueMetadata<U>");
+    let error = build_support::validate_api_document(&unbound_record_field).unwrap_err();
+    assert!(
+        error.contains("unresolved system API type `U`"),
+        "record-generic fields must only reference declared type parameters: {error}"
+    );
 }
