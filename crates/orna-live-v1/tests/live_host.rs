@@ -14221,7 +14221,8 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     .encode(Limits::default().protocol)
     .unwrap();
     // The reference requires ID/fingerprint mismatch rejection, but is silent
-    // on replay ordering with a terminal Eval; retain the two snapshots apart.
+    // on multiple retarget retries around terminal Eval replay; retain every
+    // rejected payload snapshot separately from the admitted status.
     let retarget_mismatch = block_on(host.dispatch_frame(
         [6; 16],
         4,
@@ -14236,9 +14237,35 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
         Message::Diagnostic { .. }
     ));
 
-    let terminal_eval_replay = block_on(host.dispatch_frame(
+    let alternate_target_eval = eval_with_context([1; 16], [92; 16], [5; 16], None);
+    let alternate_retarget_query = Envelope {
+        request: Some([93; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [92; 16],
+            fingerprint: request_fingerprint(&alternate_target_eval, [1; 16]),
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let alternate_retarget_mismatch = block_on(host.dispatch_frame(
         [6; 16],
         5,
+        Frame::Binary(alternate_retarget_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a second target fingerprint returns an independent mismatch");
+    assert!(matches!(
+        &alternate_retarget_mismatch.message,
+        Message::Diagnostic { .. }
+    ));
+
+    let terminal_eval_replay = block_on(host.dispatch_frame(
+        [6; 16],
+        6,
         Frame::Binary(terminal_eval.clone()),
         &mut application,
     ))
@@ -14260,22 +14287,37 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
             .unwrap(),
         retained_failure_bytes
     );
-    assert_eq!(
-        block_on(host.dispatch_frame(
-            [6; 16],
-            6,
-            Frame::Binary(retargeted_status_query.clone()),
-            &mut application,
-        ))
-        .unwrap()
-        .response
-        .expect("the rejected retarget payload replays after terminal Eval replay"),
-        retarget_mismatch
-    );
-    assert_eq!(
-        block_on(host.dispatch_frame(
-            [6; 16],
+    for (frame, expected, label, now) in [
+        (
+            retargeted_status_query.clone(),
+            retarget_mismatch.clone(),
+            "the first rejected retarget replays after terminal Eval replay",
             7,
+        ),
+        (
+            alternate_retarget_query.clone(),
+            alternate_retarget_mismatch.clone(),
+            "the alternate rejected retarget replays independently",
+            8,
+        ),
+    ] {
+        assert_eq!(
+            block_on(host.dispatch_frame(
+                [6; 16],
+                now,
+                Frame::Binary(frame),
+                &mut application,
+            ))
+            .unwrap()
+            .response
+            .expect(label),
+            expected
+        );
+    }
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            9,
             Frame::Binary(accepted_status_query.clone()),
             &mut application,
         ))
@@ -14295,27 +14337,54 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     assert_eq!(
         block_on(host.dispatch_frame(
             [6; 16],
-            8,
+            10,
             Frame::Binary(eval_reusing_status_identity),
             &mut application,
         )),
         Err(Error::RequestMismatch)
     );
+    for (frame, expected, label, now) in [
+        (
+            retargeted_status_query,
+            retarget_mismatch,
+            "cross-kind ID reuse preserves the first mismatch replay",
+            11,
+        ),
+        (
+            alternate_retarget_query,
+            alternate_retarget_mismatch,
+            "cross-kind ID reuse preserves the alternate mismatch replay",
+            12,
+        ),
+    ] {
+        assert_eq!(
+            block_on(host.dispatch_frame(
+                [6; 16],
+                now,
+                Frame::Binary(frame),
+                &mut application,
+            ))
+            .unwrap()
+            .response
+            .expect(label),
+            expected
+        );
+    }
     assert_eq!(
         block_on(host.dispatch_frame(
             [6; 16],
-            9,
-            Frame::Binary(retargeted_status_query),
+            13,
+            Frame::Binary(accepted_status_query.clone()),
             &mut application,
         ))
         .unwrap()
         .response
-        .expect("cross-kind request-ID reuse leaves the mismatch replay stable"),
-        retarget_mismatch
+        .expect("cross-kind ID reuse leaves the admitted status replay stable"),
+        accepted_status
     );
     let final_terminal_replay = block_on(host.dispatch_frame(
         [6; 16],
-        10,
+        14,
         Frame::Binary(terminal_eval),
         &mut application,
     ))
@@ -14323,6 +14392,42 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     .response
     .expect("the same failure still replays after retarget and cross-kind retries");
     assert_eq!(final_terminal_replay, terminal_eval_replay);
+    assert_eq!(application.calls, 1);
+
+    let fresh_status_query = Envelope {
+        request: Some([94; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint: terminal_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let fresh_status_fingerprint = request_fingerprint(&fresh_status_query, [1; 16]);
+    let fresh_status = block_on(host.dispatch_frame(
+        [6; 16],
+        15,
+        Frame::Binary(fresh_status_query),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a fresh query still observes the terminal Eval after retarget retries");
+    let expected_failure =
+        ResultBody::from_result(&terminal_eval_replay, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        &fresh_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(returned),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *returned == terminal_fingerprint
+            && result == &expected_failure
+    ));
     assert_eq!(application.calls, 1);
     assert!(matches!(
         block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
@@ -14333,6 +14438,16 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
         Some(status)
             if status.state == orna_runtime_v1::RequestState::Completed
                 && status.fingerprint == accepted_status_fingerprint
+    ));
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [1; 16],
+            request_id: [94; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == fresh_status_fingerprint
     ));
     drop(host);
     remove_test_repository(&root);
