@@ -1341,19 +1341,31 @@ fn annotate_expr(expr: &mut Expr, source: &str, file: &str) {
             }
             annotate_span(span, source, file)
         }
-        Expr::Call { callee, span, .. } => {
+        Expr::Call {
+            callee,
+            arguments,
+            span,
+        } => {
             annotate_expr(callee, source, file);
+            for argument in arguments {
+                annotate_expr(&mut argument.value, source, file);
+                annotate_span(&mut argument.span, source, file);
+            }
             annotate_span(span, source, file)
         }
         Expr::GenericCall {
             callee,
             type_arguments,
+            arguments,
             span,
-            ..
         } => {
             annotate_expr(callee, source, file);
             for type_argument in type_arguments {
                 annotate_type(type_argument, source, file)
+            }
+            for argument in arguments {
+                annotate_expr(&mut argument.value, source, file);
+                annotate_span(&mut argument.span, source, file);
             }
             annotate_span(span, source, file)
         }
@@ -5068,6 +5080,12 @@ impl Parser {
                     self.bump();
                     return true;
                 }
+                // Commas are optional between case arms. After a malformed
+                // arm, preserve an adjacent suffix when its simple pattern
+                // and colon make the next boundary unambiguous.
+                if self.simple_case_arm_header_ahead() {
+                    return true;
+                }
             }
             // Interpolation boundaries are dedicated tokens, not braces.
             match &self.current().kind {
@@ -5095,6 +5113,27 @@ impl Parser {
             self.bump();
         }
         false
+    }
+    fn simple_case_arm_header_ahead(&self) -> bool {
+        let starts_simple_pattern = matches!(
+            &self.current().kind,
+            TokenKind::Identifier { .. }
+                | TokenKind::Keyword(
+                    Keyword::SelfValue | Keyword::True | Keyword::False | Keyword::Null
+                )
+                | TokenKind::Integer
+                | TokenKind::Decimal
+                | TokenKind::Float
+                | TokenKind::Date
+                | TokenKind::Instant
+                | TokenKind::String
+                | TokenKind::Punct("_")
+        );
+        starts_simple_pattern
+            && matches!(
+                self.tokens.get(self.at + 1).map(|token| &token.kind),
+                Some(TokenKind::Punct(":"))
+            )
     }
     fn contextual(&self) -> bool {
         matches!(
