@@ -7525,6 +7525,170 @@ mod tests {
     }
 
     #[test]
+    fn nested_pin_reverse_prefix_middle_reattach_matches_long_endpoint_only() {
+        let app_source = include_str!("../tests/fixtures/attached-incompatible-main.orna");
+        let shared_source = include_str!("../tests/fixtures/attached-equivalent-main.orna");
+        let (app_dir, app_repository, _) = repository(app_source);
+        let (shared_dir, shared_repository, _) = repository(shared_source);
+
+        let short_revision_commit = write_commit(
+            shared_dir.path(),
+            "main.orna",
+            &shared_source.replace("42", "7"),
+        );
+        let middle_revision_commit = write_commit(
+            shared_dir.path(),
+            "main.orna",
+            &shared_source.replace("42", "8"),
+        );
+        let long_revision_commit = write_commit(
+            shared_dir.path(),
+            "main.orna",
+            &shared_source.replace("42", "9"),
+        );
+        let historical_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!(
+                "archive {short_revision_commit}\narchive_copy {middle_revision_commit}\narchive_copy_archive {long_revision_commit}\n"
+            ),
+        );
+        let current_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive_copy_archive_archive {historical_commit}\n"),
+        );
+        let app_commit = write_commit(
+            app_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive_copy_archive {current_commit}\n"),
+        );
+
+        let loader = ProjectLoader::default();
+        let app = PinnedDatabase::resolve(
+            "app",
+            app_repository.clone(),
+            &app_commit,
+            loader,
+        )
+        .unwrap();
+        let resolver = PackageResolver::new(
+            [
+                ("app".to_owned(), app_repository),
+                ("archive".to_owned(), shared_repository.clone()),
+                ("archive_copy".to_owned(), shared_repository.clone()),
+                ("archive_copy_archive".to_owned(), shared_repository.clone()),
+                (
+                    "archive_copy_archive_archive".to_owned(),
+                    shared_repository.clone(),
+                ),
+            ],
+            loader,
+        )
+        .unwrap();
+
+        let root_session = resolver.resolve_for_parent(app).unwrap();
+        let current_closure = resolver
+            .resolve_for_parent(
+                root_session
+                    .database("archive_copy_archive")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        let historical_pin = current_closure
+            .database("archive_copy_archive_archive")
+            .unwrap()
+            .clone();
+        let mut historical = resolver
+            .resolve_for_parent(historical_pin.clone())
+            .unwrap();
+        let historical_sibling = resolver
+            .resolve_for_parent(historical_pin)
+            .unwrap();
+        let short_pin = historical.database("archive").unwrap().clone();
+        let middle_pin = historical.database("archive_copy").unwrap().clone();
+        let long_pin = historical
+            .database("archive_copy_archive")
+            .unwrap()
+            .clone();
+        let replacement_middle = PinnedDatabase::resolve(
+            "archive_copy",
+            shared_repository,
+            &long_revision_commit,
+            loader,
+        )
+        .unwrap();
+
+        assert_eq!(historical.primary().pin().name(), "archive_copy_archive_archive");
+        assert_eq!(historical.primary().pin().commit().as_str(), historical_commit);
+        assert_eq!(short_pin.pin().commit().as_str(), short_revision_commit);
+        assert_eq!(middle_pin.pin().commit().as_str(), middle_revision_commit);
+        assert_eq!(long_pin.pin().commit().as_str(), long_revision_commit);
+        assert_ne!(short_pin.pin().commit(), long_pin.pin().commit());
+
+        // The reference is silent on reattaching the middle alias at the long
+        // endpoint's OID. V1 preserves the endpoint distinction by exact alias
+        // even when middle and long now share one immutable revision.
+        historical.detach_database("archive_copy").unwrap();
+        historical.attach_database(replacement_middle.clone()).unwrap();
+        let replaced_middle = historical.database("archive_copy").unwrap();
+        let unchanged_short = historical.database("archive").unwrap();
+        let unchanged_long = historical.database("archive_copy_archive").unwrap();
+        assert_eq!(
+            replaced_middle.pin().commit(),
+            unchanged_long.pin().commit()
+        );
+        assert_ne!(replaced_middle.pin(), unchanged_long.pin());
+        assert_eq!(unchanged_short.pin(), short_pin.pin());
+        assert_eq!(unchanged_long.pin(), long_pin.pin());
+        assert_ne!(unchanged_short.pin().commit(), unchanged_long.pin().commit());
+        assert_eq!(
+            replaced_middle.pin().commit().as_str(),
+            long_revision_commit
+        );
+        assert_eq!(
+            historical_sibling.database("archive").unwrap().pin(),
+            short_pin.pin()
+        );
+        assert_eq!(
+            historical_sibling
+                .database("archive_copy")
+                .unwrap()
+                .pin(),
+            middle_pin.pin()
+        );
+        assert_eq!(
+            historical_sibling
+                .database("archive_copy_archive")
+                .unwrap()
+                .pin(),
+            long_pin.pin()
+        );
+        let replacement_session = resolver
+            .resolve_for_parent(replacement_middle)
+            .unwrap();
+        assert_eq!(
+            replacement_session.primary().pin().name(),
+            "archive_copy"
+        );
+        assert_eq!(
+            replacement_session.primary().pin().commit().as_str(),
+            long_revision_commit
+        );
+        assert_eq!(replacement_session.attached().count(), 0);
+        assert_eq!(
+            root_session
+                .database("archive_copy_archive")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            current_commit
+        );
+    }
+
+    #[test]
     fn equivalent_units_interoperate_across_attachments_but_name_match_is_not_enough() {
         let primary_source = include_str!("fixtures/attached-primary-main.orna");
         let (_primary_dir, primary_repository, primary_commit) = repository(&primary_source);
