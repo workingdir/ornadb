@@ -950,6 +950,42 @@ pub fn explain_query_with_input_limit_disjunct_chain(
     )
 }
 
+/// Explains nested input limits, expanded disjuncts with a conjunct chain in
+/// each arm, and then the query's outer limit followed by any additional
+/// limits.
+///
+/// Each nested input limit runs after source and join work but before the
+/// predicate, and is charged for its immediate input rows. Every disjunct arm
+/// then starts from the capped rows and evaluates its conjuncts
+/// left-to-right, charging later conjuncts only for rows surviving earlier
+/// ones. ORNA-PLAN leaves estimate aggregation unspecified, so the documented
+/// independent 50%-per-conjunct fallback is applied within each arm; each arm
+/// is charged against the full capped input.
+pub fn explain_query_with_input_limit_conjunct_disjunct_chain(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    conjunct_count_per_disjunct: u64,
+    nested_input_limits: &[u64],
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0 || conjunct_count_per_disjunct == 0 || query.predicate.is_none() {
+        return Err(ExplainError::InvalidExpression);
+    }
+    if disjunct_count.saturating_mul(conjunct_count_per_disjunct)
+        > MAX_PLAN_EXPRESSIONS as u64
+    {
+        return Err(ExplainError::TooManyExpressions);
+    }
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        None,
+        Some(conjunct_count_per_disjunct),
+        nested_input_limits,
+        additional_limits,
+    )
+}
+
 fn explain_query_with_predicate_pressure(
     query: &QueryPlanDescription,
     disjunct_count: u64,
