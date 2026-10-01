@@ -1,0 +1,9 @@
+pub fn guarded(flag: Bool): String {
+    case flag {
+        true if case flag {
+            true 0
+            Packet([false, true], Point{x: false}) if flag: true
+        }: "nested compound matched"
+        false: "fallback"
+    }
+}
