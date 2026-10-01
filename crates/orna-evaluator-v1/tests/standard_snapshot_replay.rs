@@ -108,7 +108,7 @@ fn snapshot_projects() -> (
     let snapshot_v2 = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
     let sources_v2 = standard_sources(include_str!("fixtures/snapshot-replay-std-v2.orna"));
     let profile_v2 =
-        StandardDependencyProfile::from_sources(snapshot_v2.clone(), sources_v2).unwrap();
+        StandardDependencyProfile::from_sources(snapshot_v2.clone(), sources_v2.clone()).unwrap();
     let project_v2 = loader
         .load_with_standard_profile(&repository, Some(profile_v2))
         .unwrap();
