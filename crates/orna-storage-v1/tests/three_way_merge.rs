@@ -24,6 +24,7 @@ const CHECKPOINT_TAIL_BASE: &str = include_str!("fixtures/merge-checkpoint-tail-
 const CHECKPOINT_TAIL_LEFT: &str = include_str!("fixtures/merge-checkpoint-tail-left.orna");
 const CHECKPOINT_TAIL_RIGHT: &str = include_str!("fixtures/merge-checkpoint-tail-right.orna");
 const TOMBSTONE_DEPTH_SHALLOW: &str = include_str!("fixtures/merge-tombstone-depth-shallow.orna");
+const TOMBSTONE_DEPTH_MIDDLE: &str = include_str!("fixtures/merge-tombstone-depth-middle.orna");
 const TOMBSTONE_DEPTH_DEEP: &str = include_str!("fixtures/merge-tombstone-depth-deep.orna");
 
 fn id(value: u8) -> ObjectId {
@@ -136,6 +137,27 @@ fn manifest(digest: u8, segment_digest: u8, locator: &[u8]) -> TableManifest {
         digest: [digest; 32],
         segments: vec![RowSegmentManifest { locator: locator.to_vec(), range: KeyRange::all(), digest: [segment_digest; 32] }],
     }
+}
+
+fn depth_split_manifest(digest: u8, segment_digests: [u8; 3], locators: [&[u8]; 3]) -> TableManifest {
+    let middle = string("root/child").encode().unwrap();
+    let deep = string("root/child/deep").encode().unwrap();
+    let ranges = [
+        KeyRange::new(None, Some(middle.clone())).unwrap(),
+        KeyRange::new(Some(middle), Some(deep.clone())).unwrap(),
+        KeyRange::new(Some(deep), None).unwrap(),
+    ];
+    let segments = ranges
+        .into_iter()
+        .zip(segment_digests)
+        .zip(locators)
+        .map(|((range, segment_digest), locator)| RowSegmentManifest {
+            locator: locator.to_vec(),
+            range,
+            digest: [segment_digest; 32],
+        })
+        .collect();
+    TableManifest { digest: [digest; 32], segments }
 }
 
 fn snapshot(schema: Schema, manifest: TableManifest, checkpoint: Option<CheckpointGeneration>) -> ThreeWaySnapshot {
@@ -15380,6 +15402,132 @@ fn fixture_nested_delete_edit_conflicts_follow_logical_key_order() {
     );
     assert_eq!(report.conflicts_lower_bound, 3);
     assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+}
+
+#[test]
+fn fixture_depth_split_tombstones_follow_table_wide_primary_key_order() {
+    let shallow = parse_fixture(TOMBSTONE_DEPTH_SHALLOW, RowKeyKind::Explicit);
+    let middle = parse_fixture(TOMBSTONE_DEPTH_MIDDLE, RowKeyKind::Explicit);
+    let deep = parse_fixture(TOMBSTONE_DEPTH_DEEP, RowKeyKind::Explicit);
+
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"split-base-shallow", vec![shallow.clone()]);
+    source.add(MergeSide::Base, b"split-base-middle", vec![middle.clone()]);
+    source.add(MergeSide::Base, b"split-base-deep", vec![deep.clone()]);
+    source.add(MergeSide::Left, b"split-left-shallow", Vec::new());
+    source.add(MergeSide::Left, b"split-left-middle", vec![middle]);
+    source.add(MergeSide::Left, b"split-left-deep", Vec::new());
+    source.add(MergeSide::Right, b"split-right-shallow", Vec::new());
+    source.add(MergeSide::Right, b"split-right-middle", Vec::new());
+    source.add(MergeSide::Right, b"split-right-deep", vec![deep]);
+
+    let base = snapshot(
+        string_key_schema(),
+        depth_split_manifest(1, [1, 2, 3], [b"split-base-shallow", b"split-base-middle", b"split-base-deep"]),
+        None,
+    );
+    let left = snapshot(
+        string_key_schema(),
+        depth_split_manifest(2, [4, 5, 6], [b"split-left-shallow", b"split-left-middle", b"split-left-deep"]),
+        None,
+    );
+    let right = snapshot(
+        string_key_schema(),
+        depth_split_manifest(3, [7, 8, 9], [b"split-right-shallow", b"split-right-middle", b"split-right-deep"]),
+        None,
+    );
+
+    let plan = merge_three_way_snapshots(&base, &left, &right, &mut source, budget())
+        .expect("depth-separated deletes resolve as exact tombstones");
+    let segments = &plan.tables[&id(1)].segments;
+    assert_eq!(segments.len(), 3);
+    let ordered_tombstones = segments
+        .iter()
+        .flat_map(|segment| match segment {
+            MergedSegment::Rows { rows, tombstones, .. } => {
+                assert!(rows.is_empty());
+                tombstones.clone()
+            }
+            other => panic!("each changed depth range materializes: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ordered_tombstones,
+        vec![string("root"), string("root/child"), string("root/child/deep")],
+        "walking materialized segments preserves table-wide key order across depth boundaries",
+    );
+    assert_eq!(plan.report.rows_examined, 5);
+    assert_eq!(source.visited.len(), 9);
+}
+
+#[test]
+fn fixture_ancestor_tombstone_preserves_deeper_rows_across_ranges() {
+    let shallow = parse_fixture(TOMBSTONE_DEPTH_SHALLOW, RowKeyKind::Explicit);
+    let middle = parse_fixture(TOMBSTONE_DEPTH_MIDDLE, RowKeyKind::Explicit);
+    let deep = parse_fixture(TOMBSTONE_DEPTH_DEEP, RowKeyKind::Explicit);
+    let edited_deep = edit_name(&deep, "edited descendant");
+
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"preserve-base-shallow", vec![shallow.clone()]);
+    source.add(MergeSide::Base, b"preserve-base-middle", vec![middle.clone()]);
+    source.add(MergeSide::Base, b"preserve-base-deep", vec![deep.clone()]);
+    source.add(MergeSide::Left, b"preserve-left-shallow", Vec::new());
+    source.add(MergeSide::Left, b"preserve-left-middle", vec![middle.clone()]);
+    source.add(MergeSide::Left, b"preserve-left-deep", vec![deep.clone()]);
+    source.add(MergeSide::Right, b"preserve-right-shallow", vec![shallow]);
+    source.add(MergeSide::Right, b"preserve-right-middle", vec![middle.clone()]);
+    source.add(MergeSide::Right, b"preserve-right-deep", vec![edited_deep.clone()]);
+
+    let base = snapshot(
+        string_key_schema(),
+        depth_split_manifest(
+            10,
+            [10, 11, 12],
+            [b"preserve-base-shallow", b"preserve-base-middle", b"preserve-base-deep"],
+        ),
+        None,
+    );
+    let left = snapshot(
+        string_key_schema(),
+        depth_split_manifest(
+            11,
+            [13, 14, 15],
+            [b"preserve-left-shallow", b"preserve-left-middle", b"preserve-left-deep"],
+        ),
+        None,
+    );
+    let right = snapshot(
+        string_key_schema(),
+        depth_split_manifest(
+            12,
+            [16, 17, 18],
+            [b"preserve-right-shallow", b"preserve-right-middle", b"preserve-right-deep"],
+        ),
+        None,
+    );
+
+    let plan = merge_three_way_snapshots(&base, &left, &right, &mut source, budget())
+        .expect("deleting a parent key does not delete its children");
+    let segments = &plan.tables[&id(1)].segments;
+    let MergedSegment::Rows { rows, tombstones, .. } = &segments[0] else {
+        panic!("the shallow parent range materializes its tombstone")
+    };
+    assert!(rows.is_empty());
+    assert_eq!(tombstones, &[string("root")]);
+
+    let MergedSegment::Rows { rows, tombstones, .. } = &segments[1] else {
+        panic!("the middle child range materializes independently")
+    };
+    assert_eq!(rows, &[middle]);
+    assert!(tombstones.is_empty());
+
+    let MergedSegment::Rows { rows, tombstones, .. } = &segments[2] else {
+        panic!("the deep child edit materializes independently")
+    };
+    assert_eq!(rows, &[edited_deep]);
+    assert!(tombstones.is_empty());
+    assert_eq!(plan.report.rows_examined, 8);
+    assert_eq!(source.visited.len(), 9);
 }
 
 #[test]

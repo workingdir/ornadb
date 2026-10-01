@@ -197,6 +197,9 @@ pub enum MergedSegment {
 pub struct MergedTable {
     pub id: ObjectId,
     pub whole_table_reuse: Option<(MergeSide, TableManifest)>,
+    /// Materialized ranges retain canonical primary-key order. Collecting
+    /// tombstones by segment order therefore preserves table-wide key order
+    /// even when a depth-shaped key boundary splits the ranges.
     pub segments: Vec<MergedSegment>,
 }
 
