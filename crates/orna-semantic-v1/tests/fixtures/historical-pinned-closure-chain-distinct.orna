@@ -1,0 +1,16 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn distinct_resolved_pins_stay_separate_through_closure_chains() {
+    let before_pin = sys.snapshot("HEAD~10");
+    let head_pin = sys.snapshot("HEAD");
+    let before_factory = chained_factory(before_pin);
+    let head_factory = forwarded_factory(head_pin);
+    let before_product = before_factory();
+    let head_product = head_factory();
+    [before_product.read, head_product.read]
+}
