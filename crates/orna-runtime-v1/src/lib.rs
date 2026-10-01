@@ -24003,6 +24003,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_split_conjunct_tighter_inner_take_caps_larger_outer_demand() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=10)
+            .map(|row_id| {
+                let title = if row_id == 7 || row_id == 10 {
+                    "later"
+                } else {
+                    "current"
+                };
+                let target = if row_id == 8 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(131), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The intermediate take limits the rows reaching the second
+        // conjunct. The larger final take cannot demand rows beyond that
+        // prefix, even though the second filter returns fewer than three.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-take-two-split-conjunct-mixed-tight-inner-limit.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 3),
+            "the inner take caps the larger outer demand after two first-filter matches"
+        );
+    }
+
+    #[tokio::test]
     async fn query_projection_failures_recover_at_the_outer_boundary() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
