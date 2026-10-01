@@ -1,0 +1,7 @@
+pub fn reassigned_selector_does_not_reuse_its_previous_pin() {
+    let selector = "HEAD~10";
+    let before = sys.database.as_of(sys.snapshot(selector));
+    selector = "HEAD";
+    let current = sys.database.as_of(sys.snapshot(selector));
+    [before.energy.daily, current.energy.daily]
+}

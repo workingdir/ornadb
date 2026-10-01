@@ -1341,19 +1341,31 @@ fn annotate_expr(expr: &mut Expr, source: &str, file: &str) {
             }
             annotate_span(span, source, file)
         }
-        Expr::Call { callee, span, .. } => {
+        Expr::Call {
+            callee,
+            arguments,
+            span,
+        } => {
             annotate_expr(callee, source, file);
+            for argument in arguments {
+                annotate_expr(&mut argument.value, source, file);
+                annotate_span(&mut argument.span, source, file);
+            }
             annotate_span(span, source, file)
         }
         Expr::GenericCall {
             callee,
             type_arguments,
+            arguments,
             span,
-            ..
         } => {
             annotate_expr(callee, source, file);
             for type_argument in type_arguments {
                 annotate_type(type_argument, source, file)
+            }
+            for argument in arguments {
+                annotate_expr(&mut argument.value, source, file);
+                annotate_span(&mut argument.span, source, file);
             }
             annotate_span(span, source, file)
         }
