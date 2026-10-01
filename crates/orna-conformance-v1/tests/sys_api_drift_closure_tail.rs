@@ -595,6 +595,26 @@ fn edge_interplay_fixture_returns_filtered_present_count_from_inner_handoff() {
 }
 
 #[test]
+fn edge_interplay_fixture_returns_present_exact_count_filtered_inside_callback() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Project exact rows first, then filter and return the inner callback's present count.
+    // The SYS field remains nullable until the callback's explicit `!= null` predicate.
+    assert!(
+        analysis.is_ok(),
+        "a present projected exact count must be returned from its filtering callback: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_projects_unknown_exact_target_count_through_columns() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
