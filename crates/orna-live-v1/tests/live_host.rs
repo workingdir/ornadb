@@ -2768,6 +2768,351 @@ fn running_status_snapshot_survives_http_reconnect_before_eval_completion() {
     assert_eq!(application.calls, 1);
 }
 
+fn create_transport_session_with_socket(
+    transport: &mut LiveTransport,
+    issuer: &mut Issuer,
+    authority: &mut Authority,
+    deletion: &mut Delete,
+    attachment: [u8; 16],
+    now: u64,
+) -> (String, WebSocketState) {
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"{}"}}"#,
+                uuid(2),
+                SUBPROTOCOL
+            ),
+        ),
+        now,
+        authority,
+        issuer,
+        deletion,
+    ));
+    assert_eq!(created.status, 201);
+    let token = token(&created);
+    assert_eq!(
+        block_on(transport.upgrade(websocket_upgrade(1, &token), attachment, now)).status,
+        101
+    );
+    (token, WebSocketState::new(attachment))
+}
+
+fn resume_transport_session_with_socket(
+    transport: &mut LiveTransport,
+    issuer: &mut Issuer,
+    authority: &mut Authority,
+    deletion: &mut Delete,
+    old_token: &str,
+    old_attachment: [u8; 16],
+    new_attachment: [u8; 16],
+    now: u64,
+) -> (String, WebSocketState) {
+    let resumed = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session/01010101-0101-0101-0101-010101010101/resume",
+            &format!(r#"{{"resume_token":"{old_token}","protocol":"{SUBPROTOCOL}"}}"#),
+        ),
+        now,
+        authority,
+        issuer,
+        deletion,
+    ));
+    assert_eq!(resumed.status, 200);
+    let new_token = token(&resumed);
+    assert_ne!(new_token, old_token);
+    assert_eq!(transport.take_retired_attachments(), vec![old_attachment]);
+    assert!(transport.acknowledge_retired_attachment(old_attachment));
+    assert_eq!(
+        block_on(transport.upgrade(
+            websocket_upgrade(1, &new_token),
+            new_attachment,
+            now,
+        ))
+        .status,
+        101
+    );
+    (new_token, WebSocketState::new(new_attachment))
+}
+
+#[test]
+fn terminal_status_snapshot_survives_http_reconnect() {
+    terminal_status_snapshot_survives_http_reconnect_with(UnitEvalOutcome::Unit);
+}
+
+#[test]
+fn terminal_failure_status_snapshot_survives_http_reconnect() {
+    terminal_status_snapshot_survives_http_reconnect_with(UnitEvalOutcome::SemanticFailure);
+}
+
+fn terminal_status_snapshot_survives_http_reconnect_with(eval_outcome: UnitEvalOutcome) {
+    const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
+
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let (old_token, mut old_socket) = create_transport_session_with_socket(
+        &mut transport,
+        &mut issuer,
+        &mut authority,
+        &mut deletion,
+        [5; 16],
+        0,
+    );
+    let target_request = eval_with_context([1; 16], [81; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&target_request, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    let target_fingerprint = request_fingerprint(&target_request, [1; 16]);
+    let mut application = UnitApplication {
+        eval_outcome,
+        ..UnitApplication::default()
+    };
+    let target_output = block_on(transport.receive_with_application(
+        &mut old_socket,
+        1,
+        &masked_binary_payload(&target_request),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("the fixture Eval returns a terminal result");
+    let WebSocketOutput::Binary {
+        payload: target_payload,
+        ..
+    } = target_output
+    else {
+        panic!("the Eval result is binary");
+    };
+    let target_result = Envelope::decode(&target_payload, Limits::default().protocol).unwrap();
+    let expected_result =
+        ResultBody::from_result(&target_result, Limits::default().protocol).unwrap();
+    let status_request = |request| {
+        Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::RequestStatus {
+                target: [81; 16],
+                fingerprint: target_fingerprint,
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap()
+    };
+    let pinned_request = status_request([82; 16]);
+    let pinned_output = block_on(transport.receive_with_application(
+        &mut old_socket,
+        2,
+        &masked_binary_payload(&pinned_request),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("the query pins its Terminal response");
+    let WebSocketOutput::Binary {
+        payload: pinned_payload,
+        ..
+    } = pinned_output
+    else {
+        panic!("the status response is binary");
+    };
+    let pinned_snapshot = Envelope::decode(&pinned_payload, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        &pinned_snapshot.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [81; 16]
+            && *fingerprint == target_fingerprint
+            && result == &expected_result
+    ));
+
+    let (_, mut new_socket) = resume_transport_session_with_socket(
+        &mut transport,
+        &mut issuer,
+        &mut authority,
+        &mut deletion,
+        &old_token,
+        [5; 16],
+        [6; 16],
+        3,
+    );
+    let replay = block_on(transport.receive_with_application(
+        &mut new_socket,
+        4,
+        &masked_binary_payload(&status_request([82; 16])),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("the exact query replays its Terminal snapshot after reconnect");
+    let WebSocketOutput::Binary { payload, .. } = replay else {
+        panic!("the replayed status response is binary");
+    };
+    assert_eq!(
+        Envelope::decode(&payload, Limits::default().protocol).unwrap(),
+        pinned_snapshot
+    );
+    assert_eq!(application.calls, 1);
+}
+
+#[test]
+fn unknown_status_snapshot_survives_http_reconnect_and_target_id_reuse() {
+    const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
+
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let (old_token, mut old_socket) = create_transport_session_with_socket(
+        &mut transport,
+        &mut issuer,
+        &mut authority,
+        &mut deletion,
+        [5; 16],
+        0,
+    );
+    let target_request = eval_with_context([1; 16], [91; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&target_request, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    let target_fingerprint = request_fingerprint(&target_request, [1; 16]);
+    let status_request = |request| {
+        Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::RequestStatus {
+                target: [91; 16],
+                fingerprint: target_fingerprint,
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap()
+    };
+    let pinned_request = status_request([92; 16]);
+    let mut application = UnitApplication::default();
+    let pinned_output = block_on(transport.receive_with_application(
+        &mut old_socket,
+        1,
+        &masked_binary_payload(&pinned_request),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("the query returns Unknown before the target ID is used");
+    let WebSocketOutput::Binary {
+        payload: pinned_payload,
+        ..
+    } = pinned_output
+    else {
+        panic!("the status response is binary");
+    };
+    let pinned_snapshot = Envelope::decode(&pinned_payload, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        &pinned_snapshot.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Unknown,
+            fingerprint: None,
+            result: None,
+        } if *target == [91; 16]
+    ));
+
+    let (_, mut new_socket) = resume_transport_session_with_socket(
+        &mut transport,
+        &mut issuer,
+        &mut authority,
+        &mut deletion,
+        &old_token,
+        [5; 16],
+        [6; 16],
+        2,
+    );
+    let target_output = block_on(transport.receive_with_application(
+        &mut new_socket,
+        3,
+        &masked_binary_payload(&target_request),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("the previously unknown target ID can be reused after reconnect");
+    let WebSocketOutput::Binary {
+        payload: target_payload,
+        ..
+    } = target_output
+    else {
+        panic!("the Eval result is binary");
+    };
+    let target_result = Envelope::decode(&target_payload, Limits::default().protocol).unwrap();
+    let expected_result =
+        ResultBody::from_result(&target_result, Limits::default().protocol).unwrap();
+
+    let replay = block_on(transport.receive_with_application(
+        &mut new_socket,
+        4,
+        &masked_binary_payload(&status_request([92; 16])),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("the exact query replays Unknown after its target ID is reused");
+    let WebSocketOutput::Binary { payload, .. } = replay else {
+        panic!("the replayed status response is binary");
+    };
+    assert_eq!(
+        Envelope::decode(&payload, Limits::default().protocol).unwrap(),
+        pinned_snapshot
+    );
+
+    let fresh = block_on(transport.receive_with_application(
+        &mut new_socket,
+        5,
+        &masked_binary_payload(&status_request([93; 16])),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("a fresh query sees the reused target ID as Terminal");
+    let WebSocketOutput::Binary { payload, .. } = fresh else {
+        panic!("a fresh status response is binary");
+    };
+    let fresh = Envelope::decode(&payload, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        &fresh.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *fingerprint == target_fingerprint
+            && result == &expected_result
+    ));
+    assert_eq!(application.calls, 1);
+}
+
 #[test]
 fn rejected_cross_layer_reconnect_preserves_a_valid_session() {
     let mut host = host();
@@ -4357,6 +4702,141 @@ fn durable_status_snapshots_keep_reserved_and_running_after_completion_and_recov
     assert_eq!(fence.owner_id, [76; 16]);
     assert_eq!(application.calls, 0);
     drop(recovered);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn durable_running_status_snapshot_survives_session_handoff() {
+    const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
+
+    let (root, repository) = durable_repository();
+    let runtime = open_durable_state(&repository);
+    let session = [1; 16];
+    let owner = block_on(runtime.acquire_lease([75; 16])).unwrap();
+    let target_request = eval_with_context(session, [81; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&target_request, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    let target_fingerprint = request_fingerprint(&target_request, session);
+    let target = RequestIdentity {
+        session_id: session,
+        request_id: [81; 16],
+    };
+    let (_, admission) =
+        block_on(runtime.reserve_request_with_admission(target, target_fingerprint)).unwrap();
+    block_on(runtime.start_request_with_owner_and_admission(
+        target,
+        target_fingerprint,
+        owner,
+        admission.expect("running target has owner admission"),
+    ))
+    .unwrap();
+    // Model a side effect that may have escaped before the old owner died.
+    block_on(runtime.record_external_effect(target, target_fingerprint, owner)).unwrap();
+
+    let mut host = durable_host_with_owner(runtime, owner.owner_id);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: session,
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let status_request = |request| {
+        Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::RequestStatus {
+                target: [81; 16],
+                fingerprint: target_fingerprint,
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap()
+    };
+    let pinned_query = status_request([82; 16]);
+    let mut application = UnitApplication::default();
+    let pinned_snapshot = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(pinned_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the status query pins the Running snapshot");
+    assert!(matches!(
+        &pinned_snapshot.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Running,
+            fingerprint: Some(fingerprint),
+            result: None,
+        } if *target == [81; 16] && *fingerprint == target_fingerprint
+    ));
+    drop(host);
+
+    let recovery_runtime = open_durable_state(&repository);
+    let fence = block_on(recovery_runtime.recover_abandoned(owner.owner_id, [76; 16])).unwrap();
+    assert_eq!(fence.owner_id, [76; 16]);
+    drop(recovery_runtime);
+    let mut handed_off = durable_host_after_takeover(
+        open_durable_state(&repository),
+        [76; 16],
+        RequestOwner::from(owner),
+    );
+    let mut handed_off_issuer = Issuer(2, None);
+    let handed_off_credential = create(&mut handed_off, &mut handed_off_issuer);
+    block_on(handed_off.resume(ResumeRequest {
+        id: session,
+        origin: &origin(),
+        credential: &handed_off_credential,
+        attachment: [6; 16],
+        now: 3,
+    }))
+    .unwrap();
+
+    // The reference requires session resumption to retain request outcomes but
+    // does not define whether a pinned status read is re-evaluated at lease
+    // handoff. Exact retries remain fixed observations; new IDs read Orphaned.
+    let replay = block_on(handed_off.dispatch_frame(
+        [6; 16],
+        4,
+        Frame::Binary(pinned_query),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the exact query replays its pre-handoff snapshot");
+    assert_eq!(replay, pinned_snapshot);
+
+    let fresh = block_on(handed_off.dispatch_frame(
+        [6; 16],
+        5,
+        Frame::Binary(status_request([83; 16])),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a fresh query sees the post-handoff target state");
+    assert!(matches!(
+        &fresh.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Orphaned,
+            fingerprint: Some(fingerprint),
+            result: Some(_),
+        } if *target == [81; 16] && *fingerprint == target_fingerprint
+    ), "fresh status after handoff: {fresh:?}");
+    assert_eq!(application.calls, 0);
+    drop(handed_off);
     remove_test_repository(&root);
 }
 
