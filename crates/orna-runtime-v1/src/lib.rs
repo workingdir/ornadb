@@ -21068,7 +21068,7 @@ mod tests {
         let mutations = (1u8..=22)
             .map(|row_id| {
                 let title = if row_id == 5 { "later" } else { "current" };
-                let target = if row_id == 8 { 99 } else { row_id };
+                let target = if matches!(row_id, 8 | 10) { 99 } else { row_id };
                 query_test_mutation(
                     row_id + 40,
                     row_id,
@@ -24047,6 +24047,50 @@ mod tests {
             (lookups, scans),
             (2, 3),
             "the inner take caps the larger outer demand after two first-filter matches"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_split_conjunct_mixed_limits_preserve_failure_before_outer_take_fills() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=9)
+            .map(|row_id| {
+                let title = if row_id == 7 { "later" } else { "current" };
+                let target = if row_id == 7 { row_id } else { 99 };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(132), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The failure lies inside the three-row intermediate cap but after
+        // one final match. Since take(2) remains short, the later conjunct's
+        // missing lookup is observable instead of being hidden by either cap.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-take-two-split-conjunct-mixed-inner-failure.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 3),
+            "an in-prefix failure remains visible while the final take is unsatisfied"
         );
     }
 
