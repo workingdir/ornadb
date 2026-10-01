@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
 };
@@ -7,8 +7,8 @@ use std::{
 mod build_support;
 
 use build_support::{
-    Collector, canonical_pretty_json, parse_role_version, validate_api_document,
-    validate_collection,
+    Collector, canonical_pretty_json, generate_binding_stubs, parse_role_version,
+    validate_api_document, validate_collection,
 };
 use serde_json::{Value, json};
 
@@ -186,9 +186,43 @@ fn main() {
     let mut provider_abi_json =
         canonical_pretty_json(&provider_abi).expect("serialize provider ABI canonically");
     provider_abi_json.push('\n');
+    let generated_binding_stubs = generate_binding_stubs(
+        provider_abi["operations"]
+            .as_array()
+            .expect("generated typed provider operations"),
+    )
+    .expect("registered sys signatures must be supported by the Orna stub emitter");
+    let mut binding_modules = BTreeMap::<String, String>::new();
+    let mut binding_bundle = String::from(
+        "// Generated sys binding declaration bundle. Module markers identify the emitted .orna file.\n",
+    );
+    for stub in generated_binding_stubs {
+        let relative_path = format!("{}.orna", stub.module.replace('.', "/"));
+        let module_source = binding_modules.entry(relative_path).or_insert_with(|| {
+            format!(
+                "// Generated built-in module `{}` from the typed sys provider registry.\n// Orna keyword parameter aliases are suffixed with `_`; comments preserve registered names.\n",
+                stub.module
+            )
+        });
+        module_source.push_str(&stub.source);
+        binding_bundle.push_str(&format!("// sys-module: {}\n", stub.module));
+        binding_bundle.push_str(&stub.source);
+    }
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("build output directory"));
     fs::write(out_dir.join("api_sys.json"), generated_json).expect("write generated api/sys.json");
     fs::write(out_dir.join("system_provider_abi.json"), provider_abi_json)
         .expect("write generated typed system provider ABI");
+    let binding_root = out_dir.join("system_bindings");
+    if binding_root.exists() {
+        fs::remove_dir_all(&binding_root).expect("remove stale generated sys binding stubs");
+    }
+    for (relative_path, source) in binding_modules {
+        let path = binding_root.join(relative_path);
+        fs::create_dir_all(path.parent().expect("generated module has a parent"))
+            .expect("create generated sys module directory");
+        fs::write(path, source).expect("write generated Orna sys module stub");
+    }
+    fs::write(out_dir.join("system_bindings.orna"), binding_bundle)
+        .expect("write generated Orna sys binding stubs");
 }

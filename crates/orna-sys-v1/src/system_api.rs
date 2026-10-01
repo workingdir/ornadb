@@ -15,6 +15,8 @@ use super::{SystemEffect, SystemFunctionDescriptor, system_function_descriptor};
 use orna_sys_macros::ornasys;
 
 const GENERATED_SYSTEM_API: &str = include_str!(concat!(env!("OUT_DIR"), "/api_sys.json"));
+const GENERATED_BINDING_STUBS: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/system_bindings.orna"));
 
 /// Runtime descriptors are parsed from the same canonical artifact emitted
 /// from method attributes; build.rs does not emit a second Rust descriptor table.
@@ -62,6 +64,14 @@ pub static SYSTEM_FUNCTION_DESCRIPTORS: LazyLock<Vec<SystemFunctionDescriptor>> 
 /// Returns the deterministic build-time projection of the annotated system API methods.
 pub fn system_api_json() -> String {
     GENERATED_SYSTEM_API.to_owned()
+}
+
+/// Deterministic Orna declaration bundle emitted from the typed native sys
+/// registry. The corresponding module files are written beneath Cargo's
+/// `OUT_DIR/system_bindings/` tree. These stubs are a type and dispatch
+/// artifact, not executable implementations.
+pub fn system_binding_stubs() -> &'static str {
+    GENERATED_BINDING_STUBS
 }
 
 /// Descriptor accessors for the portable system methods collected by `build.rs`.
