@@ -11414,3 +11414,81 @@ fn explain_keeps_partial_half_block_source_on_materialization_fallback() {
         node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
     }));
 }
+
+#[test]
+fn explain_closes_partial_half_block_bound_before_materialization_fallback() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // The reference is silent on combining a scan's partial 4-KiB byte bound
+    // with a row-only write estimate. Preserve the established one-unit
+    // half-block lower bound: together they reach MAX exactly, then overflow
+    // one row later. An explicitly requested materialization remains an
+    // unknown tail when its byte estimate is missing.
+    let explain = |affected_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-half-block-write-materialize"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:ByteWorkThreeScanLast"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(affected_rows),
+                estimated_write_bytes: None,
+                estimated_table_rows_before: Some(affected_rows),
+            }],
+            materialize_into: Some(obj("materialization:partial-half-block-write")),
+        })
+        .expect("partial half-block source, row-only write, and materialization fallback")
+    };
+
+    let exact = explain(u64::MAX - 1);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let exact_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan)
+        .expect("partial half-block source scan");
+    assert_eq!(exact_scan.estimated_rows(), None);
+    assert_eq!(exact_scan.estimated_bytes(), Some(2_048));
+    assert_eq!(exact_scan.estimated_work(), None);
+    let exact_update = exact
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned())))
+        .expect("row-only update lower bound");
+    assert_eq!(exact_update.estimated_rows(), Some(u64::MAX - 1));
+    assert_eq!(exact_update.estimated_bytes(), None);
+    assert_eq!(exact_update.estimated_work(), None);
+
+    let overflow = explain(u64::MAX);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the source's one-unit partial byte bound takes the row-only write past MAX"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow).expect("partial materialization overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
