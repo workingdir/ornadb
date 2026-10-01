@@ -15,6 +15,8 @@ use super::{SystemEffect, SystemFunctionDescriptor, system_function_descriptor};
 use orna_sys_macros::ornasys;
 
 const GENERATED_SYSTEM_API: &str = include_str!(concat!(env!("OUT_DIR"), "/api_sys.json"));
+const GENERATED_SYSTEM_SCHEMA: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/system_api_schema.json"));
 const GENERATED_BINDING_STUBS: &str =
     include_str!(concat!(env!("OUT_DIR"), "/system_bindings.orna"));
 
@@ -66,6 +68,13 @@ pub fn system_api_json() -> String {
     GENERATED_SYSTEM_API.to_owned()
 }
 
+/// The JSON Schema generated beside the API artifact and embedded with the
+/// baked sys registry. Production consumers use the compiled schema directly;
+/// the dev-only exporter can emit the API document without a checked-in file.
+pub fn system_api_schema_json() -> &'static str {
+    GENERATED_SYSTEM_SCHEMA
+}
+
 /// Deterministic Orna declaration bundle emitted from the typed native sys
 /// registry. The corresponding module files are written beneath Cargo's
 /// `OUT_DIR/system_bindings/` tree. These stubs are a type and dispatch
@@ -82,7 +91,9 @@ pub struct SystemApiFunctionBindings;
 impl SystemApiFunctionBindings {
     #[ornasys(
         function = r###"{"effect":"read","name":"sys.meta","purpose":"Return safe static/nominal/codec/protocol metadata for a value.","signature":"fn sys.meta<T>(value: T): sys.ValueMetadata<T>"}"###,
-        role = "langitem.sys.meta@1.0"
+        role = "langitem.sys.meta@1.0",
+        type_graph = "system_api_inventory.json",
+        schema = "system_api_schema.json"
     )]
     pub fn sys_meta(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.meta")
