@@ -116,3 +116,66 @@ fn interpolated_recovery_keeps_a_near_limit_compound_suffix() {
         Expr::Literal { text, .. } if text == "\"deep fallback\""
     ));
 }
+
+#[test]
+fn deep_case_chain_keeps_compound_suffix_and_enclosing_fallbacks() {
+    let source = include_str!("fixtures/deep-nested-case-compound-suffix.orna");
+    let parsed = parse_module(source);
+
+    assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+    let diagnostic = &parsed.diagnostics[0];
+    let start = source.find("true 0").expect("malformed deepest arm") + "true ".len();
+    assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+    assert_eq!(diagnostic.message, "expected `:` after case pattern");
+    assert_eq!(diagnostic.span.start, start, "{diagnostic:?}");
+    assert_eq!(diagnostic.span.end, start + 1, "{diagnostic:?}");
+    assert!(parsed.is_malformed());
+    assert!(!parsed.is_incomplete());
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected the deep case-chain function");
+    };
+    let Expr::Block {
+        tail: Some(root_case),
+        ..
+    } = body
+    else {
+        panic!("expected a case expression at the function tail: {body:?}");
+    };
+
+    let mut current_case = root_case.as_ref();
+    for level in 0..16 {
+        let Expr::Control { arms, .. } = current_case else {
+            panic!("case chain ended at level {level}: {current_case:?}");
+        };
+        assert_eq!(arms.len(), 2, "level {level}: {arms:?}");
+
+        if level == 15 {
+            assert!(matches!(
+                &arms[0].pattern,
+                Pattern::Constructor { path, fields, .. }
+                    if path.iter().map(|segment| segment.text.as_str()).collect::<Vec<_>>() == ["Deep"]
+                        && fields.len() == 2
+            ));
+            assert!(matches!(
+                arms[0].guard.as_ref(),
+                Some(Expr::Name { text, .. }) if text == "flag"
+            ));
+            assert!(matches!(
+                &arms[0].body,
+                Expr::Literal { text, .. } if text == "\"deep recovered\""
+            ));
+            assert!(matches!(
+                &arms[1].body,
+                Expr::Literal { text, .. } if text == "\"deep fallback\""
+            ));
+        } else {
+            let expected_fallback = format!("\"level {level} fallback\"");
+            assert!(matches!(
+                &arms[1].body,
+                Expr::Literal { text, .. } if text == &expected_fallback
+            ));
+            current_case = &arms[0].body;
+        }
+    }
+}
