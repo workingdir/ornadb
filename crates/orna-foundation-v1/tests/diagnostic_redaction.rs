@@ -13888,7 +13888,7 @@ fn replayed_duplicate_error_tails_keep_nested_child_order() {
 }
 
 #[test]
-fn nested_duplicate_error_tail_order_survives_replay() {
+fn nested_duplicate_error_tail_order_survives_empty_replay() {
     let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
@@ -13907,7 +13907,7 @@ fn nested_duplicate_error_tail_order_survives_replay() {
         .with_note(SafeText::new(fixture).unwrap())
         .redacted_with_message(SafeText::new(message).unwrap())
     };
-    let make_wire = |payload: &str, reverse: bool| {
+    let make_wire = |payload: &str, order: Option<bool>| {
         let child = |label: &str| {
             let leaf_code = format!("ORNA-E-NESTED-DUPLICATE-LEAF-{label}");
             admitted(
@@ -13927,10 +13927,10 @@ fn nested_duplicate_error_tail_order_survives_replay() {
             .with_cause(child(child_labels[0]))
             .with_cause(child(child_labels[1]))
         };
-        let tails = if reverse {
-            vec![tail("B", ["B2", "B1"]), tail("A", ["A2", "A1"])]
-        } else {
-            vec![tail("A", ["A1", "A2"]), tail("B", ["B1", "B2"])]
+        let tails = match order {
+            Some(true) => vec![tail("B", ["B2", "B1"]), tail("A", ["A2", "A1"])],
+            Some(false) => vec![tail("A", ["A1", "A2"]), tail("B", ["B1", "B2"])],
+            None => Vec::new(),
         };
         let terminal = tails.into_iter().fold(
             admitted("ORNA-E-NESTED-DUPLICATE-TERMINAL", payload),
@@ -13973,29 +13973,39 @@ fn nested_duplicate_error_tail_order_survives_replay() {
             .collect()
     }
 
-    let forward_wire = make_wire("forward nested duplicate order payload", false);
-    let reverse_wire = make_wire("reverse nested duplicate order payload", true);
+    let forward_wire = make_wire("forward nested duplicate order payload", Some(false));
+    let reverse_wire = make_wire("reverse nested duplicate order payload", Some(true));
+    let empty_wire = make_wire("empty nested duplicate order payload", None);
     let replay_forward = || Diagnostic::decode_ovb(&forward_wire).unwrap();
     let replay_reverse = || Diagnostic::decode_ovb(&reverse_wire).unwrap();
+    let replay_empty = || Diagnostic::decode_ovb(&empty_wire).unwrap();
     let mut receiver = replay_forward();
     let forward = receiver.clone();
+    receiver.clone_from(&replay_empty());
+    let empty_after_forward = receiver.clone();
     receiver.clone_from(&replay_reverse());
     let reverse = receiver.clone();
+    receiver.clone_from(&replay_empty());
+    let empty_after_reverse = receiver.clone();
     receiver.clone_from(&replay_forward());
     let restored_forward = receiver.clone();
     assert_eq!(restored_forward, forward);
+    assert_eq!(empty_after_forward, replay_empty());
+    assert_eq!(empty_after_reverse, replay_empty());
 
     // ORNA-SECRET-002 requires redaction but leaves ordering open; retain the
-    // nested insertion order when duplicate Error codes are replayed.
+    // nested insertion order when duplicate Error codes replay around empties.
     let outer = admitted("ORNA-E-NESTED-DUPLICATE-OUTER", "public nested replay admission")
         .with_cause(forward)
+        .with_cause(empty_after_forward)
         .with_cause(reverse)
+        .with_cause(empty_after_reverse)
         .with_cause(restored_forward);
     let projection = serde_json::to_value(&outer).unwrap();
     assert_eq!(projection["severity"], "error");
     assert_eq!(projection["message"], "public nested replay admission");
     let causes = projection["causes"].as_array().unwrap();
-    assert_eq!(causes.len(), 3);
+    assert_eq!(causes.len(), 5);
     for cause in causes {
         assert_redacted_tree(cause);
         for tail in terminal(cause)["causes"].as_array().unwrap() {
@@ -14022,6 +14032,7 @@ fn nested_duplicate_error_tail_order_survives_replay() {
                     "ORNA-E-NESTED-DUPLICATE-LEAF-B2".to_owned(),
                 ],
             ],
+            vec![],
             vec![
                 vec![
                     "ORNA-E-NESTED-DUPLICATE-LEAF-B2".to_owned(),
@@ -14032,6 +14043,7 @@ fn nested_duplicate_error_tail_order_survives_replay() {
                     "ORNA-E-NESTED-DUPLICATE-LEAF-A1".to_owned(),
                 ],
             ],
+            vec![],
             vec![
                 vec![
                     "ORNA-E-NESTED-DUPLICATE-LEAF-A1".to_owned(),
@@ -14054,6 +14066,7 @@ fn nested_duplicate_error_tail_order_survives_replay() {
             fixture.as_bytes(),
             b"forward nested duplicate order payload".as_slice(),
             b"reverse nested duplicate order payload".as_slice(),
+            b"empty nested duplicate order payload".as_slice(),
             b"tail A secret".as_slice(),
             b"tail B secret".as_slice(),
             b"child A1 secret".as_slice(),
