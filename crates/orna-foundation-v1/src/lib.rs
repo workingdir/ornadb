@@ -1483,7 +1483,11 @@ impl Diagnostic {
     /// including repeated stable references; references do not coalesce or
     /// reorder slots. Each call replaces the previous snapshot, so the latest
     /// successful reload is authoritative even after many rebinds. Wire
-    /// decoding does not restore local message admission.
+    /// decoding does not restore local message admission. Shared owners must
+    /// serialize concurrent calls themselves; the resulting call order
+    /// determines which successful snapshot remains current. Each serialized
+    /// call installs one complete decoded snapshot, so aliases from earlier
+    /// snapshots carry forward only when the replacement wire encodes them.
     pub fn reload_ovb(&mut self, bytes: &[u8]) -> Result<(), FoundationError> {
         let replacement = Self::decode_ovb(bytes)?;
         // Replace through Clone::clone_from so reused nested vectors are
