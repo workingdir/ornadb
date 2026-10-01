@@ -2768,6 +2768,195 @@ fn running_status_snapshot_survives_http_reconnect_before_eval_completion() {
     assert_eq!(application.calls, 1);
 }
 
+fn create_transport_session_with_socket(
+    transport: &mut LiveTransport,
+    issuer: &mut Issuer,
+    authority: &mut Authority,
+    deletion: &mut Delete,
+    attachment: [u8; 16],
+    now: u64,
+) -> (String, WebSocketState) {
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"{}"}}"#,
+                uuid(2),
+                SUBPROTOCOL
+            ),
+        ),
+        now,
+        authority,
+        issuer,
+        deletion,
+    ));
+    assert_eq!(created.status, 201);
+    let token = token(&created);
+    assert_eq!(
+        block_on(transport.upgrade(websocket_upgrade(1, &token), attachment, now)).status,
+        101
+    );
+    (token, WebSocketState::new(attachment))
+}
+
+fn resume_transport_session_with_socket(
+    transport: &mut LiveTransport,
+    issuer: &mut Issuer,
+    authority: &mut Authority,
+    deletion: &mut Delete,
+    old_token: &str,
+    old_attachment: [u8; 16],
+    new_attachment: [u8; 16],
+    now: u64,
+) -> (String, WebSocketState) {
+    let resumed = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session/01010101-0101-0101-0101-010101010101/resume",
+            &format!(r#"{{"resume_token":"{old_token}","protocol":"{SUBPROTOCOL}"}}"#),
+        ),
+        now,
+        authority,
+        issuer,
+        deletion,
+    ));
+    assert_eq!(resumed.status, 200);
+    let new_token = token(&resumed);
+    assert_ne!(new_token, old_token);
+    assert_eq!(transport.take_retired_attachments(), vec![old_attachment]);
+    assert!(transport.acknowledge_retired_attachment(old_attachment));
+    assert_eq!(
+        block_on(transport.upgrade(
+            websocket_upgrade(1, &new_token),
+            new_attachment,
+            now,
+        ))
+        .status,
+        101
+    );
+    (new_token, WebSocketState::new(new_attachment))
+}
+
+#[test]
+fn terminal_status_snapshot_survives_http_reconnect() {
+    const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
+
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let (old_token, mut old_socket) = create_transport_session_with_socket(
+        &mut transport,
+        &mut issuer,
+        &mut authority,
+        &mut deletion,
+        [5; 16],
+        0,
+    );
+    let target_request = eval_with_context([1; 16], [81; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&target_request, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    let target_fingerprint = request_fingerprint(&target_request, [1; 16]);
+    let mut application = UnitApplication::default();
+    let target_output = block_on(transport.receive_with_application(
+        &mut old_socket,
+        1,
+        &masked_binary_payload(&target_request),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("the fixture Eval returns a terminal result");
+    let WebSocketOutput::Binary {
+        payload: target_payload,
+        ..
+    } = target_output
+    else {
+        panic!("the Eval result is binary");
+    };
+    let target_result = Envelope::decode(&target_payload, Limits::default().protocol).unwrap();
+    let expected_result =
+        ResultBody::from_result(&target_result, Limits::default().protocol).unwrap();
+    let status_request = |request| {
+        Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::RequestStatus {
+                target: [81; 16],
+                fingerprint: target_fingerprint,
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap()
+    };
+    let pinned_request = status_request([82; 16]);
+    let pinned_output = block_on(transport.receive_with_application(
+        &mut old_socket,
+        2,
+        &masked_binary_payload(&pinned_request),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("the query pins its Terminal response");
+    let WebSocketOutput::Binary {
+        payload: pinned_payload,
+        ..
+    } = pinned_output
+    else {
+        panic!("the status response is binary");
+    };
+    let pinned_snapshot = Envelope::decode(&pinned_payload, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        &pinned_snapshot.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [81; 16]
+            && *fingerprint == target_fingerprint
+            && result == &expected_result
+    ));
+
+    let (_, mut new_socket) = resume_transport_session_with_socket(
+        &mut transport,
+        &mut issuer,
+        &mut authority,
+        &mut deletion,
+        &old_token,
+        [5; 16],
+        [6; 16],
+        3,
+    );
+    let replay = block_on(transport.receive_with_application(
+        &mut new_socket,
+        4,
+        &masked_binary_payload(&status_request([82; 16])),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("the exact query replays its Terminal snapshot after reconnect");
+    let WebSocketOutput::Binary { payload, .. } = replay else {
+        panic!("the replayed status response is binary");
+    };
+    assert_eq!(
+        Envelope::decode(&payload, Limits::default().protocol).unwrap(),
+        pinned_snapshot
+    );
+    assert_eq!(application.calls, 1);
+}
+
 #[test]
 fn rejected_cross_layer_reconnect_preserves_a_valid_session() {
     let mut host = host();
