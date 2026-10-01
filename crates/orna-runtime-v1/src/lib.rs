@@ -20033,6 +20033,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_four_tail_rejects_follow_thirteen_matches() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=29)
+            .map(|row_id| {
+                let title = if row_id <= 25 && row_id % 2 == 1 {
+                    "later"
+                } else {
+                    "current"
+                };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, 99)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(69), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference leaves this longer interleaving implicit. After
+        // twelve rejects between thirteen matches, the four-row trailing
+        // reject run and failing union source must remain unopened.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-thirteen-after-interleaving-four-trailing-rejects.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(25u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (25, 25),
+            "take(13) traverses twelve inter-match rejects, then leaves the four-reject tail and failing union source unopened"
+        );
+    }
+
+    #[tokio::test]
     async fn query_four_trailing_rejects_follow_thirteen_interleaved_rejects() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
