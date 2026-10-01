@@ -14085,3 +14085,175 @@ fn nested_duplicate_error_tail_cardinality_edges_survive_replay() {
     assert_redacted_tree(&decoded);
     assert_eq!(decoded["causes"], projection["causes"]);
 }
+
+#[test]
+fn nested_duplicate_tails_keep_interposed_sibling_order_on_replay() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let make_wire = |payload: &str, reverse: bool| {
+        let duplicate_tail = |label: &str| {
+            admitted(
+                "ORNA-E-NESTED-DUPLICATE-EDGE-TAIL",
+                &format!("{payload} duplicate tail {label} secret"),
+            )
+            .with_cause(admitted(
+                &format!("ORNA-E-NESTED-DUPLICATE-EDGE-LEAF-{label}"),
+                &format!("{payload} duplicate leaf {label} secret"),
+            ))
+        };
+        let interposed = admitted(
+            "ORNA-E-NESTED-DUPLICATE-EDGE-INTERPOSED",
+            &format!("{payload} interposed sibling secret"),
+        );
+        let tails = if reverse {
+            vec![duplicate_tail("B"), interposed, duplicate_tail("A")]
+        } else {
+            vec![duplicate_tail("A"), interposed, duplicate_tail("B")]
+        };
+        let terminal = tails.into_iter().fold(
+            admitted("ORNA-E-NESTED-DUPLICATE-EDGE-TERMINAL", payload),
+            |terminal, tail| terminal.with_cause(tail),
+        );
+        let nested = admitted("ORNA-E-NESTED-DUPLICATE-EDGE-NESTED", payload)
+            .with_cause(terminal);
+        let parent = admitted("ORNA-E-NESTED-DUPLICATE-EDGE-PARENT", payload)
+            .with_cause(nested);
+        let branch = admitted("ORNA-E-NESTED-DUPLICATE-EDGE-BRANCH", payload)
+            .with_cause(parent);
+        admitted("ORNA-E-NESTED-DUPLICATE-EDGE-ROOT", payload)
+            .with_cause(branch)
+            .encode_ovb()
+            .unwrap()
+    };
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    fn terminal(diagnostic: &serde_json::Value) -> &serde_json::Value {
+        let mut node = diagnostic;
+        for _ in 0..4 {
+            node = &node["causes"][0];
+        }
+        node
+    }
+    fn tail_codes(diagnostic: &serde_json::Value) -> Vec<String> {
+        terminal(diagnostic)["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tail| tail["code"].as_str().unwrap().to_owned())
+            .collect()
+    }
+    fn tail_leaf_codes(diagnostic: &serde_json::Value) -> Vec<Option<String>> {
+        terminal(diagnostic)["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tail| tail["causes"][0]["code"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    let forward_wire = make_wire("forward nested duplicate edge payload", false);
+    let reverse_wire = make_wire("reverse nested duplicate edge payload", true);
+    let replay_forward = || Diagnostic::decode_ovb(&forward_wire).unwrap();
+    let replay_reverse = || Diagnostic::decode_ovb(&reverse_wire).unwrap();
+    let mut receiver = replay_forward();
+    let forward = receiver.clone();
+    receiver.clone_from(&replay_reverse());
+    let reverse = receiver.clone();
+    receiver.clone_from(&replay_forward());
+    let restored_forward = receiver.clone();
+    assert_eq!(restored_forward, forward);
+
+    // ORNA-SECRET-002 requires redaction but leaves order open; keep duplicate
+    // nested tails on their original sides of an interposed sibling on replay.
+    let outer = admitted(
+        "ORNA-E-NESTED-DUPLICATE-EDGE-OUTER",
+        "public nested duplicate edge admission",
+    )
+    .with_cause(forward)
+    .with_cause(reverse)
+    .with_cause(restored_forward);
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["severity"], "error");
+    assert_eq!(
+        projection["message"],
+        "public nested duplicate edge admission"
+    );
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 3);
+    for cause in causes {
+        assert_redacted_tree(cause);
+    }
+    let duplicate = "ORNA-E-NESTED-DUPLICATE-EDGE-TAIL";
+    let interposed = "ORNA-E-NESTED-DUPLICATE-EDGE-INTERPOSED";
+    assert_eq!(
+        causes.iter().map(tail_codes).collect::<Vec<_>>(),
+        vec![
+            vec![duplicate.to_owned(), interposed.to_owned(), duplicate.to_owned()],
+            vec![duplicate.to_owned(), interposed.to_owned(), duplicate.to_owned()],
+            vec![duplicate.to_owned(), interposed.to_owned(), duplicate.to_owned()],
+        ],
+    );
+    assert_eq!(
+        causes.iter().map(tail_leaf_codes).collect::<Vec<_>>(),
+        vec![
+            vec![
+                Some("ORNA-E-NESTED-DUPLICATE-EDGE-LEAF-A".to_owned()),
+                None,
+                Some("ORNA-E-NESTED-DUPLICATE-EDGE-LEAF-B".to_owned()),
+            ],
+            vec![
+                Some("ORNA-E-NESTED-DUPLICATE-EDGE-LEAF-B".to_owned()),
+                None,
+                Some("ORNA-E-NESTED-DUPLICATE-EDGE-LEAF-A".to_owned()),
+            ],
+            vec![
+                Some("ORNA-E-NESTED-DUPLICATE-EDGE-LEAF-A".to_owned()),
+                None,
+                Some("ORNA-E-NESTED-DUPLICATE-EDGE-LEAF-B".to_owned()),
+            ],
+        ],
+    );
+
+    let json = serde_json::to_vec(&outer).unwrap();
+    let encoded = outer.encode_ovb().unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"forward nested duplicate edge payload".as_slice(),
+            b"reverse nested duplicate edge payload".as_slice(),
+            b"duplicate tail A secret".as_slice(),
+            b"duplicate tail B secret".as_slice(),
+            b"duplicate leaf A secret".as_slice(),
+            b"duplicate leaf B secret".as_slice(),
+            b"interposed sibling secret".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
+    assert_redacted_tree(&decoded);
+    assert_eq!(decoded["causes"], projection["causes"]);
+}
