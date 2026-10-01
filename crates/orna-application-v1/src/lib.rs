@@ -8456,6 +8456,27 @@ mod tests {
         )
         .expect("owner retries after the competitor's nested handoff");
 
+        assert_eq!(
+            handler.current_row("Note", &key(2)).unwrap(),
+            Some(row(2, "competitor", 39)),
+            "the final competitor retry should occupy the reclaimed owner key"
+        );
+        assert_eq!(
+            handler.current_row("Note", &key(3)).unwrap(),
+            Some(row(3, "owner", 42)),
+            "the final owner retry should retain its latest row update"
+        );
+        assert_eq!(
+            handler.current_row("Note", &key(1)).unwrap(),
+            None,
+            "the original owner key should stay released after handoff"
+        );
+        assert_eq!(
+            handler.current_row("Note", &key(6)).unwrap(),
+            None,
+            "the temporary move target should be released after handoff"
+        );
+
         let mutations = handler.into_mutations().expect("valid ordered mutation log");
         let expected = [
             (3, None, false, None),
