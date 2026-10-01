@@ -29,6 +29,7 @@ const CHECKPOINT_TAIL_RIGHT: &str = include_str!("fixtures/merge-checkpoint-tail
 const TOMBSTONE_DEPTH_SHALLOW: &str = include_str!("fixtures/merge-tombstone-depth-shallow.orna");
 const TOMBSTONE_DEPTH_MIDDLE: &str = include_str!("fixtures/merge-tombstone-depth-middle.orna");
 const TOMBSTONE_DEPTH_DEEP: &str = include_str!("fixtures/merge-tombstone-depth-deep.orna");
+const TOMBSTONE_CHAIN: &str = include_str!("fixtures/merge-tombstone-chain.orna");
 const TOMBSTONE_RECOVERY_STORM: &str = include_str!("fixtures/merge-tombstone-recovery-storm.orna");
 const TOMBSTONE_STORM_KEYS: &[&str] = &[
     "a",
@@ -15651,6 +15652,111 @@ fn split_cross_depth_load_inputs(
     (base, left, right, source)
 }
 
+fn chain_split_manifest(
+    digest: u8,
+    segment_digest_start: u8,
+    boundaries: &[Vec<u8>],
+    locator_prefix: &str,
+) -> (TableManifest, Vec<Vec<u8>>) {
+    let mut segments = Vec::with_capacity(boundaries.len() + 1);
+    let mut locators = Vec::with_capacity(boundaries.len() + 1);
+    for index in 0..=boundaries.len() {
+        let locator = format!("{locator_prefix}-{index}").into_bytes();
+        locators.push(locator.clone());
+        segments.push(RowSegmentManifest {
+            locator,
+            range: KeyRange::new(
+                index.checked_sub(1).map(|previous| boundaries[previous].clone()),
+                boundaries.get(index).cloned(),
+            )
+            .expect("fixture chain boundaries are in logical key order"),
+            digest: [segment_digest_start + index as u8; 32],
+        });
+    }
+    (TableManifest { digest: [digest; 32], segments }, locators)
+}
+
+fn tombstone_chain_load_inputs(
+    split_layout: bool,
+    left_keeps_even_chain_keys: bool,
+    reverse_whole_loads: bool,
+) -> (
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    FixtureRows,
+) {
+    let chain_rows = TOMBSTONE_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    assert_eq!(chain_rows.len(), 7);
+    let sibling_index = chain_rows.len() - 1;
+    let left_keeps = |index: usize| {
+        index == sibling_index || (index % 2 == 0) == left_keeps_even_chain_keys
+    };
+    let right_keeps = |index: usize| index == sibling_index || !left_keeps(index);
+    let mut source = FixtureRows::default();
+
+    if split_layout {
+        let boundaries = chain_rows
+            .iter()
+            .skip(1)
+            .map(|row| row.key.encode().unwrap())
+            .collect::<Vec<_>>();
+        let (base_manifest, base_locators) = chain_split_manifest(31, 31, &boundaries, "chain-base");
+        let (left_manifest, left_locators) = chain_split_manifest(32, 41, &boundaries, "chain-left");
+        let (right_manifest, right_locators) = chain_split_manifest(33, 51, &boundaries, "chain-right");
+        for (index, row) in chain_rows.iter().enumerate() {
+            source.add(MergeSide::Base, &base_locators[index], vec![row.clone()]);
+            source.add(
+                MergeSide::Left,
+                &left_locators[index],
+                if left_keeps(index) { vec![row.clone()] } else { Vec::new() },
+            );
+            source.add(
+                MergeSide::Right,
+                &right_locators[index],
+                if right_keeps(index) { vec![row.clone()] } else { Vec::new() },
+            );
+        }
+        (
+            snapshot(string_key_schema(), base_manifest, None),
+            snapshot(string_key_schema(), left_manifest, None),
+            snapshot(string_key_schema(), right_manifest, None),
+            source,
+        )
+    } else {
+        let mut base_rows = chain_rows.clone();
+        let mut left_rows = chain_rows
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| left_keeps(*index))
+            .map(|(_, row)| row.clone())
+            .collect::<Vec<_>>();
+        let mut right_rows = chain_rows
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| right_keeps(*index))
+            .map(|(_, row)| row.clone())
+            .collect::<Vec<_>>();
+        if reverse_whole_loads {
+            base_rows.reverse();
+            left_rows.reverse();
+            right_rows.reverse();
+        }
+        source.add(MergeSide::Base, b"chain-whole-base", base_rows);
+        source.add(MergeSide::Left, b"chain-whole-left", left_rows);
+        source.add(MergeSide::Right, b"chain-whole-right", right_rows);
+        (
+            snapshot(string_key_schema(), manifest(61, 61, b"chain-whole-base"), None),
+            snapshot(string_key_schema(), manifest(62, 62, b"chain-whole-left"), None),
+            snapshot(string_key_schema(), manifest(63, 63, b"chain-whole-right"), None),
+            source,
+        )
+    }
+}
+
 fn flattened_row_tombstones(plan: &BranchMergePlan) -> Vec<CanonicalValue> {
     plan.tables[&id(1)]
         .segments
@@ -15658,6 +15764,20 @@ fn flattened_row_tombstones(plan: &BranchMergePlan) -> Vec<CanonicalValue> {
         .flat_map(|segment| match segment {
             MergedSegment::Rows { tombstones, .. } => tombstones.clone(),
             other => panic!("expected materialized cross-depth rows, got {other:?}"),
+        })
+        .collect()
+}
+
+fn flattened_live_row_keys(plan: &BranchMergePlan) -> Vec<CanonicalValue> {
+    plan.tables[&id(1)]
+        .segments
+        .iter()
+        .flat_map(|segment| match segment {
+            MergedSegment::Rows { rows, .. } => rows
+                .iter()
+                .map(|row| row.key.clone())
+                .collect::<Vec<_>>(),
+            other => panic!("expected materialized chain rows, got {other:?}"),
         })
         .collect()
 }
@@ -16427,6 +16547,140 @@ fn sustained_concurrent_budget_stops_leave_complete_boundary_orders_isolated() {
                 assert_eq!(
                     plan.tables[&id(1)].segments.len(),
                     if split_layout { 3 } else { 1 },
+                );
+                complete_loads += 1;
+            }
+        }
+    }
+
+    assert_eq!(complete_loads, 36);
+    assert_eq!(capped_loads, 12);
+}
+
+#[test]
+fn sustained_concurrent_tombstone_chains_keep_logical_boundary_order() {
+    // The reference does not prescribe concurrent scheduling for nested
+    // tombstone chains. Pin canonical table-key order across every boundary.
+    const LOADS_PER_WAVE: usize = 8;
+    const WAVES: usize = 6;
+    let expected_tombstones = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .into_iter()
+    .map(string)
+    .collect::<Vec<_>>();
+    let expected_live_rows = vec![string("z")];
+    let mut completed = 0;
+
+    for wave in 0..WAVES {
+        let start = Arc::new(Barrier::new(LOADS_PER_WAVE));
+        let mut workers = Vec::with_capacity(LOADS_PER_WAVE);
+        for load in 0..LOADS_PER_WAVE {
+            let split_layout = (wave + load) % 2 == 0;
+            let (base, left, right, source) = tombstone_chain_load_inputs(
+                split_layout,
+                (wave + load) % 3 == 0,
+                (wave + load) % 2 == 1,
+            );
+            let gate = Arc::clone(&start);
+            workers.push(std::thread::spawn(move || {
+                let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+                let plan = merge_three_way_snapshots(
+                    &base,
+                    &left,
+                    &right,
+                    &mut source,
+                    BranchMergeBudget { max_rows_examined: 15, max_conflicts: 0 },
+                )
+                .expect("each synchronized chain load fits the exact fixture budget");
+                (plan, split_layout)
+            }));
+        }
+
+        for worker in workers {
+            let (plan, split_layout) = worker.join().expect("chain load worker completes");
+            assert_eq!(plan.report.rows_examined, 15);
+            assert_eq!(flattened_row_tombstones(&plan), expected_tombstones);
+            assert_eq!(flattened_live_row_keys(&plan), expected_live_rows);
+            assert_eq!(plan.tables[&id(1)].segments.len(), if split_layout { 7 } else { 1 });
+            completed += 1;
+        }
+    }
+
+    assert_eq!(completed, LOADS_PER_WAVE * WAVES);
+}
+
+#[test]
+fn sustained_concurrent_chain_budget_stops_do_not_disturb_tombstone_order() {
+    // Under the same synchronized load, a one-row-short chain scan must stop
+    // privately while exact-budget peers return the full ordered chain.
+    const LOADS_PER_WAVE: usize = 8;
+    const WAVES: usize = 6;
+    let expected_tombstones = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .into_iter()
+    .map(string)
+    .collect::<Vec<_>>();
+    let expected_live_rows = vec![string("z")];
+    let mut complete_loads = 0;
+    let mut capped_loads = 0;
+
+    for wave in 0..WAVES {
+        let start = Arc::new(Barrier::new(LOADS_PER_WAVE));
+        let mut workers = Vec::with_capacity(LOADS_PER_WAVE);
+        for load in 0..LOADS_PER_WAVE {
+            let split_layout = (wave + load) % 2 == 0;
+            let capped = (wave + load) % 4 == 0;
+            let (base, left, right, source) = tombstone_chain_load_inputs(
+                split_layout,
+                (wave + load) % 3 == 1,
+                (wave + load) % 2 == 0,
+            );
+            let gate = Arc::clone(&start);
+            workers.push(std::thread::spawn(move || {
+                let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+                let row_cap = if capped { 14 } else { 15 };
+                let result = merge_three_way_snapshots(
+                    &base,
+                    &left,
+                    &right,
+                    &mut source,
+                    BranchMergeBudget { max_rows_examined: row_cap, max_conflicts: 0 },
+                );
+                (result, capped, split_layout)
+            }));
+        }
+
+        for worker in workers {
+            let (result, capped, split_layout) =
+                worker.join().expect("budgeted chain worker completes");
+            if capped {
+                let Err(BranchMergeError::BudgetExceeded { report }) = result else {
+                    panic!("a one-row-short chain budget never returns a partial plan")
+                };
+                assert_eq!(report.rows_examined, 15);
+                assert_eq!(report.conflicts_lower_bound, 0);
+                assert!(report.affected_tables.contains(&id(1)));
+                capped_loads += 1;
+            } else {
+                let plan = result.expect("the exact-budget peer remains independent");
+                assert_eq!(plan.report.rows_examined, 15);
+                assert_eq!(flattened_row_tombstones(&plan), expected_tombstones);
+                assert_eq!(flattened_live_row_keys(&plan), expected_live_rows);
+                assert_eq!(
+                    plan.tables[&id(1)].segments.len(),
+                    if split_layout { 7 } else { 1 },
                 );
                 complete_loads += 1;
             }
