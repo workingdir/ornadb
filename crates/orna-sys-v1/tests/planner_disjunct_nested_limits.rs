@@ -111,3 +111,33 @@ fn disjunct_overflow_crosses_nested_limits_after_a_representable_prefix() {
         ]
     );
 }
+
+#[test]
+fn nested_zero_limits_preserve_known_branch_overflow_without_promoting_unknowns() {
+    let overflow_rows = u64::MAX / 3 + 1;
+    let overflow = explain_nested_disjuncts(Some(overflow_rows), &[0, u64::MAX, 0]);
+    let filter = overflow
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Filter)
+        .expect("expanded disjunction filter");
+    assert_eq!(filter.estimated_work(), None);
+    assert_eq!(
+        filter.details().get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    assert_eq!(overflow.root().estimated_rows(), Some(0));
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "nested zero limits cannot erase proven branch-work overflow"
+    );
+
+    let unknown = explain_nested_disjuncts(None, &[0, u64::MAX, 0]);
+    assert_eq!(unknown.plan().estimated_cost(), None);
+    assert_eq!(unknown.root().estimated_rows(), None);
+    assert_eq!(
+        unknown.root().details().get("estimated_cost_overflow"),
+        None
+    );
+}
