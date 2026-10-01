@@ -1606,6 +1606,10 @@ fn build_plan(
             known_work_total = known_work_total.and_then(|known| known.checked_add(work));
             known_work_overflow |= known_work_total.is_none();
         }
+        // A local marker proves this nonnegative contribution exceeds
+        // u64::MAX, so the full plan cost overflows even across unknown tails
+        // or a LIMIT that lowers only output cardinality.
+        known_work_overflow |= operator.details.contains_key("estimated_work_overflow");
         let mut details = operator.details.clone();
         if let Some(work) = operator.work {
             // `sys.PlanNode` has no dedicated cost column. Keep each local
