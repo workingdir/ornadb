@@ -4134,6 +4134,42 @@ fn durable_status_snapshots_keep_reserved_and_running_after_completion_and_recov
         .expect("the exact snapshot survives host recovery");
         assert_eq!(&retry, expected);
     }
+    for (request, target, fingerprint, result) in [
+        (
+            [87; 16],
+            [81; 16],
+            reserved_fingerprint,
+            unit_result([81; 16], reserved_fingerprint),
+        ),
+        (
+            [88; 16],
+            [82; 16],
+            running_fingerprint,
+            semantic_failure_result([82; 16], running_fingerprint),
+        ),
+    ] {
+        let fresh = block_on(recovered.dispatch_frame(
+            [6; 16],
+            8,
+            Frame::Binary(status_query(request, target, fingerprint)),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("a fresh post-recovery query reads the retained terminal target");
+        let expected_body = ResultBody::from_result(&result, Limits::default().protocol).unwrap();
+        assert!(matches!(
+            &fresh.message,
+            Message::RequestStatusResult {
+                target: returned_target,
+                state: orna_protocol_v1::RequestState::Terminal,
+                fingerprint: Some(returned_fingerprint),
+                result: Some(body),
+            } if *returned_target == target
+                && *returned_fingerprint == fingerprint
+                && body == &expected_body
+        ));
+    }
     assert_eq!(fence.owner_id, [76; 16]);
     assert_eq!(application.calls, 0);
     drop(recovered);
