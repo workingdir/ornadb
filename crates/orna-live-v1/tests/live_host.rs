@@ -12795,6 +12795,164 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
             if status.state == orna_runtime_v1::RequestState::Completed
                 && status.fingerprint == seventh_failure_query_fingerprint
     ));
+
+    // The reference binds a rejected retarget to its request fingerprint but
+    // leaves replay of that mismatch around cross-kind retries unstated. Keep
+    // both the accepted status snapshot and rejected retarget response stable.
+    let eighth_failure_query = Envelope {
+        request: Some([101; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let eighth_failure_query_fingerprint = request_fingerprint(&eighth_failure_query, [1; 16]);
+    let eighth_failure_status = block_on(host.dispatch_frame(
+        [6; 16],
+        64,
+        Frame::Binary(eighth_failure_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("an eighth fresh status identity observes the retained failure");
+    assert!(matches!(
+        &eighth_failure_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(returned),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *returned == fingerprint
+            && result == &expected_failure
+    ));
+
+    let retargeted_eighth_query = Envelope {
+        request: Some([101; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [92; 16],
+            fingerprint: request_fingerprint(&other_eval, [1; 16]),
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let retargeted_eighth_response = block_on(host.dispatch_frame(
+        [6; 16],
+        65,
+        Frame::Binary(retargeted_eighth_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("retargeting the eighth status identity returns a mismatch");
+    assert!(matches!(
+        &retargeted_eighth_response.message,
+        Message::Diagnostic { .. }
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            66,
+            Frame::Binary(retargeted_eighth_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the rejected retarget replays before cross-kind reuse"),
+        retargeted_eighth_response
+    );
+
+    let eval_reusing_eighth_failure_query =
+        eval_with_context([1; 16], [101; 16], [9; 16], None);
+    assert!(matches!(
+        Envelope::decode(&eval_reusing_eighth_failure_query, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            67,
+            Frame::Binary(eval_reusing_eighth_failure_query.clone()),
+            &mut application,
+        )),
+        Err(Error::RequestMismatch)
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            68,
+            Frame::Binary(retargeted_eighth_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the rejected retarget still replays after the Eval mismatch"),
+        retargeted_eighth_response
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            69,
+            Frame::Binary(eighth_failure_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the accepted status still replays after the retargeted mismatch"),
+        eighth_failure_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            70,
+            Frame::Binary(eval_reusing_eighth_failure_query),
+            &mut application,
+        )),
+        Err(Error::RequestMismatch)
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            71,
+            Frame::Binary(retargeted_eighth_query),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the rejected retarget replays after repeated cross-kind mismatch"),
+        retargeted_eighth_response
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            72,
+            Frame::Binary(eighth_failure_query),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the accepted status still replays after both cross-kind mismatches"),
+        eighth_failure_status
+    );
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [1; 16],
+            request_id: [101; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == eighth_failure_query_fingerprint
+    ));
     assert_eq!(application.calls, 1);
 
     drop(host);
