@@ -12667,3 +12667,112 @@ fn explain_closes_complete_half_block_scan_and_write_work_after_unknowns() {
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
 }
+
+#[test]
+fn explain_closes_complete_half_block_scan_through_unknown_join_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Use the established
+    // rows-plus-rounded-4-KiB-blocks estimate: the one-row half-block scan
+    // costs two. It closes a MAX-2 row source exactly at MAX after an unknown
+    // join gap; one more source row overflows despite a later unknown scan.
+    let explain = |source_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:complete-half-block-scan-join-tail"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanFirst"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(1),
+                        estimated_bytes: Some(2_048),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownSecond"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:complete-half-block-scan-join-tail")),
+        })
+        .expect("complete half-block scan between unknown join tails")
+    };
+
+    let exact = explain(u64::MAX - 2);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let source = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanSource"))
+        })
+        .expect("near-MAX source scan");
+    assert_eq!(source.estimated_rows(), Some(u64::MAX - 2));
+    assert_eq!(source.estimated_bytes(), Some(0));
+    assert_eq!(source.estimated_work(), Some(u64::MAX - 2));
+    let half_block_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanFirst"))
+        })
+        .expect("complete one-row half-block scan");
+    assert_eq!(half_block_scan.estimated_rows(), Some(1));
+    assert_eq!(half_block_scan.estimated_bytes(), Some(2_048));
+    assert_eq!(half_block_scan.estimated_work(), Some(2));
+    for table in [
+        "table:ByteWorkThreeScanUnknownFirst",
+        "table:ByteWorkThreeScanUnknownSecond",
+    ] {
+        let unknown_scan = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("unknown scan tail");
+        assert_eq!(unknown_scan.estimated_work(), None);
+    }
+
+    let overflow = explain(u64::MAX - 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the complete half-block scan carries one extra source row past MAX"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("complete half-block scan overflow through unknown joins");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
