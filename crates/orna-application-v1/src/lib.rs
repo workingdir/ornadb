@@ -8458,13 +8458,13 @@ mod tests {
 
         assert_eq!(
             handler.current_row("Note", &key(2)).unwrap(),
-            Some(row(2, "competitor", 39)),
-            "the final competitor retry should occupy the reclaimed owner key"
+            Some(row(2, "owner", 47)),
+            "the final owner retry should occupy the reclaimed competitor key"
         );
         assert_eq!(
             handler.current_row("Note", &key(3)).unwrap(),
-            Some(row(3, "owner", 42)),
-            "the final owner retry should retain its latest row update"
+            Some(row(3, "competitor", 48)),
+            "the final competitor retry should retain its latest row update"
         );
         assert_eq!(
             handler.current_row("Note", &key(1)).unwrap(),
@@ -8584,6 +8584,21 @@ mod tests {
             (3, Some(2), false, Some(row(2, "competitor", 39))),
             (6, Some(3), false, Some(row(3, "owner", 41))),
             (3, None, false, Some(row(3, "owner", 42))),
+            (3, None, false, Some(row(3, "owner", 43))),
+            (2, Some(6), false, Some(row(6, "competitor", 39))),
+            (3, Some(2), false, Some(row(2, "owner", 43))),
+            (6, Some(3), false, Some(row(3, "competitor", 39))),
+            (3, None, false, Some(row(3, "competitor", 44))),
+            (3, None, false, Some(row(3, "competitor", 45))),
+            (2, Some(6), false, Some(row(6, "owner", 43))),
+            (3, Some(2), false, Some(row(2, "competitor", 45))),
+            (6, Some(3), false, Some(row(3, "owner", 43))),
+            (3, None, false, Some(row(3, "owner", 46))),
+            (3, None, false, Some(row(3, "owner", 47))),
+            (2, Some(6), false, Some(row(6, "competitor", 45))),
+            (3, Some(2), false, Some(row(2, "owner", 47))),
+            (6, Some(3), false, Some(row(3, "competitor", 45))),
+            (3, None, false, Some(row(3, "competitor", 48))),
         ];
         assert_eq!(mutations.len(), expected.len());
         for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in
