@@ -468,6 +468,46 @@ fn stable_module_replays_across_distinct_snapshot_pins() {
 }
 
 #[test]
+fn mixed_module_sources_are_rejected_under_a_different_snapshot_pin() {
+    let (_directory, _project_v1, _project_v2, project_v3, project_v4, _snapshots) =
+        module_upgrade_projects();
+
+    let mut v3_with_v4_collection = project_v3.standard_sources().to_vec();
+    v3_with_v4_collection
+        .iter_mut()
+        .find(|(path, _)| path == "std/collection.orna")
+        .unwrap()
+        .1 = include_str!("fixtures/module-upgrade-std-collection-v4.orna").into();
+    assert_eq!(
+        AdmittedReplSession::from_loaded_project(
+            &project_v3,
+            v3_with_v4_collection,
+            Limits::default(),
+        )
+        .unwrap_err()
+        .code(),
+        "ORNA-REPL-STANDARD"
+    );
+
+    let mut v4_with_v3_collection = project_v4.standard_sources().to_vec();
+    v4_with_v3_collection
+        .iter_mut()
+        .find(|(path, _)| path == "std/collection.orna")
+        .unwrap()
+        .1 = include_str!("fixtures/module-upgrade-std-collection.orna").into();
+    assert_eq!(
+        AdmittedReplSession::from_loaded_project(
+            &project_v4,
+            v4_with_v3_collection,
+            Limits::default(),
+        )
+        .unwrap_err()
+        .code(),
+        "ORNA-REPL-STANDARD"
+    );
+}
+
+#[test]
 fn replayed_closure_uses_its_captured_dependency_snapshot_after_snapshot_changes() {
     let (_directory, project_v1, project_v2, snapshot_v1, snapshot_v2, sources_v1, sources_v2) =
         snapshot_projects();
