@@ -2777,6 +2777,92 @@ fn nested_callables_from_distinct_historical_contexts_cannot_mix() {
 }
 
 #[test]
+fn dynamic_nested_callable_context_survives_decomposition() {
+    let source = include_str!("fixtures/historical-dynamic-nested-closure-context.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-dynamic-nested-closure-context.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
+fn nested_callables_from_distinct_dynamic_contexts_cannot_mix() {
+    let source = include_str!("fixtures/historical-dynamic-nested-closure-context-mixed.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-dynamic-nested-closure-context-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn calls_to_dynamic_pin_helpers_keep_call_site_identity() {
+    let source = include_str!("fixtures/historical-dynamic-helper-closure-context-mixed.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-dynamic-helper-closure-context-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn reassigned_dynamic_selector_keeps_helper_closure_pins_distinct() {
+    let source = include_str!("fixtures/historical-dynamic-helper-reassignment.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-dynamic-helper-reassignment.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn dynamic_helper_literal_head_context_matches_symbolic_head() {
+    let source = include_str!("fixtures/historical-dynamic-helper-head-context.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-dynamic-helper-head-context.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [

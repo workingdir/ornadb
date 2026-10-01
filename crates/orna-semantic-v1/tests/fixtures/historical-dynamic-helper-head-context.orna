@@ -1,0 +1,8 @@
+pub fn pinned_factory(selector: Str) =
+    sys.database.as_of(sys.snapshot(selector)).energy.factory;
+
+pub fn helper_head_context_matches_symbolic_head() {
+    let helper = pinned_factory("HEAD");
+    let direct = sys.database.as_of(HEAD).energy.factory;
+    [helper, direct]
+}
