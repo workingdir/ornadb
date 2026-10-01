@@ -2909,6 +2909,26 @@ fn rebinding_snapshot_pin_preserves_old_and_specializes_new_closure_chains() {
 }
 
 #[test]
+fn rebound_snapshot_closures_from_distinct_pins_cannot_mix() {
+    let source = include_str!("fixtures/historical-pinned-closure-chain-rebinding-mixed.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-rebinding-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "closures from different sides of a pin rebind should not compose: {:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [

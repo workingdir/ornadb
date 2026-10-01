@@ -1,0 +1,14 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn a_rebound_pin_does_not_merge_old_and_new_closure_contexts() {
+    let pin = sys.snapshot("HEAD~10");
+    let before = chained_factory(pin);
+    pin = sys.snapshot("HEAD");
+    let after = forwarded_factory(pin);
+    [before, after]
+}
