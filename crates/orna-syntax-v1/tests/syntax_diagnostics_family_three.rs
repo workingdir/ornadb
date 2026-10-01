@@ -5,7 +5,11 @@ fn nested_case_recovery_reports_local_diagnostics_and_keeps_enclosing_suffix() {
     let source = include_str!("fixtures/nested-case-recovery-diagnostics.orna");
     let parsed = parse_module(source);
 
-    let malformed_arms = [("true 0", "true "), ("false 1", "false ")];
+    let malformed_arms = [
+        ("true 0", "true "),
+        ("false 1", "false "),
+        ("false 4", "false "),
+    ];
     assert_eq!(
         parsed.diagnostics.len(),
         malformed_arms.len(),
@@ -39,7 +43,7 @@ fn nested_case_recovery_reports_local_diagnostics_and_keeps_enclosing_suffix() {
         panic!("outer case was lost: {body:?}");
     };
     assert_eq!(outer_arms.len(), 2, "{outer_arms:?}");
-    assert!(matches!(&outer_arms[1].body, Expr::Literal { text, .. } if text == "4"));
+    assert!(matches!(&outer_arms[1].body, Expr::Literal { text, .. } if text == "5"));
 
     let Expr::Control {
         arms: nested_arms, ..
