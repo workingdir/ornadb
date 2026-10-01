@@ -24398,6 +24398,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_sustained_split_pressure_leaf_chains_stop_after_two_matches() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=23)
+            .map(|row_id| {
+                let title = if matches!(row_id, 7 | 22) {
+                    "later"
+                } else {
+                    "current"
+                };
+                let target = if row_id == 23 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(141), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on sustained demand across leaf-local
+        // chains. Preserve pipeline order within each leaf: its take cap is
+        // applied before its trailing filter, then outer filters accumulate
+        // pressure across the ordered union. Fourteen rejects do not consume
+        // take(2), and the second match closes before row twenty-three's
+        // missing lookup.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-take-two-sustained-split-pressure-leaf-chains-stop.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(2u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (9, 27),
+            "leaf-local chains retain order and outer take stops at the second match"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_sustained_split_pressure_leaf_chains_preserve_short_take_failure() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=23)
+            .map(|row_id| {
+                let title = if row_id == 7 { "later" } else { "current" };
+                let target = if matches!(row_id, 22 | 23) { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(142), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The same fourteen rejects leave only row seven counted toward the
+        // global take. Row twenty-two fails inside the third leaf's local
+        // take(8) chain, so the short outer result must expose that failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-take-two-sustained-split-pressure-leaf-chains-failure.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (9, 27),
+            "leaf-local take/filter chains preserve the failure before outer take fills"
+        );
+    }
+
+    #[tokio::test]
     async fn query_projection_failures_recover_at_the_outer_boundary() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
