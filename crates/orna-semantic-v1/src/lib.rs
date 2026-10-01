@@ -7563,16 +7563,22 @@ fn infer(
                         None,
                         diagnostics,
                     );
-                    let result = specialize_historical_database_result(&result, &values)
-                        .unwrap_or_else(|| result.as_ref().clone());
-                    let result = specialize_dynamic_parameter_snapshot_contexts(
+                    let historical_database = specialize_historical_database_result(
                         &result,
-                        parameter_names.as_deref(),
-                        arguments,
                         &values,
+                        arguments,
                         local,
-                        span,
                     );
+                    let result = historical_database.unwrap_or_else(|| {
+                        specialize_dynamic_parameter_snapshot_contexts(
+                            &result,
+                            parameter_names.as_deref(),
+                            arguments,
+                            &values,
+                            local,
+                            span,
+                        )
+                    });
                     Inferred {
                         ty: historical_context.as_ref().map_or_else(
                             || result.clone(),
@@ -14474,9 +14480,9 @@ fn infer_descriptor_system_call(
     let result = descriptor_call_type(&function.result, &function.type_parameters)
         .expect("supported descriptor functions have concrete types");
     let result = if path == ["sys", "snapshot"] {
-        arguments
-            .first()
-            .map(|argument| snapshot_selector_context(&argument.value, local))
+        arguments.first().map(|argument| {
+            snapshot_selector_context(&argument.value, values.first(), local)
+        })
             .unwrap_or(result)
     } else {
         result
@@ -16041,10 +16047,20 @@ fn is_contextual_snapshot_ref(ty: &Type) -> bool {
 /// namespace or callable path does not erase which selected snapshot it came
 /// from. Literal selectors use their decoded value; dynamic selectors use
 /// their file and source expression identity because this semantic slice does not
-/// execute or constant-fold selector expressions. Reusing one `SnapshotRef`
-/// binding retains its identity; separate dynamic selector calls are not
-/// assumed to resolve to the same pin.
-fn snapshot_selector_context(expression: &Expr, local: &BTreeMap<String, Symbol>) -> Type {
+/// execute or constant-fold selector expressions. An already contextualized
+/// `SnapshotRef` keeps that identity across `sys.snapshot` calls and closure
+/// chains; a typed snapshot parameter receives a parameter-scoped identity,
+/// then callers specialize it from their actual pinned argument.
+fn snapshot_selector_context(
+    expression: &Expr,
+    argument_type: Option<&Type>,
+    local: &BTreeMap<String, Symbol>,
+) -> Type {
+    if let Some(argument_type) = argument_type
+        && is_contextual_snapshot_ref(argument_type)
+    {
+        return argument_type.clone();
+    }
     let selector = match expression {
         Expr::Literal {
             text,
@@ -16067,7 +16083,7 @@ fn snapshot_selector_context(expression: &Expr, local: &BTreeMap<String, Symbol>
             span.end
         ),
         Expr::Group { inner, .. } => {
-            return snapshot_selector_context(inner, local);
+            return snapshot_selector_context(inner, argument_type, local);
         }
         _ => format!("dynamic:{expression:?}"),
     };
@@ -16092,11 +16108,18 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 && let [Type::Named(selector)] = values.as_slice()
                 && let Some(parameter) = selector.strip_prefix("selector:parameter:") =>
         {
-            let argument = parameter_names
+            let argument_index = parameter_names
                 .and_then(|names| names.iter().position(|name| name == parameter))
-                .and_then(|index| call_argument_for_parameter(parameter_names, index, arguments));
-            if let Some(argument) = argument {
-                call_argument_snapshot_context(argument, call_span, local)
+                .and_then(|index| call_argument_index_for_parameter(parameter_names, index, arguments));
+            if let Some(argument_index) = argument_index
+                && let Some(argument) = arguments.get(argument_index)
+            {
+                call_argument_snapshot_context(
+                    &argument.value,
+                    argument_types.get(argument_index),
+                    call_span,
+                    local,
+                )
             } else if argument_types
                 .iter()
                 .any(|actual| contains_snapshot_context_key(actual, selector))
@@ -16278,29 +16301,39 @@ fn contains_snapshot_context_key(ty: &Type, key: &str) -> bool {
     }
 }
 
-fn call_argument_for_parameter<'a>(
+fn call_argument_index_for_parameter(
     parameter_names: Option<&[String]>,
     parameter_index: usize,
-    arguments: &'a [orna_syntax_v1::Argument],
-) -> Option<&'a Expr> {
-    let parameter_name = parameter_names?.get(parameter_index)?;
-    let mut positional_index = 0usize;
-    arguments.iter().find_map(|argument| {
-        if let Some(name) = argument.name.as_deref() {
-            (name == parameter_name).then_some(&argument.value)
+    arguments: &[orna_syntax_v1::Argument],
+) -> Option<usize> {
+    let names = parameter_names?;
+    names.get(parameter_index)?;
+    let mut assigned = BTreeSet::new();
+    for (argument_index, argument) in arguments.iter().enumerate() {
+        let index = if let Some(name) = argument.name.as_deref() {
+            names.iter().position(|parameter| parameter == name)
         } else {
-            let matches = positional_index == parameter_index;
-            positional_index += 1;
-            matches.then_some(&argument.value)
+            (0..names.len()).find(|index| !assigned.contains(index))
+        }?;
+        if index == parameter_index {
+            return Some(argument_index);
         }
-    })
+        assigned.insert(index);
+    }
+    None
 }
 
 fn call_argument_snapshot_context(
     argument: &Expr,
+    argument_type: Option<&Type>,
     call_span: &SyntaxSpan,
     local: &BTreeMap<String, Symbol>,
 ) -> Type {
+    if let Some(argument_type) = argument_type
+        && is_contextual_snapshot_ref(argument_type)
+    {
+        return argument_type.clone();
+    }
     let selector = match argument {
         Expr::Literal {
             text,
@@ -16317,7 +16350,7 @@ fn call_argument_snapshot_context(
             format!("parameter:{text}")
         }
         Expr::Group { inner, .. } => {
-            return call_argument_snapshot_context(inner, call_span, local);
+            return call_argument_snapshot_context(inner, argument_type, call_span, local);
         }
         _ => format!(
             "dynamic-call:{}:{}..{}",
@@ -16329,19 +16362,61 @@ fn call_argument_snapshot_context(
     contextual_snapshot_ref(&format!("selector:{selector}"))
 }
 
-fn specialize_historical_database_result(result: &Type, arguments: &[Type]) -> Option<Type> {
-    let Type::Applied { base, arguments: result_arguments } = result else {
+/// A typed `SnapshotRef` parameter has no concrete identity while its body is
+/// summarized. Key it by parameter name so each caller can specialize the key
+/// from its resolved argument; uncontextualized non-parameter references stay
+/// generic because this semantic pass cannot infer their runtime pin.
+fn specialize_snapshot_ref_parameter(
+    expression: &Expr,
+    snapshot: &Type,
+    local: &BTreeMap<String, Symbol>,
+) -> Type {
+    if is_contextual_snapshot_ref(snapshot) {
+        return snapshot.clone();
+    }
+    match expression {
+        Expr::Name { text, .. }
+            if local
+                .get(text)
+                .is_some_and(|symbol| symbol.kind == SymbolKind::Parameter)
+                && snapshot == &Type::Named("sys.SnapshotRef".into()) =>
+        {
+            contextual_snapshot_ref(&format!("selector:parameter:{text}"))
+        }
+        Expr::Group { inner, .. } => specialize_snapshot_ref_parameter(inner, snapshot, local),
+        _ => snapshot.clone(),
+    }
+}
+
+fn specialize_historical_database_result(
+    result: &Type,
+    argument_types: &[Type],
+    arguments: &[orna_syntax_v1::Argument],
+    local: &BTreeMap<String, Symbol>,
+) -> Option<Type> {
+    let Type::Applied {
+        base,
+        arguments: result_arguments,
+    } = result
+    else {
         return None;
     };
-    if base != "sys.DatabaseSnapshot" || result_arguments.len() != 1 {
+    if base != "sys.DatabaseSnapshot"
+        || !matches!(result_arguments.as_slice(), [Type::Named(snapshot)] if snapshot == "sys.SnapshotRef")
+    {
         return None;
     }
-    Some(historical_database_type(
-        arguments
-            .first()
-            .cloned()
-            .unwrap_or_else(|| Type::Named("sys.SnapshotRef".into())),
-    ))
+    let snapshot = argument_types
+        .first()
+        .cloned()
+        .map(|snapshot| {
+            let argument = arguments.first().map(|argument| &argument.value);
+            argument.map_or(snapshot.clone(), |argument| {
+                specialize_snapshot_ref_parameter(argument, &snapshot, local)
+            })
+        })
+        .unwrap_or_else(|| Type::Named("sys.SnapshotRef".into()));
+    Some(historical_database_type(snapshot))
 }
 
 fn historical_database_type(snapshot: Type) -> Type {
