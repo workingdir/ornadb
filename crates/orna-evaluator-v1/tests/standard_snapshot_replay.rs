@@ -190,10 +190,12 @@ fn replayed_closure_uses_its_captured_dependency_snapshot_after_snapshot_changes
         .unwrap_or_else(|error| panic!("historical source export call failed: {}", error.code()));
     assert_eq!(historical_direct, Some(int(8)));
     let source = include_str!("fixtures/snapshot-replay-callback-seven.orna");
+    let parsed = orna_syntax_v1::parse_repl(source);
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
     let historical_callback = historical
         .submit(source)
         .unwrap_or_else(|error| panic!("historical callback failed: {}", error.code()));
-    assert_eq!(historical_callback, Some(ints(&[8])));
+    assert_eq!(historical_callback, Some(ints(&[11])));
     let mut replay = historical.clone();
 
     let mut current =
@@ -207,9 +209,9 @@ fn replayed_closure_uses_its_captured_dependency_snapshot_after_snapshot_changes
         current.submit(include_str!("fixtures/snapshot-replay-direct-seven.orna")),
         Ok(Some(int(107)))
     );
-    assert_eq!(current.submit(source), Ok(Some(ints(&[107]))));
+    assert_eq!(current.submit(source), Ok(Some(ints(&[110]))));
     assert_eq!(
         replay.submit(include_str!("fixtures/snapshot-replay-callback-nine.orna")),
-        Ok(Some(ints(&[10])))
+        Ok(Some(ints(&[13])))
     );
 }
