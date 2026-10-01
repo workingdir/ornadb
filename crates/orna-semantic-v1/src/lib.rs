@@ -365,6 +365,7 @@ impl EffectSummary {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SymbolKind {
     Function,
+    Parameter,
     Table,
     Type,
     Enum,
@@ -5721,10 +5722,13 @@ fn check_function(
             // cascade. The annotation diagnostic remains authoritative.
             if let Pattern::Name(name, _) = &parameter.pattern {
                 insert_local_binding(name, Type::Error, &mut local, diagnostics);
+                if let Some(symbol) = local.get_mut(name) {
+                    symbol.kind = SymbolKind::Parameter;
+                }
                 continue;
             }
         }
-        bind_pattern(&parameter.pattern, ty, scope, &mut local, diagnostics);
+        bind_parameter_pattern(&parameter.pattern, ty, scope, &mut local, diagnostics);
     }
     if let Some(expected) = signature
         .result
@@ -6495,6 +6499,21 @@ fn bind_pattern(
             ..
         } => {
             bind_constructor_pattern(path, arguments, fields, &ty, scope, into, diagnostics);
+        }
+    }
+}
+
+fn bind_parameter_pattern(
+    pattern: &Pattern,
+    ty: Type,
+    scope: &Scope,
+    local: &mut BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    bind_pattern(pattern, ty, scope, local, diagnostics);
+    for name in pattern_binding_names(pattern) {
+        if let Some(symbol) = local.get_mut(&name) {
+            symbol.kind = SymbolKind::Parameter;
         }
     }
 }
@@ -7318,7 +7337,9 @@ fn infer(
             }
         }
         Expr::Call {
-            callee, arguments, ..
+            callee,
+            arguments,
+            span,
         } => {
             if matches!(callee.as_ref(), Expr::Name { text, .. } if text == "fail")
                 && !local.contains_key("fail")
@@ -7544,6 +7565,14 @@ fn infer(
                     );
                     let result = specialize_historical_database_result(&result, &values)
                         .unwrap_or_else(|| result.as_ref().clone());
+                    let result = specialize_dynamic_parameter_snapshot_contexts(
+                        &result,
+                        parameter_names.as_deref(),
+                        arguments,
+                        &values,
+                        local,
+                        span,
+                    );
                     Inferred {
                         ty: historical_context.as_ref().map_or_else(
                             || result.clone(),
@@ -14447,7 +14476,7 @@ fn infer_descriptor_system_call(
     let result = if path == ["sys", "snapshot"] {
         arguments
             .first()
-            .map(|argument| snapshot_selector_context(&argument.value))
+            .map(|argument| snapshot_selector_context(&argument.value, local))
             .unwrap_or(result)
     } else {
         result
@@ -16015,7 +16044,7 @@ fn is_contextual_snapshot_ref(ty: &Type) -> bool {
 /// execute or constant-fold selector expressions. Reusing one `SnapshotRef`
 /// binding retains its identity; separate dynamic selector calls are not
 /// assumed to resolve to the same pin.
-fn snapshot_selector_context(expression: &Expr) -> Type {
+fn snapshot_selector_context(expression: &Expr, local: &BTreeMap<String, Symbol>) -> Type {
     let selector = match expression {
         Expr::Literal {
             text,
@@ -16024,6 +16053,13 @@ fn snapshot_selector_context(expression: &Expr) -> Type {
         } => serde_json::from_str::<String>(text)
             .unwrap_or_else(|_| text.trim_matches('"').to_owned()),
         Expr::Name { text, .. } if matches!(text.as_str(), "CWD" | "HEAD") => text.clone(),
+        Expr::Name { text, .. }
+            if local
+                .get(text)
+                .is_some_and(|symbol| symbol.kind == SymbolKind::Parameter) =>
+        {
+            format!("parameter:{text}")
+        }
         Expr::Name { text, span } => format!(
             "dynamic:{}:{text}@{}..{}",
             span.file.as_deref().unwrap_or("<unknown>"),
@@ -16031,9 +16067,264 @@ fn snapshot_selector_context(expression: &Expr) -> Type {
             span.end
         ),
         Expr::Group { inner, .. } => {
-            return snapshot_selector_context(inner);
+            return snapshot_selector_context(inner, local);
         }
         _ => format!("dynamic:{expression:?}"),
+    };
+    contextual_snapshot_ref(&format!("selector:{selector}"))
+}
+
+/// Substitute a selector parameter in a function result with the caller's
+/// selector identity. Literal and built-in selectors retain canonical
+/// identities. Dynamic arguments use the call occurrence because this pass
+/// does not evaluate selector values.
+fn specialize_dynamic_parameter_snapshot_contexts(
+    ty: &Type,
+    parameter_names: Option<&[String]>,
+    arguments: &[orna_syntax_v1::Argument],
+    argument_types: &[Type],
+    local: &BTreeMap<String, Symbol>,
+    call_span: &SyntaxSpan,
+) -> Type {
+    match ty {
+        Type::Applied { base, arguments: values }
+            if base == "sys.SnapshotRefContext"
+                && let [Type::Named(selector)] = values.as_slice()
+                && let Some(parameter) = selector.strip_prefix("selector:parameter:") =>
+        {
+            let argument = parameter_names
+                .and_then(|names| names.iter().position(|name| name == parameter))
+                .and_then(|index| call_argument_for_parameter(parameter_names, index, arguments));
+            if let Some(argument) = argument {
+                call_argument_snapshot_context(argument, call_span, local)
+            } else if argument_types
+                .iter()
+                .any(|actual| contains_snapshot_context_key(actual, selector))
+            {
+                // `database.as_of(pin)` forwards the context already carried
+                // by its argument instead of selecting a new dynamic pin.
+                ty.clone()
+            } else {
+                contextual_snapshot_ref(&format!(
+                    "selector:dynamic-call:{}:{}..{}:parameter:{parameter}",
+                    call_span.file.as_deref().unwrap_or("<unknown>"),
+                    call_span.start,
+                    call_span.end,
+                ))
+            }
+        }
+        Type::Function {
+            parameters,
+            parameter_names: function_parameter_names,
+            default_parameters,
+            result,
+        } => Type::Function {
+            parameters: parameters
+                .iter()
+                .map(|parameter| {
+                    specialize_dynamic_parameter_snapshot_contexts(
+                        parameter,
+                        parameter_names,
+                        arguments,
+                        argument_types,
+                        local,
+                        call_span,
+                    )
+                })
+                .collect(),
+            parameter_names: function_parameter_names.clone(),
+            default_parameters: default_parameters.clone(),
+            result: Box::new(specialize_dynamic_parameter_snapshot_contexts(
+                result,
+                parameter_names,
+                arguments,
+                argument_types,
+                local,
+                call_span,
+            )),
+        },
+        Type::List(element) => Type::List(Box::new(
+            specialize_dynamic_parameter_snapshot_contexts(
+                element,
+                parameter_names,
+                arguments,
+                argument_types,
+                local,
+                call_span,
+            ),
+        )),
+        Type::Range(element) => Type::Range(Box::new(
+            specialize_dynamic_parameter_snapshot_contexts(
+                element,
+                parameter_names,
+                arguments,
+                argument_types,
+                local,
+                call_span,
+            ),
+        )),
+        Type::Relation(element) => Type::Relation(Box::new(
+            specialize_dynamic_parameter_snapshot_contexts(
+                element,
+                parameter_names,
+                arguments,
+                argument_types,
+                local,
+                call_span,
+            ),
+        )),
+        Type::Stream(element) => Type::Stream(Box::new(
+            specialize_dynamic_parameter_snapshot_contexts(
+                element,
+                parameter_names,
+                arguments,
+                argument_types,
+                local,
+                call_span,
+            ),
+        )),
+        Type::Optional(element) => Type::Optional(Box::new(
+            specialize_dynamic_parameter_snapshot_contexts(
+                element,
+                parameter_names,
+                arguments,
+                argument_types,
+                local,
+                call_span,
+            ),
+        )),
+        Type::Record(fields) => Type::Record(
+            fields
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.clone(),
+                        specialize_dynamic_parameter_snapshot_contexts(
+                            value,
+                            parameter_names,
+                            arguments,
+                            argument_types,
+                            local,
+                            call_span,
+                        ),
+                    )
+                })
+                .collect(),
+        ),
+        Type::Tuple(elements) => Type::Tuple(
+            elements
+                .iter()
+                .map(|element| {
+                    specialize_dynamic_parameter_snapshot_contexts(
+                        element,
+                        parameter_names,
+                        arguments,
+                        argument_types,
+                        local,
+                        call_span,
+                    )
+                })
+                .collect(),
+        ),
+        Type::Applied { base, arguments: values } => Type::Applied {
+            base: base.clone(),
+            arguments: values
+                .iter()
+                .map(|value| {
+                    specialize_dynamic_parameter_snapshot_contexts(
+                        value,
+                        parameter_names,
+                        arguments,
+                        argument_types,
+                        local,
+                        call_span,
+                    )
+                })
+                .collect(),
+        },
+        _ => ty.clone(),
+    }
+}
+
+fn contains_snapshot_context_key(ty: &Type, key: &str) -> bool {
+    match ty {
+        Type::Applied { base, arguments }
+            if base == "sys.SnapshotRefContext"
+                && matches!(arguments.as_slice(), [Type::Named(context)] if context == key) =>
+        {
+            true
+        }
+        Type::Function { parameters, result, .. } => {
+            parameters
+                .iter()
+                .any(|parameter| contains_snapshot_context_key(parameter, key))
+                || contains_snapshot_context_key(result, key)
+        }
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => contains_snapshot_context_key(element, key),
+        Type::Record(fields) => fields
+            .values()
+            .any(|value| contains_snapshot_context_key(value, key)),
+        Type::Tuple(elements) => elements
+            .iter()
+            .any(|element| contains_snapshot_context_key(element, key)),
+        Type::Applied { arguments, .. } => arguments
+            .iter()
+            .any(|argument| contains_snapshot_context_key(argument, key)),
+        _ => false,
+    }
+}
+
+fn call_argument_for_parameter<'a>(
+    parameter_names: Option<&[String]>,
+    parameter_index: usize,
+    arguments: &'a [orna_syntax_v1::Argument],
+) -> Option<&'a Expr> {
+    let parameter_name = parameter_names?.get(parameter_index)?;
+    let mut positional_index = 0usize;
+    arguments.iter().find_map(|argument| {
+        if let Some(name) = argument.name.as_deref() {
+            (name == parameter_name).then_some(&argument.value)
+        } else {
+            let matches = positional_index == parameter_index;
+            positional_index += 1;
+            matches.then_some(&argument.value)
+        }
+    })
+}
+
+fn call_argument_snapshot_context(
+    argument: &Expr,
+    call_span: &SyntaxSpan,
+    local: &BTreeMap<String, Symbol>,
+) -> Type {
+    let selector = match argument {
+        Expr::Literal {
+            text,
+            kind: LiteralKind::String,
+            ..
+        } => serde_json::from_str::<String>(text)
+            .unwrap_or_else(|_| text.trim_matches('"').to_owned()),
+        Expr::Name { text, .. } if matches!(text.as_str(), "CWD" | "HEAD") => text.clone(),
+        Expr::Name { text, .. }
+            if local
+                .get(text)
+                .is_some_and(|symbol| symbol.kind == SymbolKind::Parameter) =>
+        {
+            format!("parameter:{text}")
+        }
+        Expr::Group { inner, .. } => {
+            return call_argument_snapshot_context(inner, call_span, local);
+        }
+        _ => format!(
+            "dynamic-call:{}:{}..{}",
+            call_span.file.as_deref().unwrap_or("<unknown>"),
+            call_span.start,
+            call_span.end,
+        ),
     };
     contextual_snapshot_ref(&format!("selector:{selector}"))
 }
