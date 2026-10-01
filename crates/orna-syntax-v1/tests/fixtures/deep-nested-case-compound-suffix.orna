@@ -1,0 +1,67 @@
+pub fn deep_chain(flag: Bool): String {
+        case flag {
+            true:
+                case flag {
+                    true:
+                        case flag {
+                            true:
+                                case flag {
+                                    true:
+                                        case flag {
+                                            true:
+                                                case flag {
+                                                    true:
+                                                        case flag {
+                                                            true:
+                                                                case flag {
+                                                                    true:
+                                                                        case flag {
+                                                                            true:
+                                                                                case flag {
+                                                                                    true:
+                                                                                        case flag {
+                                                                                            true:
+                                                                                                case flag {
+                                                                                                    true:
+                                                                                                        case flag {
+                                                                                                            true:
+                                                                                                                case flag {
+                                                                                                                    true:
+                                                                                                                        case flag {
+                                                                                                                            true:
+                                                                                                                                case flag {
+                                                                                                                                    true 0
+                                                                                                                                    Deep{items: [false, true], point: Point{x: false}} if flag: "deep recovered"
+                                                                                                                                    false: "deep fallback"
+                                                                                                                                }
+                                                                                                                            false: "level 14 fallback"
+                                                                                                                        }
+                                                                                                                    false: "level 13 fallback"
+                                                                                                                }
+                                                                                                            false: "level 12 fallback"
+                                                                                                        }
+                                                                                                    false: "level 11 fallback"
+                                                                                                }
+                                                                                            false: "level 10 fallback"
+                                                                                        }
+                                                                                    false: "level 9 fallback"
+                                                                                }
+                                                                            false: "level 8 fallback"
+                                                                        }
+                                                                    false: "level 7 fallback"
+                                                                }
+                                                            false: "level 6 fallback"
+                                                        }
+                                                    false: "level 5 fallback"
+                                                }
+                                            false: "level 4 fallback"
+                                        }
+                                    false: "level 3 fallback"
+                                }
+                            false: "level 2 fallback"
+                        }
+                    false: "level 1 fallback"
+                }
+            false: "level 0 fallback"
+        }
+}
