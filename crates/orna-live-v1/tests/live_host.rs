@@ -2537,11 +2537,19 @@ fn watch_with_context(request: [u8; 16], database: [u8; 16]) -> Vec<u8> {
 }
 
 fn create(host: &mut LiveHost, issuer: &mut Issuer) -> SessionCredential {
+    create_with_expiration(host, issuer, 100)
+}
+
+fn create_with_expiration(
+    host: &mut LiveHost,
+    issuer: &mut Issuer,
+    expires_at: u64,
+) -> SessionCredential {
     block_on(host.create(
         CreateRequest {
             id: [1; 16],
             origin: origin(),
-            expires_at: 100,
+            expires_at,
             now: 0,
             subscribe: &subscribe(),
         },
@@ -5595,7 +5603,7 @@ fn durable_running_status_snapshot_survives_session_handoff() {
 #[test]
 fn durable_status_snapshots_survive_repeated_owner_handoffs() {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
-    const HANDOFFS: u8 = 4;
+    const HANDOFFS: u8 = 8;
 
     let (root, repository) = durable_repository();
     let runtime = open_durable_state(&repository);
@@ -5626,7 +5634,7 @@ fn durable_status_snapshots_survive_repeated_owner_handoffs() {
 
     let mut host = durable_host_with_owner(runtime, owner.owner_id);
     let mut issuer = Issuer(1, None);
-    let credential = create(&mut host, &mut issuer);
+    let credential = create_with_expiration(&mut host, &mut issuer, 10_000);
     block_on(host.resume(ResumeRequest {
         id: session,
         origin: &origin(),
@@ -5689,7 +5697,7 @@ fn durable_status_snapshots_survive_repeated_owner_handoffs() {
             RequestOwner::from(current_owner),
         );
         let mut issuer = Issuer(2 + handoff, None);
-        let credential = create(&mut host, &mut issuer);
+        let credential = create_with_expiration(&mut host, &mut issuer, 10_000);
         let attachment = [6 + handoff; 16];
         block_on(host.resume(ResumeRequest {
             id: session,
@@ -5775,7 +5783,7 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
     eval_outcome: UnitEvalOutcome,
 ) {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
-    const HANDOFFS: u8 = 4;
+    const HANDOFFS: u8 = 8;
 
     let (root, repository) = durable_repository();
     let runtime = open_durable_state(&repository);
@@ -5783,7 +5791,7 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
     let owner = block_on(runtime.acquire_lease([75; 16])).unwrap();
     let mut host = durable_host_with_owner(runtime, owner.owner_id);
     let mut issuer = Issuer(1, None);
-    let credential = create(&mut host, &mut issuer);
+    let credential = create_with_expiration(&mut host, &mut issuer, 10_000);
     block_on(host.resume(ResumeRequest {
         id: session,
         origin: &origin(),
@@ -5880,7 +5888,7 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
             RequestOwner::from(current_owner),
         );
         let mut issuer = Issuer(2 + handoff, None);
-        let credential = create(&mut host, &mut issuer);
+        let credential = create_with_expiration(&mut host, &mut issuer, 10_000);
         let attachment = [6 + handoff; 16];
         block_on(host.resume(ResumeRequest {
             id: session,
