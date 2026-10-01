@@ -35,7 +35,14 @@ fn main() {
                             Note.rekey(3, 5);
                             Note.rekey(2, 3);
                             Note.rekey(5, 2);
-                            Note.update(2, { quantity: 25 })
+                            Note.update(2, { quantity: 25 });
+                            Note.rekey(3, 2) |? (owner_retries_after_reused_handoff_target => {
+                                Note.update(2, { quantity: 26 });
+                                Note.rekey(2, 5);
+                                Note.rekey(3, 2);
+                                Note.rekey(5, 3);
+                                Note.update(3, { quantity: 27 })
+                            })
                         })
                     })
                 })

@@ -8483,6 +8483,11 @@ mod tests {
             (2, Some(3), false, Some(row(3, "owner", 13))),
             (5, Some(2), false, Some(row(2, "competitor", 24))),
             (2, None, false, Some(row(2, "competitor", 25))),
+            (2, None, false, Some(row(2, "competitor", 26))),
+            (2, Some(5), false, Some(row(5, "competitor", 26))),
+            (3, Some(2), false, Some(row(2, "owner", 13))),
+            (5, Some(3), false, Some(row(3, "competitor", 26))),
+            (3, None, false, Some(row(3, "competitor", 27))),
         ];
         assert_eq!(mutations.len(), expected.len());
         for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in
