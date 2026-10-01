@@ -14871,7 +14871,7 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     let fresh_status = block_on(host.dispatch_frame(
         [6; 16],
         54,
-        Frame::Binary(fresh_status_query),
+        Frame::Binary(fresh_status_query.clone()),
         &mut application,
     ))
     .unwrap()
@@ -14911,6 +14911,56 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
             if status.state == orna_runtime_v1::RequestState::Completed
                 && status.fingerprint == fresh_status_fingerprint
     ));
+
+    // The reference is silent on replaying the admitted terminal status query
+    // inside a reverse-phase retry cycle; preserve all three response snapshots.
+    for (frame, expected, label, now) in [
+        (
+            Frame::Binary(repeated_same_target_query.clone()),
+            repeated_same_target_mismatch.clone(),
+            "the second same-target mismatch starts the interleaved reverse phase",
+            55,
+        ),
+        (
+            Frame::Binary(terminal_eval.clone()),
+            terminal_eval_replay.clone(),
+            "the terminal Eval replays before the fresh status retry",
+            56,
+        ),
+        (
+            Frame::Binary(fresh_status_query),
+            fresh_status,
+            "the admitted status query replays inside the reverse-phase cycle",
+            57,
+        ),
+        (
+            Frame::Binary(same_target_wrong_fingerprint_query.clone()),
+            same_target_fingerprint_mismatch.clone(),
+            "the first mismatch follows the admitted status replay",
+            58,
+        ),
+        (
+            Frame::Binary(terminal_eval.clone()),
+            terminal_eval_replay,
+            "the terminal Eval remains stable after the status replay",
+            59,
+        ),
+        (
+            Frame::Binary(repeated_same_target_query.clone()),
+            repeated_same_target_mismatch,
+            "the second mismatch closes the interleaved reverse phase",
+            60,
+        ),
+    ] {
+        assert_eq!(
+            block_on(host.dispatch_frame([6; 16], now, frame, &mut application))
+                .unwrap()
+                .response
+                .expect(label),
+            expected
+        );
+    }
+    assert_eq!(application.calls, 1);
     drop(host);
     remove_test_repository(&root);
 }
