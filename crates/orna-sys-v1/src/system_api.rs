@@ -9,14 +9,54 @@
 //! macros are not visible to it and must be written explicitly or handled by a future
 //! macro-expanding collector.
 
-use std::sync::LazyLock;
+use std::{collections::BTreeSet, sync::LazyLock};
 
 use super::{SystemEffect, SystemFunctionDescriptor, system_function_descriptor};
 use orna_sys_macros::ornasys;
 
 const GENERATED_SYSTEM_API: &str = include_str!(concat!(env!("OUT_DIR"), "/api_sys.json"));
+const GENERATED_SYSTEM_SCHEMA: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/system_api_schema.json"));
 const GENERATED_BINDING_STUBS: &str =
     include_str!(concat!(env!("OUT_DIR"), "/system_bindings.orna"));
+
+static EMBEDDED_SYS_SCHEMA_CHECK: LazyLock<()> = LazyLock::new(|| {
+    let api: serde_json::Value =
+        serde_json::from_str(GENERATED_SYSTEM_API).expect("build-validated generated sys API JSON");
+    let schema: serde_json::Value = serde_json::from_str(GENERATED_SYSTEM_SCHEMA)
+        .expect("build-validated generated sys JSON Schema");
+    assert_eq!(
+        schema["$schema"].as_str(),
+        Some("https://json-schema.org/draft/2020-12/schema")
+    );
+    assert_eq!(schema["type"].as_str(), Some("object"));
+    assert_eq!(schema["additionalProperties"], false);
+    let api_fields = api
+        .as_object()
+        .expect("generated sys API root is an object")
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let schema_fields = schema["properties"]
+        .as_object()
+        .expect("embedded sys schema properties are an object")
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let required_fields = schema["required"]
+        .as_array()
+        .expect("embedded sys schema required fields are an array")
+        .iter()
+        .map(|field| {
+            field
+                .as_str()
+                .expect("embedded sys schema field name is a string")
+                .to_owned()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(api_fields, schema_fields);
+    assert_eq!(api_fields, required_fields);
+});
 
 /// Runtime descriptors are parsed from the same canonical artifact emitted
 /// from method attributes; build.rs does not emit a second Rust descriptor table.
@@ -63,7 +103,16 @@ pub static SYSTEM_FUNCTION_DESCRIPTORS: LazyLock<Vec<SystemFunctionDescriptor>> 
 
 /// Returns the deterministic build-time projection of the annotated system API methods.
 pub fn system_api_json() -> String {
+    LazyLock::force(&EMBEDDED_SYS_SCHEMA_CHECK);
     GENERATED_SYSTEM_API.to_owned()
+}
+
+/// The JSON Schema generated beside the API artifact and embedded with the
+/// baked sys registry. Production consumers use the compiled schema directly;
+/// the dev-only exporter can emit the API document without a checked-in file.
+pub fn system_api_schema_json() -> &'static str {
+    LazyLock::force(&EMBEDDED_SYS_SCHEMA_CHECK);
+    GENERATED_SYSTEM_SCHEMA
 }
 
 /// Deterministic Orna declaration bundle emitted from the typed native sys
@@ -82,7 +131,9 @@ pub struct SystemApiFunctionBindings;
 impl SystemApiFunctionBindings {
     #[ornasys(
         function = r###"{"effect":"read","name":"sys.meta","purpose":"Return safe static/nominal/codec/protocol metadata for a value.","signature":"fn sys.meta<T>(value: T): sys.ValueMetadata<T>"}"###,
-        role = "langitem.sys.meta@1.0"
+        role = "langitem.sys.meta@1.0",
+        type_graph = "system_api_inventory.json",
+        schema = "system_api_schema.json"
     )]
     pub fn sys_meta(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.meta")
