@@ -90,6 +90,13 @@ fn continue_after_seventeenth_handoff() {
         Note.rekey(3, 2);
         Note.rekey(6, 3);
         Note.update(3, { quantity: 46 })
+    });
+    Note.rekey(3, 2) |? (owner_retries_after_twenty_first_handoff => {
+        Note.update(3, { quantity: 47 });
+        Note.rekey(2, 6);
+        Note.rekey(3, 2);
+        Note.rekey(6, 3);
+        Note.update(3, { quantity: 48 })
     })
 }
 
