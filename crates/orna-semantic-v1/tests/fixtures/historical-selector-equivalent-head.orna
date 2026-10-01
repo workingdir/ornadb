@@ -1,0 +1,5 @@
+pub fn equivalent_head_selectors_compose() {
+    let symbolic = sys.database.as_of(HEAD);
+    let explicit = sys.database.as_of(sys.snapshot("HEAD"));
+    [symbolic.energy.daily, explicit.energy.daily]
+}

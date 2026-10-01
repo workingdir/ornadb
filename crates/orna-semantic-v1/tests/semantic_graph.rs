@@ -2649,6 +2649,16 @@ fn distinct_historical_callable_contexts_cannot_be_mixed() {
     );
 }
 
+#[test]
+fn equivalent_head_selectors_share_historical_callable_context() {
+    let source = include_str!("fixtures/historical-selector-equivalent-head.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new("historical-selector-equivalent-head.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
 fn historical_nested_callable_catalogue() -> Catalogue {
     let continuation = Type::Function {
         parameters: Vec::new(),
