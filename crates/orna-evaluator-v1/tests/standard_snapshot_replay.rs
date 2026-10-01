@@ -153,7 +153,7 @@ fn capture_standard_gitlink(
     git_output_at(project_path, &["rev-parse", "HEAD"])
 }
 
-fn module_upgrade_projects() -> (TempDir, LoadedProject, LoadedProject, String, String) {
+fn module_upgrade_projects() -> (TempDir, LoadedProject, LoadedProject, LoadedProject, [String; 3]) {
     let directory = tempfile::tempdir().unwrap();
     let project_path = directory.path().join("project");
     fs::create_dir_all(&project_path).unwrap();
@@ -205,34 +205,61 @@ fn module_upgrade_projects() -> (TempDir, LoadedProject, LoadedProject, String, 
     .unwrap();
     commit_directory(&standard_path, "standard module v2");
     let snapshot_v2 = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
-    capture_standard_gitlink(&project_path, &snapshot_v2, "capture std v2");
+    let parent_v2 = capture_standard_gitlink(&project_path, &snapshot_v2, "capture std v2");
+
+    fs::write(
+        standard_path.join("math.orna"),
+        include_str!("fixtures/module-upgrade-std-v3.orna"),
+    )
+    .unwrap();
+    commit_directory(&standard_path, "standard module v3");
+    let snapshot_v3 = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+    capture_standard_gitlink(&project_path, &snapshot_v3, "capture std v3");
 
     let repository = Repository::discover(&project_path).unwrap();
     let loader = ProjectLoader::default();
     let parent_v1 = repository.resolve_snapshot(&parent_v1).unwrap();
+    let parent_v2 = repository.resolve_snapshot(&parent_v2).unwrap();
     let historical = loader
         .load_committed_snapshot(&repository, &parent_v1)
         .unwrap();
+    let intermediate = loader
+        .load_committed_snapshot(&repository, &parent_v2)
+        .unwrap();
     let upgraded = loader.load(&repository).unwrap();
-    (directory, historical, upgraded, snapshot_v1, snapshot_v2)
+    (
+        directory,
+        historical,
+        intermediate,
+        upgraded,
+        [snapshot_v1, snapshot_v2, snapshot_v3],
+    )
 }
 
 #[test]
 fn project_gitlink_upgrade_keeps_historical_standard_sources_available() {
-    let (_directory, historical, upgraded, snapshot_v1, snapshot_v2) = module_upgrade_projects();
+    let (_directory, historical, intermediate, upgraded, snapshots) = module_upgrade_projects();
 
-    assert_ne!(snapshot_v1, snapshot_v2);
+    assert!(snapshots.windows(2).all(|pair| pair[0] != pair[1]));
     assert_eq!(
         historical.standard_profile().unwrap().snapshot(),
-        snapshot_v1
+        snapshots[0]
+    );
+    assert_eq!(
+        intermediate.standard_profile().unwrap().snapshot(),
+        snapshots[1]
     );
     assert_eq!(
         upgraded.standard_profile().unwrap().snapshot(),
-        snapshot_v2
+        snapshots[2]
     );
     for (project, expected) in [
         (&historical, include_str!("fixtures/module-upgrade-std-v1.orna")),
-        (&upgraded, include_str!("fixtures/module-upgrade-std-v2.orna")),
+        (
+            &intermediate,
+            include_str!("fixtures/module-upgrade-std-v2.orna"),
+        ),
+        (&upgraded, include_str!("fixtures/module-upgrade-std-v3.orna")),
     ] {
         assert_eq!(
             project
@@ -244,6 +271,59 @@ fn project_gitlink_upgrade_keeps_historical_standard_sources_available() {
             expected
         );
     }
+}
+
+fn admitted_upgrade_session(project: &LoadedProject) -> AdmittedReplSession {
+    let mut session = AdmittedReplSession::from_loaded_project(
+        project,
+        project.standard_sources().iter().cloned(),
+        Limits::default(),
+    )
+    .unwrap_or_else(|error| panic!("failed to admit upgraded project: {}", error.code()));
+    assert_eq!(
+        session.submit(include_str!("fixtures/snapshot-replay-use-math.orna")),
+        Ok(None)
+    );
+    session
+}
+
+#[test]
+fn module_upgrade_sessions_replay_with_their_captured_standard_snapshot() {
+    let (_directory, project_v1, project_v2, project_v3, snapshots) = module_upgrade_projects();
+    let mut session_v1 = admitted_upgrade_session(&project_v1);
+    let mut session_v2 = admitted_upgrade_session(&project_v2);
+    let mut session_v3 = admitted_upgrade_session(&project_v3);
+
+    for (session, direct, callback) in [
+        (&mut session_v1, 8, &[11][..]),
+        (&mut session_v2, 107, &[110][..]),
+        (&mut session_v3, 1007, &[1010][..]),
+    ] {
+        assert_eq!(
+            session.submit(include_str!("fixtures/snapshot-replay-direct-seven.orna")),
+            Ok(Some(int(direct)))
+        );
+        assert_eq!(
+            session.submit(include_str!("fixtures/snapshot-replay-callback-seven.orna")),
+            Ok(Some(ints(callback)))
+        );
+    }
+
+    assert_eq!(project_v1.standard_profile().unwrap().snapshot(), snapshots[0]);
+    assert_eq!(project_v2.standard_profile().unwrap().snapshot(), snapshots[1]);
+    assert_eq!(project_v3.standard_profile().unwrap().snapshot(), snapshots[2]);
+    assert_eq!(
+        session_v1.submit(include_str!("fixtures/snapshot-replay-callback-nine.orna")),
+        Ok(Some(ints(&[13])))
+    );
+    assert_eq!(
+        session_v2.submit(include_str!("fixtures/snapshot-replay-callback-nine.orna")),
+        Ok(Some(ints(&[112])))
+    );
+    assert_eq!(
+        session_v3.submit(include_str!("fixtures/snapshot-replay-callback-nine.orna")),
+        Ok(Some(ints(&[1012])))
+    );
 }
 
 #[test]
