@@ -100,6 +100,8 @@ const SPLIT_BYTE_REMAINDER_REPEATED_RESET_TAIL: &str =
     include_str!("fixtures/split_byte_remainder_repeated_reset_tail.orna");
 const MULTISCAN_SPLIT_BYTE_RESET_TAIL: &str =
     include_str!("fixtures/multiscan_split_byte_reset_tail.orna");
+const SPLIT_BYTE_WORK_UNKNOWN_EDGE_TAIL: &str =
+    include_str!("fixtures/split_byte_work_unknown_edge_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -9299,6 +9301,168 @@ fn explain_rounds_split_bytes_per_scan_and_reset_after_unknown() {
     }));
 
     let surface = serde_json::to_value(&overflow).expect("multi-scan reset overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_preserves_split_byte_work_on_both_sides_of_unknown_scan() {
+    let parsed = orna_syntax_v1::parse_module(SPLIT_BYTE_WORK_UNKNOWN_EDGE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 6);
+
+    // ORNA-PLAN leaves byte-cost units and cross-stage accumulation details
+    // unspecified. Continue the pragmatic local 4-KiB block model: one
+    // byte-only scan precedes an unknown scan and another follows it; two
+    // update resets and materialization close the MAX-8 source remainder.
+    // Both scan estimates and each update write round locally. A later
+    // unknown scan cannot erase the known lower bound before it, and a later
+    // reset cannot erase the split scan or write work that follows.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let source_rows = u64::MAX - MAX_BYTE_BLOCKS - 8;
+    let explain = |before_unknown_bytes, after_unknown_bytes, first_write_bytes, last_write_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:split-byte-work-unknown-edge"),
+            source: obj("table:SplitByteUnknownEdgeSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:SplitByteUnknownEdgeBefore"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(before_unknown_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SplitByteUnknownEdgeUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SplitByteUnknownEdgeAfter"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(after_unknown_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:SplitByteUnknownEdgeFirstReset"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(first_write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:SplitByteUnknownEdgeLastReset"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(last_write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+            ],
+            materialize_into: Some(obj("materialization:split-byte-work-unknown-edge")),
+        })
+        .expect("split scans around unknown input and repeated reset writes")
+    };
+
+    let below = explain(4_096, 0, 2_048, 2_048);
+    assert_eq!(below.plan().estimated_cost(), None);
+    assert_eq!(below.root().details().get("estimated_cost_overflow"), None);
+
+    for (before_unknown_bytes, after_unknown_bytes) in [(4_095, 4_096), (4_096, 4_095)] {
+        let exact = explain(before_unknown_bytes, after_unknown_bytes, 2_048, 2_048);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(
+            exact.root().details().get("estimated_cost_overflow"),
+            None,
+            "the pre- and post-unknown scan bounds combine with both reset writes"
+        );
+    }
+
+    for overflow in [
+        explain(4_097, 4_096, 2_048, 2_048),
+        explain(4_096, 4_097, 2_048, 2_048),
+        explain(4_096, 4_096, 4_097, 2_048),
+        explain(4_096, 4_096, 2_048, 4_097),
+    ] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "crossing one local rounding edge survives unknown and reset tails"
+        );
+    }
+
+    let overflow = explain(4_096, 4_096, 2_048, 4_097);
+    let nodes = overflow.nodes();
+    let position = |kind, name: &str| {
+        nodes
+            .iter()
+            .position(|node| node.kind() == kind && node.object() == Some(&obj(name)))
+            .expect("fixture-backed plan node appears")
+    };
+    let source_position = position(PlanNodeKind::Scan, "table:SplitByteUnknownEdgeSource");
+    let before_position = position(PlanNodeKind::Scan, "table:SplitByteUnknownEdgeBefore");
+    let unknown_position = position(PlanNodeKind::Scan, "table:SplitByteUnknownEdgeUnknown");
+    let after_position = position(PlanNodeKind::Scan, "table:SplitByteUnknownEdgeAfter");
+    let first_reset_position = position(PlanNodeKind::Invoke, "table:SplitByteUnknownEdgeFirstReset");
+    let last_reset_position = position(PlanNodeKind::Invoke, "table:SplitByteUnknownEdgeLastReset");
+    assert!(source_position < before_position);
+    assert!(before_position < unknown_position);
+    assert!(unknown_position < after_position);
+    assert!(last_reset_position < first_reset_position);
+    assert!(first_reset_position < source_position);
+    assert_eq!(
+        overflow.root().inputs(),
+        &[nodes[last_reset_position].reference().clone()]
+    );
+    assert_eq!(
+        nodes[last_reset_position].inputs(),
+        &[nodes[first_reset_position].reference().clone()]
+    );
+    assert_eq!(
+        nodes[after_position].parent(),
+        nodes[first_reset_position].inputs().first()
+    );
+    assert_eq!(nodes[source_position].estimated_work(), Some(u64::MAX - 8));
+    for (scan_position, bytes) in [(before_position, 4_096), (after_position, 4_096)] {
+        assert_eq!(nodes[scan_position].estimated_bytes(), Some(bytes));
+        assert_eq!(nodes[scan_position].estimated_work(), None);
+    }
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+    assert_eq!(nodes[first_reset_position].estimated_bytes(), Some(2_048));
+    assert_eq!(nodes[first_reset_position].estimated_work(), Some(2));
+    assert_eq!(nodes[last_reset_position].estimated_bytes(), Some(4_097));
+    assert_eq!(nodes[last_reset_position].estimated_work(), Some(3));
+    assert_eq!(overflow.root().estimated_rows(), Some(1));
+    assert_eq!(overflow.root().estimated_bytes(), Some(4_097));
+    assert_eq!(overflow.root().estimated_work(), Some(3));
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow).expect("unknown split-byte overflow surface");
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
