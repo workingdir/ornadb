@@ -5,7 +5,7 @@ use orna_foundation_v1::CanonicalValue;
 use orna_project_v1::{LoadedProject, ProjectLoader};
 use orna_repository_v1::{Repository, initialize_repository};
 use orna_semantic_v1::StandardDependencyProfile;
-use orna_value_v1::Raw;
+use orna_value_v1::{Raw, Value};
 use tempfile::TempDir;
 
 fn git_output_at(directory: &Path, arguments: &[&str]) -> String {
@@ -134,6 +134,10 @@ fn ints(values: &[i64]) -> CanonicalValue {
     .unwrap()
 }
 
+fn int(value: i64) -> CanonicalValue {
+    CanonicalValue::new(Value::int(value.into()).raw().clone()).unwrap()
+}
+
 #[test]
 fn replayed_closure_uses_its_captured_dependency_snapshot_after_snapshot_changes() {
     let (_directory, project_v1, project_v2, snapshot_v1, snapshot_v2, sources_v1, sources_v2) =
@@ -163,17 +167,46 @@ fn replayed_closure_uses_its_captured_dependency_snapshot_after_snapshot_changes
             .1,
         include_str!("fixtures/snapshot-replay-std-v2.orna")
     );
+    assert_eq!(
+        AdmittedReplSession::from_loaded_project(
+            &project_v1,
+            sources_v2.clone(),
+            Limits::default(),
+        )
+        .unwrap_err()
+        .code(),
+        "ORNA-REPL-STANDARD"
+    );
 
     let mut historical =
         AdmittedReplSession::from_loaded_project(&project_v1, sources_v1, Limits::default())
             .unwrap();
+    assert_eq!(
+        historical.submit(include_str!("fixtures/snapshot-replay-use-math.orna")),
+        Ok(None)
+    );
+    let historical_direct = historical
+        .submit(include_str!("fixtures/snapshot-replay-direct-seven.orna"))
+        .unwrap_or_else(|error| panic!("historical source export call failed: {}", error.code()));
+    assert_eq!(historical_direct, Some(int(8)));
     let source = include_str!("fixtures/snapshot-replay-callback-seven.orna");
-    assert_eq!(historical.submit(source), Ok(Some(ints(&[8]))));
+    let historical_callback = historical
+        .submit(source)
+        .unwrap_or_else(|error| panic!("historical callback failed: {}", error.code()));
+    assert_eq!(historical_callback, Some(ints(&[8])));
     let mut replay = historical.clone();
 
     let mut current =
         AdmittedReplSession::from_loaded_project(&project_v2, sources_v2, Limits::default())
             .unwrap();
+    assert_eq!(
+        current.submit(include_str!("fixtures/snapshot-replay-use-math.orna")),
+        Ok(None)
+    );
+    assert_eq!(
+        current.submit(include_str!("fixtures/snapshot-replay-direct-seven.orna")),
+        Ok(Some(int(107)))
+    );
     assert_eq!(current.submit(source), Ok(Some(ints(&[107]))));
     assert_eq!(
         replay.submit(include_str!("fixtures/snapshot-replay-callback-nine.orna")),

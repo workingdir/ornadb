@@ -1,1 +1,1 @@
-pub fn increment(value: Int): Int = value + 100;
+pub fn shift(value: Int): Int = value + 100;
