@@ -76,6 +76,13 @@ fn continue_after_seventeenth_handoff() {
         Note.rekey(3, 2);
         Note.rekey(6, 3);
         Note.update(3, { quantity: 42 })
+    });
+    Note.rekey(3, 2) |? (owner_retries_after_nineteenth_handoff => {
+        Note.update(3, { quantity: 43 });
+        Note.rekey(2, 6);
+        Note.rekey(3, 2);
+        Note.rekey(6, 3);
+        Note.update(3, { quantity: 44 })
     })
 }
 
