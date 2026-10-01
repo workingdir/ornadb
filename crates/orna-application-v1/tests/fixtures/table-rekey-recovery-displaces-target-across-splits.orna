@@ -24,8 +24,16 @@ fn owner_retries_after_competitor_moves() {
 fn first_recovery() {
     competitor_retries_after_blocker_moves();
     owner_retries_after_competitor_moves();
-    Note.update(3, { quantity: 11 })
+    Note.update(3, { quantity: 11 });
+    Note.rekey(99, 100)
+}
+
+fn outer_recovery() {
+    Note.rekey(3, 1);
+    Note.rekey(5, 3);
+    Note.update(3, { quantity: 23 })
 }
 
 fn main() = Note.rekey(1, 2)
-    |? (owner_target_occupied => first_recovery());
+    |? (owner_target_occupied => first_recovery())
+    |? (nested_recovery_failed => outer_recovery());

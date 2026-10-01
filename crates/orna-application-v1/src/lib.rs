@@ -9016,9 +9016,9 @@ mod tests {
     #[test]
     fn recovery_rekey_displaces_competitor_across_nested_splits() {
         // The reference specifies atomic re-key failures and recovery ordering,
-        // but not an inner recovery that moves a blocker before retrying one
-        // re-key, then handles another re-key failure by moving its blocker.
-        // Local policy: nested retries observe successful inner mutations.
+        // but not a recovery re-key that moves its blocker before an enclosing
+        // split reuses the owner's and competitor's released keys. Local policy:
+        // later recoveries observe successful mutations from inner handlers.
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
         let application = authority
@@ -9060,25 +9060,25 @@ mod tests {
             application.limits,
             &mut handler,
         )
-        .expect("nested recovery rekeys should displace their blockers");
+        .expect("nested recovery rekeys should displace blockers and reuse released keys");
 
-        assert_eq!(handler.current_row("Note", &key(1)).unwrap(), None);
+        assert_eq!(
+            handler.current_row("Note", &key(1)).unwrap(),
+            Some(row(1, "owner", 11))
+        );
         assert_eq!(handler.current_row("Note", &key(2)).unwrap(), None);
         assert_eq!(
             handler.current_row("Note", &key(3)).unwrap(),
-            Some(row(3, "owner", 11))
+            Some(row(3, "competitor", 23))
         );
         assert_eq!(
             handler.current_row("Note", &key(4)).unwrap(),
             Some(row(4, "blocker", 30))
         );
-        assert_eq!(
-            handler.current_row("Note", &key(5)).unwrap(),
-            Some(row(5, "competitor", 22))
-        );
+        assert_eq!(handler.current_row("Note", &key(5)).unwrap(), None);
 
         let mutations = handler.into_mutations().expect("valid ordered mutation log");
-        assert_eq!(mutations.len(), 7, "failed rekeys add no mutations");
+        assert_eq!(mutations.len(), 10, "failed rekeys add no mutations");
         let expected = [
             (3, Some(4), Some(row(4, "blocker", 30))),
             (2, Some(3), Some(row(3, "competitor", 20))),
@@ -9087,6 +9087,9 @@ mod tests {
             (5, None, Some(row(5, "competitor", 22))),
             (1, Some(3), Some(row(3, "owner", 10))),
             (3, None, Some(row(3, "owner", 11))),
+            (3, Some(1), Some(row(1, "owner", 11))),
+            (5, Some(3), Some(row(3, "competitor", 22))),
+            (3, None, Some(row(3, "competitor", 23))),
         ];
         for (index, (mutation, (old_key, new_key, expected_row))) in
             mutations.iter().zip(expected).enumerate()
