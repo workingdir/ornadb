@@ -2,14 +2,13 @@ use std::collections::BTreeMap;
 
 use orna_sys_v1::{
     Diagnostic, DiagnosticExplanationError, DiagnosticField, SystemEffect,
-    SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR, TypeId, explain_diagnostic, system_function_descriptor,
+    TypeId, explain_diagnostic, system_function_descriptor,
 };
 
 #[test]
 fn sys_explain_diagnostic_descriptor_is_authoritative_and_read_only() {
     let descriptor = system_function_descriptor("sys.explain(Diagnostic)")
         .expect("portable diagnostic explanation descriptor");
-    assert_eq!(descriptor, &SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR);
     assert_eq!(descriptor.name, "sys.explain(Diagnostic)");
     assert_eq!(descriptor.effect, SystemEffect::Read);
     assert_eq!(

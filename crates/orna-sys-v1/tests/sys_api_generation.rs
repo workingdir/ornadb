@@ -7,7 +7,29 @@ use serde_json::Value;
 mod build_support;
 
 const PUBLISHED_SYS_API: &str = include_str!("../../../api/sys.json");
+const PUBLISHED_SYS_SCHEMA: &str = include_str!("../../../api/sys.schema.json");
 const SYSTEM_API_FIXTURE: &str = include_str!("fixtures/system-api-annotation.orna");
+
+fn assert_canonical_object_key_order(value: &Value) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                assert_canonical_object_key_order(item);
+            }
+        }
+        Value::Object(object) => {
+            let keys = object.keys().collect::<Vec<_>>();
+            assert!(
+                keys.windows(2).all(|pair| pair[0] < pair[1]),
+                "JSON object members must be lexicographically ordered: {keys:?}"
+            );
+            for child in object.values() {
+                assert_canonical_object_key_order(child);
+            }
+        }
+        _ => {}
+    }
+}
 
 #[test]
 fn published_schema_is_the_deterministic_annotated_method_projection() {
@@ -16,6 +38,35 @@ fn published_schema_is_the_deterministic_annotated_method_projection() {
         PUBLISHED_SYS_API,
         "regenerate api/sys.json with `cargo run -p orna-sys-v1 --example write_sys_api > api/sys.json`"
     );
+}
+
+#[test]
+fn published_json_schema_covers_the_generated_artifact_and_closed_type_graph() {
+    let schema: Value = serde_json::from_str(PUBLISHED_SYS_SCHEMA).expect("published JSON Schema");
+    let api: Value = serde_json::from_str(&system_api_json()).expect("generated system API JSON");
+    let properties = schema["properties"].as_object().expect("schema root properties");
+    let mut property_names = properties.keys().cloned().collect::<Vec<_>>();
+    let mut required_names = schema["required"]
+        .as_array()
+        .expect("schema root required members")
+        .iter()
+        .map(|name| name.as_str().expect("required member name").to_owned())
+        .collect::<Vec<_>>();
+    property_names.sort();
+    required_names.sort();
+
+    assert_eq!(schema["$schema"], "https://json-schema.org/draft/2020-12/schema");
+    assert_eq!(schema["type"], "object");
+    assert_eq!(schema["additionalProperties"], false);
+    assert_eq!(property_names, required_names);
+    assert_canonical_object_key_order(&api);
+    assert_eq!(
+        build_support::canonical_pretty_json(&api).expect("canonical artifact serialization"),
+        system_api_json().trim_end(),
+        "the generator must emit stable canonical member order"
+    );
+    build_support::validate_api_document(&api)
+        .expect("generated API type graph is closed and shape-valid");
 }
 
 #[test]
