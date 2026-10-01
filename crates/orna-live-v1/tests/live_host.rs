@@ -2840,6 +2840,15 @@ fn resume_transport_session_with_socket(
 
 #[test]
 fn terminal_status_snapshot_survives_http_reconnect() {
+    terminal_status_snapshot_survives_http_reconnect_with(UnitEvalOutcome::Unit);
+}
+
+#[test]
+fn terminal_failure_status_snapshot_survives_http_reconnect() {
+    terminal_status_snapshot_survives_http_reconnect_with(UnitEvalOutcome::SemanticFailure);
+}
+
+fn terminal_status_snapshot_survives_http_reconnect_with(eval_outcome: UnitEvalOutcome) {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
 
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
@@ -2862,7 +2871,10 @@ fn terminal_status_snapshot_survives_http_reconnect() {
         Message::Eval { source, .. } if source == FIXTURE
     ));
     let target_fingerprint = request_fingerprint(&target_request, [1; 16]);
-    let mut application = UnitApplication::default();
+    let mut application = UnitApplication {
+        eval_outcome,
+        ..UnitApplication::default()
+    };
     let target_output = block_on(transport.receive_with_application(
         &mut old_socket,
         1,
