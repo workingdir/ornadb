@@ -1,10 +1,14 @@
-use serde_json::Value;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Path, PathBuf},
+};
+
+use serde_json::{Value, json};
 use syn::{
     Expr, ForeignItem, ImplItem, ItemFn, Lit, TraitItem,
     visit::{self, Visit},
 };
-use std::collections::BTreeSet;
-
 #[derive(Clone, Debug)]
 pub struct Function {
     #[allow(dead_code)] // Read by collector proofs; not needed while emitting API JSON.
@@ -18,6 +22,204 @@ pub struct Function {
 pub struct Collector {
     pub functions: Vec<Function>,
     pub errors: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GeneratedSysArtifacts {
+    pub api_json: String,
+    pub provider_abi_json: String,
+    pub binding_modules: BTreeMap<String, String>,
+    pub binding_bundle: String,
+}
+
+/// Collect the same explicitly written Rust source methods consumed by build.rs.
+/// Keeping traversal here lets the parity test rerun the real registry collector.
+pub fn collect_rust_sources(root: &Path) -> Result<Collector, String> {
+    fn rust_sources(root: &Path, output: &mut Vec<PathBuf>) -> Result<(), String> {
+        let mut entries = fs::read_dir(root)
+            .map_err(|error| format!("read source directory {}: {error}", root.display()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("list source directory {}: {error}", root.display()))?;
+        entries.sort_by_key(|entry| entry.path());
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                rust_sources(&path, output)?;
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                output.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    let mut sources = Vec::new();
+    rust_sources(root, &mut sources)?;
+    let mut collector = Collector::default();
+    for source in sources {
+        let text = fs::read_to_string(&source)
+            .map_err(|error| format!("read {}: {error}", source.display()))?;
+        collector.collect_source(&source.display().to_string(), &text);
+    }
+    if !collector.errors.is_empty() {
+        return Err(collector.errors.join("\n"));
+    }
+    if collector.functions.is_empty() {
+        return Err("no #[ornasys] trait or implementation methods were collected".to_owned());
+    }
+    validate_collection(&collector.functions)?;
+    Ok(collector)
+}
+
+/// Generate every published or embedded sys binding artifact from the one
+/// implementation-annotated registry. build.rs and its CI parity proof use
+/// this same projection so the check guards the production generation path.
+pub fn generate_sys_artifacts(
+    functions: &[Function],
+    registry: Value,
+    schema: &Value,
+) -> Result<GeneratedSysArtifacts, String> {
+    validate_collection(functions)?;
+    let function_metadata = functions
+        .iter()
+        .map(|function| function.metadata.clone())
+        .collect::<Vec<_>>();
+    let api = generate_system_api_document(registry, function_metadata)?;
+    validate_published_schema_shape(&api, schema)?;
+    let mut api_json = canonical_pretty_json(&api).map_err(|error| error.to_string())?;
+    api_json.push('\n');
+
+    let provider_abi = generate_provider_abi(functions, &api)?;
+    let mut provider_abi_json =
+        canonical_pretty_json(&provider_abi).map_err(|error| error.to_string())?;
+    provider_abi_json.push('\n');
+    let operations = provider_abi["operations"]
+        .as_array()
+        .ok_or_else(|| "generated typed provider operations must be an array".to_owned())?;
+    let (binding_modules, binding_bundle) = generate_binding_bundle(operations)?;
+
+    Ok(GeneratedSysArtifacts {
+        api_json,
+        provider_abi_json,
+        binding_modules,
+        binding_bundle,
+    })
+}
+
+fn generate_provider_abi(functions: &[Function], api: &Value) -> Result<Value, String> {
+    let declared_failures = api["failure_codes"]
+        .as_array()
+        .ok_or_else(|| "validated API failure-code array is missing".to_owned())?;
+    let operations = functions
+        .iter()
+        .map(|function| {
+            let name = function.metadata["name"]
+                .as_str()
+                .ok_or_else(|| "validated operation name is missing".to_owned())?;
+            let operation_namespace = name
+                .find(['(', '<'])
+                .map_or(name, |end| &name[..end]);
+            let failures = declared_failures
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|code| {
+                    *code == operation_namespace
+                        || code
+                            .strip_prefix(operation_namespace)
+                            .is_some_and(|tail| tail.starts_with('.'))
+                })
+                .collect::<Vec<_>>();
+            let preconditions = function.metadata["preconditions"]
+                .as_str()
+                .map(|value| vec![value])
+                .unwrap_or_default();
+            Ok(json!({
+                "name": name,
+                "version": {"major": 1, "minor": 0},
+                "signature": function.metadata["signature"],
+                "effect": function.metadata["effect"],
+                "preconditions": preconditions,
+                "failures": failures,
+                "role": function.role,
+            }))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let mut roles = BTreeMap::<String, Value>::new();
+    for function in functions {
+        let Some(role) = &function.role else {
+            continue;
+        };
+        let (name, major, minor) = parse_role_version(role)?;
+        let effect = function.metadata["effect"]
+            .as_str()
+            .ok_or_else(|| "validated role operation effect is missing".to_owned())?;
+        let role_entry = roles.entry(name.to_owned()).or_insert_with(|| {
+            json!({
+                "name": name,
+                "version": {"major": major, "minor": minor},
+                "effects": [],
+                "operations": [],
+                "required": true,
+                "replaceable": false,
+                "builtin_provider": "orna.sys.v1",
+            })
+        });
+        role_entry["effects"]
+            .as_array_mut()
+            .expect("generated effect array")
+            .push(json!(effect));
+        role_entry["operations"]
+            .as_array_mut()
+            .expect("generated role operation list")
+            .push(function.metadata["name"].clone());
+    }
+    for role in roles.values_mut() {
+        let effects = role["effects"]
+            .as_array()
+            .expect("generated role effects")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<BTreeSet<_>>();
+        if effects.len() != 1 {
+            return Err("semantic role has incompatible effects".to_owned());
+        }
+        role["effects"] = json!(effects);
+        let operations = role["operations"]
+            .as_array()
+            .expect("generated role operation list")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<BTreeSet<_>>();
+        role["operations"] = json!(operations);
+    }
+    Ok(json!({
+        "abi_version": {"major": 1, "minor": 0},
+        "operations": operations,
+        "roles": roles.into_values().collect::<Vec<_>>(),
+    }))
+}
+
+pub fn generate_binding_bundle(
+    operations: &[Value],
+) -> Result<(BTreeMap<String, String>, String), String> {
+    let generated_stubs = generate_binding_stubs(operations)?;
+    let mut modules = BTreeMap::<String, String>::new();
+    let mut bundle = String::from(
+        "// Generated sys binding declaration bundle. Module markers identify the emitted .orna file.\n",
+    );
+    for stub in generated_stubs {
+        let relative_path = format!("{}.orna", stub.module.replace('.', "/"));
+        let module_source = modules.entry(relative_path).or_insert_with(|| {
+            format!(
+                "// Generated built-in module `{}` from the typed sys provider registry.\n// Orna keyword parameter aliases are suffixed with `_`; comments preserve registered names.\n",
+                stub.module
+            )
+        });
+        module_source.push_str(&stub.source);
+        bundle.push_str(&format!("// sys-module: {}\n", stub.module));
+        bundle.push_str(&stub.source);
+    }
+    Ok((modules, bundle))
 }
 
 /// Serialize API JSON with RFC 8785-style stable object-key ordering while
