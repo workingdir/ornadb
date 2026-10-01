@@ -1879,6 +1879,118 @@ fn nested_rebind_chain_keeps_longer_sibling_and_uses_each_replacement_manifest()
 }
 
 #[test]
+fn alias_rebind_storm_keeps_latest_exact_manifest_and_prior_route_snapshots() {
+    let package_source = include_str!("fixtures/attach-package.orna");
+    let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
+
+    let original_short = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "20",
+        None,
+        "original short route before rebound storm",
+    );
+    let original_long = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "30",
+        None,
+        "original longer prefix route before rebound storm",
+    );
+    let original_deep = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "40",
+        None,
+        "original deepest prefix route before rebound storm",
+    );
+
+    let mut replacements = Vec::new();
+    for revision in 0..3 {
+        let child = write_package_snapshot(
+            shared_dir.path(),
+            package_source,
+            &format!("{}", 60 + revision),
+            None,
+            &format!("storm child revision {revision}"),
+        );
+        let deep_sibling = write_package_snapshot(
+            shared_dir.path(),
+            package_source,
+            &format!("{}", 70 + revision),
+            None,
+            &format!("storm deep sibling revision {revision}"),
+        );
+        let manifest = format!(
+            "archive_copy {child}\narchive_copy_archive {deep_sibling}\n"
+        );
+        let replacement = write_package_snapshot(
+            shared_dir.path(),
+            package_source,
+            &format!("{}", 50 + revision),
+            Some(&manifest),
+            &format!("short alias rebound revision {revision}"),
+        );
+        replacements.push(replacement);
+    }
+
+    let root_manifest = format!(
+        "archive {original_short}\narchive_copy {original_long}\narchive_copy_archive {original_deep}\n"
+    );
+    let (_root_dir, root_repository, root_commit) = repository(&[
+        ("main.orna", include_str!("fixtures/attach-primary.orna")),
+        (PACKAGE_PIN_MANIFEST_PATH, &root_manifest),
+    ]);
+    let loader = ProjectLoader::default();
+    let primary = PinnedDatabase::resolve("app", root_repository, &root_commit, loader).unwrap();
+    let resolver = PackageResolver::new(
+        [
+            ("archive".to_owned(), shared_repository.clone()),
+            ("archive_copy".to_owned(), shared_repository.clone()),
+            ("archive_copy_archive".to_owned(), shared_repository.clone()),
+        ],
+        loader,
+    )
+    .unwrap();
+
+    let mut session = resolver.resolve_for_parent(primary).unwrap();
+    let original_session = session.clone();
+    for revision in [0, 1, 2, 0, 2, 1, 2] {
+        let replacement = PinnedDatabase::resolve(
+            "archive",
+            shared_repository.clone(),
+            &replacements[revision],
+            loader,
+        )
+        .unwrap();
+        session.detach_database("archive").unwrap();
+        session.attach_database(replacement).unwrap();
+
+        assert_module_route(
+            &session,
+            "archive.orna",
+            &format!("= {}", 50 + revision),
+        );
+        assert_module_route(&session, "archive_copy.orna", "= 30");
+        assert_module_route(&session, "archive_copy_archive.orna", "= 40");
+        assert_module_route(&original_session, "archive.orna", "= 20");
+        assert_module_route(&original_session, "archive_copy.orna", "= 30");
+    }
+
+    let latest = PinnedDatabase::resolve(
+        "archive",
+        shared_repository,
+        &replacements[2],
+        loader,
+    )
+    .unwrap();
+    let latest_closure = resolver.resolve_for_parent(latest).unwrap();
+    assert_module_route(&latest_closure, "main.orna", "= 52");
+    assert_module_route(&latest_closure, "archive_copy.orna", "= 62");
+    assert_module_route(&latest_closure, "archive_copy_archive.orna", "= 72");
+}
+
+#[test]
 fn deep_rebind_chain_uses_exact_parent_aliases_at_each_depth() {
     let package_source = include_str!("fixtures/attach-package.orna");
     let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
