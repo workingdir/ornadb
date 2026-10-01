@@ -1,0 +1,22 @@
+// Pinned callbacks retain their closure snapshot after the defining local changes.
+if true {
+    let step = 10;
+    let shift = (value: Int) => value + step;
+    step = 100;
+
+    let extra = 20;
+    let expand = (value: Int) => [value, value + extra];
+    extra = 200;
+
+    let divisor = 10;
+    let bucket = (value: Int) => value % divisor;
+    divisor = 100;
+
+    [
+        collection_ops.map([1, 2], shift) == [11, 12],
+        collection_ops.flat_map([1, 2], expand) == [1, 21, 2, 22],
+        collection_ops.sort_by([22, 11, 23, 12], bucket) == [11, 22, 12, 23],
+        collection_ops.group_by([22, 11, 23, 12], bucket) == [(1, [11]), (2, [22, 12]), (3, [23])],
+        collection_ops.rank([22, 11, 23, 12], bucket) == [(11, 1), (22, 2), (12, 2), (23, 4)]
+    ]
+} else { [false, false, false, false, false] }
