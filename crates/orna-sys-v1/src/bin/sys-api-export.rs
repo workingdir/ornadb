@@ -50,20 +50,30 @@ fn validate_embedded_schema(api_json: &str, schema_json: &str) -> Result<(), Box
 
 fn main() -> Result<(), Box<dyn Error>> {
     let api_json = system_api_json();
-    validate_embedded_schema(&api_json, system_api_schema_json())?;
+    let schema_json = system_api_schema_json();
+    validate_embedded_schema(&api_json, schema_json)?;
 
     let mut arguments = env::args_os().skip(1);
-    if let Some(output) = arguments.next() {
-        if arguments.next().is_some() {
-            return Err("usage: sys-api-export [output-path]".into());
-        }
+    let first = arguments.next();
+    let (content, output) = match first.as_deref().and_then(|arg| arg.to_str()) {
+        Some("--schema") => (schema_json, arguments.next()),
+        _ => (api_json.as_str(), first),
+    };
+    if arguments.next().is_some() {
+        return Err("usage: sys-api-export [--schema] [output-path]".into());
+    }
+
+    if let Some(output) = output {
         let output = Path::new(&output);
-        if let Some(parent) = output.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        if let Some(parent) = output
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
             fs::create_dir_all(parent)?;
         }
-        fs::write(output, api_json)?;
+        fs::write(output, content)?;
     } else {
-        io::stdout().lock().write_all(api_json.as_bytes())?;
+        io::stdout().lock().write_all(content.as_bytes())?;
     }
     Ok(())
 }

@@ -15593,6 +15593,230 @@ fn flattened_row_tombstones(plan: &BranchMergePlan) -> Vec<CanonicalValue> {
         .collect()
 }
 
+fn logical_split_manifest(digest: u8, boundaries: &[&str]) -> TableManifest {
+    let encoded_boundaries = boundaries
+        .iter()
+        .map(|boundary| string(boundary).encode().unwrap())
+        .collect::<Vec<_>>();
+    let mut ranges = Vec::with_capacity(encoded_boundaries.len() + 1);
+    let mut start = None;
+    for end in encoded_boundaries {
+        ranges.push(KeyRange::new(start, Some(end.clone())).unwrap());
+        start = Some(end);
+    }
+    ranges.push(KeyRange::new(start, None).unwrap());
+    TableManifest {
+        digest: [digest; 32],
+        segments: ranges
+            .into_iter()
+            .enumerate()
+            .map(|(index, range)| RowSegmentManifest {
+                locator: format!("layout-{digest}-{index}").into_bytes(),
+                range,
+                digest: [digest.wrapping_add(index as u8); 32],
+            })
+            .collect(),
+    }
+}
+
+fn unaligned_tombstone_inputs(
+    layout: u8,
+    with_conflicts: bool,
+    reverse_rows: bool,
+) -> (
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    FixtureRows,
+) {
+    let root = parse_fixture(TOMBSTONE_DEPTH_SHALLOW, RowKeyKind::Explicit);
+    let middle = parse_fixture(TOMBSTONE_DEPTH_MIDDLE, RowKeyKind::Explicit);
+    let deep = parse_fixture(TOMBSTONE_DEPTH_DEEP, RowKeyKind::Explicit);
+    let tail = rekey_row(&root, "z");
+    let mut left_rows = if with_conflicts {
+        vec![deep.clone(), edit_name(&tail, "left tail edit")]
+    } else {
+        vec![middle.clone(), tail.clone()]
+    };
+    let mut right_rows = if with_conflicts {
+        vec![root.clone(), edit_name(&middle, "right middle edit")]
+    } else {
+        vec![deep.clone(), tail.clone()]
+    };
+    let mut base_rows = vec![root, middle, deep, tail];
+    if reverse_rows {
+        base_rows.reverse();
+        left_rows.reverse();
+        right_rows.reverse();
+    }
+
+    // Different split points force the planner's whole-table fallback. The
+    // logical key order is root, child, deep child, then the short `z` key.
+    let (base_bounds, left_bounds, right_bounds) = if layout == 0 {
+        (&["root/child", "root/child/deep"][..], &["root/child/deep"][..], &[][..])
+    } else {
+        (&[][..], &["root/child", "root/child/deep"][..], &["root/child"][..])
+    };
+    let base = snapshot(
+        string_key_schema(),
+        logical_split_manifest(31 + layout * 3, base_bounds),
+        None,
+    );
+    let left = snapshot(
+        string_key_schema(),
+        logical_split_manifest(32 + layout * 3, left_bounds),
+        None,
+    );
+    let right = snapshot(
+        string_key_schema(),
+        logical_split_manifest(33 + layout * 3, right_bounds),
+        None,
+    );
+    let mut source = FixtureRows::default();
+    // An absent segment locator denotes the complete logical table for this
+    // adapter fixture, as required by the row-source contract.
+    source.add(MergeSide::Base, b"", base_rows);
+    source.add(MergeSide::Left, b"", left_rows);
+    source.add(MergeSide::Right, b"", right_rows);
+    (base, left, right, source)
+}
+
+#[test]
+fn concurrent_unaligned_split_tombstones_keep_logical_order() {
+    let (base_a, left_a, right_a, source_a) = unaligned_tombstone_inputs(0, false, false);
+    let (base_b, left_b, right_b, source_b) = unaligned_tombstone_inputs(1, false, true);
+    let start = Arc::new(Barrier::new(2));
+    let start_a = Arc::clone(&start);
+    let load_a = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: source_a,
+            first_load: Some(start_a),
+        };
+        let plan = merge_three_way_snapshots(
+            &base_a,
+            &left_a,
+            &right_a,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 8, max_conflicts: 0 },
+        )
+        .expect("the first unaligned split load completes");
+        (plan, source.source.visited)
+    });
+    let load_b = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: source_b,
+            first_load: Some(start),
+        };
+        let plan = merge_three_way_snapshots(
+            &base_b,
+            &left_b,
+            &right_b,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 8, max_conflicts: 0 },
+        )
+        .expect("the second unaligned split load completes");
+        (plan, source.source.visited)
+    });
+
+    let (plan_a, visits_a) = load_a.join().expect("first fallback worker completes");
+    let (plan_b, visits_b) = load_b.join().expect("second fallback worker completes");
+    assert_eq!(plan_a, plan_b, "layout and row-source order do not change the merge");
+    assert_eq!(
+        visits_a,
+        vec![
+            (MergeSide::Base, Vec::new()),
+            (MergeSide::Left, Vec::new()),
+            (MergeSide::Right, Vec::new()),
+        ],
+        "unaligned manifests are read once per side as complete tables",
+    );
+    assert_eq!(visits_b, visits_a);
+    assert_eq!(plan_a.report.rows_examined, 8);
+    let [MergedSegment::Rows { range, rows, tombstones }] =
+        plan_a.tables[&id(1)].segments.as_slice()
+    else {
+        panic!("an unaligned table merge materializes one complete range")
+    };
+    assert_eq!(*range, KeyRange::all());
+    assert_eq!(
+        tombstones,
+        &[string("root"), string("root/child"), string("root/child/deep")],
+    );
+    assert_eq!(rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>(), vec![string("z")]);
+}
+
+#[test]
+fn concurrent_unaligned_tombstones_and_conflicts_follow_one_logical_order() {
+    let (base_a, left_a, right_a, source_a) = unaligned_tombstone_inputs(0, true, false);
+    let (base_b, left_b, right_b, source_b) = unaligned_tombstone_inputs(1, true, true);
+    let start = Arc::new(Barrier::new(2));
+    let start_a = Arc::clone(&start);
+    let merge_a = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: source_a,
+            first_load: Some(start_a),
+        };
+        merge_three_way_snapshots(
+            &base_a,
+            &left_a,
+            &right_a,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 8, max_conflicts: 2 },
+        )
+    });
+    let merge_b = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: source_b,
+            first_load: Some(start),
+        };
+        merge_three_way_snapshots(
+            &base_b,
+            &left_b,
+            &right_b,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 8, max_conflicts: 2 },
+        )
+    });
+    let result_a = merge_a.join().expect("first conflict worker completes");
+    let result_b = merge_b.join().expect("second conflict worker completes");
+    assert_eq!(result_a, result_b, "concurrent fallback plans report the same conflict order");
+    let BranchMergeError::Conflicts { conflicts, report } = result_a.unwrap_err() else {
+        panic!("both ordered delete/edit conflicts fit the exact budget")
+    };
+    let conflict_keys = conflicts
+        .iter()
+        .map(|conflict| match conflict {
+            BranchMergeConflict::Row {
+                conflict: orna_evolution_v1::RowMergeConflict::DeleteAndEdit { key, .. },
+                ..
+            } => key.clone(),
+            other => panic!("unexpected unaligned split conflict: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(conflict_keys, vec![string("root/child"), string("z")]);
+    assert_eq!(report.rows_examined, 8);
+    assert_eq!(report.conflicts_lower_bound, 2);
+    assert_eq!(report.affected_ranges, [(id(1), KeyRange::all())].into_iter().collect());
+
+    for (max_conflicts, lower_bound) in [(0, 1), (1, 2)] {
+        let (base, left, right, mut source) = unaligned_tombstone_inputs(0, true, true);
+        let error = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 8, max_conflicts },
+        )
+        .unwrap_err();
+        let BranchMergeError::BudgetExceeded { report } = error else {
+            panic!("the first conflict beyond the detail budget stops the fallback walk")
+        };
+        assert_eq!(report.rows_examined, 8);
+        assert_eq!(report.conflicts_lower_bound, lower_bound);
+        assert_eq!(report.affected_ranges, [(id(1), KeyRange::all())].into_iter().collect());
+    }
+}
+
 #[test]
 fn fixture_cross_depth_tombstones_keep_order_at_exact_load_budget() {
     // ORNA-MERGE-005 requires bounded work and an isolated complete result,
