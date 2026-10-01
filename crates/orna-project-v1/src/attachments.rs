@@ -237,7 +237,11 @@ impl PackageResolver {
     /// lookup for every selected parent's historical manifest.
     /// After a caller rebinds an alias, selecting that replacement here loads
     /// its own committed manifest. Sibling aliases remain pinned in the source
-    /// session and do not retarget the replacement's closure.
+    /// session and do not retarget the replacement's closure. Each replacement
+    /// starts a new resolution branch: aliases from the prior parent's
+    /// manifest are not inherited or used as fallback at the next depth. The
+    /// reference is silent on precedence across rebound alias chains; v1 makes
+    /// the selected parent's committed manifest authoritative for that depth.
     /// The reference requires each historical parent's exact pins but does not
     /// require flattening a recursive closure into one session.
     pub fn resolve_for_parent(
