@@ -271,3 +271,4 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 ## External reference records
 
 * [Sys binding architecture addendum](0113-reference-sys-bindings-addendum.md) — records the standalone Orna 1.0.0 reference-tree addendum and its checksum verification.
+* [Sys binding addendum placement check](0114-reference-sys-bindings-placement-check.md) — verifies the previously placed reference file and proves byte identity for the reference tree.
