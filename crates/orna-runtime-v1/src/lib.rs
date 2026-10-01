@@ -21068,7 +21068,7 @@ mod tests {
         let mutations = (1u8..=22)
             .map(|row_id| {
                 let title = if row_id == 5 { "later" } else { "current" };
-                let target = if matches!(row_id, 8 | 10) { 99 } else { row_id };
+                let target = if row_id == 8 { 99 } else { row_id };
                 query_test_mutation(
                     row_id + 40,
                     row_id,
@@ -24015,7 +24015,7 @@ mod tests {
                 } else {
                     "current"
                 };
-                let target = if row_id == 8 { 99 } else { row_id };
+                let target = if matches!(row_id, 8 | 10) { 99 } else { row_id };
                 query_test_mutation(
                     row_id + 40,
                     row_id,
@@ -24091,6 +24091,110 @@ mod tests {
             (lookups, scans),
             (2, 3),
             "an in-prefix failure remains visible while the final take is unsatisfied"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_split_pressure_mixed_limits_stop_after_two_matches() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=12)
+            .map(|row_id| {
+                let title = if matches!(row_id, 7 | 11) {
+                    "later"
+                } else {
+                    "current"
+                };
+                let target = if matches!(row_id, 8 | 10 | 12) {
+                    99
+                } else {
+                    row_id
+                };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(133), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference requires input-order filtering and bounded take work,
+        // but is silent on this split-pressure mix. The first filter rejects
+        // row eight before take(5); the next filter rejects row ten after that
+        // cap; the lookup filter rejects row nine. Preserve both matches and
+        // stop before row twelve's missing lookup once take(2) is full.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-take-two-split-pressure-mixed-limit-stop.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(2u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 5),
+            "split-filter rejects count toward scan pressure, not the two-result demand"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_split_pressure_mixed_limits_preserve_failure_while_take_is_short() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=11)
+            .map(|row_id| {
+                let title = if row_id == 7 { "later" } else { "current" };
+                let target = if matches!(row_id, 8 | 10 | 11) {
+                    99
+                } else {
+                    row_id
+                };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(134), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // Row eight is rejected before the intermediate take. Row ten consumes
+        // one of its four slots and is rejected afterward. Row nine supplies
+        // another lookup rejection; row eleven then fails lookup while only
+        // one final match exists, so the failure remains inside the demanded
+        // prefix.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-take-two-split-pressure-mixed-limit-failure.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 5),
+            "the short take reaches lookup failure after rejects on both sides of its split cap"
         );
     }
 
