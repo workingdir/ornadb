@@ -3584,6 +3584,40 @@ fn positive_factor_rescaled_tails_close_after_seventy_seventh_doubling() {
 }
 
 #[test]
+fn positive_factor_rescaled_tails_close_after_seventy_eighth_doubling() {
+    // The reference is silent at this next scale. Continue the symmetric edge
+    // correction by doubling the prior tail to 906,694,364,710,971,881,029,632 ns
+    // around 302,231,454,903,657,293,676,544 minutes, pinning 209882954794206453942d 1h 4m.
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
+    ] {
+        assert_eq!(session.submit(source), Ok(None), "{source}");
+    }
+
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventy-eighth-doubling-from-below-02cp0.orna"),
+        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventy-eighth-doubling-from-above-02cp0.orna"),
+    ] {
+        let result = session.submit(source);
+        assert_eq!(
+            result,
+            Ok(Some(texts(&[
+                "209882954794206453942d 1h 4m",
+                "5037190915060954894609:04:00",
+                "209882954794206453942 days, 1 hour, 4 minutes",
+                "P209882954794206453942DT1H4M",
+            ]))),
+            "{source}; diagnostic={}",
+            result.as_ref().err().map_or("none", |error| error.code())
+        );
+    }
+}
+
+#[test]
 fn clock_output_bound_keeps_elapsed_hours_and_fractional_tail() {
     let limits = Limits {
         max_string_bytes: 129,
