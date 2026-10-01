@@ -5068,6 +5068,12 @@ impl Parser {
                     self.bump();
                     return true;
                 }
+                // Commas are optional between case arms. After a malformed
+                // arm, preserve an adjacent suffix when its simple pattern
+                // and colon make the next boundary unambiguous.
+                if self.simple_case_arm_header_ahead() {
+                    return true;
+                }
             }
             // Interpolation boundaries are dedicated tokens, not braces.
             match &self.current().kind {
@@ -5095,6 +5101,27 @@ impl Parser {
             self.bump();
         }
         false
+    }
+    fn simple_case_arm_header_ahead(&self) -> bool {
+        let starts_simple_pattern = matches!(
+            &self.current().kind,
+            TokenKind::Identifier { .. }
+                | TokenKind::Keyword(
+                    Keyword::SelfValue | Keyword::True | Keyword::False | Keyword::Null
+                )
+                | TokenKind::Integer
+                | TokenKind::Decimal
+                | TokenKind::Float
+                | TokenKind::Date
+                | TokenKind::Instant
+                | TokenKind::String
+                | TokenKind::Punct("_")
+        );
+        starts_simple_pattern
+            && matches!(
+                self.tokens.get(self.at + 1).map(|token| &token.kind),
+                Some(TokenKind::Punct(":"))
+            )
     }
     fn contextual(&self) -> bool {
         matches!(
