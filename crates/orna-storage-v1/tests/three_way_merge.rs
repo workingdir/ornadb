@@ -9,7 +9,10 @@ use orna_storage_v1::{
     merge_three_way_snapshots,
 };
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Barrier},
+};
 
 const BASE: &str = include_str!("fixtures/merge-contact-base.orna");
 const LEFT: &str = include_str!("fixtures/merge-contact-left.orna");
@@ -15529,6 +15532,116 @@ fn fixture_cross_depth_load_budget_stops_without_partial_plan() {
     assert_eq!(report.conflicts_lower_bound, 0);
     assert_eq!(report.affected_ranges, [(id(1), KeyRange::all())].into_iter().collect());
     assert_eq!(source.visited.len(), 3, "the bounded merge stops in the third row source");
+}
+
+#[test]
+fn concurrent_fixture_load_orders_keep_cross_depth_tombstones_deterministic() {
+    // The reference requires bounded, isolated merge results but is silent on
+    // independent concurrent loads. Each complete invocation uses its own
+    // fixture source and must produce the same logical key order.
+    let (base_a, left_a, right_a, source_a) = cross_depth_load_inputs();
+    let (base_b, left_b, right_b, mut source_b) = cross_depth_load_inputs();
+    for rows in source_b.rows.values_mut() {
+        rows.reverse();
+    }
+
+    let start = Arc::new(Barrier::new(2));
+    let start_a = Arc::clone(&start);
+    let load_a = std::thread::spawn(move || {
+        start_a.wait();
+        let mut source = source_a;
+        merge_three_way_snapshots(
+            &base_a,
+            &left_a,
+            &right_a,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 5, max_conflicts: 0 },
+        )
+        .expect("the first concurrent fixture load fits its private budget")
+    });
+    let load_b = std::thread::spawn(move || {
+        start.wait();
+        merge_three_way_snapshots(
+            &base_b,
+            &left_b,
+            &right_b,
+            &mut source_b,
+            BranchMergeBudget { max_rows_examined: 5, max_conflicts: 0 },
+        )
+        .expect("the reversed concurrent fixture load fits its private budget")
+    });
+
+    let plan_a = load_a.join().expect("first merge worker completes");
+    let plan_b = load_b.join().expect("second merge worker completes");
+    assert_eq!(plan_a, plan_b, "concurrent load order cannot change the merge plan");
+    assert_eq!(plan_a.report.rows_examined, 5);
+    let MergedSegment::Rows { rows, tombstones, .. } = &plan_a.tables[&id(1)].segments[0] else {
+        panic!("concurrent cross-depth fixture loads materialize one segment")
+    };
+    assert!(rows.is_empty());
+    assert_eq!(
+        tombstones,
+        &[string("root"), string("root/child"), string("root/child/deep")],
+    );
+}
+
+#[test]
+fn concurrent_cross_depth_load_budgets_are_isolated_per_merge() {
+    // Each in-flight merge owns its row counter and failure report. A capped
+    // worker must not change the complete result of its concurrent peer.
+    let (base_ok, left_ok, right_ok, source_ok) = cross_depth_load_inputs();
+    let (base_capped, left_capped, right_capped, mut source_capped) =
+        cross_depth_load_inputs();
+    for rows in source_capped.rows.values_mut() {
+        rows.reverse();
+    }
+
+    let start = Arc::new(Barrier::new(2));
+    let start_ok = Arc::clone(&start);
+    let complete = std::thread::spawn(move || {
+        start_ok.wait();
+        let mut source = source_ok;
+        merge_three_way_snapshots(
+            &base_ok,
+            &left_ok,
+            &right_ok,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 5, max_conflicts: 0 },
+        )
+    });
+    let capped = std::thread::spawn(move || {
+        start.wait();
+        merge_three_way_snapshots(
+            &base_capped,
+            &left_capped,
+            &right_capped,
+            &mut source_capped,
+            BranchMergeBudget { max_rows_examined: 4, max_conflicts: 0 },
+        )
+    });
+
+    let plan = complete
+        .join()
+        .expect("complete-load worker finishes")
+        .expect("the exact-budget worker returns a complete plan");
+    assert_eq!(plan.report.rows_examined, 5);
+    let error = capped
+        .join()
+        .expect("capped-load worker finishes")
+        .expect_err("the one-row-short worker stops independently");
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("the capped concurrent load reports its own budget stop")
+    };
+    assert_eq!(report.rows_examined, 5);
+    assert_eq!(report.affected_ranges, [(id(1), KeyRange::all())].into_iter().collect());
+    let MergedSegment::Rows { rows, tombstones, .. } = &plan.tables[&id(1)].segments[0] else {
+        panic!("the successful peer retains a complete cross-depth segment")
+    };
+    assert!(rows.is_empty());
+    assert_eq!(
+        tombstones,
+        &[string("root"), string("root/child"), string("root/child/deep")],
+    );
 }
 
 #[test]
