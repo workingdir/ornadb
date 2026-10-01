@@ -8624,6 +8624,77 @@ mod tests {
     }
 
     #[test]
+    fn rekey_handoff_survives_failure_across_recovery_splits() {
+        // PIPE-011 makes these handlers left-associative: the second boundary
+        // catches the failure from the first handler. The mutation savepoint
+        // contract keeps the first handler's completed update in the activation.
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "table-rekey-handoff-across-recovery-splits.orna",
+                include_str!("../tests/fixtures/table-rekey-handoff-across-recovery-splits.orna"),
+                "main",
+            )
+            .expect("checked-in split-recovery handoff fixture should be admitted");
+
+        let int = |value: i64| {
+            CanonicalValue::new(OvbRaw::Int(value.into())).expect("integer is canonical")
+        };
+        let row = |id: i64, text: &str, quantity: i64| {
+            CanonicalValue::new(OvbRaw::Map(vec![
+                (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
+                (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
+                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+            ]))
+            .expect("row is canonical")
+        };
+        let key = |value: i64| int(value).encode().expect("key is canonical");
+        let owner = row(1, "owner", 10);
+        let competitor = row(2, "competitor", 20);
+        let competitor_after_retry = row(3, "competitor", 20);
+        let blocker = row(3, "blocker", 30);
+        let rows = BTreeMap::from([(
+            "Note".to_owned(),
+            vec![
+                (key(1), owner.encode().unwrap()),
+                (key(2), competitor.encode().unwrap()),
+                (key(3), blocker.encode().unwrap()),
+            ],
+        )]);
+        let tables = admitted_table_schemas(&application.module_header);
+        let mut handler =
+            SourceMutationEffectHandler::with_table_rows(tables, rows).expect("valid snapshot");
+
+        invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            &Environment::new(),
+            application.limits,
+            &mut handler,
+        )
+        .expect("the outer recovery retries both rows after the inner handler fails");
+
+        let owner_after_retry = row(2, "owner", 11);
+        assert_eq!(
+            handler.current_row("Note", &key(1)).unwrap(),
+            None,
+            "the moved owner source key is released"
+        );
+        assert_eq!(
+            handler.current_row("Note", &key(2)).unwrap(),
+            Some(owner_after_retry.clone()),
+            "the first handler's successful update follows the owner handoff"
+        );
+        assert_eq!(
+            handler.current_row("Note", &key(3)).unwrap(),
+            Some(competitor_after_retry.clone()),
+            "the competitor takes the released destination after blocker deletion"
+        );
+
+    }
+
+    #[test]
     fn competitor_retry_survives_successive_inserted_target_moves() {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
