@@ -13194,3 +13194,98 @@ fn explain_closes_source_half_block_bound_across_unknown_scan_tail() {
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
 }
+
+#[test]
+fn explain_closes_source_half_block_bound_through_filter_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN is silent on carrying an incomplete source scan bound through
+    // filtering and unknown joins. Keep the source's byte-only half-block as
+    // one lower-bound unit: it and a later row-only scan reach MAX together.
+    let explain = |tail_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:source-half-block-filter-tail-bound"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanLast"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(tail_rows),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownThird"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: Some(orna_sys_v1::ExpressionRef::descriptive(
+                "expr:ByteWorkThreeScanSource.value > 0",
+            )),
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:source-half-block-filter-tail-bound")),
+        })
+        .expect("source half-block bound carried through filter and unknown scan tails")
+    };
+
+    let exact = explain(u64::MAX - 1);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let source = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanSource"))
+        })
+        .expect("byte-only half-block source scan bound");
+    assert_eq!(source.estimated_rows(), None);
+    assert_eq!(source.estimated_bytes(), Some(2_048));
+    assert_eq!(source.estimated_work(), None);
+    let filter = exact
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Filter)
+        .expect("filter over partially estimated scans");
+    assert_eq!(filter.estimated_rows(), None);
+    assert_eq!(filter.estimated_work(), None);
+
+    let overflow = explain(u64::MAX);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "filtering and unknown joins do not discard the source half-block bound"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("source half-block filter-bound overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
