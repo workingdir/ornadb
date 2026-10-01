@@ -1,0 +1,31 @@
+// Predicates passed through pinned collection helpers use their closure snapshots.
+if true {
+    let floor = 2;
+    let at_least = (value: Int) => value >= floor;
+    floor = 100;
+
+    let sought = 2;
+    let is_sought = (value: Int) => value == sought;
+    sought = 3;
+
+    let delimiter = 2;
+    let is_delimiter = (value: Int) => value == delimiter;
+    delimiter = 3;
+
+    let minimum = 1;
+    let above_minimum = (value: Int) => value >= minimum;
+    minimum = 100;
+
+    let wanted = 3;
+    let is_wanted = (value: Int) => value == wanted;
+    wanted = 9;
+
+    [
+        collection_ops.filter([1, 2, 3], at_least) == [2, 3],
+        collection_ops.partition([1, 2, 3], at_least) == ([2, 3], [1]),
+        collection_ops.split_when([1, 2, 3], is_delimiter) == [[1], [2, 3]],
+        collection_ops.every([1, 2, 3], above_minimum),
+        collection_ops.exists([1, 2, 3], is_wanted),
+        collection_ops.one([1, 2, 3], is_sought) == 2
+    ]
+} else { [false, false, false, false, false, false] }

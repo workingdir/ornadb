@@ -23,6 +23,8 @@ const CHECKPOINT_RESET: &str = include_str!("fixtures/merge-checkpoint-reset.orn
 const CHECKPOINT_TAIL_BASE: &str = include_str!("fixtures/merge-checkpoint-tail-base.orna");
 const CHECKPOINT_TAIL_LEFT: &str = include_str!("fixtures/merge-checkpoint-tail-left.orna");
 const CHECKPOINT_TAIL_RIGHT: &str = include_str!("fixtures/merge-checkpoint-tail-right.orna");
+const TOMBSTONE_DEPTH_SHALLOW: &str = include_str!("fixtures/merge-tombstone-depth-shallow.orna");
+const TOMBSTONE_DEPTH_DEEP: &str = include_str!("fixtures/merge-tombstone-depth-deep.orna");
 
 fn id(value: u8) -> ObjectId {
     ObjectId::new([value; 16])
@@ -52,6 +54,24 @@ fn schema(explicit_key: bool, name_type: FieldType) -> Schema {
     }
 }
 
+fn string_key_schema() -> Schema {
+    let mut schema = schema(true, FieldType::Str);
+    schema.tables[0].fields[0].ty = FieldType::Str;
+    schema
+}
+
+fn rekey_row(row: &KeyedRow, key: &str) -> KeyedRow {
+    let mut row = row.clone();
+    row.key = string(key);
+    row
+}
+
+fn edit_name(row: &KeyedRow, value: &str) -> KeyedRow {
+    let mut row = row.clone();
+    row.fields.insert(id(2), string(value));
+    row
+}
+
 fn parse_fixture(source: &str, kind: RowKeyKind) -> KeyedRow {
     let parsed = parse_row(source);
     assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
@@ -62,9 +82,17 @@ fn parse_fixture(source: &str, kind: RowKeyKind) -> KeyedRow {
         let Expr::Literal { text, kind: literal_kind, .. } = field.value else { panic!("literal fixture") };
         match field.name.as_str() {
             "id" => {
-                assert_eq!(literal_kind, LiteralKind::Integer);
-                let number: i64 = text.parse().unwrap();
-                key = Some(CanonicalValue::new(OvbRaw::Int(number.into())).unwrap());
+                key = Some(match literal_kind {
+                    LiteralKind::Integer => {
+                        let number: i64 = text.parse().unwrap();
+                        CanonicalValue::new(OvbRaw::Int(number.into())).unwrap()
+                    }
+                    LiteralKind::String => {
+                        let value = text.strip_prefix('"').unwrap().strip_suffix('"').unwrap();
+                        string(value)
+                    }
+                    other => panic!("unexpected key literal {other:?}"),
+                });
             }
             "name" | "city" => {
                 assert_eq!(literal_kind, LiteralKind::String);
@@ -144,10 +172,7 @@ impl BranchRowSource for FixtureRows {
         for row in self.rows.get(&(side, locator)).into_iter().flatten() {
             assert_eq!(row.table, table);
             let key = row.key.encode().map_err(|error| error.to_string())?;
-            if range.start.as_deref().is_none_or(|start| key.as_slice() >= start)
-                && range.end.as_deref().is_none_or(|end| key.as_slice() < end)
-                && !visitor(row.clone())
-            {
+            if range.contains(&key) && !visitor(row.clone()) {
                 break;
             }
         }
@@ -15236,5 +15261,252 @@ fn nested_checkpoint_reset_conflicts_preserve_fixture_states_and_identity() {
             assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
             assert!(source.visited.is_empty());
         }
+    }
+}
+
+#[test]
+fn fixture_row_tombstones_are_exact_keys_and_follow_logical_depth_order() {
+    let shallow = parse_fixture(TOMBSTONE_DEPTH_SHALLOW, RowKeyKind::Explicit);
+    let deep = parse_fixture(TOMBSTONE_DEPTH_DEEP, RowKeyKind::Explicit);
+    let middle = rekey_row(&shallow, "root/child");
+    let short_sibling = rekey_row(&shallow, "z");
+    let boundary = short_sibling.key.encode().unwrap();
+    let shallow_range = KeyRange::new(None, Some(boundary.clone()))
+        .expect("logical path keys sort before the short sibling despite encoded length");
+    let sibling_range = KeyRange::new(Some(boundary), None).unwrap();
+    let split_manifest = |digest, shallow_digest, sibling_digest, shallow_locator: &[u8], sibling_locator: &[u8]| {
+        TableManifest {
+            digest: [digest; 32],
+            segments: vec![
+                RowSegmentManifest {
+                    locator: shallow_locator.to_vec(),
+                    range: shallow_range.clone(),
+                    digest: [shallow_digest; 32],
+                },
+                RowSegmentManifest {
+                    locator: sibling_locator.to_vec(),
+                    range: sibling_range.clone(),
+                    digest: [sibling_digest; 32],
+                },
+            ],
+        }
+    };
+
+    // The left side retains only the middle child; the right side retains
+    // only the deepest child. Deleting a path-shaped key never cascades into
+    // another depth, and the short sibling forces encoded and logical order
+    // to differ because its CBOR text-length prefix is smaller.
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"depth-base-shallow", vec![shallow.clone(), middle.clone(), deep.clone()]);
+    source.add(MergeSide::Base, b"depth-base-sibling", vec![short_sibling.clone()]);
+    source.add(MergeSide::Left, b"depth-left-shallow", vec![middle]);
+    source.add(MergeSide::Left, b"depth-left-sibling", vec![short_sibling.clone()]);
+    source.add(MergeSide::Right, b"depth-right-shallow", vec![deep]);
+    source.add(MergeSide::Right, b"depth-right-sibling", vec![short_sibling.clone()]);
+    let base = snapshot(
+        string_key_schema(),
+        split_manifest(1, 1, 2, b"depth-base-shallow", b"depth-base-sibling"),
+        None,
+    );
+    let left = snapshot(
+        string_key_schema(),
+        split_manifest(2, 3, 4, b"depth-left-shallow", b"depth-left-sibling"),
+        None,
+    );
+    let right = snapshot(
+        string_key_schema(),
+        split_manifest(3, 5, 6, b"depth-right-shallow", b"depth-right-sibling"),
+        None,
+    );
+
+    let plan = merge_three_way_snapshots(&base, &left, &right, &mut source, budget())
+        .expect("independent nested keys merge as exact tombstones");
+    let MergedSegment::Rows { rows, tombstones, .. } = &plan.tables[&id(1)].segments[0] else {
+        panic!("changed fixture range materializes rows and tombstones")
+    };
+    assert!(rows.is_empty());
+    assert_eq!(
+        tombstones,
+        &[string("root"), string("root/child"), string("root/child/deep")],
+        "logical primary-key order keeps each ancestor before its deeper keys",
+    );
+    let MergedSegment::Rows { rows, tombstones, .. } = &plan.tables[&id(1)].segments[1] else {
+        panic!("the short sibling range remains a separate merged range")
+    };
+    assert_eq!(rows, &[short_sibling]);
+    assert!(tombstones.is_empty());
+}
+
+#[test]
+fn fixture_nested_delete_edit_conflicts_follow_logical_key_order() {
+    let shallow = parse_fixture(TOMBSTONE_DEPTH_SHALLOW, RowKeyKind::Explicit);
+    let deep = parse_fixture(TOMBSTONE_DEPTH_DEEP, RowKeyKind::Explicit);
+    let middle = rekey_row(&shallow, "root/child");
+    let short_sibling = rekey_row(&shallow, "z");
+    let base_rows = vec![shallow.clone(), middle.clone(), deep.clone(), short_sibling.clone()];
+    let edited_rows = vec![
+        edit_name(&shallow, "edited"),
+        edit_name(&middle, "edited"),
+        edit_name(&deep, "edited"),
+        short_sibling.clone(),
+    ];
+
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"conflict-depth-base", base_rows);
+    source.add(MergeSide::Left, b"conflict-depth-left", vec![short_sibling]);
+    source.add(MergeSide::Right, b"conflict-depth-right", edited_rows);
+    let base = snapshot(string_key_schema(), manifest(4, 4, b"conflict-depth-base"), None);
+    let left = snapshot(string_key_schema(), manifest(5, 5, b"conflict-depth-left"), None);
+    let right = snapshot(string_key_schema(), manifest(6, 6, b"conflict-depth-right"), None);
+
+    let BranchMergeError::Conflicts { conflicts, report } =
+        merge_three_way_snapshots(&base, &left, &right, &mut source, budget()).unwrap_err()
+    else {
+        panic!("nested delete/edit conflicts reject the complete plan")
+    };
+    let conflict_keys = conflicts
+        .iter()
+        .map(|conflict| match conflict {
+            BranchMergeConflict::Row {
+                conflict: orna_evolution_v1::RowMergeConflict::DeleteAndEdit { key, .. },
+                ..
+            } => key.clone(),
+            other => panic!("unexpected nested-key conflict: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        conflict_keys,
+        vec![string("root"), string("root/child"), string("root/child/deep")],
+    );
+    assert_eq!(report.conflicts_lower_bound, 3);
+    assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+}
+
+#[test]
+fn unilateral_row_and_checkpoint_tombstones_resolve_in_both_orientations() {
+    let deleted_row = parse_fixture(BASE, RowKeyKind::Explicit);
+    let deleted_checkpoint_id = b"consumer/deleted-beside-row".to_vec();
+    let retained_checkpoint_id = b"consumer/retained-beside-row".to_vec();
+    let deleted_checkpoint = parse_checkpoint_fixture(CHECKPOINT_BASE);
+    let retained_checkpoint = parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS);
+
+    // A row deletion and an unrelated checkpoint deletion are independent
+    // changes. Cross their branch placement so the proof covers both deletes
+    // published together and deletes published on opposite sides.
+    for row_delete_on_left in [true, false] {
+        for checkpoint_delete_on_left in [true, false] {
+            let mut source = FixtureRows::default();
+            source.add(MergeSide::Base, b"base", vec![deleted_row.clone()]);
+            source.add(MergeSide::Left, b"left", if row_delete_on_left { Vec::new() } else { vec![deleted_row.clone()] });
+            source.add(MergeSide::Right, b"right", if row_delete_on_left { vec![deleted_row.clone()] } else { Vec::new() });
+
+            let mut base = snapshot(schema(true, FieldType::Str), manifest(1, 10, b"base"), None);
+            let mut left = snapshot(schema(true, FieldType::Str), manifest(2, 11, b"left"), None);
+            let mut right = snapshot(schema(true, FieldType::Str), manifest(3, 12, b"right"), None);
+            base.checkpoints.insert(deleted_checkpoint_id.clone(), deleted_checkpoint.clone());
+            let checkpoint_retained_side = if checkpoint_delete_on_left { &mut right } else { &mut left };
+            checkpoint_retained_side.checkpoints.insert(deleted_checkpoint_id.clone(), deleted_checkpoint.clone());
+            for snapshot in [&mut base, &mut left, &mut right] {
+                snapshot.checkpoints.insert(retained_checkpoint_id.clone(), retained_checkpoint.clone());
+            }
+
+            let plan = merge_three_way_snapshots(
+                &base,
+                &left,
+                &right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 100, max_conflicts: 0 },
+            ).unwrap();
+
+            assert_eq!(plan.report.conflicts_lower_bound, 0);
+            assert_eq!(plan.report.rows_examined, 2);
+            assert!(plan.report.affected_checkpoints.is_empty());
+            assert_eq!(source.visited.len(), 3);
+            assert!(!plan.checkpoints.contains_key(deleted_checkpoint_id.as_slice()));
+            assert_eq!(plan.checkpoints.get(retained_checkpoint_id.as_slice()), Some(&retained_checkpoint));
+
+            let MergedSegment::Rows { rows, tombstones, .. } = &plan.tables[&id(1)].segments[0] else {
+                panic!("the row deletion materializes beside the checkpoint deletion")
+            };
+            assert!(rows.is_empty());
+            assert_eq!(tombstones, &[deleted_row.key.clone()]);
+        }
+    }
+}
+
+#[test]
+fn nested_checkpoint_tombstones_pair_with_same_side_row_delete_and_disjoint_edit() {
+    let deleted_row = parse_fixture(BASE, RowKeyKind::Explicit);
+    let mut retained_row = deleted_row.clone();
+    retained_row.key = integer(2);
+    retained_row.fields.insert(id(2), string("retained row"));
+    let mut edited_retained_row = retained_row.clone();
+    edited_retained_row.fields.insert(id(3), string("Paris"));
+
+    let prefix_id = b"consumer/cach".to_vec();
+    let parent_id = b"consumer/cache".to_vec();
+    let child_id = b"consumer/cache/item".to_vec();
+    let sibling_id = b"consumer/other".to_vec();
+    let prefix_checkpoint = parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS);
+    let parent_checkpoint = parse_checkpoint_fixture(CHECKPOINT_BASE);
+    let child_checkpoint = parse_checkpoint_fixture(CHECKPOINT_EDITED);
+    let sibling_checkpoint = parse_checkpoint_fixture(CHECKPOINT_RESET);
+
+    // Checkpoint IDs are exact byte keys. Deleting a parent ID must not prune
+    // its still-present child or a strict-prefix ID. The row delete shares a
+    // side with the parent tombstone; an independent sibling tombstone and
+    // retained-row edit land on the other side.
+    for row_delete_on_left in [true, false] {
+        let mut source = FixtureRows::default();
+        source.add(MergeSide::Base, b"base", vec![deleted_row.clone(), retained_row.clone()]);
+        source.add(
+            MergeSide::Left,
+            b"left",
+            if row_delete_on_left { vec![retained_row.clone()] } else { vec![deleted_row.clone(), edited_retained_row.clone()] },
+        );
+        source.add(
+            MergeSide::Right,
+            b"right",
+            if row_delete_on_left { vec![deleted_row.clone(), edited_retained_row.clone()] } else { vec![retained_row.clone()] },
+        );
+
+        let mut base = snapshot(schema(true, FieldType::Str), manifest(1, 10, b"base"), None);
+        let mut left = snapshot(schema(true, FieldType::Str), manifest(2, 11, b"left"), None);
+        let mut right = snapshot(schema(true, FieldType::Str), manifest(3, 12, b"right"), None);
+        for branch in [&mut base, &mut left, &mut right] {
+            branch.checkpoints.insert(prefix_id.clone(), prefix_checkpoint.clone());
+            branch.checkpoints.insert(parent_id.clone(), parent_checkpoint.clone());
+            branch.checkpoints.insert(child_id.clone(), child_checkpoint.clone());
+            branch.checkpoints.insert(sibling_id.clone(), sibling_checkpoint.clone());
+        }
+        let (row_delete_side, opposite_side) = if row_delete_on_left {
+            (&mut left, &mut right)
+        } else {
+            (&mut right, &mut left)
+        };
+        row_delete_side.checkpoints.remove(parent_id.as_slice());
+        opposite_side.checkpoints.remove(sibling_id.as_slice());
+
+        let plan = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 100, max_conflicts: 0 },
+        ).unwrap();
+
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        assert!(plan.report.affected_checkpoints.is_empty());
+        assert_eq!(source.visited.len(), 3);
+        assert!(!plan.checkpoints.contains_key(parent_id.as_slice()));
+        assert!(!plan.checkpoints.contains_key(sibling_id.as_slice()));
+        assert_eq!(plan.checkpoints.get(prefix_id.as_slice()), Some(&prefix_checkpoint));
+        assert_eq!(plan.checkpoints.get(child_id.as_slice()), Some(&child_checkpoint));
+
+        let MergedSegment::Rows { rows, tombstones, .. } = &plan.tables[&id(1)].segments[0] else {
+            panic!("the disjoint retained-row edit merges beside the row tombstone")
+        };
+        assert_eq!(rows, &[edited_retained_row.clone()]);
+        assert_eq!(tombstones, &[deleted_row.key.clone()]);
     }
 }

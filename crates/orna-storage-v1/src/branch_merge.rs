@@ -11,7 +11,12 @@ use orna_evolution_v1::{
     RowMergeOperation, RowSnapshotMergeError, RowSnapshotState, Schema, SchemaMergeConflict,
     merge_checkpoint_generation, merge_keyed_row_states, merge_schema_bounded,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use orna_foundation_v1::compare_primary_keys;
+use std::{
+    cell::Cell,
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+};
 
 pub type CheckpointId = Vec<u8>;
 
@@ -22,7 +27,8 @@ pub enum MergeSide {
     Right,
 }
 
-/// A half-open range of canonical encoded row keys.
+/// A half-open range whose bounds are canonical encodings of primary keys.
+/// Boundary comparisons use the same logical order as compact row storage.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct KeyRange {
     pub start: Option<Vec<u8>>,
@@ -35,17 +41,46 @@ impl KeyRange {
     }
 
     pub fn new(start: Option<Vec<u8>>, end: Option<Vec<u8>>) -> Option<Self> {
-        if matches!((&start, &end), (Some(start), Some(end)) if start >= end) {
-            None
-        } else {
-            Some(Self { start, end })
+        for bound in [&start, &end].into_iter().flatten() {
+            let value = CanonicalValue::decode(bound).ok()?;
+            compare_primary_keys(&value, &value).ok()?;
         }
+        if let (Some(start), Some(end)) = (&start, &end) {
+            if compare_encoded_primary_keys(start, end)? != Ordering::Less {
+                return None;
+            }
+        }
+        Some(Self { start, end })
     }
 
-    fn contains(&self, key: &[u8]) -> bool {
-        self.start.as_deref().is_none_or(|start| key >= start)
-            && self.end.as_deref().is_none_or(|end| key < end)
+    pub fn contains(&self, key: &[u8]) -> bool {
+        let Ok(key_value) = CanonicalValue::decode(key) else {
+            return false;
+        };
+        if compare_primary_keys(&key_value, &key_value).is_err() {
+            return false;
+        }
+        self.start
+            .as_deref()
+            .is_none_or(|start| {
+                compare_key_to_encoded_primary_key(&key_value, start)
+                    .is_some_and(|order| order != Ordering::Less)
+            })
+            && self
+                .end
+                .as_deref()
+                .is_none_or(|end| compare_key_to_encoded_primary_key(&key_value, end) == Some(Ordering::Less))
     }
+}
+
+fn compare_encoded_primary_keys(left: &[u8], right: &[u8]) -> Option<Ordering> {
+    let left = CanonicalValue::decode(left).ok()?;
+    compare_key_to_encoded_primary_key(&left, right)
+}
+
+fn compare_key_to_encoded_primary_key(key: &CanonicalValue, encoded: &[u8]) -> Option<Ordering> {
+    let boundary = CanonicalValue::decode(encoded).ok()?;
+    compare_primary_keys(key, &boundary).ok()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -147,7 +182,10 @@ pub enum MergedSegment {
     /// Materialized logical rows for a range where all three sides changed.
     /// `tombstones` are canonical keys present in the common base but absent
     /// from the merged live rows. They describe this snapshot's versioned
-    /// deletions; they do not authorize removing older Git snapshots.
+    /// deletions; they do not authorize removing older Git snapshots. Both
+    /// rows and tombstones are ordered by canonical primary key. A key that
+    /// spells a path prefix is still only that one key; deleting it does not
+    /// implicitly tombstone deeper keys.
     Rows {
         range: KeyRange,
         rows: Vec<KeyedRow>,
@@ -469,10 +507,40 @@ fn merge_range_rows(
     conflicts: &mut Vec<BranchMergeConflict>,
     report: &mut BranchMergeReport,
 ) -> Result<MergedRangeRows, BranchMergeError> {
-    let keys: BTreeSet<_> = base.keys().chain(left.keys()).chain(right.keys()).cloned().collect();
+    let encoded_keys: BTreeSet<_> = base
+        .keys()
+        .chain(left.keys())
+        .chain(right.keys())
+        .cloned()
+        .collect();
+    let mut keys = Vec::with_capacity(encoded_keys.len());
+    for encoded in encoded_keys {
+        let key = CanonicalValue::decode(&encoded)
+            .map_err(|_| BranchMergeError::InvalidRow { table })?;
+        keys.push((encoded, key));
+    }
+    // Encoded byte order is not always the table's logical primary-key order:
+    // a short text key can sort before a lexically earlier deep path because
+    // its CBOR length prefix is smaller. Depth is not a delete precedence
+    // rule; merge each exact key independently and traverse in the same order
+    // used by compact storage.
+    let invalid_key_order = Cell::new(false);
+    keys.sort_by(|(left_bytes, left_key), (right_bytes, right_key)| {
+        match compare_primary_keys(left_key, right_key) {
+            Ok(Ordering::Equal) => left_bytes.cmp(right_bytes),
+            Ok(ordering) => ordering,
+            Err(_) => {
+                invalid_key_order.set(true);
+                left_bytes.cmp(right_bytes)
+            }
+        }
+    });
+    if invalid_key_order.get() {
+        return Err(BranchMergeError::InvalidRow { table });
+    }
     let mut merged = Vec::new();
     let mut tombstones = Vec::new();
-    for key in keys {
+    for (key, _) in keys {
         let base_state = base
             .get(&key)
             .map(RowSnapshotState::Present)
