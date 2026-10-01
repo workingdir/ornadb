@@ -635,6 +635,27 @@ fn edge_interplay_fixture_returns_present_count_after_filtered_handoff() {
 }
 
 #[test]
+fn edge_interplay_fixture_returns_present_count_after_filter_tail() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Hand off the nullable projected count first, then filter and return it. The reference
+    // publishes row_count as Int? independently of row_count_exact and does not specify this
+    // composition, so keep the declared result nullable after the presence filter.
+    assert!(
+        analysis.is_ok(),
+        "the present exact count must survive filtering after handoff: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_projects_unknown_exact_target_count_through_columns() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
