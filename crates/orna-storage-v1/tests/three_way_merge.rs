@@ -226,6 +226,28 @@ impl BranchRowSource for BarrierFixtureRows {
     }
 }
 
+struct RecoveringFixtureRows {
+    source: FixtureRows,
+    fail_first_load: bool,
+}
+
+impl BranchRowSource for RecoveringFixtureRows {
+    fn visit_rows(
+        &mut self,
+        side: MergeSide,
+        table: ObjectId,
+        segment: Option<&RowSegmentManifest>,
+        range: &KeyRange,
+        visitor: &mut dyn FnMut(KeyedRow) -> bool,
+    ) -> Result<(), String> {
+        if self.fail_first_load {
+            self.fail_first_load = false;
+            return Err("fixture row source stopped at recovery boundary".into());
+        }
+        self.source.visit_rows(side, table, segment, range, visitor)
+    }
+}
+
 fn budget() -> BranchMergeBudget {
     BranchMergeBudget { max_rows_examined: 100, max_conflicts: 20 }
 }
@@ -15815,6 +15837,85 @@ fn concurrent_unaligned_tombstones_and_conflicts_follow_one_logical_order() {
         assert_eq!(report.conflicts_lower_bound, lower_bound);
         assert_eq!(report.affected_ranges, [(id(1), KeyRange::all())].into_iter().collect());
     }
+}
+
+#[test]
+fn concurrent_recovery_retries_preserve_tombstone_conflict_order() {
+    // The reference requires an unavailable row history to fail closed but is
+    // silent on retry scheduling. After row recovery, fresh plans restart from
+    // canonical range/key order and must not inherit partial work from the
+    // failed attempt.
+    let (base, left, right, source) = unaligned_tombstone_inputs(0, true, false);
+    let mut interrupted = RecoveringFixtureRows {
+        source,
+        fail_first_load: true,
+    };
+    let error = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut interrupted,
+        BranchMergeBudget { max_rows_examined: 8, max_conflicts: 2 },
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        BranchMergeError::RowRead {
+            message: "fixture row source stopped at recovery boundary".into(),
+        },
+    );
+    assert!(interrupted.source.visited.is_empty(), "the failed source yielded no partial rows");
+
+    let (base_a, left_a, right_a, source_a) = unaligned_tombstone_inputs(0, true, false);
+    let (base_b, left_b, right_b, source_b) = unaligned_tombstone_inputs(1, true, true);
+    let start = Arc::new(Barrier::new(2));
+    let start_a = Arc::clone(&start);
+    let retry_a = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: source_a,
+            first_load: Some(start_a),
+        };
+        merge_three_way_snapshots(
+            &base_a,
+            &left_a,
+            &right_a,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 8, max_conflicts: 2 },
+        )
+    });
+    let retry_b = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: source_b,
+            first_load: Some(start),
+        };
+        merge_three_way_snapshots(
+            &base_b,
+            &left_b,
+            &right_b,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 8, max_conflicts: 2 },
+        )
+    });
+    let result_a = retry_a.join().expect("first recovered retry completes");
+    let result_b = retry_b.join().expect("second recovered retry completes");
+    assert_eq!(result_a, result_b, "recovery and concurrent scheduling preserve the same result");
+    let BranchMergeError::Conflicts { conflicts, report } = result_a.unwrap_err() else {
+        panic!("recovered row history retains its ordered delete/edit conflicts")
+    };
+    let conflict_keys = conflicts
+        .iter()
+        .map(|conflict| match conflict {
+            BranchMergeConflict::Row {
+                conflict: orna_evolution_v1::RowMergeConflict::DeleteAndEdit { key, .. },
+                ..
+            } => key.clone(),
+            other => panic!("unexpected recovered merge conflict: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(conflict_keys, vec![string("root/child"), string("z")]);
+    assert_eq!(report.rows_examined, 8);
+    assert_eq!(report.conflicts_lower_bound, 2);
+    assert_eq!(report.affected_ranges, [(id(1), KeyRange::all())].into_iter().collect());
 }
 
 #[test]
