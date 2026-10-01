@@ -59,8 +59,13 @@ fn generated_modules(root: &Path) -> BTreeMap<String, String> {
 }
 
 #[test]
-fn generated_sys_artifacts_regenerate_byte_for_byte_from_annotated_registry() {
+fn generated_sys_artifacts_regenerate_byte_for_byte_across_fresh_registry_builds() {
     let regenerated = regenerate();
+    let second_build = regenerate();
+    assert_eq!(
+        regenerated, second_build,
+        "independent registry collection and generation runs must emit identical artifacts"
+    );
     let out_dir = Path::new(env!("OUT_DIR"));
 
     assert_eq!(regenerated.api_json, system_api_json());
