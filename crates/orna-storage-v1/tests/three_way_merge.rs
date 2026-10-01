@@ -15769,6 +15769,75 @@ fn sustained_concurrent_depth_loads_keep_tombstone_boundary_order() {
 }
 
 #[test]
+fn sustained_concurrent_budget_stops_leave_complete_boundary_orders_isolated() {
+    // A capped concurrent load reports its own incomplete range while its
+    // peers still produce complete, canonically ordered tombstones.
+    const LOADS_PER_WAVE: usize = 8;
+    const WAVES: usize = 6;
+    let expected = vec![string("root"), string("root/child"), string("root/child/deep")];
+    let mut complete_loads = 0;
+    let mut capped_loads = 0;
+
+    for wave in 0..WAVES {
+        let start = Arc::new(Barrier::new(LOADS_PER_WAVE));
+        let mut workers = Vec::with_capacity(LOADS_PER_WAVE);
+        for load in 0..LOADS_PER_WAVE {
+            let split_layout = (wave + load) % 2 == 0;
+            let capped = (wave + load) % 4 == 0;
+            let (base, left, right, mut source) = if split_layout {
+                split_cross_depth_load_inputs((wave + load) % 3 == 0)
+            } else {
+                cross_depth_load_inputs()
+            };
+            if (wave + load) % 3 == 1 {
+                for rows in source.rows.values_mut() {
+                    rows.reverse();
+                }
+            }
+            let gate = Arc::clone(&start);
+            workers.push(std::thread::spawn(move || {
+                let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+                let row_cap = if capped { 4 } else { 5 };
+                let result = merge_three_way_snapshots(
+                    &base,
+                    &left,
+                    &right,
+                    &mut source,
+                    BranchMergeBudget { max_rows_examined: row_cap, max_conflicts: 0 },
+                );
+                (result, capped, split_layout)
+            }));
+        }
+
+        for worker in workers {
+            let (result, capped, split_layout) =
+                worker.join().expect("budgeted sustained-load worker completes");
+            if capped {
+                let Err(BranchMergeError::BudgetExceeded { report }) = result else {
+                    panic!("a four-row cap stops without returning a partial tombstone plan")
+                };
+                assert_eq!(report.rows_examined, 5);
+                assert_eq!(report.conflicts_lower_bound, 0);
+                assert!(report.affected_tables.contains(&id(1)));
+                capped_loads += 1;
+            } else {
+                let plan = result.expect("an exact-budget peer remains independent");
+                assert_eq!(plan.report.rows_examined, 5);
+                assert_eq!(flattened_row_tombstones(&plan), expected);
+                assert_eq!(
+                    plan.tables[&id(1)].segments.len(),
+                    if split_layout { 3 } else { 1 },
+                );
+                complete_loads += 1;
+            }
+        }
+    }
+
+    assert_eq!(complete_loads, 36);
+    assert_eq!(capped_loads, 12);
+}
+
+#[test]
 fn fixture_cross_depth_load_budget_stops_without_partial_plan() {
     let (base, left, right, mut source) = cross_depth_load_inputs();
     let error = merge_three_way_snapshots(
