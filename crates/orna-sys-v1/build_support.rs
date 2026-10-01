@@ -955,6 +955,33 @@ fn validate_unique_string_array(value: &Value, context: &str) -> Result<(), Stri
     Ok(())
 }
 
+fn validate_failure_code_array(value: &Value) -> Result<(), String> {
+    validate_unique_string_array(value, "failure_codes")?;
+    for (index, code) in value.as_array().expect("array validated").iter().enumerate() {
+        let code = code.as_str().expect("string validated");
+        let mut segments = code.split('.');
+        let valid = matches!(segments.next(), Some("sys"))
+            && segments.clone().count() >= 2
+            && segments.all(|segment| {
+                let mut characters = segment.chars();
+                characters
+                    .next()
+                    .is_some_and(|character| character.is_ascii_lowercase())
+                    && characters.all(|character| {
+                        character.is_ascii_lowercase()
+                            || character.is_ascii_digit()
+                            || character == '_'
+                    })
+            });
+        if !valid {
+            return Err(format!(
+                "failure_codes[{index}] must be a qualified lowercase `sys` failure code"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_named_rows(
     value: &Value,
     inventory: &str,
@@ -2023,7 +2050,7 @@ pub fn validate_api_document(api: &Value) -> Result<(), String> {
         &["key_fields", "invariants"],
         &["fields"],
     )?;
-    validate_unique_string_array(&object["failure_codes"], "failure_codes")?;
+    validate_failure_code_array(&object["failure_codes"])?;
 
     let functions = object["functions"]
         .as_array()
