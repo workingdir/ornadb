@@ -15513,113 +15513,88 @@ fn nested_checkpoint_tombstones_pair_with_same_side_row_delete_and_disjoint_edit
 
 #[test]
 fn path_depth_tombstones_resolve_at_adjacent_segment_boundaries() {
-    let path_row = |fixture: &str, path: &str| {
-        let mut row = parse_fixture(fixture, RowKeyKind::Explicit);
-        row.key = string(path);
-        row
-    };
-    let root_key = string("a");
-    let child_key = string("a/b");
-    let middle_peer_key = string("a/z");
-    let deep_key = string("a/b/c");
-    let child_boundary = child_key.encode().unwrap();
-    let deep_boundary = deep_key.encode().unwrap();
-    assert!(root_key.encode().unwrap() < child_boundary);
-    assert!(child_boundary < middle_peer_key.encode().unwrap());
-    assert!(middle_peer_key.encode().unwrap() < deep_boundary);
+    let shallow = parse_fixture(TOMBSTONE_DEPTH_SHALLOW, RowKeyKind::Explicit);
+    let middle = rekey_row(&shallow, "root/child");
+    let deep = parse_fixture(TOMBSTONE_DEPTH_DEEP, RowKeyKind::Explicit);
+    let boundary_row = rekey_row(&shallow, "z");
+    let sibling = rekey_row(&shallow, "zz");
+    let sibling_edit = edit_name(&sibling, "edited at upper boundary");
+    let boundary = boundary_row.key.encode().unwrap();
+    assert!(deep.key.encode().unwrap() > boundary, "the deep path's encoded length sorts after the shorter boundary");
 
-    // MERGE-008/016 require independent row changes to compose, but leave
-    // parent/child interpretation of path-shaped keys open. Resolve exact
-    // canonical keys independently, including a tombstone exactly at a
-    // half-open segment's inclusive lower boundary.
-    let root_row = path_row(BASE, "a");
-    let shallow_peer = path_row(BASE, "b");
-    let mut shallow_peer_edit = path_row(RIGHT, "b");
-    shallow_peer_edit.fields.insert(id(3), string("shallow edit"));
-    let child_row = path_row(BASE, "a/b");
-    let middle_peer = path_row(BASE, "a/z");
-    let mut middle_peer_edit = path_row(LEFT, "a/z");
-    middle_peer_edit.fields.insert(id(3), string("middle edit"));
-    let deep_row = path_row(BASE, "a/b/c");
-
+    // The reference defines three-way per-key changes but is silent on
+    // path-depth ordering. Use canonical primary-key order for the split:
+    // root, child and deep child are before `z` even though the deep key's
+    // encoded bytes sort after `z`. The `z` tombstone is exactly the inclusive
+    // lower boundary of the next range.
+    let shallow_range = KeyRange::new(None, Some(boundary.clone())).unwrap();
+    let boundary_range = KeyRange::new(Some(boundary.clone()), None).unwrap();
     let mut source = FixtureRows::default();
-    source.add(MergeSide::Base, b"base-shallow", vec![root_row.clone(), shallow_peer.clone()]);
-    source.add(MergeSide::Left, b"left-shallow", vec![shallow_peer.clone()]);
-    source.add(MergeSide::Right, b"right-shallow", vec![root_row.clone(), shallow_peer_edit.clone()]);
-    source.add(MergeSide::Base, b"base-middle", vec![child_row.clone(), middle_peer.clone()]);
-    source.add(MergeSide::Left, b"left-middle", vec![child_row.clone(), middle_peer_edit.clone()]);
-    source.add(MergeSide::Right, b"right-middle", vec![middle_peer.clone()]);
-    source.add(MergeSide::Base, b"base-deep", vec![deep_row.clone()]);
-    source.add(MergeSide::Left, b"left-deep", vec![deep_row.clone()]);
-    source.add(MergeSide::Right, b"right-deep", vec![deep_row]);
+    source.add(MergeSide::Base, b"base-depth", vec![shallow.clone(), middle.clone(), deep.clone()]);
+    source.add(MergeSide::Left, b"left-depth", vec![middle.clone()]);
+    source.add(MergeSide::Right, b"right-depth", vec![deep.clone()]);
+    source.add(MergeSide::Base, b"base-boundary", vec![boundary_row.clone(), sibling.clone()]);
+    source.add(MergeSide::Left, b"left-boundary", vec![sibling.clone()]);
+    source.add(MergeSide::Right, b"right-boundary", vec![boundary_row.clone(), sibling_edit.clone()]);
 
-    let build_manifest = |table_digest, segment_digests: [u8; 3], locators: [&[u8]; 3]| {
+    let split_manifest = |table_digest, segment_digests: [u8; 2], locators: [&[u8]; 2]| {
         TableManifest {
             digest: [table_digest; 32],
             segments: vec![
                 RowSegmentManifest {
                     locator: locators[0].to_vec(),
-                    range: KeyRange::new(None, Some(child_boundary.clone())).unwrap(),
+                    range: shallow_range.clone(),
                     digest: [segment_digests[0]; 32],
                 },
                 RowSegmentManifest {
                     locator: locators[1].to_vec(),
-                    range: KeyRange::new(Some(child_boundary.clone()), Some(deep_boundary.clone())).unwrap(),
+                    range: boundary_range.clone(),
                     digest: [segment_digests[1]; 32],
-                },
-                RowSegmentManifest {
-                    locator: locators[2].to_vec(),
-                    range: KeyRange::new(Some(deep_boundary.clone()), None).unwrap(),
-                    digest: [segment_digests[2]; 32],
                 },
             ],
         }
     };
-    let mut path_schema = schema(true, FieldType::Str);
-    path_schema.tables[0].fields[0].ty = FieldType::Str;
     let base = snapshot(
-        path_schema.clone(),
-        build_manifest(1, [10, 20, 30], [b"base-shallow", b"base-middle", b"base-deep"]),
+        string_key_schema(),
+        split_manifest(1, [10, 20], [b"base-depth", b"base-boundary"]),
         None,
     );
     let left = snapshot(
-        path_schema.clone(),
-        build_manifest(2, [11, 21, 30], [b"left-shallow", b"left-middle", b"left-deep"]),
+        string_key_schema(),
+        split_manifest(2, [11, 21], [b"left-depth", b"left-boundary"]),
         None,
     );
     let right = snapshot(
-        path_schema,
-        build_manifest(3, [12, 22, 30], [b"right-shallow", b"right-middle", b"right-deep"]),
+        string_key_schema(),
+        split_manifest(3, [12, 22], [b"right-depth", b"right-boundary"]),
         None,
     );
 
     let plan = merge_three_way_snapshots(&base, &left, &right, &mut source, budget()).unwrap();
     assert_eq!(plan.report.conflicts_lower_bound, 0);
     assert_eq!(source.visited, vec![
-        (MergeSide::Base, b"base-shallow".to_vec()),
-        (MergeSide::Left, b"left-shallow".to_vec()),
-        (MergeSide::Right, b"right-shallow".to_vec()),
-        (MergeSide::Base, b"base-middle".to_vec()),
-        (MergeSide::Left, b"left-middle".to_vec()),
-        (MergeSide::Right, b"right-middle".to_vec()),
+        (MergeSide::Base, b"base-depth".to_vec()),
+        (MergeSide::Left, b"left-depth".to_vec()),
+        (MergeSide::Right, b"right-depth".to_vec()),
+        (MergeSide::Base, b"base-boundary".to_vec()),
+        (MergeSide::Left, b"left-boundary".to_vec()),
+        (MergeSide::Right, b"right-boundary".to_vec()),
     ]);
 
     let segments = &plan.tables[&id(1)].segments;
-    assert_eq!(segments.len(), 3);
+    assert_eq!(segments.len(), 2);
     let MergedSegment::Rows { range, rows, tombstones, .. } = &segments[0] else {
-        panic!("the shallow path tombstone merges with its disjoint fixture edit")
+        panic!("the depth-ordered nested tombstones materialize before the short boundary key")
     };
-    assert_eq!(range.end.as_deref(), Some(child_boundary.as_slice()));
-    assert_eq!(rows, &[shallow_peer_edit]);
-    assert_eq!(tombstones, &[root_key]);
+    assert_eq!(range.end.as_deref(), Some(boundary.as_slice()));
+    assert!(rows.is_empty());
+    assert_eq!(tombstones, &[string("root"), string("root/child"), string("root/child/deep")]);
     let MergedSegment::Rows { range, rows, tombstones, .. } = &segments[1] else {
-        panic!("the child-depth tombstone belongs to the inclusive middle boundary")
+        panic!("the short boundary tombstone merges with its disjoint fixture edit")
     };
-    assert_eq!(range.start.as_deref(), Some(child_boundary.as_slice()));
-    assert_eq!(range.end.as_deref(), Some(deep_boundary.as_slice()));
-    assert_eq!(rows, &[middle_peer_edit]);
-    assert_eq!(tombstones, &[child_key]);
-    assert!(matches!(&segments[2], MergedSegment::Reuse { from: MergeSide::Left, .. }));
+    assert_eq!(range.start.as_deref(), Some(boundary.as_slice()));
+    assert_eq!(rows, &[sibling_edit]);
+    assert_eq!(tombstones, &[boundary_row.key.clone()]);
 }
 
 #[test]
