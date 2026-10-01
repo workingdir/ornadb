@@ -15695,6 +15695,9 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
         status_query([107; 16], [91; 16], terminal_fingerprint);
     let final_sequential_terminal_fingerprint =
         request_fingerprint(&final_sequential_terminal_query, [1; 16]);
+    let terminal_after_replay_query = status_query([108; 16], [91; 16], terminal_fingerprint);
+    let terminal_after_replay_fingerprint =
+        request_fingerprint(&terminal_after_replay_query, [1; 16]);
     let first_unknown_status = block_on(host.dispatch_frame(
         [6; 16],
         2,
@@ -16622,6 +16625,100 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
         block_on(host.dispatch_frame(
             [6; 16],
             24,
+            Frame::Binary(terminal_eval.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("another terminal Eval replay preserves the prior sequential snapshot"),
+        terminal_eval_replay
+    );
+    // The reference leaves a third fresh identity after repeated terminal
+    // Eval replay unspecified; retain its snapshot alongside the earlier IDs.
+    let terminal_after_replay = block_on(host.dispatch_frame(
+        [6; 16],
+        24,
+        Frame::Binary(terminal_after_replay_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("another fresh identity after replay reads the retained terminal result");
+    assert!(matches!(
+        &terminal_after_replay.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *fingerprint == terminal_fingerprint
+            && result == &expected_first_terminal_body
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(next_fresh_terminal_first_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the oldest sequential terminal snapshot survives the next fresh identity"),
+        next_fresh_terminal_first
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(replayed_eval_fresh_terminal_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the second sequential terminal snapshot survives the next fresh identity"),
+        replayed_eval_fresh_terminal
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(post_mismatch_fresh_terminal_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the post-mismatch snapshot survives the next fresh identity"),
+        post_mismatch_fresh_terminal
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(final_sequential_terminal_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the prior sequential snapshot survives the next fresh identity"),
+        final_sequential_terminal
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(terminal_after_replay_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the third fresh terminal identity has its own stable retry"),
+        terminal_after_replay
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
             Frame::Binary(fresh_terminal_after_mixed_retries_query.clone()),
             &mut application,
         ))
@@ -16958,6 +17055,11 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
             [107; 16],
             final_sequential_terminal_fingerprint,
             final_sequential_terminal,
+        ),
+        (
+            [108; 16],
+            terminal_after_replay_fingerprint,
+            terminal_after_replay,
         ),
         ([97; 16], current_first_status_fingerprint, current_first_status),
         ([98; 16], current_second_status_fingerprint, current_second_status),
