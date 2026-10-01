@@ -24588,6 +24588,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_leaf_chain_conjunct_resplits_sustained_pressure_stop_at_two_matches() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=32)
+            .map(|row_id| {
+                let title = if matches!(row_id, 7 | 31) {
+                    "later"
+                } else {
+                    "current"
+                };
+                let target = if row_id == 32 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(147), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference does not specify how sustained conjunctive filters
+        // are re-split around nested leaf takes. Preserve the two-match
+        // closure across those re-splits: row thirty-two's missing lookup is
+        // beyond the completed take and must remain unobserved.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-take-two-leaf-chain-conjunct-resplit-stop.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(2u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (10, 47),
+            "conjunct re-splits sustain mixed leaf pressure and close at the second match"
+        );
+    }
+
+    #[tokio::test]
     async fn query_projection_failures_recover_at_the_outer_boundary() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
