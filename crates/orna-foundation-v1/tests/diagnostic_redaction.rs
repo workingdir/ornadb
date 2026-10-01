@@ -20510,3 +20510,115 @@ fn composed_decoded_ordered_tail_stays_contained_in_its_branch() {
         }
     }
 }
+
+#[test]
+fn composed_decoded_deep_empty_tails_stay_contained() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let diagnostic = |code: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let decoded_empty = Diagnostic::decode_ovb(
+        &diagnostic("ORNA-E-DEEP-CONTAINED-EMPTY")
+            .redacted()
+            .encode_ovb()
+            .unwrap(),
+    )
+    .unwrap();
+    let decoded_inner = Diagnostic::decode_ovb(
+        &diagnostic("ORNA-E-DEEP-CONTAINED-INNER")
+            .with_cause(
+                diagnostic("ORNA-E-DEEP-CONTAINED-ORDERED")
+                    .with_cause(diagnostic("ORNA-E-DEEP-CONTAINED-A"))
+                    .with_cause(diagnostic("ORNA-E-DEEP-CONTAINED-B")),
+            )
+            .with_cause(decoded_empty.clone())
+            .redacted()
+            .encode_ovb()
+            .unwrap(),
+    )
+    .unwrap();
+    let decoded_middle = Diagnostic::decode_ovb(
+        &diagnostic("ORNA-E-DEEP-CONTAINED-MIDDLE")
+            .with_cause(decoded_inner)
+            .with_cause(decoded_empty.clone())
+            .redacted()
+            .encode_ovb()
+            .unwrap(),
+    )
+    .unwrap();
+    let composed = diagnostic("ORNA-E-DEEP-CONTAINED-OUTER")
+        .with_cause(decoded_middle.clone())
+        .with_cause(decoded_empty)
+        .with_cause(decoded_middle)
+        .redacted();
+
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        assert!(diagnostic["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|note| note == "<redacted>"));
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    let projection = serde_json::to_value(&composed).unwrap();
+    assert_redacted_tree(&projection);
+    let outer_causes = projection["causes"].as_array().unwrap();
+    assert_eq!(outer_causes.len(), 3);
+    assert_eq!(outer_causes[0], outer_causes[2]);
+    assert_eq!(outer_causes[1]["code"], "ORNA-E-DEEP-CONTAINED-EMPTY");
+    assert!(outer_causes[1]["causes"].as_array().unwrap().is_empty());
+
+    let middle_causes = outer_causes[0]["causes"].as_array().unwrap();
+    assert_eq!(middle_causes.len(), 2);
+    assert_eq!(middle_causes[0]["code"], "ORNA-E-DEEP-CONTAINED-INNER");
+    assert_eq!(middle_causes[1]["code"], "ORNA-E-DEEP-CONTAINED-EMPTY");
+    assert!(middle_causes[1]["causes"].as_array().unwrap().is_empty());
+    let inner_causes = middle_causes[0]["causes"].as_array().unwrap();
+    assert_eq!(inner_causes.len(), 2);
+    assert_eq!(inner_causes[0]["code"], "ORNA-E-DEEP-CONTAINED-ORDERED");
+    assert_eq!(inner_causes[1]["code"], "ORNA-E-DEEP-CONTAINED-EMPTY");
+    assert!(inner_causes[1]["causes"].as_array().unwrap().is_empty());
+    assert_eq!(
+        inner_causes[0]["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cause| cause["code"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["ORNA-E-DEEP-CONTAINED-A", "ORNA-E-DEEP-CONTAINED-B"]
+    );
+
+    let wire = composed.encode_ovb().unwrap();
+    let replayed = Diagnostic::decode_ovb(&wire).unwrap();
+    let replayed_projection = serde_json::to_value(&replayed).unwrap();
+    assert_redacted_tree(&replayed_projection);
+    assert_eq!(replayed_projection, projection);
+    let json = serde_json::to_vec(&replayed_projection).unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([fixture.as_bytes()])
+    {
+        for bytes in [&json, &wire] {
+            assert!(!bytes
+                .windows(disclosure.len())
+                .any(|window| window == disclosure));
+        }
+    }
+}
