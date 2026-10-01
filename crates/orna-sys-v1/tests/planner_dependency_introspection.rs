@@ -14716,3 +14716,100 @@ fn explain_keeps_join_scan_overflow_through_predicate_max_limit_tail() {
         node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
     }));
 }
+
+#[test]
+fn explain_keeps_join_scan_overflow_through_limit_mutation_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN leaves local scan overflow through a bounded limit and known
+    // write suffix unspecified. Keep the joined scan marker while the limit
+    // retains its MAX input-read cost and mutation/materialization remain priced.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:join-scan-overflow-limit-mutation"),
+        source: obj("table:ByteWorkThreeScanSource"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(1),
+            estimated_bytes: Some(0),
+            mutable_branch: None,
+        }),
+        joins: vec![QueryJoinDescription {
+            source: obj("table:ByteWorkThreeScanLast"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            predicate: None,
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: Some(10),
+        mutations: vec![QueryMutationDescription {
+            table: obj("table:ByteWorkThreeScanSource"),
+            kind: QueryMutationKind::Update,
+            estimated_affected_rows: Some(2),
+            estimated_write_bytes: Some(2_048),
+            estimated_table_rows_before: Some(1),
+        }],
+        materialize_into: Some(obj("materialization:join-scan-overflow-limit-mutation")),
+    })
+    .expect("joined scan overflow through limit, write, and materialization tails");
+
+    assert_eq!(explained.nodes().len(), 6);
+    assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(explained.root().estimated_rows(), Some(2));
+    assert_eq!(explained.root().estimated_bytes(), Some(2_048));
+    assert_eq!(explained.root().estimated_work(), Some(3));
+    assert_eq!(explained.plan().estimated_cost(), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "known source and MAX input-read work cross the aggregate bound before the write suffix"
+    );
+
+    let scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("joined scan with local byte-work overflow");
+    assert_eq!(scan.estimated_rows(), Some(u64::MAX));
+    assert_eq!(scan.estimated_bytes(), Some(2_048));
+    assert_eq!(scan.estimated_work(), None);
+    assert_eq!(
+        scan.details().get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let limit = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Limit)
+        .expect("bounded limit before the write suffix");
+    assert_eq!(limit.estimated_rows(), Some(10));
+    assert_eq!(limit.estimated_bytes(), Some(10));
+    assert_eq!(limit.estimated_work(), Some(u64::MAX));
+    let mutation = explained
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned())))
+        .expect("known update following the limit");
+    assert_eq!(mutation.estimated_rows(), Some(2));
+    assert_eq!(mutation.estimated_bytes(), Some(2_048));
+    assert_eq!(mutation.estimated_work(), Some(3));
+    let surface = serde_json::to_value(&explained)
+        .expect("joined scan overflow limit-write surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().any(|node| {
+        node["details"]["estimated_work_overflow"] == true
+    }));
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
