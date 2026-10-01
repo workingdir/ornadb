@@ -10650,6 +10650,49 @@ fn explain_closes_first_byte_work_across_three_scans_at_max() {
         assert_eq!(named_node(name).estimated_work(), None);
     }
 
+    // Close all three scan-local first-byte contributions at MAX. Aggregating
+    // their three raw bytes first would charge one block rather than three.
+    let all_first_bytes = explain(u64::MAX - 3, [1, 1, 1]);
+    assert_eq!(all_first_bytes.plan().estimated_cost(), None);
+    assert_eq!(
+        all_first_bytes
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        None
+    );
+    let all_first_nodes = all_first_bytes.nodes();
+    assert_eq!(
+        all_first_nodes
+            .iter()
+            .find(|node| node.object() == Some(&obj("table:ByteWorkThreeScanSource")))
+            .unwrap()
+            .estimated_work(),
+        Some(u64::MAX - 3)
+    );
+    for name in [
+        "table:ByteWorkThreeScanFirst",
+        "table:ByteWorkThreeScanMiddle",
+        "table:ByteWorkThreeScanLast",
+    ] {
+        let scan = all_first_nodes
+            .iter()
+            .find(|node| node.object() == Some(&obj(name)))
+            .unwrap();
+        assert_eq!(scan.estimated_bytes(), Some(1));
+        assert_eq!(scan.estimated_work(), Some(1));
+    }
+
+    let all_first_overflow = explain(u64::MAX - 2, [1, 1, 1]);
+    assert_eq!(all_first_overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        all_first_overflow
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+
     // Two one-byte scans are only two raw bytes and would round to one unit
     // if combined. Each scan rounds locally, so moving the source one unit
     // closer to MAX makes the known lower bound overflow regardless of which
