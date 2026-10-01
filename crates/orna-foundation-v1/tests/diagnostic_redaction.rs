@@ -19248,3 +19248,142 @@ fn zero_cause_five_level_aliases_keep_distinct_leaf_tail_identity() {
         }
     }
 }
+
+#[test]
+fn zero_cause_five_level_aliases_preserve_distinct_leaf_tail_order() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let diagnostic = |code: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let alias = || diagnostic("ORNA-E-ZERO-ALIAS-ORDER");
+    let empty_leaf = alias();
+    let tail_a = diagnostic("ORNA-E-ZERO-ALIAS-ORDER-A");
+    let tail_b = diagnostic("ORNA-E-ZERO-ALIAS-ORDER-B");
+    let leaf_ab = empty_leaf
+        .clone()
+        .with_cause(tail_a.clone())
+        .with_cause(tail_b.clone());
+    let leaf_ba = empty_leaf
+        .clone()
+        .with_cause(tail_b)
+        .with_cause(tail_a);
+
+    let shared_level_two = alias()
+        .with_cause(empty_leaf.clone())
+        .with_cause(empty_leaf.clone());
+    let ordered_level_two = alias().with_cause(leaf_ab).with_cause(leaf_ba);
+    let shared_level_three = alias()
+        .with_cause(shared_level_two.clone())
+        .with_cause(shared_level_two.clone());
+    let ordered_level_three = alias()
+        .with_cause(shared_level_two)
+        .with_cause(ordered_level_two);
+    let shared_level_four = alias()
+        .with_cause(shared_level_three.clone())
+        .with_cause(shared_level_three.clone());
+    let ordered_level_four = alias()
+        .with_cause(shared_level_three)
+        .with_cause(ordered_level_three);
+    let shared_level_five = alias()
+        .with_cause(shared_level_four.clone())
+        .with_cause(shared_level_four.clone());
+    let ordered_level_five = alias()
+        .with_cause(shared_level_four)
+        .with_cause(ordered_level_four);
+    let wire = alias()
+        .with_cause(shared_level_five)
+        .with_cause(ordered_level_five)
+        .redacted()
+        .encode_ovb()
+        .unwrap();
+
+    fn collect_leaf_tail_codes(
+        alias: &serde_json::Value,
+        remaining_levels: usize,
+        paths: &mut Vec<Vec<String>>,
+    ) {
+        assert_eq!(alias["code"], "ORNA-E-ZERO-ALIAS-ORDER");
+        let causes = alias["causes"].as_array().unwrap();
+        if remaining_levels == 0 {
+            paths.push(
+                causes
+                    .iter()
+                    .map(|tail| {
+                        assert!(tail["causes"].as_array().unwrap().is_empty());
+                        tail["code"].as_str().unwrap().to_owned()
+                    })
+                    .collect(),
+            );
+        } else {
+            assert_eq!(causes.len(), 2);
+            for cause in causes {
+                collect_leaf_tail_codes(cause, remaining_levels - 1, paths);
+            }
+        }
+    }
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        assert!(diagnostic["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|note| note == "<redacted>"));
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+
+    let decoded = Diagnostic::decode_ovb(&wire).unwrap();
+    let projection = serde_json::to_value(&decoded).unwrap();
+    assert_redacted_tree(&projection);
+    let aliases = projection["causes"].as_array().unwrap();
+    assert_eq!(aliases.len(), 2);
+
+    let mut empty_shape = Vec::new();
+    collect_leaf_tail_codes(&aliases[0], 4, &mut empty_shape);
+    assert_eq!(empty_shape, vec![Vec::<String>::new(); 16]);
+
+    let mut ordered_shape = Vec::new();
+    collect_leaf_tail_codes(&aliases[1], 4, &mut ordered_shape);
+    // Parent order among same-code aliases is unspecified; each leaf's cause list is ordered.
+    ordered_shape.sort();
+    let mut expected_ordered_shape = vec![Vec::<String>::new(); 14];
+    expected_ordered_shape.extend([
+        vec![
+            "ORNA-E-ZERO-ALIAS-ORDER-A".to_owned(),
+            "ORNA-E-ZERO-ALIAS-ORDER-B".to_owned(),
+        ],
+        vec![
+            "ORNA-E-ZERO-ALIAS-ORDER-B".to_owned(),
+            "ORNA-E-ZERO-ALIAS-ORDER-A".to_owned(),
+        ],
+    ]);
+    expected_ordered_shape.sort();
+    assert_eq!(ordered_shape, expected_ordered_shape);
+
+    let json = serde_json::to_vec(&decoded).unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([fixture.as_bytes()])
+    {
+        for bytes in [&json, &wire] {
+            assert!(!bytes
+                .windows(disclosure.len())
+                .any(|window| window == disclosure));
+        }
+    }
+}
