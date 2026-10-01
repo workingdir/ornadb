@@ -51,3 +51,5 @@ pub fn nullable_expression_documentation(tables: Relation<sys.Table>): Relation<
 pub fn documented_default_expression_refs(tables: Relation<sys.Table>): Relation<sys.ExpressionRef?> = optional_reference_target_columns(tables) | filter(column => column.docs != null) | map(column => column.default_expression);
 pub fn defaulted_column_documentation(tables: Relation<sys.Table>): Relation<Str?> = optional_reference_target_columns(tables) | filter(column => column.default_expression != null) | map(column => column.docs);
 pub fn unkeyed_documented_computed_expression_refs(tables: Relation<sys.Table>): Relation<sys.ExpressionRef?> = optional_reference_target_columns(tables) | filter(column => column.key_position == null && column.docs != null) | map(column => column.computed_expression);
+pub fn documented_column_rows(columns: Relation<sys.Column>): Relation<sys.Column> = columns | filter(column => column.docs != null);
+pub fn documented_column_default_expression_refs(tables: Relation<sys.Table>): Relation<sys.ExpressionRef?> = documented_column_rows(optional_reference_target_columns(tables)) | map(column => column.default_expression);
