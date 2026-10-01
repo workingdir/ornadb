@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 
 #[derive(Clone, Debug)]
 pub struct Function {
+    #[allow(dead_code)] // Read by collector proofs; not needed while emitting API JSON.
     pub method: String,
     pub metadata: Value,
 }
@@ -15,6 +16,28 @@ pub struct Function {
 pub struct Collector {
     pub functions: Vec<Function>,
     pub errors: Vec<String>,
+}
+
+/// Serialize API JSON with RFC 8785-style stable object-key ordering while
+/// retaining readable pretty formatting for the published artifact.
+pub fn canonical_pretty_json(value: &Value) -> Result<String, serde_json::Error> {
+    fn sort(value: Value) -> Value {
+        match value {
+            Value::Array(items) => Value::Array(items.into_iter().map(sort).collect()),
+            Value::Object(object) => {
+                let mut members = object.into_iter().collect::<Vec<_>>();
+                members.sort_by(|left, right| left.0.cmp(&right.0));
+                let mut canonical = serde_json::Map::new();
+                for (key, value) in members {
+                    canonical.insert(key, sort(value));
+                }
+                Value::Object(canonical)
+            }
+            scalar => scalar,
+        }
+    }
+
+    serde_json::to_string_pretty(&sort(value.clone()))
 }
 
 impl Collector {
@@ -1331,10 +1354,9 @@ fn substitute_type_parameter(source: &str, parameter: &str, replacement: &str) -
     result
 }
 
-/// Validate cross-annotation invariants before deriving constants or emitting JSON.
+/// Validate cross-annotation invariants before emitting the collected API JSON.
 pub fn validate_collection(functions: &[Function]) -> Result<(), String> {
     let mut names = BTreeSet::new();
-    let mut constants = BTreeSet::new();
     let mut signatures = BTreeSet::new();
     let mut parsed_signatures = Vec::new();
     for function in functions {
@@ -1342,10 +1364,6 @@ pub fn validate_collection(functions: &[Function]) -> Result<(), String> {
         let name = function.metadata["name"].as_str().expect("validated name");
         if !names.insert(name.to_owned()) {
             return Err(format!("duplicate #[ornasys] name {name}"));
-        }
-        let constant = format!("{}_DESCRIPTOR", function.method.to_ascii_uppercase());
-        if !constants.insert(constant.clone()) {
-            return Err(format!("duplicate #[ornasys] descriptor constant {constant}"));
         }
         let signature = function.metadata["signature"]
             .as_str()
