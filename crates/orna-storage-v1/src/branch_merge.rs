@@ -114,6 +114,10 @@ pub struct ThreeWaySnapshot {
 /// an omitted key means the row is known absent in that snapshot. Missing,
 /// pruned, or unhydrated segment data must return an error instead, because
 /// treating unavailable history as an empty range would manufacture deletes.
+/// A failed visit aborts the plan; after the adapter recovers the data, a
+/// retry starts from the manifests and canonical key order again. No partial
+/// tombstones or conflicts survive the failed attempt, so concurrent retries
+/// over the same recovered snapshots have the same result.
 pub trait BranchRowSource {
     fn visit_rows(
         &mut self,
