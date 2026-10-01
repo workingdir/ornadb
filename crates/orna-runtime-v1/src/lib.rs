@@ -21311,6 +21311,26 @@ mod tests {
             "last() traverses six split rejects, fills take(2), then closes before failure"
         );
 
+        // The reference leaves a wider split tail implicit. Traverse two
+        // leading rejects and two between matches; once take(2) fills, the
+        // final two rejects and failing source stay unopened.
+        let (last_closes_after_split_six_rejects_and_leaves_tail_closed, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-six-rejects-split-leading-interleaved-trailing.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_after_split_six_rejects_and_leaves_tail_closed.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (6, 12),
+            "last() closes after four traversed rejects and leaves the split tail unopened"
+        );
+
         // The reference is silent when the entire bracketed candidate tail
         // is rejected before take(2) naturally exhausts. The empty last()
         // result keeps its explicit coalesce fallback.
