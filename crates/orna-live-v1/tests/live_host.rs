@@ -5567,7 +5567,9 @@ fn durable_status_snapshots_keep_reserved_and_running_through_handoff_storm() {
             }
         }
 
-        replay_durable_status_snapshots(
+        // Exercise the complete accumulated identity set after both reconnects;
+        // the oldest pinned snapshot must survive the entire handoff pair too.
+        replay_durable_status_snapshots_reverse(
             &mut recovered,
             current_attachment,
             &snapshots,
