@@ -1,0 +1,23 @@
+pub table Note(id: Int) {
+    text: Str,
+    quantity: Int,
+}
+
+fn move_competitor_leaf() = Note.rekey(2, 4);
+fn move_competitor_middle() = move_competitor_leaf();
+fn move_competitor() = move_competitor_middle();
+
+fn inner_split_retry() {
+    move_competitor();
+    Note.update(1, { quantity: 11 });
+    Note.rekey(1, 3)
+}
+
+fn outer_split_retry() {
+    Note.delete(3);
+    Note.rekey(1, 3)
+}
+
+fn main() = Note.rekey(1, 3)
+    |? (inner_failure => inner_split_retry())
+    |? (outer_failure => outer_split_retry());
