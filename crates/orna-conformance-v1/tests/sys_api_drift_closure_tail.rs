@@ -393,6 +393,26 @@ fn edge_interplay_fixture_composes_unknown_target_count_with_exactness() {
 }
 
 #[test]
+fn edge_interplay_fixture_composes_present_target_count_with_inexactness() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The frozen schema declares row_count nullable and row_count_exact independently; query
+    // the present/inexact branch while retaining row_count's nullable API type.
+    assert!(
+        analysis.is_ok(),
+        "present target-count and inexactness predicates must compose: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn runtime_publication_counters_do_not_leak_into_frozen_sys_types() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-internal-publication-metadata.orna",
