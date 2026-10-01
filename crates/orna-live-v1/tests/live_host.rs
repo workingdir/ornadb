@@ -2585,6 +2585,190 @@ fn http_create_and_resume_negotiate_and_replace_connections() {
 }
 
 #[test]
+fn running_status_snapshot_survives_http_reconnect_before_eval_completion() {
+    const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
+
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"{}"}}"#,
+                uuid(2),
+                SUBPROTOCOL
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    assert_eq!(created.status, 201);
+    let old_token = token(&created);
+    assert_eq!(
+        block_on(transport.upgrade(websocket_upgrade(1, &old_token), [5; 16], 1)).status,
+        101
+    );
+    let mut old_socket = WebSocketState::new([5; 16]);
+
+    let target_request = eval_with_context([1; 16], [71; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&target_request, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    let target_fingerprint = request_fingerprint(&target_request, [1; 16]);
+    let ticket = match block_on(transport.prepare_websocket_application(
+        &mut old_socket,
+        2,
+        &masked_binary_payload(&target_request),
+    ))
+    .unwrap()
+    {
+        WebSocketApplicationPreparation::Work(ticket) => ticket,
+        WebSocketApplicationPreparation::Output(_) => {
+            panic!("the fixture Eval is admitted as asynchronous work")
+        }
+        WebSocketApplicationPreparation::Pending => panic!("the Eval frame is complete"),
+    };
+    let status_request = |request| {
+        Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::RequestStatus {
+                target: [71; 16],
+                fingerprint: target_fingerprint,
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap()
+    };
+    let pinned_request = status_request([72; 16]);
+    let mut application = UnitApplication::default();
+    let pinned_output = block_on(transport.receive_with_application(
+        &mut old_socket,
+        3,
+        &masked_binary_payload(&pinned_request),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("the live query returns its Running snapshot");
+    let WebSocketOutput::Binary {
+        payload: pinned_payload,
+        ..
+    } = pinned_output
+    else {
+        panic!("the RequestStatus query returns a binary snapshot");
+    };
+    let pinned_snapshot = Envelope::decode(&pinned_payload, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        &pinned_snapshot.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Running,
+            fingerprint: Some(fingerprint),
+            result: None,
+        } if *target == [71; 16] && *fingerprint == target_fingerprint
+    ));
+
+    let resumed = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session/01010101-0101-0101-0101-010101010101/resume",
+            &format!(r#"{{"resume_token":"{old_token}","protocol":"{SUBPROTOCOL}"}}"#),
+        ),
+        4,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    assert_eq!(resumed.status, 200);
+    let new_token = token(&resumed);
+    assert_ne!(new_token, old_token);
+    assert_eq!(transport.take_retired_attachments(), vec![[5; 16]]);
+    assert!(transport.acknowledge_retired_attachment([5; 16]));
+    assert_eq!(
+        block_on(transport.receive_with_application(
+            &mut old_socket,
+            5,
+            &masked_binary_payload(&pinned_request),
+            &mut application,
+        )),
+        Err(Error::Closed),
+        "the retired socket cannot replay the request"
+    );
+    assert_eq!(
+        block_on(transport.upgrade(websocket_upgrade(1, &new_token), [6; 16], 5)).status,
+        101
+    );
+    let mut new_socket = WebSocketState::new([6; 16]);
+
+    let completion = block_on(ticket.execute(&mut application));
+    let WebSocketOutput::Binary {
+        payload: terminal_payload,
+        ..
+    } = block_on(transport.complete_application(completion)).unwrap()
+    else {
+        panic!("the session-owned Eval completes after attachment replacement");
+    };
+    let terminal = Envelope::decode(&terminal_payload, Limits::default().protocol).unwrap();
+    let expected_result = ResultBody::from_result(&terminal, Limits::default().protocol).unwrap();
+
+    let replay = block_on(transport.receive_with_application(
+        &mut new_socket,
+        6,
+        &masked_binary_payload(&status_request([72; 16])),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("the new attachment replays the exact Running snapshot");
+    let WebSocketOutput::Binary { payload, .. } = replay else {
+        panic!("a replayed status snapshot is binary");
+    };
+    assert_eq!(
+        Envelope::decode(&payload, Limits::default().protocol).unwrap(),
+        pinned_snapshot
+    );
+
+    let fresh = block_on(transport.receive_with_application(
+        &mut new_socket,
+        7,
+        &masked_binary_payload(&status_request([73; 16])),
+        &mut application,
+    ))
+    .unwrap()
+    .into_iter()
+    .next()
+    .expect("a fresh status identity observes the completed Eval");
+    let WebSocketOutput::Binary { payload, .. } = fresh else {
+        panic!("a fresh status snapshot is binary");
+    };
+    let fresh = Envelope::decode(&payload, Limits::default().protocol).unwrap();
+    assert!(matches!(
+        &fresh.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [71; 16]
+            && *fingerprint == target_fingerprint
+            && result == &expected_result
+    ));
+    assert_eq!(application.calls, 1);
+}
+
+#[test]
 fn rejected_cross_layer_reconnect_preserves_a_valid_session() {
     let mut host = host();
     let mut issuer = Issuer(1, None);
