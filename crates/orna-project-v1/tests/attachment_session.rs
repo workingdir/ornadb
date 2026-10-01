@@ -1303,6 +1303,245 @@ fn equal_oid_rebound_aliases_keep_independent_nested_route_identity() {
 }
 
 #[test]
+fn rebound_depth_chains_keep_old_and_replacement_branches_independent() {
+    let package_source = include_str!("fixtures/attach-package.orna");
+    let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
+
+    let old_short_source = package_source.replace("42", "30");
+    let old_short_commit = write_commit(
+        shared_dir.path(),
+        &[("main.orna", &old_short_source)],
+        "old short route before the chain rebind",
+    );
+    let old_long_source = package_source.replace("42", "32");
+    let old_long_commit = write_commit(
+        shared_dir.path(),
+        &[("main.orna", &old_long_source)],
+        "old long sibling before the chain rebind",
+    );
+
+    let old_leaf_source = package_source.replace("42", "45");
+    let old_leaf_commit = write_commit(
+        shared_dir.path(),
+        &[("main.orna", &old_leaf_source)],
+        "leaf from the original descendant chain",
+    );
+    let old_terminal_source = package_source.replace("42", "43");
+    let old_terminal_manifest = format!("archive_copy_archive_archive {old_leaf_commit}\n");
+    let old_terminal_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &old_terminal_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &old_terminal_manifest),
+        ],
+        "terminal from the original descendant chain",
+    );
+    let old_middle_source = package_source.replace("42", "41");
+    let old_middle_manifest = format!("archive_copy_archive {old_terminal_commit}\n");
+    let old_middle_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &old_middle_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &old_middle_manifest),
+        ],
+        "middle from the original descendant chain",
+    );
+
+    let replacement_leaf_source = package_source.replace("42", "95");
+    let replacement_leaf_commit = write_commit(
+        shared_dir.path(),
+        &[("main.orna", &replacement_leaf_source)],
+        "leaf from the rebound descendant chain",
+    );
+    let replacement_terminal_source = package_source.replace("42", "93");
+    let replacement_terminal_manifest =
+        format!("archive_copy_archive_archive {replacement_leaf_commit}\n");
+    let replacement_terminal_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &replacement_terminal_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &replacement_terminal_manifest),
+        ],
+        "terminal from the rebound descendant chain",
+    );
+    let replacement_middle_source = package_source.replace("42", "91");
+    let replacement_middle_manifest =
+        format!("archive_copy_archive {replacement_terminal_commit}\n");
+    let replacement_middle_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &replacement_middle_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &replacement_middle_manifest),
+        ],
+        "middle from the rebound descendant chain",
+    );
+
+    let replacement_source = package_source.replace("42", "50");
+    let replacement_manifest = format!("archive_copy {old_middle_commit}\n");
+    let replacement_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &replacement_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &replacement_manifest),
+        ],
+        "rebound ancestor with an original descendant branch",
+    );
+    let selected_source = package_source.replace("42", "70");
+    let selected_manifest = format!(
+        "archive {old_short_commit}\narchive_copy_archive {old_long_commit}\n"
+    );
+    let selected_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &selected_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &selected_manifest),
+        ],
+        "selected parent before the ancestor rebind",
+    );
+    let outer_source = package_source.replace("42", "71");
+    let outer_manifest = format!("archive_copy {selected_commit}\n");
+    let outer_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &outer_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &outer_manifest),
+        ],
+        "outer parent leading into the selected chain",
+    );
+
+    let root_manifest = format!("archive_copy_archive_archive {outer_commit}\n");
+    let (_root_dir, root_repository, root_commit) = repository(&[
+        ("main.orna", include_str!("fixtures/attach-primary.orna")),
+        (PACKAGE_PIN_MANIFEST_PATH, &root_manifest),
+    ]);
+    let loader = ProjectLoader::default();
+    let primary = PinnedDatabase::resolve("app", root_repository, &root_commit, loader).unwrap();
+    let resolver = PackageResolver::new(
+        [
+            ("archive".to_owned(), shared_repository.clone()),
+            ("archive_copy".to_owned(), shared_repository.clone()),
+            ("archive_copy_archive".to_owned(), shared_repository.clone()),
+            (
+                "archive_copy_archive_archive".to_owned(),
+                shared_repository.clone(),
+            ),
+        ],
+        loader,
+    )
+    .unwrap();
+
+    let root = resolver.resolve_for_parent(primary).unwrap();
+    let outer = root
+        .database("archive_copy_archive_archive")
+        .unwrap()
+        .clone();
+    let outer_closure = resolver.resolve_for_parent(outer).unwrap();
+    let selected = outer_closure.database("archive_copy").unwrap().clone();
+    let mut selected_closure = resolver.resolve_for_parent(selected).unwrap();
+    let old_selected_closure = selected_closure.clone();
+
+    let replacement = PinnedDatabase::resolve(
+        "archive",
+        shared_repository.clone(),
+        &replacement_commit,
+        loader,
+    )
+    .unwrap();
+    selected_closure.detach_database("archive").unwrap();
+    selected_closure
+        .attach_database(replacement.clone())
+        .unwrap();
+    assert_module_route(&selected_closure, "main.orna", "= 70");
+    assert_module_route(&selected_closure, "archive.orna", "= 50");
+    assert_module_route(&selected_closure, "archive_copy_archive.orna", "= 32");
+    assert_module_route(&old_selected_closure, "archive.orna", "= 30");
+    assert_module_route(
+        &old_selected_closure,
+        "archive_copy_archive.orna",
+        "= 32",
+    );
+
+    let mut original_chain = resolver.resolve_for_parent(replacement).unwrap();
+    assert_module_route(&original_chain, "main.orna", "= 50");
+    assert_module_route(&original_chain, "archive_copy.orna", "= 41");
+    let original_middle = original_chain.database("archive_copy").unwrap().clone();
+    let original_middle_snapshot = original_chain.clone();
+
+    let replacement_middle = PinnedDatabase::resolve(
+        "archive_copy",
+        shared_repository.clone(),
+        &replacement_middle_commit,
+        loader,
+    )
+    .unwrap();
+    original_chain.detach_database("archive_copy").unwrap();
+    original_chain
+        .attach_database(replacement_middle.clone())
+        .unwrap();
+    assert_module_route(&original_chain, "main.orna", "= 50");
+    assert_module_route(&original_chain, "archive_copy.orna", "= 91");
+    assert_module_route(&original_middle_snapshot, "archive_copy.orna", "= 41");
+
+    let replacement_middle_closure =
+        resolver.resolve_for_parent(replacement_middle).unwrap();
+    assert_module_route(&replacement_middle_closure, "main.orna", "= 91");
+    assert_module_route(
+        &replacement_middle_closure,
+        "archive_copy_archive.orna",
+        "= 93",
+    );
+    let replacement_terminal = replacement_middle_closure
+        .database("archive_copy_archive")
+        .unwrap()
+        .clone();
+    let replacement_terminal_closure =
+        resolver.resolve_for_parent(replacement_terminal).unwrap();
+    assert_module_route(&replacement_terminal_closure, "main.orna", "= 93");
+    assert_module_route(
+        &replacement_terminal_closure,
+        "archive_copy_archive_archive.orna",
+        "= 95",
+    );
+    assert_eq!(
+        replacement_terminal_closure
+            .database("archive_copy_archive_archive")
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        replacement_leaf_commit
+    );
+
+    let original_middle_closure = resolver.resolve_for_parent(original_middle).unwrap();
+    assert_module_route(&original_middle_closure, "main.orna", "= 41");
+    assert_module_route(
+        &original_middle_closure,
+        "archive_copy_archive.orna",
+        "= 43",
+    );
+    let original_terminal = original_middle_closure
+        .database("archive_copy_archive")
+        .unwrap()
+        .clone();
+    let original_terminal_closure = resolver.resolve_for_parent(original_terminal).unwrap();
+    assert_module_route(&original_terminal_closure, "main.orna", "= 43");
+    assert_module_route(
+        &original_terminal_closure,
+        "archive_copy_archive_archive.orna",
+        "= 45",
+    );
+    assert_eq!(
+        original_terminal_closure
+            .database("archive_copy_archive_archive")
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        old_leaf_commit
+    );
+}
+
+#[test]
 fn short_alias_rebound_to_long_pin_keeps_longer_nested_routes() {
     let package_source = include_str!("fixtures/attach-package.orna");
     let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
