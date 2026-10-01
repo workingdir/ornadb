@@ -273,6 +273,26 @@ fn edge_interplay_fixture_projects_outer_nullable_field_from_sibling_map() {
 }
 
 #[test]
+fn edge_interplay_fixture_projects_nullable_capture_across_nested_closures() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The frozen schema leaves an anchor's nullable default_expression independent from
+    // two-hop sibling docs; retain that captured nullable projection through both flat_maps.
+    assert!(
+        analysis.is_ok(),
+        "nested sibling closures must preserve the captured nullable expression: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn runtime_publication_counters_do_not_leak_into_frozen_sys_types() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-internal-publication-metadata.orna",
