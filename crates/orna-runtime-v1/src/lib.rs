@@ -23892,6 +23892,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_take_two_preserves_failures_across_conjunct_filter_splits() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=9)
+            .map(|row_id| {
+                let title = if row_id == 7 { "later" } else { "current" };
+                let target = if row_id == 7 { row_id } else { 99 };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(129), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The first row supplies one accepted result. Row eight is rejected
+        // by the first conjunct, so its bad lookup must be skipped. Row nine
+        // reaches the later conjunct while take(2) is still short; preserve
+        // that error in both the combined and split-filter forms.
+        let (combined, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-take-two-conjunct-in-prefix-failure.orna"
+            ),
+        );
+        assert_eq!(
+            combined.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 3),
+            "the short result reaches row nine's failing second conjunct after skipping row eight"
+        );
+
+        let (split, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-take-two-split-conjunct-in-prefix-failure.orna"
+            ),
+        );
+        assert_eq!(
+            split.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 3),
+            "split filters preserve the in-prefix later-conjunct failure and short-circuit work"
+        );
+    }
+
+    #[tokio::test]
     async fn query_projection_failures_recover_at_the_outer_boundary() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
