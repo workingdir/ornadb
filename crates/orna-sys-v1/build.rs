@@ -44,6 +44,9 @@ fn main() {
     }
     let collector = collect_rust_sources(&source_root)
         .expect("annotated system API collection must be unique and internally consistent");
+    for asset in &collector.registry_assets {
+        println!("cargo:rerun-if-changed={}", asset.display());
+    }
 
     let registry = collector
         .type_graph

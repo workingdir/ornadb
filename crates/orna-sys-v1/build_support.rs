@@ -26,6 +26,7 @@ pub struct Collector {
     /// the annotated implementation registry.
     pub type_graph: Option<Value>,
     pub schema: Option<Value>,
+    pub registry_assets: Vec<PathBuf>,
     current_source_dir: Option<PathBuf>,
 }
 
@@ -571,6 +572,7 @@ impl Collector {
                 return;
             }
         };
+        self.registry_assets.push(path);
         match kind {
             "type_graph" => self.type_graph = Some(value),
             "schema" => self.schema = Some(value),
