@@ -4,5 +4,6 @@ pub fn nested_callable_context_survives_decomposition() {
     let factory = historical.energy.factory;
     let product = factory();
     let read = product.read;
-    read()
+    let continuation = read();
+    continuation()
 }

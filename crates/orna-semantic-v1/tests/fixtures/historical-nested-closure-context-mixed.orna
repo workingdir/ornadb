@@ -3,5 +3,7 @@ pub fn differently_pinned_nested_callables_do_not_compose() {
     let current = sys.database.as_of(sys.snapshot("HEAD"));
     let before_product = before.energy.factory();
     let current_product = current.energy.factory();
-    [before_product.read, current_product.read]
+    let before_continuation = before_product.read();
+    let current_continuation = current_product.read();
+    [before_continuation, current_continuation]
 }

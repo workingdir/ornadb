@@ -2650,11 +2650,17 @@ fn distinct_historical_callable_contexts_cannot_be_mixed() {
 }
 
 fn historical_nested_callable_catalogue() -> Catalogue {
-    let reader = Type::Function {
+    let continuation = Type::Function {
         parameters: Vec::new(),
         parameter_names: Some(Vec::new()),
         default_parameters: BTreeSet::new(),
         result: Box::new(Type::Int),
+    };
+    let reader = Type::Function {
+        parameters: Vec::new(),
+        parameter_names: Some(Vec::new()),
+        default_parameters: BTreeSet::new(),
+        result: Box::new(continuation),
     };
     let factory = Symbol {
         kind: SymbolKind::Function,
