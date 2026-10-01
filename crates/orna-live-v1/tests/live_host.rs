@@ -12283,6 +12283,114 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
             if status.state == orna_runtime_v1::RequestState::Completed
                 && status.fingerprint == third_failure_query_fingerprint
     ));
+
+    // The reference does not spell out repeated exact status replay before
+    // cross-kind reuse. Keep a newly admitted query bound to its terminal
+    // failure when its own snapshot is replayed on both sides of the mismatch.
+    let fourth_failure_query = Envelope {
+        request: Some([97; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let fourth_failure_query_fingerprint = request_fingerprint(&fourth_failure_query, [1; 16]);
+    let fourth_failure_status = block_on(host.dispatch_frame(
+        [6; 16],
+        35,
+        Frame::Binary(fourth_failure_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a further fresh status identity observes the retained failure");
+    assert!(matches!(
+        &fourth_failure_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(returned),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *returned == fingerprint
+            && result == &expected_failure
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            36,
+            Frame::Binary(fourth_failure_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the fresh status snapshot replays before cross-kind reuse"),
+        fourth_failure_status
+    );
+
+    let eval_reusing_fourth_failure_query = eval_with_context([1; 16], [97; 16], [5; 16], None);
+    assert!(matches!(
+        Envelope::decode(&eval_reusing_fourth_failure_query, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            37,
+            Frame::Binary(eval_reusing_fourth_failure_query.clone()),
+            &mut application,
+        )),
+        Err(Error::RequestMismatch)
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            38,
+            Frame::Binary(fourth_failure_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the fresh status snapshot replays between cross-kind mismatches"),
+        fourth_failure_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            39,
+            Frame::Binary(eval_reusing_fourth_failure_query),
+            &mut application,
+        )),
+        Err(Error::RequestMismatch)
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            40,
+            Frame::Binary(fourth_failure_query),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the fresh status snapshot replays after cross-kind mismatches"),
+        fourth_failure_status
+    );
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [1; 16],
+            request_id: [97; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == fourth_failure_query_fingerprint
+    ));
     assert_eq!(application.calls, 1);
 
     drop(host);
