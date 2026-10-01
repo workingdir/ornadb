@@ -575,6 +575,26 @@ fn edge_interplay_fixture_hands_off_filtered_present_projected_exact_count() {
 }
 
 #[test]
+fn edge_interplay_fixture_returns_filtered_present_count_from_inner_handoff() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The present-count filter runs before the callback; return the callback's handed-off
+    // value itself and keep the API's nullable result type through the nested relation.
+    assert!(
+        analysis.is_ok(),
+        "the filtered present projected count must survive its inner handoff: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_projects_unknown_exact_target_count_through_columns() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
