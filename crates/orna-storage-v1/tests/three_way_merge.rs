@@ -15717,6 +15717,58 @@ fn concurrent_split_and_whole_loads_keep_the_same_tombstone_order() {
 }
 
 #[test]
+fn sustained_concurrent_depth_loads_keep_tombstone_boundary_order() {
+    // The reference is silent on sustained concurrent scheduling. Pin the
+    // local policy that every complete load retains canonical table-key
+    // ordering across both aligned segment boundaries and whole-table scans.
+    const LOADS_PER_WAVE: usize = 8;
+    const WAVES: usize = 6;
+    let expected = vec![string("root"), string("root/child"), string("root/child/deep")];
+    let mut completed = 0;
+
+    for wave in 0..WAVES {
+        let start = Arc::new(Barrier::new(LOADS_PER_WAVE));
+        let mut workers = Vec::with_capacity(LOADS_PER_WAVE);
+        for load in 0..LOADS_PER_WAVE {
+            let split_layout = (wave + load) % 2 == 0;
+            let (base, left, right, mut source) = if split_layout {
+                split_cross_depth_load_inputs((wave + load) % 4 == 0)
+            } else {
+                cross_depth_load_inputs()
+            };
+            if (wave + load) % 3 == 0 {
+                for rows in source.rows.values_mut() {
+                    rows.reverse();
+                }
+            }
+            let gate = Arc::clone(&start);
+            workers.push(std::thread::spawn(move || {
+                let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+                let plan = merge_three_way_snapshots(
+                    &base,
+                    &left,
+                    &right,
+                    &mut source,
+                    BranchMergeBudget { max_rows_examined: 5, max_conflicts: 0 },
+                )
+                .expect("each synchronized load fits its private exact budget");
+                (plan, split_layout)
+            }));
+        }
+
+        for worker in workers {
+            let (plan, split_layout) = worker.join().expect("sustained load worker completes");
+            assert_eq!(plan.report.rows_examined, 5);
+            assert_eq!(flattened_row_tombstones(&plan), expected);
+            assert_eq!(plan.tables[&id(1)].segments.len(), if split_layout { 3 } else { 1 });
+            completed += 1;
+        }
+    }
+
+    assert_eq!(completed, LOADS_PER_WAVE * WAVES);
+}
+
+#[test]
 fn fixture_cross_depth_load_budget_stops_without_partial_plan() {
     let (base, left, right, mut source) = cross_depth_load_inputs();
     let error = merge_three_way_snapshots(
