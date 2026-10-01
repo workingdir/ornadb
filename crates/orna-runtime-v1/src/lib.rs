@@ -1983,6 +1983,7 @@ pub enum RuntimeError {
     TerminalOutcomeTooLarge,
     RecoveryInvalid,
     FaultInjected(FaultPoint),
+    SystemProviderAbiInvalid,
     StorageUnavailable,
 }
 impl RuntimeError {
@@ -2056,6 +2057,7 @@ impl fmt::Display for RuntimeError {
             Self::TerminalOutcomeTooLarge => "runtime terminal outcome exceeds its bound",
             Self::RecoveryInvalid => "runtime recovery validation failed",
             Self::FaultInjected(_) => "runtime fault injected",
+            Self::SystemProviderAbiInvalid => "baked system provider ABI is invalid",
             Self::StorageUnavailable => "runtime state unavailable",
         })
     }
@@ -2077,6 +2079,7 @@ pub enum TableActivationError {
 pub struct RuntimeState {
     connection: Connection,
     compact_receipt_signing_key: SigningKey,
+    system_provider_roles: orna_sys_v1::ProviderRoleRegistry,
 }
 
 enum RequestActivationTransactionError {
@@ -3914,6 +3917,9 @@ impl RuntimeState {
     ) -> Result<Self, RuntimeError> {
         validate_identity(identity)?;
         validate_digest(initial_digest)?;
+        let system_provider_roles =
+            orna_sys_v1::ProviderRoleRegistry::from_baked_abi(orna_sys_v1::system_provider_abi())
+                .map_err(|_| RuntimeError::SystemProviderAbiInvalid)?;
         let database = Builder::new_local(path)
             .build()
             .await
@@ -3939,6 +3945,7 @@ impl RuntimeState {
         let state = Self {
             connection,
             compact_receipt_signing_key,
+            system_provider_roles,
         };
         state.migrate_observation_projection_schema().await?;
         state.migrate_stream_observation_failure_identity().await?;
@@ -3950,6 +3957,12 @@ impl RuntimeState {
         state.migrate_catalogue_identity_schema().await?;
         state.validate_recovery().await?;
         Ok(state)
+    }
+
+    /// The runtime links the baked module roles at startup. Extension loading
+    /// is not part of this 1.0 runtime surface.
+    pub fn system_provider_roles(&self) -> &orna_sys_v1::ProviderRoleRegistry {
+        &self.system_provider_roles
     }
 
     /// Creates a stream backend whose mutations are fenced by this writer lease.
@@ -18868,6 +18881,17 @@ mod tests {
         let row = rows.next().await.unwrap().expect("synchronous pragma row");
         let synchronous: i64 = row.get(0).unwrap();
         assert_eq!(synchronous, 2, "RuntimeState must use SQLite FULL synchronous mode");
+    }
+
+    #[tokio::test]
+    async fn runtime_links_required_baked_system_provider_roles_at_open() {
+        let (_temp, repository) = repository();
+        let state = open_state(&repository).await;
+        let invoke = state
+            .system_provider_roles()
+            .resolve("langitem.sys.invoke")
+            .unwrap();
+        assert_eq!(invoke.provider.as_str(), "orna.sys.v1");
     }
 
     #[tokio::test]

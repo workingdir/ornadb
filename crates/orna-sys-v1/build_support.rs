@@ -10,6 +10,8 @@ pub struct Function {
     #[allow(dead_code)] // Read by collector proofs; not needed while emitting API JSON.
     pub method: String,
     pub metadata: Value,
+    /// Compiler-known semantic role, omitted from frozen `api/sys.json`.
+    pub role: Option<String>,
 }
 
 #[derive(Default)]
@@ -63,10 +65,11 @@ impl Collector {
             return;
         }
         if let Some(attribute) = annotations.first() {
-            match parse_function_attribute(attribute) {
-                Ok(metadata) => self.functions.push(Function {
+            match parse_function_attributes(attribute) {
+                Ok((metadata, role)) => self.functions.push(Function {
                     method: method.ident.to_string(),
                     metadata,
+                    role,
                 }),
                 Err(error) => self.errors.push(format!("{}: {error}", method.ident)),
             }
@@ -131,23 +134,33 @@ pub fn is_ornasys(attribute: &syn::Attribute) -> bool {
         .is_some_and(|segment| segment.ident == "ornasys")
 }
 
-pub fn parse_function_attribute(attribute: &syn::Attribute) -> Result<Value, String> {
+fn parse_function_attributes(
+    attribute: &syn::Attribute,
+) -> Result<(Value, Option<String>), String> {
     let mut function_json = None;
+    let mut role = None;
     attribute
         .parse_nested_meta(|meta| {
-            if !meta.path.is_ident("function") {
-                return Err(meta.error("expected `function = \"<JSON>\"`"));
-            }
             let value = meta.value()?;
             let expression: Expr = value.parse()?;
             let Expr::Lit(expression) = expression else {
-                return Err(meta.error("function metadata must be a string literal"));
+                return Err(meta.error("#[ornasys] metadata must be a string literal"));
             };
             let Lit::Str(value) = expression.lit else {
-                return Err(meta.error("function metadata must be a string literal"));
+                return Err(meta.error("#[ornasys] metadata must be a string literal"));
             };
-            if function_json.replace(value.value()).is_some() {
-                return Err(meta.error("only one function metadata value is allowed"));
+            if meta.path.is_ident("function") {
+                if function_json.replace(value.value()).is_some() {
+                    return Err(meta.error("only one function metadata value is allowed"));
+                }
+            } else if meta.path.is_ident("role") {
+                if role.replace(value.value()).is_some() {
+                    return Err(meta.error("only one semantic role may be declared"));
+                }
+            } else {
+                return Err(meta.error(
+                    "expected `function = \"<JSON>\"` or `role = \"<id>@<major>.<minor>\"`",
+                ));
             }
             Ok(())
         })
@@ -156,7 +169,36 @@ pub fn parse_function_attribute(attribute: &syn::Attribute) -> Result<Value, Str
     let metadata: Value = serde_json::from_str(&source)
         .map_err(|error| format!("invalid function JSON metadata: {error}"))?;
     validate_function_metadata(&metadata)?;
-    Ok(metadata)
+    if let Some(role) = &role {
+        parse_role_version(role)?;
+    }
+    Ok((metadata, role))
+}
+
+pub fn parse_role_version(value: &str) -> Result<(&str, u16, u16), String> {
+    let (name, version) = value
+        .rsplit_once('@')
+        .ok_or_else(|| "semantic role requires an explicit `@major.minor` version".to_owned())?;
+    if name.is_empty()
+        || !name.split('.').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+        })
+    {
+        return Err("semantic role must be a qualified ASCII identifier".to_owned());
+    }
+    let (major, minor) = version
+        .split_once('.')
+        .ok_or_else(|| "semantic role version must be `major.minor`".to_owned())?;
+    let major = major
+        .parse::<u16>()
+        .map_err(|_| "semantic role major version must be a 16-bit integer".to_owned())?;
+    let minor = minor
+        .parse::<u16>()
+        .map_err(|_| "semantic role minor version must be a 16-bit integer".to_owned())?;
+    Ok((name, major, minor))
 }
 
 pub fn validate_function_metadata(metadata: &Value) -> Result<(), String> {
@@ -1359,9 +1401,26 @@ pub fn validate_collection(functions: &[Function]) -> Result<(), String> {
     let mut names = BTreeSet::new();
     let mut signatures = BTreeSet::new();
     let mut parsed_signatures = Vec::new();
+    let mut role_contracts =
+        std::collections::BTreeMap::<String, ((u16, u16), BTreeSet<String>)>::new();
     for function in functions {
         validate_function_metadata(&function.metadata)?;
         let name = function.metadata["name"].as_str().expect("validated name");
+        if let Some(role) = &function.role {
+            let (role_name, major, minor) = parse_role_version(role)?;
+            let contract = role_contracts
+                .entry(role_name.to_owned())
+                .or_insert_with(|| ((major, minor), BTreeSet::new()));
+            if contract.0 != (major, minor) {
+                return Err(format!(
+                    "semantic role `{role_name}` declares multiple versions: {}.{} and {major}.{minor}",
+                    contract.0.0, contract.0.1
+                ));
+            }
+            contract
+                .1
+                .insert(function.metadata["effect"].as_str().unwrap().to_owned());
+        }
         if !names.insert(name.to_owned()) {
             return Err(format!("duplicate #[ornasys] name {name}"));
         }
@@ -1375,6 +1434,13 @@ pub fn validate_collection(functions: &[Function]) -> Result<(), String> {
             ));
         }
         parsed_signatures.push((name.to_owned(), parsed));
+    }
+    for (role, (_, effects)) in role_contracts {
+        if effects.len() > 1 {
+            return Err(format!(
+                "semantic role `{role}` has overloads with incompatible effects"
+            ));
+        }
     }
     validate_erased_generic_pairs(&parsed_signatures)
 }
