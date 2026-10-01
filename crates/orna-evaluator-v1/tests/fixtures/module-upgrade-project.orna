@@ -1,0 +1,5 @@
+use std.collection.{map};
+use std.math.{shift};
+
+pub fn direct(): Int = shift(7);
+pub fn callback(): [Int] = map([7], value => shift(value + 3));
