@@ -15512,6 +15512,26 @@ fn fixture_cross_depth_tombstones_keep_order_at_exact_load_budget() {
 }
 
 #[test]
+fn fixture_cross_depth_load_budget_stops_without_partial_plan() {
+    let (base, left, right, mut source) = cross_depth_load_inputs();
+    let error = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 4, max_conflicts: 0 },
+    )
+    .unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("an incomplete cross-depth load cannot return a partial tombstone plan")
+    };
+    assert_eq!(report.rows_examined, 5, "the report records the first row beyond the cap");
+    assert_eq!(report.conflicts_lower_bound, 0);
+    assert_eq!(report.affected_ranges, [(id(1), KeyRange::all())].into_iter().collect());
+    assert_eq!(source.visited.len(), 3, "the bounded merge stops in the third row source");
+}
+
+#[test]
 fn fixture_ancestor_tombstone_preserves_deeper_rows_across_ranges() {
     let shallow = parse_fixture(TOMBSTONE_DEPTH_SHALLOW, RowKeyKind::Explicit);
     let middle = parse_fixture(TOMBSTONE_DEPTH_MIDDLE, RowKeyKind::Explicit);
