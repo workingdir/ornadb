@@ -229,6 +229,10 @@ impl PackageResolver {
     /// Parent history is authoritative: later edits to the primary manifest
     /// cannot move this session to newer package commits. Resolution is
     /// all-or-nothing: a failed pin never returns a partially attached session.
+    /// Nested closure is one parent manifest per call; pass a selected attached
+    /// database back to this method to resolve the next edge from its own pin.
+    /// The reference requires each historical parent's exact pins but does not
+    /// require flattening a recursive closure into one session.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
