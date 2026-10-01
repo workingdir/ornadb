@@ -6,6 +6,8 @@ use orna_sys_v1::{
 const GENERIC_KEYWORD_STUB_FIXTURE: &str = include_str!("fixtures/sys-invoke-generic-keyword.orna");
 const GENERIC_START_KEYWORD_STUB_FIXTURE: &str =
     include_str!("fixtures/sys-start-generic-keyword.orna");
+const GENERIC_START_KEYWORD_OVERLOAD_FIXTURE: &str =
+    include_str!("fixtures/sys-start-generic-keyword-overloads.orna");
 
 fn resolve_type(ty: &TypeExpr) -> Result<AbiType, String> {
     match ty {
@@ -307,4 +309,67 @@ fn generated_start_generic_keyword_tail_matches_the_in_crate_fixture() {
             .expect("supported InvocationHandle result"),
         operation.signature.result
     );
+}
+
+#[test]
+fn generated_start_generic_keyword_overloads_match_the_in_crate_fixture() {
+    let fixture = GENERIC_START_KEYWORD_OVERLOAD_FIXTURE.trim_end();
+    assert!(
+        system_binding_stubs().contains(fixture),
+        "generated bundle must keep erased and generic start stubs paired"
+    );
+
+    let parsed = parse_module(fixture);
+    assert!(
+        parsed.is_ok(),
+        "the focused overload fixture must parse in supported Orna grammar: {:?}",
+        parsed.diagnostics
+    );
+    assert_eq!(parsed.value.items.len(), 2);
+    let operations = ["sys.start(Value)", "sys.start<T>"];
+    let markers = fixture
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+    assert_eq!(markers, operations);
+
+    for (index, (item, operation_name)) in parsed.value.items.iter().zip(operations).enumerate() {
+        let Declaration::Function { signature, .. } = &item.declaration else {
+            panic!("each start overload must be a function declaration")
+        };
+        let operation = system_provider_abi()
+            .operation(operation_name)
+            .expect("overload dispatch entry");
+        assert_eq!(signature.name, "start");
+        assert_eq!(
+            signature
+                .generics
+                .iter()
+                .map(|generic| generic.name.as_str())
+                .collect::<Vec<_>>(),
+            operation
+                .signature
+                .type_parameters
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            signature.parameters.len(),
+            operation.signature.parameters.len()
+        );
+        assert_eq!(
+            signature.parameters.iter().any(|parameter| {
+                let source = &fixture[parameter.span.start..parameter.span.end];
+                source.starts_with("as_:")
+            }),
+            index == 1,
+            "only the generic overload emits the registry's reserved `as` parameter as `as_`"
+        );
+        assert_eq!(
+            resolve_type(signature.result.as_ref().expect("typed overload result"))
+                .expect("supported overload result"),
+            operation.signature.result
+        );
+    }
 }
