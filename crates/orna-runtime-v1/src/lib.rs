@@ -21068,7 +21068,7 @@ mod tests {
         let mutations = (1u8..=22)
             .map(|row_id| {
                 let title = if row_id == 5 { "later" } else { "current" };
-                let target = if matches!(row_id, 8 | 10) { 99 } else { row_id };
+                let target = if row_id == 8 { 99 } else { row_id };
                 query_test_mutation(
                     row_id + 40,
                     row_id,
@@ -24015,7 +24015,7 @@ mod tests {
                 } else {
                     "current"
                 };
-                let target = if row_id == 8 { 99 } else { row_id };
+                let target = if matches!(row_id, 8 | 10) { 99 } else { row_id };
                 query_test_mutation(
                     row_id + 40,
                     row_id,
