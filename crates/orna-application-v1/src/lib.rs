@@ -8887,6 +8887,33 @@ mod tests {
             "the competitor handoff remains visible through the outer split"
         );
 
+        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        assert_eq!(mutations.len(), 4, "the failed rekeys add no mutations");
+        let expected = [
+            (2, Some(4), Some(row(4, "competitor", 20))),
+            (1, None, Some(row(1, "owner", 11))),
+            (3, None, None),
+            (1, Some(3), Some(row(3, "owner", 11))),
+        ];
+        for (index, (mutation, (old_key, new_key, expected_row))) in
+            mutations.iter().zip(expected).enumerate()
+        {
+            assert_eq!(mutation.key(), key(old_key), "mutation {index} source key");
+            assert_eq!(
+                mutation.rekey_to(),
+                new_key.map(key).as_deref(),
+                "mutation {index} destination"
+            );
+            assert!(!mutation.is_insert(), "mutation {index} is an update, delete, or rekey");
+            match expected_row {
+                Some(expected_row) => assert_eq!(
+                    CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
+                    expected_row,
+                    "mutation {index} row value"
+                ),
+                None => assert_eq!(mutation.value(), None, "mutation {index} deletion value"),
+            }
+        }
     }
 
     #[test]
