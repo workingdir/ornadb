@@ -979,12 +979,47 @@ async fn case_closure_matrix_preserves_each_transition_pin() {
         .await
         .expect("select restored both-row image");
 
-    let both_rows = vec![(vec![5], prefix), (vec![5, 0], tail.clone())];
+    let both_rows = vec![(vec![5], prefix.clone()), (vec![5, 0], tail.clone())];
+    let tail_only_rows = vec![(vec![5, 0], tail.clone())];
+    let prefix_only_rows = vec![(vec![5], prefix.clone())];
     assert_eq!(historical_rows(&state, &both).await, both_rows);
-    assert_eq!(historical_rows(&state, &tail_only).await, vec![(vec![5, 0], tail)]);
+    assert_eq!(historical_rows(&state, &tail_only).await, tail_only_rows);
     assert_eq!(historical_rows(&state, &restored).await, both_rows);
     assert_eq!(both.capture().generation_digest(), restored.capture().generation_digest());
     assert_ne!(both.snapshot_id(), restored.snapshot_id());
+
+    // Closing the edge tail then its prefix reaches the empty image without
+    // rewriting any of the earlier closure pins.
+    commit(
+        &state,
+        writer,
+        &[TableMutation::new([80; 16], "records", vec![5, 0], None)
+            .expect("valid tail closure mutation")],
+        77,
+    )
+    .await;
+    let prefix_only = state
+        .select_historical_snapshot(4)
+        .await
+        .expect("select prefix-only image after tail closure");
+    commit(
+        &state,
+        writer,
+        &[TableMutation::new([81; 16], "records", vec![5], None)
+            .expect("valid final prefix closure mutation")],
+        77,
+    )
+    .await;
+    let empty = state
+        .select_historical_snapshot(5)
+        .await
+        .expect("select empty image after final closure");
+
+    assert_eq!(historical_rows(&state, &both).await, both_rows);
+    assert_eq!(historical_rows(&state, &tail_only).await, tail_only_rows);
+    assert_eq!(historical_rows(&state, &restored).await, both_rows);
+    assert_eq!(historical_rows(&state, &prefix_only).await, prefix_only_rows);
+    assert!(historical_rows(&state, &empty).await.is_empty());
 }
 
 #[tokio::test]
