@@ -2602,6 +2602,132 @@ fn frozen_historical_program_resolves_through_authoritative_projection() {
 }
 
 #[test]
+fn historical_callable_context_survives_namespace_decomposition() {
+    let source = include_str!("fixtures/historical-closure-context-decomposed.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new("historical-closure-context.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn distinct_historical_callable_contexts_cannot_be_mixed() {
+    let source = include_str!("fixtures/historical-closure-context-mixed.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new("historical-closure-context-mixed.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(
+        !result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn equivalent_head_selectors_share_historical_callable_context() {
+    let source = include_str!("fixtures/historical-selector-equivalent-head.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new("historical-selector-equivalent-head.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+fn historical_nested_callable_catalogue() -> Catalogue {
+    let continuation = Type::Function {
+        parameters: Vec::new(),
+        parameter_names: Some(Vec::new()),
+        default_parameters: BTreeSet::new(),
+        result: Box::new(Type::Int),
+    };
+    let reader = Type::Function {
+        parameters: Vec::new(),
+        parameter_names: Some(Vec::new()),
+        default_parameters: BTreeSet::new(),
+        result: Box::new(continuation),
+    };
+    let factory = Symbol {
+        kind: SymbolKind::Function,
+        ty: Type::Function {
+            parameters: Vec::new(),
+            parameter_names: Some(Vec::new()),
+            default_parameters: BTreeSet::new(),
+            result: Box::new(Type::Record(BTreeMap::from([("read".into(), reader)]))),
+        },
+        public: true,
+        effects: EffectSummary::default(),
+        generic_parameters: Vec::new(),
+        enum_variants: BTreeSet::new(),
+        table_schema: None,
+    };
+    let symbols = BTreeMap::from([("factory".to_owned(), factory)]);
+    Catalogue::authoritative_fixture().with_historical_modules([ModuleHeader {
+        namespace: Namespace(vec!["energy".into()]),
+        exports: symbols.clone(),
+        symbols,
+        generic_functions: BTreeMap::new(),
+        prelude_exports: BTreeSet::new(),
+        implicit: true,
+    }])
+}
+
+#[test]
+fn nested_historical_callable_context_survives_decomposition() {
+    let source = include_str!("fixtures/historical-nested-closure-context.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new("historical-nested-closure-context.orna", source)],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
+fn nested_callables_from_distinct_historical_contexts_cannot_mix() {
+    let source = include_str!("fixtures/historical-nested-closure-context-mixed.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-nested-closure-context-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
