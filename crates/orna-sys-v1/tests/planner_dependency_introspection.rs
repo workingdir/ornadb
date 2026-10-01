@@ -14383,3 +14383,85 @@ fn explain_keeps_join_scan_overflow_through_bounded_limit_tail() {
         node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
     }));
 }
+
+#[test]
+fn explain_keeps_join_scan_overflow_visible_through_sort_limit_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN leaves local scan overflow through ordering and limit tails
+    // unspecified. Keep the joined table's half-block overflow marker visible
+    // even though unknown source rows leave both tail work estimates unknown.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:join-scan-overflow-sort-limit-tail"),
+        source: obj("table:ByteWorkThreeScanUnknownFirst"),
+        source_statistics: None,
+        joins: vec![QueryJoinDescription {
+            source: obj("table:ByteWorkThreeScanLast"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            predicate: None,
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: vec![PlanOrdering {
+            expression: orna_sys_v1::ExpressionRef::descriptive("expr:ByteWorkThreeScanLast.value"),
+            direction: PlanSortDirection::Ascending,
+            null_order: PlanNullOrder::Last,
+        }],
+        limit: Some(10),
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("joined scan overflow through sort and limit tails");
+
+    assert_eq!(explained.nodes().len(), 5);
+    assert_eq!(explained.root().kind(), PlanNodeKind::Limit);
+    assert_eq!(explained.root().estimated_rows(), None);
+    assert_eq!(explained.root().estimated_work(), None);
+    assert_eq!(explained.root().details().get("estimated_work_overflow"), None);
+    assert_eq!(explained.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(explained.plan().estimated_cost(), None);
+    let scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("joined scan beneath sort and limit");
+    assert_eq!(scan.estimated_rows(), Some(u64::MAX));
+    assert_eq!(scan.estimated_bytes(), Some(2_048));
+    assert_eq!(scan.estimated_work(), None);
+    assert_eq!(
+        scan.details().get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let sort = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Sort)
+        .expect("sort before limit");
+    assert_eq!(sort.estimated_rows(), None);
+    assert_eq!(sort.estimated_work(), None);
+    let surface = serde_json::to_value(&explained).expect("joined overflow sort-limit surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(
+        surface["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|node| node["details"]["estimated_work_overflow"] == true)
+            .count(),
+        1,
+        "the joined scan retains its single local overflow marker"
+    );
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
