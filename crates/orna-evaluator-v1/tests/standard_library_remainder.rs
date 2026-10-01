@@ -159,6 +159,24 @@ fn pinned_collection_predicate_callbacks_keep_captured_values() {
 }
 
 #[test]
+fn pinned_collection_asof_selectors_keep_captured_values() {
+    let mut session = pinned_collection_session();
+    let source = include_str!("fixtures/stdlib-collection-captured-asof-selectors-yfifu.orna");
+    let parsed = orna_syntax_v1::parse_repl(source);
+    assert!(parsed.is_ok(), "collection fixture syntax: {:?}", parsed.diagnostics);
+    let actual = session
+        .submit(source)
+        .unwrap_or_else(|error| panic!("pinned as-of callback fixture rejected: {}", error.code()));
+    assert_eq!(
+        actual,
+        Some(canonical(Raw::Array(vec![
+            Raw::Array(vec![ints(&[5, 1])]),
+            Raw::Array(vec![ints(&[11, 1])]),
+        ])))
+    );
+}
+
+#[test]
 fn pinned_bits_exports_bind_and_remain_optional_without_std() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
     assert_eq!(
