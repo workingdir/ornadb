@@ -8260,6 +8260,10 @@ mod tests {
                     shared_repository.clone(),
                 ),
                 (
+                    "nested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy".to_owned(),
+                    shared_repository.clone(),
+                ),
+                (
                     "archive_copy_archive_archive".to_owned(),
                     shared_repository.clone(),
                 ),
@@ -8714,11 +8718,18 @@ mod tests {
                 "nested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_final_tail_commit}\n"
             ),
         );
+        let expanded_closure_tail_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!(
+                "nested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_final_tail_commit}\n"
+            ),
+        );
         let expanded_short_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
             &format!(
-                "nested_archive {short_revision_commit}\nnested_archive_copy {middle_revision_commit}\nnested_archive_copy_archive {long_revision_commit}\nnested_archive_copy_archive_copy {expanded_deep_commit}\nnested_archive_copy_archive_copy_archive {expanded_deeper_commit}\nnested_archive_copy_archive_copy_archive_copy {expanded_deepest_commit}\nnested_archive_copy_archive_copy_archive_copy_archive {expanded_deeper_deepest_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy {expanded_final_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_next_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_further_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_extreme_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_extreme_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_supreme_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_ultimate_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_penultimate_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_last_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_final_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_final_tail_commit}\n"
+                "nested_archive {short_revision_commit}\nnested_archive_copy {middle_revision_commit}\nnested_archive_copy_archive {long_revision_commit}\nnested_archive_copy_archive_copy {expanded_deep_commit}\nnested_archive_copy_archive_copy_archive {expanded_deeper_commit}\nnested_archive_copy_archive_copy_archive_copy {expanded_deepest_commit}\nnested_archive_copy_archive_copy_archive_copy_archive {expanded_deeper_deepest_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy {expanded_final_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_next_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_further_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_extreme_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_extreme_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_supreme_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_ultimate_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_penultimate_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_last_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_final_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_final_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_closure_tail_commit}\n"
             ),
         );
         let expanded_short_replacement = PinnedDatabase::resolve(
@@ -9474,6 +9485,39 @@ mod tests {
                 .unwrap()
                 .pin(),
             nested_archive_final_tail_pin
+        );
+        // The reference is silent on this additional suffix; v1 keeps the
+        // new alias distinct and links it to the preceding terminal pin.
+        let nested_archive_closure_tail_pin = expanded_short_session
+            .database("nested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy")
+            .unwrap()
+            .pin();
+        assert_eq!(
+            nested_archive_closure_tail_pin.name(),
+            "nested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy"
+        );
+        assert_eq!(
+            nested_archive_closure_tail_pin.commit().as_str(),
+            expanded_closure_tail_commit
+        );
+        let expanded_closure_tail_child = resolver
+            .resolve_for_parent(
+                expanded_short_session
+                    .database("nested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            expanded_closure_tail_child.primary().pin().name(),
+            "nested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy"
+        );
+        assert_eq!(
+            expanded_closure_tail_child
+                .database("nested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive")
+                .unwrap()
+                .pin(),
+            nested_archive_terminal_final_tail_pin
         );
         assert_eq!(
             root_session
