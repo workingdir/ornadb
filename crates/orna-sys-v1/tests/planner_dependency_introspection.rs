@@ -14896,3 +14896,100 @@ fn explain_keeps_join_work_overflow_visible_through_limit_tail() {
         node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
     }));
 }
+
+#[test]
+fn explain_keeps_chained_join_work_overflows_through_limit_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN leaves multiple join-work overflows across a later join and
+    // limit unspecified. Preserve each join's local marker when the first
+    // MAX-row product makes both successive input-row sums exceed MAX.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:chained-join-work-overflow-limit-tail"),
+        source: obj("table:ByteWorkThreeScanSource"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(1),
+            estimated_bytes: Some(0),
+            mutable_branch: None,
+        }),
+        joins: vec![
+            QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanFirst"),
+                statistics: Some(QuerySourceStatistics {
+                    estimated_rows: Some(u64::MAX),
+                    estimated_bytes: Some(0),
+                    mutable_branch: None,
+                }),
+                predicate: None,
+            },
+            QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanMiddle"),
+                statistics: Some(QuerySourceStatistics {
+                    estimated_rows: Some(1),
+                    estimated_bytes: Some(0),
+                    mutable_branch: None,
+                }),
+                predicate: None,
+            },
+        ],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: Some(10),
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("two overflowing joins beneath a bounded limit");
+
+    assert_eq!(explained.nodes().len(), 6);
+    assert_eq!(explained.root().kind(), PlanNodeKind::Limit);
+    assert_eq!(explained.root().estimated_rows(), Some(10));
+    assert_eq!(explained.root().estimated_bytes(), Some(0));
+    assert_eq!(explained.root().estimated_work(), Some(u64::MAX));
+    assert_eq!(explained.plan().estimated_cost(), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "representable scan and limit work prove aggregate overflow"
+    );
+
+    let scans: Vec<_> = explained
+        .nodes()
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Scan)
+        .collect();
+    assert_eq!(scans.len(), 3);
+    assert!(scans.iter().all(|node| node.details().get("estimated_work_overflow").is_none()));
+    let joins: Vec<_> = explained
+        .nodes()
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Join)
+        .collect();
+    assert_eq!(joins.len(), 2);
+    assert!(joins.iter().all(|node| {
+        node.estimated_rows() == Some(u64::MAX)
+            && node.estimated_bytes() == Some(0)
+            && node.estimated_work().is_none()
+            && node.details().get("estimated_work_overflow")
+                == Some(&PlanDetail::Boolean(true))
+    }));
+    let surface = serde_json::to_value(&explained).expect("chained join overflow limit surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert_eq!(
+        surface["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|node| node["details"]["estimated_work_overflow"] == true)
+            .count(),
+        2,
+        "both joins retain a local overflow marker through the limit"
+    );
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
