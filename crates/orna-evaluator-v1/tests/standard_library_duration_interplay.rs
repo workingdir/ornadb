@@ -3108,6 +3108,40 @@ fn positive_factor_rescaled_tails_close_after_sixty_third_doubling() {
 }
 
 #[test]
+fn positive_factor_rescaled_tails_close_after_sixty_fourth_doubling() {
+    // The reference is silent at this next scale. Continue the symmetric edge
+    // correction by doubling the prior tail to 55,340,232,221,128,654,848 ns
+    // around 18,446,744,073,709,551,616 minutes, pinning 12810238940076077d 12h 16m.
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
+    ] {
+        assert_eq!(session.submit(source), Ok(None), "{source}");
+    }
+
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixty-fourth-doubling-from-below-y7dit.orna"),
+        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixty-fourth-doubling-from-above-y7dit.orna"),
+    ] {
+        let result = session.submit(source);
+        assert_eq!(
+            result,
+            Ok(Some(texts(&[
+                "12810238940076077d 12h 16m",
+                "307445734561825860:16:00",
+                "12810238940076077 days, 12 hours, 16 minutes",
+                "P12810238940076077DT12H16M",
+            ]))),
+            "{source}; diagnostic={}",
+            result.as_ref().err().map_or("none", |error| error.code())
+        );
+    }
+}
+
+#[test]
 fn clock_output_bound_keeps_elapsed_hours_and_fractional_tail() {
     let limits = Limits {
         max_string_bytes: 129,
