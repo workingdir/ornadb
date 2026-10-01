@@ -12175,3 +12175,99 @@ fn duplicate_deep_snapshots_preserve_repeated_tail_order() {
     assert_redacted_tree(&decoded);
     assert_eq!(decoded["causes"], projection["causes"]);
 }
+
+#[test]
+fn repeated_deep_recovery_cycles_keep_tail_multiplicity() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+
+    let terminal = admitted("ORNA-E-CYCLE-TERMINAL", "deep recovery cycle payload")
+        .with_cause(admitted(
+            "ORNA-E-CYCLE-TAIL",
+            "first repeated cycle tail secret",
+        ))
+        .with_cause(admitted(
+            "ORNA-E-CYCLE-TAIL",
+            "second repeated cycle tail secret",
+        ));
+    let nested = admitted("ORNA-E-CYCLE-NESTED", "deep recovery cycle payload")
+        .with_cause(terminal);
+    let parent = admitted("ORNA-E-CYCLE-PARENT", "deep recovery cycle payload")
+        .with_cause(nested);
+    let branch = admitted("ORNA-E-CYCLE-BRANCH", "deep recovery cycle payload")
+        .with_cause(parent);
+    let root = admitted("ORNA-E-CYCLE-ROOT", "deep recovery cycle payload")
+        .with_cause(branch);
+
+    let mut current = Diagnostic::decode_ovb(&root.encode_ovb().unwrap()).unwrap();
+    let mut generations = vec![current.clone()];
+    for _ in 0..2 {
+        current = Diagnostic::decode_ovb(&current.encode_ovb().unwrap()).unwrap();
+        generations.push(current.clone());
+    }
+    assert_eq!(generations[0], generations[1]);
+    assert_eq!(generations[1], generations[2]);
+
+    // ORNA-SECRET-002 requires diagnostic secret redaction but is silent on
+    // repeated recovery preserving sibling order and duplicate tail occurrences.
+    let outer = generations.into_iter().fold(
+        admitted("ORNA-E-CYCLE-OUTER", "outer recovery cycle admission"),
+        |outer, generation| outer.with_cause(generation),
+    );
+    let projection = serde_json::to_value(&outer).unwrap();
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 3);
+    for cause in causes {
+        assert_redacted_tree(cause);
+        let terminal = &cause["causes"][0]["causes"][0]["causes"][0]["causes"][0];
+        let tails = terminal["causes"].as_array().unwrap();
+        assert_eq!(tails.len(), 2);
+        assert_eq!(tails[0]["code"], "ORNA-E-CYCLE-TAIL");
+        assert_eq!(tails[1]["code"], "ORNA-E-CYCLE-TAIL");
+        assert_eq!(tails[0]["message"], "<redacted>");
+        assert_eq!(tails[1]["message"], "<redacted>");
+    }
+    assert_eq!(causes[0], causes[1]);
+    assert_eq!(causes[1], causes[2]);
+
+    let json = serde_json::to_vec(&outer).unwrap();
+    let encoded = outer.encode_ovb().unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"deep recovery cycle payload".as_slice(),
+            b"first repeated cycle tail secret".as_slice(),
+            b"second repeated cycle tail secret".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
+    assert_redacted_tree(&decoded);
+    assert_eq!(decoded["causes"], projection["causes"]);
+}
