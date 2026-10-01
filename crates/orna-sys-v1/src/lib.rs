@@ -37,7 +37,7 @@ pub use introspection::{
     MAX_PLAN_NODES, MAX_REFERENCE_BYTES, Plan, PlanDetail, PlanNode, PlanNodeKind, PlanNodeRef,
     PlanNullOrder,
     PlanOrdering, PlanSortDirection, QueryPlanDescription, SnapshotRef, SourceSpan, explain_function,
-    explain_query,
+    explain_query, explain_query_with_limit_chain,
 };
 
 mod provider;
