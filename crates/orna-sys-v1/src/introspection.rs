@@ -852,7 +852,14 @@ pub fn explain_query_with_disjunct_limit_chain(
     disjunct_count: u64,
     additional_limits: &[u64],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_with_predicate_pressure(query, disjunct_count, None, None, additional_limits)
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        None,
+        None,
+        &[],
+        additional_limits,
+    )
 }
 
 /// Explains a disjunction followed by a left-to-right chain of conjunctive
@@ -877,6 +884,7 @@ pub fn explain_query_with_disjunct_conjunct_limit_chain(
         disjunct_count,
         Some(conjunct_count),
         None,
+        &[],
         additional_limits,
     )
 }
@@ -909,6 +917,35 @@ pub fn explain_query_with_conjunct_disjunct_limit_chain(
         disjunct_count,
         None,
         Some(conjunct_count_per_disjunct),
+        &[],
+        additional_limits,
+    )
+}
+
+/// Explains nested input limits, one expanded disjunctive filter, and then
+/// the query's outer limit followed by any additional limits.
+///
+/// The input limits model an already nested relation and run after source and
+/// join work but before the predicate. Each limit is charged for its immediate
+/// input rows; disjunct expansion then charges each arm for the bounded rows
+/// that remain. ORNA-PLAN leaves cost aggregation unspecified, so this keeps
+/// the same documented independent 50%-per-arm fallback as
+/// [`explain_query_with_disjunct_limit_chain`].
+pub fn explain_query_with_input_limit_disjunct_chain(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    nested_input_limits: &[u64],
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0 || query.predicate.is_none() {
+        return Err(ExplainError::InvalidExpression);
+    }
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        None,
+        None,
+        nested_input_limits,
         additional_limits,
     )
 }
@@ -918,6 +955,7 @@ fn explain_query_with_predicate_pressure(
     disjunct_count: u64,
     conjunct_count: Option<u64>,
     conjunct_count_per_disjunct: Option<u64>,
+    nested_input_limits: &[u64],
     additional_limits: &[u64],
 ) -> Result<ExplainedPlan, ExplainError> {
     if disjunct_count == 0
@@ -964,6 +1002,7 @@ fn explain_query_with_predicate_pressure(
         .saturating_add(usize::from(query.distinct))
         .saturating_add(usize::from(!query.ordering.is_empty()))
         .saturating_add(usize::from(query.limit.is_some()))
+        .saturating_add(nested_input_limits.len())
         .saturating_add(additional_limits.len())
         .saturating_add(query.mutations.len())
         .saturating_add(usize::from(query.materialize_into.is_some()));
@@ -1046,6 +1085,20 @@ fn explain_query_with_predicate_pressure(
             cardinality,
             work,
         ));
+        current_cardinality = cardinality;
+    }
+    for limit in nested_input_limits {
+        let cardinality = limit_cardinality(current_cardinality, *limit);
+        let work = current_cardinality.rows;
+        current = push_unary(
+            &mut operators,
+            current,
+            PlanNodeKind::Limit,
+            None,
+            BTreeMap::from([("limit".to_owned(), PlanDetail::Integer(*limit))]),
+            cardinality,
+            work,
+        );
         current_cardinality = cardinality;
     }
     if let Some(predicate) = &query.predicate {
