@@ -413,6 +413,26 @@ fn edge_interplay_fixture_projects_unknown_exact_target_count_through_columns() 
 }
 
 #[test]
+fn edge_interplay_fixture_retains_unknown_exact_target_across_reference_handoff() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Keep an exact-but-unknown target record through References, then project its row_count;
+    // the frozen API does not specify exactness as a non-null guarantee.
+    assert!(
+        analysis.is_ok(),
+        "unknown exact target and nullable row_count must survive Reference traversal: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_composes_unknown_target_count_with_inexactness() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
