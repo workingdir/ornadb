@@ -12388,3 +12388,137 @@ fn explain_closes_three_partial_half_block_scans_and_writes_with_source_remainde
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
 }
+
+#[test]
+fn explain_closes_half_block_scan_and_write_through_unknown_tails() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN is silent on carrying a partial scan bound through an
+    // unknown join and a partial write across an unknown mutation reset.
+    // Keep the source and write half-blocks as independent one-unit 4-KiB
+    // lower bounds. A row-only closing write at MAX-2 reaches MAX exactly;
+    // one more row proves overflow through the materialization tail.
+    let explain = |closing_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:half-block-scan-write-unknown-tail"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            joins: vec![QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanUnknownThird"),
+                statistics: None,
+                predicate: None,
+            }],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:ByteWorkThreeScanFirst"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: Some(2_048),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+                QueryMutationDescription {
+                    table: obj("table:ByteWorkThreeScanLast"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(closing_rows),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(closing_rows),
+                },
+            ],
+            materialize_into: Some(obj("materialization:half-block-scan-write-tail")),
+        })
+        .expect("partial half-block scan and write across unknown tails")
+    };
+
+    let exact = explain(u64::MAX - 2);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let source = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanSource"))
+        })
+        .expect("partial half-block source scan");
+    assert_eq!(source.estimated_rows(), None);
+    assert_eq!(source.estimated_bytes(), Some(2_048));
+    assert_eq!(source.estimated_work(), None);
+    let unknown_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanUnknownThird"))
+        })
+        .expect("unknown join tail");
+    assert_eq!(unknown_scan.estimated_work(), None);
+    let partial_write = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Invoke
+                && node.object() == Some(&obj("table:ByteWorkThreeScanFirst"))
+        })
+        .expect("partial half-block write");
+    assert_eq!(partial_write.estimated_rows(), None);
+    assert_eq!(partial_write.estimated_bytes(), Some(2_048));
+    assert_eq!(partial_write.estimated_work(), None);
+    let unknown_write = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Invoke
+                && node.object() == Some(&obj("table:ByteWorkThreeScanUnknownFirst"))
+        })
+        .expect("unknown mutation reset");
+    assert_eq!(unknown_write.estimated_work(), None);
+    let closing_write = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Invoke
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("row-only closing write");
+    assert_eq!(closing_write.estimated_rows(), Some(u64::MAX - 2));
+    assert_eq!(closing_write.estimated_bytes(), None);
+    assert_eq!(closing_write.estimated_work(), None);
+
+    let overflow = explain(u64::MAX - 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one extra closing row takes the independent scan and write bounds past MAX"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("half-block scan and write overflow through unknown tails");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
