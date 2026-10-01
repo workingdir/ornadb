@@ -1,0 +1,8 @@
+pub fn nested_callable_context_survives_decomposition() {
+    let selected = sys.snapshot("HEAD~10");
+    let historical = sys.database.as_of(selected);
+    let factory = historical.energy.factory;
+    let product = factory();
+    let read = product.read;
+    read()
+}
