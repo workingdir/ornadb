@@ -131,7 +131,6 @@ impl LoadedProject {
         self.loose_rows
     }
 
-
     pub fn into_modules(self) -> Vec<ModuleInput> {
         self.modules
     }
@@ -200,9 +199,7 @@ impl ProjectLoader {
             standard_profile,
             |logical_path, total_bytes| read_module(&root, logical_path, total_bytes, self.limits),
             |segments| resolve_import(&root, segments),
-            |tables, total_bytes| {
-                discover_worktree_rows(&root, tables, total_bytes, self.limits)
-            },
+            |tables, total_bytes| discover_worktree_rows(&root, tables, total_bytes, self.limits),
         )
     }
 
@@ -675,8 +672,8 @@ fn discover_worktree_rows(
     paths
         .into_iter()
         .map(|logical_path| {
-            let (table_path, key_path) =
-                table_owner_and_key(&logical_path, table_paths).ok_or(ProjectLoadError::UnsafePath)?;
+            let (table_path, key_path) = table_owner_and_key(&logical_path, table_paths)
+                .ok_or(ProjectLoadError::UnsafePath)?;
             let source = read_module(root, &logical_path, total_bytes, limits)?;
             Ok(LooseRowCandidate {
                 logical_path,

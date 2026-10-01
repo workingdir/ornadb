@@ -139,7 +139,6 @@ impl LiveSession {
     }
 }
 
-
 pub struct LiveClient {
     config: LiveClientConfig,
     http: HttpClient,
@@ -500,7 +499,6 @@ struct ParsedResponseLimits {
     max_outgoing_bytes: usize,
     request_retention_ms: u64,
 }
-
 
 fn validate_resume_token(token: &str) -> Result<(), LiveTransportError> {
     if token.len() != 43
@@ -1269,7 +1267,6 @@ mod tests {
         let mut unknown_limit = valid_response();
         unknown_limit["limits"]["unexpected"] = serde_json::Value::Bool(true);
         assert!(parse_session(unknown_limit, &valid_cookie(), Limits::default(), true).is_err());
-
 
         let mut wrong_path = valid_response();
         wrong_path["websocket_path"] = "/orna/live/00000000-0000-0000-0000-000000000009".into();

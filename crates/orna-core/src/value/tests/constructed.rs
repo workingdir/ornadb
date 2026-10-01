@@ -1956,7 +1956,6 @@ fn map_duplicate_keys_report_exact_original_indices() {
             duplicate: 3,
         }
     );
-
 }
 
 #[test]
@@ -1984,10 +1983,7 @@ fn named_float_map_keys_fail_at_descriptor_preflight_for_all_attempted_values() 
         let CollectionValueError::UnsupportedDescriptor { path, descriptor } = error else {
             panic!("named Float map key must fail at descriptor preflight");
         };
-        assert_eq!(
-            path.segments(),
-            &[CollectionValuePathSegment::MapKeyChild]
-        );
+        assert_eq!(path.segments(), &[CollectionValuePathSegment::MapKeyChild]);
         assert_eq!(descriptor, float_descriptor);
     }
 }
@@ -1995,9 +1991,11 @@ fn named_float_map_keys_fail_at_descriptor_preflight_for_all_attempted_values() 
 #[test]
 fn float_map_values_remain_accepted_under_an_integer_key_descriptor() {
     let active = active_map_revision();
-    let descriptor =
-        TypeDescriptor::map(TypeDescriptor::named(MAP_INTEGER), TypeDescriptor::named(MAP_FLOAT))
-            .unwrap();
+    let descriptor = TypeDescriptor::map(
+        TypeDescriptor::named(MAP_INTEGER),
+        TypeDescriptor::named(MAP_FLOAT),
+    )
+    .unwrap();
     let value = RuntimeValue::map(
         &active,
         descriptor,

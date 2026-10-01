@@ -847,11 +847,8 @@ mod tests {
     fn initial_snapshot_requires_subscribe_request_correlation() {
         let expected_request = [1; 16];
         let mut io = MemoryIo::default();
-        io.incoming.push_back(snapshot_with_request(
-            0,
-            "wrong-request",
-            Some([2; 16]),
-        ));
+        io.incoming
+            .push_back(snapshot_with_request(0, "wrong-request", Some([2; 16])));
         let mut driver = LiveSessionDriver::new_with_expected_snapshot_request(
             io,
             [7; 16],

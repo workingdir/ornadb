@@ -1,7 +1,7 @@
 use orna_conformance_v1::{
     BoundedEvaluator, Corpus, FixtureStageBinding, Harness, RuntimeAdapter, Stage,
 };
-use orna_traceability_v1::{generate_with_engine_witnesses, Status};
+use orna_traceability_v1::{Status, generate_with_engine_witnesses};
 use serde_json::Value;
 use std::{
     fs,
@@ -10,15 +10,15 @@ use std::{
 
 const FIXTURE_ID: &str = "valid/minimal-root.orna";
 const FIXTURE_PATH: &str = "examples/valid/minimal-root.orna";
-const IMPLEMENTATION_REF: &str =
-    "crates/orna-conformance-v1/src/lib.rs::Harness::engine_witnesses";
-const TEST_REF: &str =
-    "crates/orna-traceability-v1/tests/engine_witness_binding.rs::engine_witness_accepts_requirement_declared_for_exact_fixture_and_path";
+const IMPLEMENTATION_REF: &str = "crates/orna-conformance-v1/src/lib.rs::Harness::engine_witnesses";
+const TEST_REF: &str = "crates/orna-traceability-v1/tests/engine_witness_binding.rs::engine_witness_accepts_requirement_declared_for_exact_fixture_and_path";
 
 fn reference_root() -> PathBuf {
     std::env::var_os("ORNA_REFERENCE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../reference/Orna-1.0.0"))
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../reference/Orna-1.0.0")
+        })
 }
 
 fn copied_reference(label: &str) -> PathBuf {
@@ -36,7 +36,11 @@ fn copy_dir(from: &Path, to: &Path) {
     for entry in fs::read_dir(from).expect("read authoritative reference directory") {
         let entry = entry.expect("read reference entry");
         let destination = to.join(entry.file_name());
-        if entry.file_type().expect("read reference entry type").is_dir() {
+        if entry
+            .file_type()
+            .expect("read reference entry type")
+            .is_dir()
+        {
             copy_dir(&entry.path(), &destination);
         } else {
             fs::copy(entry.path(), destination).expect("copy authoritative reference file");
@@ -115,9 +119,11 @@ fn engine_witness_rejects_unrelated_globally_known_requirement() {
 
     let error = generate_with_engine_witnesses(&root, &witnesses)
         .expect_err("a globally known but unrelated requirement must be rejected");
-    assert!(error
-        .to_string()
-        .contains("engine witness requirement evidence does not declare fixture"));
+    assert!(
+        error
+            .to_string()
+            .contains("engine witness requirement evidence does not declare fixture")
+    );
 
     let _ = fs::remove_dir_all(root);
 }

@@ -499,8 +499,7 @@ impl PublicationJournal {
             if !paths.insert(path.clone()) {
                 return Err(RepositoryError::InvalidPublicationJournal);
             }
-            let phase =
-                PublicationMaterializationPhase::from_code(take_byte(bytes, &mut cursor)?)?;
+            let phase = PublicationMaterializationPhase::from_code(take_byte(bytes, &mut cursor)?)?;
             let quarantine = take_optional_string(bytes, &mut cursor)?;
             if (phase == PublicationMaterializationPhase::Clean) == quarantine.is_some()
                 || phase != PublicationMaterializationPhase::Clean && quarantine.is_none()
@@ -2748,8 +2747,6 @@ impl Repository {
     const fn worktree_executable_marker(_metadata: &fs::Metadata) -> u8 {
         0
     }
-
-
 
     fn worktree_content_digest(
         &self,

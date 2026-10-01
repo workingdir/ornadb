@@ -287,10 +287,7 @@ fn request(
 fn push_keeps_second_phase_atomic_after_allocator_first() {
     let fixture = Fixture::new();
     let initial = fixture.initial_head();
-    git(
-        &fixture.source,
-        &["update-ref", ALLOCATOR_REF, &initial],
-    );
+    git(&fixture.source, &["update-ref", ALLOCATOR_REF, &initial]);
     let allocator_refspec = format!("{ALLOCATOR_REF}:{ALLOCATOR_REF}");
     git(&fixture.source, &["push", "origin", &allocator_refspec]);
     fs::write(
@@ -301,25 +298,14 @@ fn push_keeps_second_phase_atomic_after_allocator_first() {
     git(&fixture.source, &["add", "main.orna"]);
     git(&fixture.source, &["commit", "-m", "next"]);
     let next = git(&fixture.source, &["rev-parse", "HEAD"]);
-    git(
-        &fixture.source,
-        &["update-ref", ALLOCATOR_REF, &next],
-    );
-    git(
-        &fixture.source,
-        &["update-ref", INTERNAL_REF, &next],
-    );
-    git(
-        &fixture.source,
-        &["update-ref", OTHER_INTERNAL_REF, &next],
-    );
+    git(&fixture.source, &["update-ref", ALLOCATOR_REF, &next]);
+    git(&fixture.source, &["update-ref", INTERNAL_REF, &next]);
+    git(&fixture.source, &["update-ref", OTHER_INTERNAL_REF, &next]);
 
     let hook = fixture.remote.join("hooks/update");
     fs::write(
         &hook,
-        format!(
-            "#!/bin/sh\nif [ \"$1\" = \"{OTHER_INTERNAL_REF}\" ]; then exit 1; fi\nexit 0\n"
-        ),
+        format!("#!/bin/sh\nif [ \"$1\" = \"{OTHER_INTERNAL_REF}\" ]; then exit 1; fi\nexit 0\n"),
     )
     .unwrap();
     let mut permissions = fs::metadata(&hook).unwrap().permissions();
@@ -342,14 +328,8 @@ fn push_keeps_second_phase_atomic_after_allocator_first() {
         .expect_err("a rejected second-phase ref must fail the push");
 
     assert!(matches!(error, FetchError::PushFailed));
-    assert_eq!(
-        git(&fixture.remote, &["rev-parse", ALLOCATOR_REF]),
-        next
-    );
-    assert_eq!(
-        git(&fixture.remote, &["rev-parse", INTERNAL_REF]),
-        initial
-    );
+    assert_eq!(git(&fixture.remote, &["rev-parse", ALLOCATOR_REF]), next);
+    assert_eq!(git(&fixture.remote, &["rev-parse", INTERNAL_REF]), initial);
     assert_eq!(
         git(&fixture.remote, &["rev-parse", "refs/heads/main"]),
         initial
@@ -373,25 +353,14 @@ fn push_does_not_treat_allocator_shadow_as_allocator() {
     git(&fixture.source, &["commit", "-m", "next"]);
     let next = git(&fixture.source, &["rev-parse", "HEAD"]);
     let allocator_shadow = "refs/orna/allocator-shadow";
-    git(
-        &fixture.source,
-        &["update-ref", allocator_shadow, &next],
-    );
-    git(
-        &fixture.source,
-        &["update-ref", INTERNAL_REF, &next],
-    );
-    git(
-        &fixture.source,
-        &["update-ref", OTHER_INTERNAL_REF, &next],
-    );
+    git(&fixture.source, &["update-ref", allocator_shadow, &next]);
+    git(&fixture.source, &["update-ref", INTERNAL_REF, &next]);
+    git(&fixture.source, &["update-ref", OTHER_INTERNAL_REF, &next]);
 
     let hook = fixture.remote.join("hooks/update");
     fs::write(
         &hook,
-        format!(
-            "#!/bin/sh\nif [ \"$1\" = \"{OTHER_INTERNAL_REF}\" ]; then exit 1; fi\nexit 0\n"
-        ),
+        format!("#!/bin/sh\nif [ \"$1\" = \"{OTHER_INTERNAL_REF}\" ]; then exit 1; fi\nexit 0\n"),
     )
     .unwrap();
     let mut permissions = fs::metadata(&hook).unwrap().permissions();
@@ -421,20 +390,14 @@ fn push_does_not_treat_allocator_shadow_as_allocator() {
         git(&fixture.remote, &["rev-parse", "refs/heads/main"]),
         initial
     );
-    assert_eq!(
-        git(&fixture.remote, &["rev-parse", INTERNAL_REF]),
-        initial
-    );
+    assert_eq!(git(&fixture.remote, &["rev-parse", INTERNAL_REF]), initial);
 }
 
 #[test]
 fn push_rejects_unsupported_atomic_before_allocator_advance() {
     let fixture = Fixture::new();
     let initial = fixture.initial_head();
-    git(
-        &fixture.source,
-        &["update-ref", ALLOCATOR_REF, &initial],
-    );
+    git(&fixture.source, &["update-ref", ALLOCATOR_REF, &initial]);
     let allocator_refspec = format!("{ALLOCATOR_REF}:{ALLOCATOR_REF}");
     git(&fixture.source, &["push", "origin", &allocator_refspec]);
     fs::write(
@@ -445,14 +408,8 @@ fn push_rejects_unsupported_atomic_before_allocator_advance() {
     git(&fixture.source, &["add", "main.orna"]);
     git(&fixture.source, &["commit", "-m", "next"]);
     let next = git(&fixture.source, &["rev-parse", "HEAD"]);
-    git(
-        &fixture.source,
-        &["update-ref", ALLOCATOR_REF, &next],
-    );
-    git(
-        &fixture.source,
-        &["update-ref", INTERNAL_REF, &next],
-    );
+    git(&fixture.source, &["update-ref", ALLOCATOR_REF, &next]);
+    git(&fixture.source, &["update-ref", INTERNAL_REF, &next]);
     git(
         &fixture.remote,
         &["config", "receive.advertiseAtomic", "false"],
@@ -472,14 +429,8 @@ fn push_rejects_unsupported_atomic_before_allocator_advance() {
         repository.push(&request),
         Err(FetchError::PushFailed)
     ));
-    assert_eq!(
-        git(&fixture.remote, &["rev-parse", ALLOCATOR_REF]),
-        initial
-    );
-    assert_eq!(
-        git(&fixture.remote, &["rev-parse", INTERNAL_REF]),
-        initial
-    );
+    assert_eq!(git(&fixture.remote, &["rev-parse", ALLOCATOR_REF]), initial);
+    assert_eq!(git(&fixture.remote, &["rev-parse", INTERNAL_REF]), initial);
     assert_eq!(
         git(&fixture.remote, &["rev-parse", "refs/heads/main"]),
         initial

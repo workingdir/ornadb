@@ -41,12 +41,12 @@ use std::{
     pin::Pin,
     process::Command,
     sync::{
-        Arc, mpsc,
+        Arc,
         atomic::{AtomicUsize, Ordering},
+        mpsc,
     },
     thread,
     time::{SystemTime, UNIX_EPOCH},
-
 };
 struct FailFirstWriter {
     writes: usize,
@@ -558,13 +558,7 @@ impl LiveApplication for CompetingTerminalApplication {
         .join()
         .unwrap();
         let transaction = LiveEvalTransaction::new(
-            vec![TableMutation::new(
-                [8; 16],
-                "books",
-                vec![8],
-                Some(vec![9]),
-            )
-            .unwrap()],
+            vec![TableMutation::new([8; 16], "books", vec![8], Some(vec![9])).unwrap()],
             [4; 32],
             Arc::new(NoFault),
         );
@@ -610,12 +604,7 @@ struct TransactionalApplication {
 }
 
 impl LiveApplication for TransactionalApplication {
-    fn eval(
-        &mut self,
-        _: [u8; 16],
-        _: [u8; 16],
-        _: &Message,
-    ) -> Result<Envelope, Error> {
+    fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
         Err(Error::UnsupportedOperation)
     }
 
@@ -632,11 +621,8 @@ impl LiveApplication for TransactionalApplication {
         };
         self.calls += 1;
         let response = unit_result(request, *fingerprint);
-        let transaction = LiveEvalTransaction::new(
-            self.mutations.clone(),
-            [3; 32],
-            Arc::clone(&self.faults),
-        );
+        let transaction =
+            LiveEvalTransaction::new(self.mutations.clone(), [3; 32], Arc::clone(&self.faults));
         Box::pin(async move { Ok(LiveEvalResponse::transaction(response, transaction)) })
     }
     fn dispatch_eval_with_work<'a>(
@@ -673,11 +659,8 @@ impl LiveApplication for TransactionalApplication {
         };
         self.calls += 1;
         let response = unit_result(request, *fingerprint);
-        let transaction = LiveEvalTransaction::new(
-            self.mutations.clone(),
-            [3; 32],
-            Arc::clone(&self.faults),
-        );
+        let transaction =
+            LiveEvalTransaction::new(self.mutations.clone(), [3; 32], Arc::clone(&self.faults));
         Box::pin(async move { Ok(LiveEvalResponse::transaction(response, transaction)) })
     }
 
@@ -692,8 +675,7 @@ impl LiveApplication for TransactionalApplication {
             watch: Some([11; 16]),
             message: Message::Snapshot {
                 revision: 0,
-                present: orna_protocol_v1::PresentNode::from_value(CanonicalValue::unit())
-                    .unwrap(),
+                present: orna_protocol_v1::PresentNode::from_value(CanonicalValue::unit()).unwrap(),
                 snapshot: CanonicalSnapshot::cwd([2; 16], [3; 16], 0.into()).unwrap(),
             },
             extensions: BTreeMap::new(),
@@ -724,8 +706,7 @@ impl WatchEventApplication {
             watch: Some(watch),
             message: Message::Snapshot {
                 revision: 0,
-                present: orna_protocol_v1::PresentNode::from_value(CanonicalValue::unit())
-                    .unwrap(),
+                present: orna_protocol_v1::PresentNode::from_value(CanonicalValue::unit()).unwrap(),
                 snapshot: CanonicalSnapshot::cwd([2; 16], [3; 16], 0.into()).unwrap(),
             },
             extensions: BTreeMap::new(),
@@ -734,12 +715,7 @@ impl WatchEventApplication {
 }
 
 impl LiveApplication for WatchEventApplication {
-    fn eval(
-        &mut self,
-        _: [u8; 16],
-        _: [u8; 16],
-        _: &Message,
-    ) -> Result<Envelope, Error> {
+    fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
         Err(Error::UnsupportedOperation)
     }
 
@@ -789,13 +765,10 @@ impl LiveApplication for WatchEventApplication {
                 WatchEventMode::Rollback => Ok(LiveEvalResponse::transaction(
                     response,
                     LiveEvalTransaction::new(
-                        vec![TableMutation::new(
-                            [201; 16],
-                            "watch_rollback",
-                            vec![1],
-                            Some(vec![2]),
-                        )
-                        .unwrap()],
+                        vec![
+                            TableMutation::new([201; 16], "watch_rollback", vec![1], Some(vec![2]))
+                                .unwrap(),
+                        ],
                         [201; 32],
                         Arc::new(FailAt(FaultPoint::AfterTableWrite)),
                     ),
@@ -803,13 +776,10 @@ impl LiveApplication for WatchEventApplication {
                 WatchEventMode::Commit => Ok(LiveEvalResponse::transaction(
                     response,
                     LiveEvalTransaction::new(
-                        vec![TableMutation::new(
-                            [202; 16],
-                            "watch_commit",
-                            vec![1],
-                            Some(vec![2]),
-                        )
-                        .unwrap()],
+                        vec![
+                            TableMutation::new([202; 16], "watch_commit", vec![1], Some(vec![2]))
+                                .unwrap(),
+                        ],
                         [202; 32],
                         Arc::new(NoFault),
                     ),
@@ -818,7 +788,6 @@ impl LiveApplication for WatchEventApplication {
         })
     }
 }
-
 
 struct Authority;
 impl LiveSessionAuthority for Authority {
@@ -2239,8 +2208,8 @@ fn cancel_request(request: [u8; 16], target: [u8; 16]) -> Vec<u8> {
         },
         extensions: BTreeMap::new(),
     }
-.encode(Limits::default().protocol)
-.unwrap()
+    .encode(Limits::default().protocol)
+    .unwrap()
 }
 fn resync() -> Vec<u8> {
     resync_request([9; 16], [10; 16])
@@ -3921,18 +3890,12 @@ fn durable_transactional_eval_commits_or_rolls_back_and_replays_terminally() {
     let mut committed = TransactionalApplication {
         calls: 0,
         faults: Arc::new(NoFault),
-        mutations: vec![
-            TableMutation::new([1; 16], "books", vec![1], Some(vec![2])).unwrap(),
-        ],
+        mutations: vec![TableMutation::new([1; 16], "books", vec![1], Some(vec![2])).unwrap()],
     };
     let request = eval([1; 16], [23; 16], "insert");
-    let first = block_on(host.dispatch_frame(
-        [5; 16],
-        2,
-        Frame::Binary(request.clone()),
-        &mut committed,
-    ))
-    .unwrap();
+    let first =
+        block_on(host.dispatch_frame([5; 16], 2, Frame::Binary(request.clone()), &mut committed))
+            .unwrap();
     assert!(matches!(
         first.response.as_ref().unwrap().message,
         Message::Result {
@@ -3955,13 +3918,8 @@ fn durable_transactional_eval_commits_or_rolls_back_and_replays_terminally() {
     .unwrap()
     .unwrap();
     assert_eq!(status.state, RequestState::Completed);
-    let replay = block_on(host.dispatch_frame(
-        [5; 16],
-        3,
-        Frame::Binary(request),
-        &mut committed,
-    ))
-    .unwrap();
+    let replay =
+        block_on(host.dispatch_frame([5; 16], 3, Frame::Binary(request), &mut committed)).unwrap();
     assert_eq!(replay, first);
     assert_eq!(committed.calls, 1);
 
@@ -3969,9 +3927,7 @@ fn durable_transactional_eval_commits_or_rolls_back_and_replays_terminally() {
     let mut failed = TransactionalApplication {
         calls: 0,
         faults: Arc::new(FailAt(FaultPoint::AfterTableWrite)),
-        mutations: vec![
-            TableMutation::new([2; 16], "books", vec![2], Some(vec![3])).unwrap(),
-        ],
+        mutations: vec![TableMutation::new([2; 16], "books", vec![2], Some(vec![3])).unwrap()],
     };
     assert_eq!(
         block_on(host.dispatch_frame(
@@ -3999,9 +3955,7 @@ fn durable_transactional_eval_commits_or_rolls_back_and_replays_terminally() {
     let mut replay_application = TransactionalApplication {
         calls: 0,
         faults: Arc::new(NoFault),
-        mutations: vec![
-            TableMutation::new([9; 16], "books", vec![9], Some(vec![9])).unwrap(),
-        ],
+        mutations: vec![TableMutation::new([9; 16], "books", vec![9], Some(vec![9])).unwrap()],
     };
 
     let failed_replay = block_on(host.dispatch_frame(
@@ -4045,20 +3999,12 @@ fn durable_transactional_event_commits_through_the_application_ticket() {
             TableMutation::new([6; 16], "event_books", vec![1], Some(vec![2])).unwrap(),
         ],
     };
-    block_on(host.dispatch_frame(
-        [5; 16],
-        2,
-        Frame::Binary(subscribe()),
-        &mut application,
-    ))
-    .unwrap();
+    block_on(host.dispatch_frame([5; 16], 2, Frame::Binary(subscribe()), &mut application))
+        .unwrap();
     let request = event([1; 16], [23; 16], [11; 16]);
-    let preparation = block_on(host.prepare_application_frame(
-        [5; 16],
-        3,
-        Frame::Binary(request.clone()),
-    ))
-    .unwrap();
+    let preparation =
+        block_on(host.prepare_application_frame([5; 16], 3, Frame::Binary(request.clone())))
+            .unwrap();
     let ticket = match preparation {
         orna_live_v1::ApplicationPreparation::Work(ticket) => ticket,
         orna_live_v1::ApplicationPreparation::Completed(_) => {
@@ -4105,21 +4051,12 @@ fn durable_transactional_event_commits_through_synchronous_dispatch() {
             TableMutation::new([7; 16], "event_books_sync", vec![1], Some(vec![2])).unwrap(),
         ],
     };
-    block_on(host.dispatch_frame(
-        [5; 16],
-        2,
-        Frame::Binary(subscribe()),
-        &mut application,
-    ))
-    .unwrap();
+    block_on(host.dispatch_frame([5; 16], 2, Frame::Binary(subscribe()), &mut application))
+        .unwrap();
     let request = event([1; 16], [24; 16], [11; 16]);
-    let outcome = block_on(host.dispatch_frame(
-        [5; 16],
-        3,
-        Frame::Binary(request),
-        &mut application,
-    ))
-    .unwrap();
+    let outcome =
+        block_on(host.dispatch_frame([5; 16], 3, Frame::Binary(request), &mut application))
+            .unwrap();
     assert!(matches!(
         outcome.response.as_ref().map(|response| &response.message),
         Some(Message::Result {
@@ -4388,14 +4325,7 @@ fn public_action_registry_is_consumable_without_server_dependency() {
      -> Result<LiveEvalResponse, Error> {
         let supervisor = LiveApplicationWorkSupervisor::new();
         let mut work = supervisor.admit(binding.session, request)?;
-        block_on(registry.activate(
-            binding,
-            request,
-            [8; 32],
-            &value,
-            &context,
-            &mut work,
-        ))
+        block_on(registry.activate(binding, request, [8; 32], &value, &context, &mut work))
     };
 
     for wrong in [
@@ -5286,19 +5216,14 @@ fn durable_live_host_does_not_recover_a_request_owned_by_another_runtime() {
     assert!(first.response.is_none());
     assert_eq!(application.calls, 0);
 
-    let status = block_on(
-        open_durable_state(&repository).request_status_for_identity(identity),
-    )
-    .unwrap()
-    .unwrap();
+    let status = block_on(open_durable_state(&repository).request_status_for_identity(identity))
+        .unwrap()
+        .unwrap();
     assert_eq!(status.state, RequestState::Running);
     assert_eq!(status.fingerprint, fingerprint);
     assert!(status.terminal_outcome.is_none());
     assert_eq!(
-        block_on(
-            open_durable_state(&repository).request_owner(identity, fingerprint),
-        )
-        .unwrap(),
+        block_on(open_durable_state(&repository).request_owner(identity, fingerprint),).unwrap(),
         Some(RequestOwner::from(active_owner))
     );
 
@@ -5370,9 +5295,13 @@ fn durable_live_host_replays_proven_rollback_without_reexecution() {
     }))
     .unwrap();
     let mut application = UnitApplication::default();
-    let first =
-        block_on(host.dispatch_frame([11; 16], 2, Frame::Binary(request.clone()), &mut application))
-            .unwrap();
+    let first = block_on(host.dispatch_frame(
+        [11; 16],
+        2,
+        Frame::Binary(request.clone()),
+        &mut application,
+    ))
+    .unwrap();
     assert!(matches!(
         first.response.as_ref().unwrap().message,
         Message::Result {
@@ -5389,10 +5318,9 @@ fn durable_live_host_replays_proven_rollback_without_reexecution() {
     assert_eq!(second, first);
     assert_eq!(application.calls, 0);
     assert_eq!(
-        block_on(open_durable_state(&repository).request_recovery_disposition(
-            identity,
-            fingerprint,
-        ))
+        block_on(
+            open_durable_state(&repository).request_recovery_disposition(identity, fingerprint,)
+        )
         .unwrap(),
         Some(orna_runtime_v1::RecoveryDisposition::RollbackProven)
     );
@@ -7164,8 +7092,7 @@ fn websocket_peer_close_echoes_valid_code_and_reason_on_receive_and_prepare() {
     );
 
     let (mut transport, mut socket) = attached_transport_for_close();
-    let prepared =
-        prepared_close_output(&mut transport, &mut socket, &masked(true, 8, &payload));
+    let prepared = prepared_close_output(&mut transport, &mut socket, &masked(true, 8, &payload));
     assert_close_output(&prepared, Some(1000), b"normal");
     assert_eq!(
         encode_close(&prepared),
@@ -7183,19 +7110,14 @@ fn websocket_peer_close_preserves_empty_reason_on_receive_and_prepare() {
     assert_eq!(encode_close(&receive), [0x88, 2, 0x03, 0xe9]);
 
     let (mut transport, mut socket) = attached_transport_for_close();
-    let prepared =
-        prepared_close_output(&mut transport, &mut socket, &masked(true, 8, &payload));
+    let prepared = prepared_close_output(&mut transport, &mut socket, &masked(true, 8, &payload));
     assert_close_output(&prepared, Some(1001), b"");
     assert_eq!(encode_close(&prepared), [0x88, 2, 0x03, 0xe9]);
 }
 
 #[test]
 fn websocket_peer_close_rejects_malformed_and_invalid_payloads_on_both_paths() {
-    for payload in [
-        &[0x03][..],
-        &[0x00, 0x01][..],
-        &[0x03, 0xe8, 0xff][..],
-    ] {
+    for payload in [&[0x03][..], &[0x00, 0x01][..], &[0x03, 0xe8, 0xff][..]] {
         let (mut transport, mut socket) = attached_transport_for_close();
         let receive = close_output(&mut transport, &mut socket, &masked(true, 8, payload));
         assert_close_output(&receive, Some(1002), b"");

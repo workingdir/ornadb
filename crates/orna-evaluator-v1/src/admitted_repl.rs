@@ -128,10 +128,7 @@ impl StagedReplActivation {
     ///
     /// Runtime/table state is deliberately not touched here. A stale or
     /// foreign session rejects the handoff before semantic state changes.
-    pub fn commit_semantic(
-        self,
-        session: &mut AdmittedReplSession,
-    ) -> Result<(), ReplError> {
+    pub fn commit_semantic(self, session: &mut AdmittedReplSession) -> Result<(), ReplError> {
         let mut semantic = session.semantic.clone();
         semantic
             .commit(self.admission)
@@ -140,7 +137,6 @@ impl StagedReplActivation {
         Ok(())
     }
 }
-
 
 /// An isolated, typed session against one admitted project snapshot.
 ///

@@ -908,10 +908,7 @@ mod tests {
         let old = schema(table(true, vec![field(2, "name", false)]));
         let mut added_key = field(3, "account_id", true);
         added_key.role = FieldRole::Key;
-        let next = schema(table(
-            true,
-            vec![field(2, "name", false), added_key],
-        ));
+        let next = schema(table(true, vec![field(2, "name", false), added_key]));
 
         assert!(matches!(
             plan(&old, &next, &request(vec![])),
@@ -922,7 +919,6 @@ mod tests {
             }) if table == id(1) && field == id(3)
         ));
     }
-
 
     #[test]
     fn explicit_key_mode_changes_fail_closed_in_both_directions() {

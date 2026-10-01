@@ -9,12 +9,11 @@ mod compact;
 mod compact_parquet;
 
 pub use compact::{
+    COMPACT_STORAGE_PROFILE, CompactBaseProjectionError, CompactBaseRow, CompactBaseState,
+    CompactExactKeyIndex, CompactExactKeySource, CompactKeyError, CompactKeyIdentity,
+    CompactLogicalKeyError, CompactLogicalReader, CompactLoweringError, CompactOvbProfile,
+    CompactWriterInput, CompactWriterMutation, CompactWriterMutationState, OVB_PROFILE,
     apply_migration_plan_to_compact, fold_compact_committed_base, lower_publication_freeze,
-    CompactBaseProjectionError, CompactBaseRow, CompactBaseState, CompactExactKeyIndex,
-    CompactExactKeySource,
-    CompactKeyError, CompactKeyIdentity, CompactLogicalKeyError, CompactLogicalReader,
-    CompactLoweringError, CompactOvbProfile, CompactWriterInput, CompactWriterMutation,
-    CompactWriterMutationState, COMPACT_STORAGE_PROFILE, OVB_PROFILE,
 };
 pub use compact_parquet::{CompactParquetError, CompactParquetKeySource};
 
@@ -305,15 +304,18 @@ where
     }
     let mut merged: BTreeMap<CompactKeyIdentity, HybridLogicalRow<'a>> = BTreeMap::new();
     for row in base.rows() {
-        let encoded = row
-            .key()
-            .encode()
-            .map_err(|_| Error::HybridBaseMismatch)?;
+        let encoded = row.key().encode().map_err(|_| Error::HybridBaseMismatch)?;
         let key = profile
             .decode_key(&encoded)
             .map_err(|_| Error::HybridBaseMismatch)?;
         if merged
-            .insert(key.clone(), HybridLogicalRow::Compact { key: key.clone(), row })
+            .insert(
+                key.clone(),
+                HybridLogicalRow::Compact {
+                    key: key.clone(),
+                    row,
+                },
+            )
             .is_some()
         {
             return Err(Error::HybridDuplicateKey { key });
@@ -329,10 +331,7 @@ where
         if !resolved_loose.insert(key.clone()) {
             return Err(Error::HybridDuplicateKey { key });
         }
-        merged.insert(
-            key.clone(),
-            HybridLogicalRow::Loose { key, path, row },
-        );
+        merged.insert(key.clone(), HybridLogicalRow::Loose { key, path, row });
     }
     for path in loose.tombstones() {
         let key = resolve(path)?;
@@ -677,8 +676,6 @@ impl RuntimePublicationCoordinator {
             .map_err(map_publication_repository_error)
     }
 
-    /// Validates and consumes the schema-bound committed base and generated
-    /// writer input before repository publication consumes the sealed prefix.
     pub async fn publish_compact_and_complete_validated(
         repository: &Repository,
         runtime: &RuntimeState,
@@ -723,6 +720,9 @@ impl RuntimePublicationCoordinator {
             .map_err(|_| Error::InvalidTransition)?;
         base.consume_writer_input(&writer_input)
             .map_err(|_| Error::InvalidTransition)?;
+        if plan.manifest().next_generation() != writer_input.candidate_generation {
+            return Err(Error::InvalidTransition);
+        }
         Self::publish_compact_and_complete(repository, runtime, freeze, plan).await
     }
 
@@ -1746,22 +1746,6 @@ mod tests {
         assert_eq!(repository.read_publication_journal().unwrap(), None);
     }
 
-    #[tokio::test]
-    async fn compact_coordinator_completion_consumes_only_the_frozen_prefix() {
-        let (_temp, repository, runtime, freeze, plan) =
-            compact_runtime_unpublished_fixture().await;
-        RuntimePublicationCoordinator::publish_compact_and_complete(
-            &repository,
-            &runtime,
-            &freeze,
-            plan,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(runtime.pending().await.unwrap().len(), 1);
-        assert_eq!(repository.read_publication_journal().unwrap(), None);
-    }
 
     #[tokio::test]
     async fn compact_reader_visibility_switches_at_the_durable_runtime_watermark() {

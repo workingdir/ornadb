@@ -4,8 +4,8 @@ use orna_runtime_v1::{
     PublicationMutationState, PublicationRowEncoding, PublicationValueEncoding,
 };
 use orna_storage_v1::{
-    lower_publication_freeze, CompactKeyError, CompactLoweringError, CompactOvbProfile,
-    CompactWriterMutationState,
+    CompactKeyError, CompactLoweringError, CompactOvbProfile, CompactWriterMutationState,
+    lower_publication_freeze,
 };
 use sha2::{Digest, Sha256};
 
@@ -143,21 +143,36 @@ fn lowers_runtime_freeze_to_ordered_writer_input() {
     assert_eq!(input.table_id, TABLE);
     assert_eq!(input.schema_fingerprint, profile.schema_fingerprint());
     assert_eq!(input.candidate_generation, GENERATION);
-    assert_eq!(input.row_encoding_identity, PublicationRowEncoding::CompactOvb1);
-    assert_eq!(input.value_encoding_identity, PublicationValueEncoding::Ovb1);
+    assert_eq!(
+        input.row_encoding_identity,
+        PublicationRowEncoding::CompactOvb1
+    );
+    assert_eq!(
+        input.value_encoding_identity,
+        PublicationValueEncoding::Ovb1
+    );
     assert_eq!(input.candidate_digest, candidate);
     assert_eq!(input.mutations.len(), 2);
     assert_eq!(input.mutations[0].sequence, 1);
     assert_eq!(input.mutations[0].mutation_id, [0x51; 16]);
-    assert_eq!(input.mutations[0].key.encoded(), freeze.mutations[0].logical_key);
+    assert_eq!(
+        input.mutations[0].key.encoded(),
+        freeze.mutations[0].logical_key
+    );
     assert!(matches!(
         &input.mutations[0].state,
         CompactWriterMutationState::Replacement { value } if value == &value_one
     ));
     assert_eq!(input.mutations[1].sequence, 2);
     assert_eq!(input.mutations[1].mutation_id, [0x52; 16]);
-    assert_eq!(input.mutations[1].key.encoded(), freeze.mutations[1].logical_key);
-    assert!(matches!(input.mutations[1].state, CompactWriterMutationState::Deletion));
+    assert_eq!(
+        input.mutations[1].key.encoded(),
+        freeze.mutations[1].logical_key
+    );
+    assert!(matches!(
+        input.mutations[1].state,
+        CompactWriterMutationState::Deletion
+    ));
 }
 
 #[test]
@@ -203,11 +218,15 @@ fn rejects_malformed_or_stale_typed_freezes() {
     malformed_key.mutations[0].logical_key = vec![0xff];
     assert!(matches!(
         lower_publication_freeze(&profile, &malformed_key),
-        Err(CompactLoweringError::InvalidKey(CompactKeyError::InvalidOvb))
+        Err(CompactLoweringError::InvalidKey(
+            CompactKeyError::InvalidOvb
+        ))
     ));
 
     let mut wrong_key_witness = freeze.clone();
-    wrong_key_witness.mutations[0].equivalence_witness.key_digest[0] ^= 1;
+    wrong_key_witness.mutations[0]
+        .equivalence_witness
+        .key_digest[0] ^= 1;
     assert!(matches!(
         lower_publication_freeze(&profile, &wrong_key_witness),
         Err(CompactLoweringError::KeyWitnessMismatch)

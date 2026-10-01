@@ -1,7 +1,9 @@
 use std::future::Future;
 
-use super::{FaultInjector, RuntimeError, RuntimeState, RuntimeTableActivationSnapshot, TableMutation,
-    WriterLease};
+use super::{
+    FaultInjector, RuntimeError, RuntimeState, RuntimeTableActivationSnapshot, TableMutation,
+    WriterLease,
+};
 
 /// Staged table changes and the typed value produced by one activation.
 ///
@@ -94,13 +96,7 @@ where
         result,
     } = work;
     state
-        .commit_table_activation(
-            lease,
-            snapshot.context(),
-            &mutations,
-            next_digest,
-            faults,
-        )
+        .commit_table_activation(lease, snapshot.context(), &mutations, next_digest, faults)
         .await
         .map_err(ActivationError::Runtime)?;
     Ok(result)

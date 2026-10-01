@@ -13,14 +13,13 @@ use std::{
     fmt,
 };
 
-use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_evolution_v1::{MigrationOperation, MigrationPlan};
+use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::{
     CompactCommittedSegmentProjection, CompactManifest, CompactManifestEntry, CompactSegmentRole,
 };
 use orna_runtime_v1::{
-    PublicationFreeze, PublicationMutationState, PublicationRowEncoding,
-    PublicationValueEncoding,
+    PublicationFreeze, PublicationMutationState, PublicationRowEncoding, PublicationValueEncoding,
 };
 use sha2::{Digest, Sha256};
 
@@ -298,10 +297,10 @@ fn rewrite_rekey_row_value(
     new_key: &CompactKeyIdentity,
     value: &CanonicalValue,
 ) -> Result<CanonicalValue, CompactBaseProjectionError> {
-    let old_components =
-        decode_key_components(profile, old_key).map_err(|_| CompactBaseProjectionError::InvalidEvolutionKey)?;
-    let new_components =
-        decode_key_components(profile, new_key).map_err(|_| CompactBaseProjectionError::InvalidEvolutionKey)?;
+    let old_components = decode_key_components(profile, old_key)
+        .map_err(|_| CompactBaseProjectionError::InvalidEvolutionKey)?;
+    let new_components = decode_key_components(profile, new_key)
+        .map_err(|_| CompactBaseProjectionError::InvalidEvolutionKey)?;
     let OvbRaw::Tag(60009, payload) = value.raw() else {
         return Err(CompactBaseProjectionError::InvalidEvolutionValue);
     };
@@ -333,10 +332,7 @@ fn rewrite_rekey_row_value(
             }
             field_value = new_components[index].clone();
         }
-        rewritten_fields.push(OvbRaw::Array(vec![
-            field_id.clone(),
-            field_value,
-        ]));
+        rewritten_fields.push(OvbRaw::Array(vec![field_id.clone(), field_value]));
     }
     if seen_keys.len() != profile.key_fields.len() {
         return Err(CompactBaseProjectionError::InvalidEvolutionValue);
@@ -500,7 +496,9 @@ impl fmt::Display for CompactLoweringError {
             Self::EmptyTable => f.write_str("compact freeze has an empty table identity"),
             Self::WrongTable => f.write_str("compact freeze mutation belongs to another table"),
             Self::WrongSchema => f.write_str("compact freeze mutation belongs to another schema"),
-            Self::WrongRowEncoding => f.write_str("compact freeze uses an unsupported row encoding"),
+            Self::WrongRowEncoding => {
+                f.write_str("compact freeze uses an unsupported row encoding")
+            }
             Self::WrongValueEncoding => {
                 f.write_str("compact freeze uses an unsupported value encoding")
             }
@@ -655,7 +653,6 @@ pub fn lower_publication_freeze(
         candidate_digest,
     })
 }
-
 
 /// A validated compact logical schema projection for primary-key admission.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1910,7 +1907,6 @@ mod tests {
         );
     }
 
-
     fn enum_profile() -> CompactOvbProfile {
         let enum_type = OvbRaw::Array(vec![OvbRaw::Int(5.into()), uuid_raw(ENUM_TYPE)]);
         let definition = OvbRaw::Array(vec![
@@ -2591,14 +2587,16 @@ mod tests {
         );
 
         let mut evolved_schema = schema.clone();
-        evolved_schema.tables[0].fields.push(orna_evolution_v1::Field {
-            id: orna_evolution_v1::ObjectId::new(KEY_B),
-            name: "label".into(),
-            ty: orna_evolution_v1::FieldType::Str,
-            role: orna_evolution_v1::FieldRole::Stored,
-            optional: true,
-            introduction_fallback: None,
-        });
+        evolved_schema.tables[0]
+            .fields
+            .push(orna_evolution_v1::Field {
+                id: orna_evolution_v1::ObjectId::new(KEY_B),
+                name: "label".into(),
+                ty: orna_evolution_v1::FieldType::Str,
+                role: orna_evolution_v1::FieldRole::Stored,
+                optional: true,
+                introduction_fallback: None,
+            });
         let schema_plan = orna_evolution_v1::plan(
             &schema,
             &evolved_schema,

@@ -1822,7 +1822,7 @@ fn quoted_names_do_not_acquire_standard_prelude_meaning() {
     )
     .unwrap();
     let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
-    let source = "CREATE SCHEMA app; CREATE TYPE app.flag AS OBJECT (value \"BOOLEAN\");";
+    let source = include_str!("tests/fixtures/quoted-boolean-type.orna");
     let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
 
     let report = check_standard_application(&bundle, &context);
@@ -2822,7 +2822,8 @@ fn renders_contextual_diagnostics_from_retained_source_without_mutating_raw_data
 
 #[test]
 fn falls_back_to_raw_location_when_retained_source_cannot_cover_span() {
-    let bundle = SourceBundle::new([SourceUnit::new("syntax.orna", "CREATE SCHEMA crm.;")]).unwrap();
+    let bundle =
+        SourceBundle::new([SourceUnit::new("syntax.orna", "CREATE SCHEMA crm.;")]).unwrap();
     let mut report = parse_bundle(&bundle);
     report.units[0].replace_source_text_for_test("short");
 

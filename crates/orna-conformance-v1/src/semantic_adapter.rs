@@ -29,9 +29,9 @@ use orna_runtime_v1::{
     StreamItem, StreamObservationRegistration, StreamRunControl, StreamRunOutcome, StreamSource,
     StreamSourcePoll, StreamStep, StreamTableCandidateValidator, StreamTableDeliveryError,
     StreamTableMutationBatch, StreamValidatedTableDeliveryCommit,
-    StreamValidatedTableMutationBatch,
-    TableActivationCandidateValidator, TableActivationError, TableMutation, TerminalOutcome,
-    ValidatedTableActivationCommit, ValidatedTableRequestActivationCommit, WriterLease,
+    StreamValidatedTableMutationBatch, TableActivationCandidateValidator, TableActivationError,
+    TableMutation, TerminalOutcome, ValidatedTableActivationCommit,
+    ValidatedTableRequestActivationCommit, WriterLease,
 };
 use orna_semantic_v1::{
     AssertionOwner, AssertionPlan, Catalogue, EffectSummary, ModuleInput, Namespace,
@@ -685,14 +685,15 @@ impl BoundedEvaluator {
     /// source expression.  The source string remains the provenance input; an
     /// opaque server handle is deliberately allocated by the serving boundary.
     pub fn source_action_descriptor(source: &str) -> Option<(String, String, [u8; 32])> {
-        let value = evaluate_expression(source, &Environment::new(), EvaluatorLimits::default()).ok()?;
+        let value =
+            evaluate_expression(source, &Environment::new(), EvaluatorLimits::default()).ok()?;
         let OvbRaw::Map(fields) = value.raw() else {
             return None;
         };
         let field = |name: &str| {
-            fields.iter().find_map(|(key, value)| {
-                (key == &OvbRaw::Text(name.into())).then_some(value)
-            })
+            fields
+                .iter()
+                .find_map(|(key, value)| (key == &OvbRaw::Text(name.into())).then_some(value))
         };
         let OvbRaw::Text(action_id) = field("action_id")? else {
             return None;
@@ -1607,8 +1608,8 @@ fn decode_ordered_decimal_cursor(encoded: &[u8]) -> Result<(Value, usize), Evalu
         coefficient = -coefficient;
     }
     let exponent = adjusted - BigInt::from(digits.len());
-    let value = Value::decimal(coefficient, exponent)
-        .map_err(|_| transaction_error("ORNA-EVAL-VALUE"))?;
+    let value =
+        Value::decimal(coefficient, exponent).map_err(|_| transaction_error("ORNA-EVAL-VALUE"))?;
     let mut canonical = Vec::new();
     encode_ordered_decimal_cursor(&value, &mut canonical)?;
     if canonical.as_slice() != &encoded[..digits_end] {
@@ -2726,9 +2727,7 @@ impl DurableTransactionalEvaluator {
             update_text(digest, root_entry);
             for (name, value) in arguments {
                 update_text(digest, name);
-                let encoded = value
-                    .encode()
-                    .map_err(|_| RuntimeError::RecoveryInvalid)?;
+                let encoded = value.encode().map_err(|_| RuntimeError::RecoveryInvalid)?;
                 digest.update(
                     u64::try_from(encoded.len())
                         .expect("project request value length fits u64")
@@ -2827,14 +2826,8 @@ impl DurableTransactionalEvaluator {
         let admitted = match admit_transaction_project(project, self.limits, root_entry) {
             Ok(value) => value,
             Err(outcome) => {
-                return terminalize_observed_outcome(
-                    &state,
-                    request,
-                    fingerprint,
-                    lease,
-                    *outcome,
-                )
-                .await;
+                return terminalize_observed_outcome(&state, request, fingerprint, lease, *outcome)
+                    .await;
             }
         };
         if admit_project_list_stream(project, &admitted, root_entry, target.identity).is_ok() {
@@ -3659,13 +3652,8 @@ impl DurableTransactionalEvaluator {
                 let row = match Value::decode(row) {
                     Ok(row) => row,
                     Err(_) => {
-                        return fail_observed_request_runtime(
-                            state,
-                            request,
-                            fingerprint,
-                            lease,
-                        )
-                        .await;
+                        return fail_observed_request_runtime(state, request, fingerprint, lease)
+                            .await;
                     }
                 };
                 if evaluator
@@ -3749,7 +3737,6 @@ impl DurableTransactionalEvaluator {
             }
         }
     }
-
 
     /// Publishes the caller-selected frozen runtime prefix through the loose
     /// Git projection. Publication is explicit: source execution only stages
@@ -4119,8 +4106,7 @@ impl EffectHandler for CandidateRelationEffectHandler<'_> {
         for (_, encoded) in &candidates[start..end] {
             budget.debit(1)?;
             rows.push(
-                Value::decode(encoded)
-                    .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ASSERT"))?,
+                Value::decode(encoded).map_err(|_| transaction_error("ORNA-EVAL-TABLE-ASSERT"))?,
             );
         }
         Ok(Some(RelationPage {
@@ -4141,10 +4127,7 @@ fn relation_cursor_start(after: Option<&[u8]>) -> Result<usize, EvaluationError>
         .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ASSERT"))
 }
 
-fn table_assertion_function<'a>(
-    assertion: &'a Expr,
-    functions: &Functions,
-) -> Option<&'a str> {
+fn table_assertion_function<'a>(assertion: &'a Expr, functions: &Functions) -> Option<&'a str> {
     match assertion {
         Expr::Name { text, .. } if functions.contains_key(text) => Some(text),
         _ => None,
@@ -4517,7 +4500,7 @@ impl StreamHandler for ListTableHandler {
                         next_digest: self.digest,
                     },
                     stream_handler_diagnostic(),
-                )
+                );
             }
         };
         StreamHandlerResult::CommitValidatedTable(StreamValidatedTableMutationBatch {
@@ -5547,10 +5530,8 @@ impl TableEffectHandler<'_, '_> {
                     OvbRaw::Tag(60000, _) if kind == "decimal" => {
                         if operation != "sum" {
                             let replace = decimal_extreme.as_ref().is_none_or(|current: &Value| {
-                                let (
-                                    OvbRaw::Tag(60000, left),
-                                    OvbRaw::Tag(60000, right),
-                                ) = (value.raw(), current.raw())
+                                let (OvbRaw::Tag(60000, left), OvbRaw::Tag(60000, right)) =
+                                    (value.raw(), current.raw())
                                 else {
                                     unreachable!("validated Decimal extrema retain Decimal tags");
                                 };
@@ -5602,9 +5583,11 @@ impl TableEffectHandler<'_, '_> {
                         Some(value) => Value::option(Some(value))
                             .map(Some)
                             .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ARGUMENT")),
-                        None => Ok(Some(Value::new(OvbRaw::Null).map_err(|_| {
-                            transaction_error("ORNA-EVAL-TABLE-ARGUMENT")
-                        })?)),
+                        None => {
+                            Ok(Some(Value::new(OvbRaw::Null).map_err(|_| {
+                                transaction_error("ORNA-EVAL-TABLE-ARGUMENT")
+                            })?))
+                        }
                     }
                 }
                 _ => unreachable!("aggregate operation was checked above"),
@@ -5988,7 +5971,6 @@ struct AdmittedTransaction {
 }
 
 type AdmissionFailure = Box<StageOutcome<Diagnostic>>;
-
 
 fn admit_transaction_source(
     unit: &SourceUnit,
@@ -6578,8 +6560,7 @@ fn lower_relation_expression_with_resolution(
             namespace,
             shadowed,
         )
-    })
-    {
+    }) {
         *expression = lowered;
         return;
     }
@@ -7012,16 +6993,14 @@ fn relation_quantifier(
         Expr::Call {
             callee, arguments, ..
         } => {
-            let Expr::Name { text: operation, .. } = callee.as_ref() else {
+            let Expr::Name {
+                text: operation, ..
+            } = callee.as_ref()
+            else {
                 return None;
             };
             if !matches!(operation.as_str(), "every" | "exists")
-                || !root_relation_intrinsic_is_unshadowed(
-                    operation,
-                    functions,
-                    namespace,
-                    shadowed,
-                )
+                || !root_relation_intrinsic_is_unshadowed(operation, functions, namespace, shadowed)
             {
                 return None;
             }
@@ -7050,19 +7029,20 @@ fn relation_quantifier(
             (operation.as_str(), table?, predicate?)
         }
         Expr::Binary { lhs, op, rhs, .. } if op == "|" => {
-            let Expr::Call { callee, arguments, .. } = rhs.as_ref() else {
+            let Expr::Call {
+                callee, arguments, ..
+            } = rhs.as_ref()
+            else {
                 return None;
             };
-            let Expr::Name { text: operation, .. } = callee.as_ref() else {
+            let Expr::Name {
+                text: operation, ..
+            } = callee.as_ref()
+            else {
                 return None;
             };
             if !matches!(operation.as_str(), "every" | "exists")
-                || !root_relation_intrinsic_is_unshadowed(
-                    operation,
-                    functions,
-                    namespace,
-                    shadowed,
-                )
+                || !root_relation_intrinsic_is_unshadowed(operation, functions, namespace, shadowed)
             {
                 return None;
             }
@@ -7487,7 +7467,6 @@ fn relation_count_target(
     name == "count" && root_relation_intrinsic_is_unshadowed(name, functions, namespace, shadowed)
 }
 
-
 fn relation_filter_first(
     expression: &Expr,
     table_keys: &TableKeys,
@@ -7568,22 +7547,15 @@ fn relation_filter_first(
     if predicate_op != "==" {
         return None;
     }
-    let (field_expr, field, expected) =
-        match (predicate_lhs.as_ref(), predicate_rhs.as_ref()) {
-            (
-                Expr::Field { base, name, .. },
-                expected,
-            ) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
-                (predicate_lhs.as_ref(), name, expected)
-            }
-            (
-                expected,
-                Expr::Field { base, name, .. },
-            ) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
-                (predicate_rhs.as_ref(), name, expected)
-            }
-            _ => return None,
-        };
+    let (field_expr, field, expected) = match (predicate_lhs.as_ref(), predicate_rhs.as_ref()) {
+        (Expr::Field { base, name, .. }, expected) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
+            (predicate_lhs.as_ref(), name, expected)
+        }
+        (expected, Expr::Field { base, name, .. }) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
+            (predicate_rhs.as_ref(), name, expected)
+        }
+        _ => return None,
+    };
     if !table_fields
         .get(table)
         .is_some_and(|fields| fields.contains(field))
@@ -7719,22 +7691,18 @@ fn relation_filter_count(
     if predicate_op != "==" {
         return None;
     }
-    let (field_expr, field, expected, reversed) =
-        match (predicate_lhs.as_ref(), predicate_rhs.as_ref()) {
-            (
-                Expr::Field { base, name, .. },
-                expected,
-            ) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
-                (predicate_lhs.as_ref(), name, expected, false)
-            }
-            (
-                expected,
-                Expr::Field { base, name, .. },
-            ) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
-                (predicate_rhs.as_ref(), name, expected, true)
-            }
-            _ => return None,
-        };
+    let (field_expr, field, expected, reversed) = match (
+        predicate_lhs.as_ref(),
+        predicate_rhs.as_ref(),
+    ) {
+        (Expr::Field { base, name, .. }, expected) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
+            (predicate_lhs.as_ref(), name, expected, false)
+        }
+        (expected, Expr::Field { base, name, .. }) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
+            (predicate_rhs.as_ref(), name, expected, true)
+        }
+        _ => return None,
+    };
     if !(table_fields
         .get(table)
         .is_some_and(|fields| fields.contains(field))
@@ -7868,22 +7836,18 @@ fn relation_filtered_one(
     if predicate_op != "==" {
         return None;
     }
-    let (field_expr, field, expected, reversed) =
-        match (predicate_lhs.as_ref(), predicate_rhs.as_ref()) {
-            (
-                Expr::Field { base, name, .. },
-                expected,
-            ) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
-                (predicate_lhs.as_ref(), name, expected, false)
-            }
-            (
-                expected,
-                Expr::Field { base, name, .. },
-            ) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
-                (predicate_rhs.as_ref(), name, expected, true)
-            }
-            _ => return None,
-        };
+    let (field_expr, field, expected, reversed) = match (
+        predicate_lhs.as_ref(),
+        predicate_rhs.as_ref(),
+    ) {
+        (Expr::Field { base, name, .. }, expected) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
+            (predicate_lhs.as_ref(), name, expected, false)
+        }
+        (expected, Expr::Field { base, name, .. }) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
+            (predicate_rhs.as_ref(), name, expected, true)
+        }
+        _ => return None,
+    };
     if !(table_fields
         .get(table)
         .is_some_and(|fields| fields.contains(field))
@@ -7933,7 +7897,6 @@ fn relation_filtered_one(
         span: expression.span(),
     })
 }
-
 
 fn relation_one_target(expression: &Expr) -> bool {
     matches!(
@@ -8322,8 +8285,7 @@ fn canonical_uuid7(value: SystemTime) -> Result<Value, EvaluationError> {
     let mut bytes = [0_u8; 16];
     bytes[..6].copy_from_slice(&timestamp.to_be_bytes()[2..]);
     let mut random = [0_u8; 10];
-    getrandom::fill(&mut random)
-        .map_err(|_| transaction_error("ORNA-EVAL-TABLE-VALUE"))?;
+    getrandom::fill(&mut random).map_err(|_| transaction_error("ORNA-EVAL-TABLE-VALUE"))?;
     bytes[6] = 0x70 | (random[0] & 0x0F);
     bytes[7] = random[1];
     bytes[8] = 0x80 | (random[2] & 0x3F);
@@ -9874,9 +9836,8 @@ mod durable_tests {
     use super::{
         DurableTransactionalEvaluator, Functions, RunningTableRequestDisposition, SourceUnit,
         StageOutcome, TransactionKeyType, TransactionTableKey, TransactionalEvaluator,
-        admitted_transaction_module, admit_transaction_project, lower_relation_bindings,
-        replay_request_terminal,
-        request_terminal,
+        admit_transaction_project, admitted_transaction_module, lower_relation_bindings,
+        replay_request_terminal, request_terminal,
     };
     use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
     use orna_evaluator_v1::Limits;
@@ -10184,7 +10145,11 @@ mod durable_tests {
         .await
         .expect("reopen committed runtime");
         assert_eq!(
-            state.capture().await.expect("capture committed activation").generation_digest(),
+            state
+                .capture()
+                .await
+                .expect("capture committed activation")
+                .generation_digest(),
             expected_digest
         );
         let key = Value::int(9.into()).encode().expect("encoded key");
@@ -10202,7 +10167,6 @@ mod durable_tests {
                     && value == &OvbRaw::Text("resolved".into()))
         ));
     }
-
 
     #[tokio::test]
     async fn ordinary_activation_reuses_one_captured_now_for_repeated_writes() {
@@ -12375,7 +12339,7 @@ mod list_stream_tests {
             source: component("fixture:failure"),
             partition_format: component("literal-list"),
             partition: None,
-            position_format: component("orna.list.v1")
+            position_format: component("orna.list.v1"),
         }
     }
 

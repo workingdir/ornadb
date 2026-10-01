@@ -1,0 +1,3 @@
+fn ungrouped_stage() = input | stage + amount;
+fn grouped_stage() = input | (stage + amount);
+fn comparison_after_pipeline() = input | stage > threshold;

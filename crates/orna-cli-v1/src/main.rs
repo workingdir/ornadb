@@ -11,19 +11,123 @@ use std::fmt;
 use std::io::{self, BufReader, IsTerminal, Write as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use orna_application_v1::ApplicationAuthority;
 use orna_conformance_v1::{
     AdmittedReplSession, BoundedEvaluator, DurableTransactionalEvaluator, ProjectEnvironment,
     ProjectExpectations, ProjectUnit, ReplError, RuntimeEvaluator, SourceUnit, StageOutcome,
 };
-use orna_application_v1::ApplicationAuthority;
 use orna_evaluator_v1::{Environment, Limits};
 use orna_foundation_v1::{OvbRaw, Value};
 use orna_runtime_v1::{RunObservationStatus, RuntimeIdentity, RuntimeState};
 
 static CLI_REQUEST_NONCE: AtomicU64 = AtomicU64::new(1);
+static CLI_OUTPUT_FORMAT: AtomicU8 = AtomicU8::new(0);
+
+fn output_format() -> OutputFormat {
+    match CLI_OUTPUT_FORMAT.load(AtomicOrdering::Relaxed) {
+        1 => OutputFormat::Short,
+        2 => OutputFormat::Json,
+        _ => OutputFormat::Human,
+    }
+}
+
+fn set_output_format(format: OutputFormat) {
+    let value = match format {
+        OutputFormat::Human => 0,
+        OutputFormat::Short => 1,
+        OutputFormat::Json => 2,
+    };
+    CLI_OUTPUT_FORMAT.store(value, AtomicOrdering::Relaxed);
+}
+
+fn parse_output_format(value: &str) -> Result<OutputFormat, Diagnostic> {
+    match value {
+        "human" => Ok(OutputFormat::Human),
+        "short" => Ok(OutputFormat::Short),
+        "json" => Ok(OutputFormat::Json),
+        _ => Err(Diagnostic {
+            code: "E1002",
+            title: "unsupported output format",
+            help: "choose `human`, `short`, or `json` with `--format`",
+            exit: Exit::Usage,
+            detail: Some(format!("received `{value}`; supported formats are human, short, json")),
+        }),
+    }
+}
+
+fn emit_human(text: &str) {
+    if output_format() == OutputFormat::Human {
+        println!("{text}");
+    }
+}
+
+fn json_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            character if character.is_control() => {
+                use fmt::Write as _;
+                let _ = write!(escaped, "\\u{:04x}", character as u32);
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped.push('"');
+    escaped
+}
+
+fn command_name(command: &Command) -> &'static str {
+    match command {
+        Command::Repl(_) => "repl",
+        Command::Init(_) => "init",
+        Command::Status { .. } => "status",
+        Command::Fetch { .. } => "fetch",
+        Command::Check => "check",
+        Command::Explain(_) => "explain",
+        Command::Invoke(_) => "invoke",
+        Command::Run(_) => "run",
+        Command::Help => "help",
+        Command::Version => "version",
+    }
+}
+
+fn emit_success(format: OutputFormat, command: &Command) {
+    match format {
+        OutputFormat::Human => {}
+        OutputFormat::Short => println!("{}: ok", command_name(command)),
+        OutputFormat::Json => println!(
+            "{{\"ok\":true,\"command\":{},\"result\":\"completed\"}}",
+            json_string(command_name(command))
+        ),
+    }
+}
+
+fn emit_diagnostic(format: OutputFormat, error: &Diagnostic) {
+    match format {
+        OutputFormat::Human => eprintln!("{error}"),
+        OutputFormat::Short => eprintln!(
+            "error[{}]: {} (help: {})",
+            error.code, error.title, error.help
+        ),
+        OutputFormat::Json => eprintln!(
+            "{{\"ok\":false,\"diagnostic\":{{\"code\":{},\"title\":{},\"help\":{},\"detail\":{},\"exit_code\":{}}}}}",
+            json_string(error.code),
+            json_string(error.title),
+            json_string(error.help),
+            error.detail.as_deref().map(json_string).unwrap_or_else(|| "null".into()),
+            error.exit as u8
+        ),
+    }
+}
 
 fn cli_request_nonce() -> u128 {
     let now = SystemTime::now()
@@ -34,7 +138,6 @@ fn cli_request_nonce() -> u128 {
         ^ (u128::from(std::process::id()) << 16)
         ^ u128::from(CLI_REQUEST_NONCE.fetch_add(1, AtomicOrdering::Relaxed))
 }
-
 
 const SENSOR_SOURCE_IDENTITY: &str = "example:sensors:v1";
 
@@ -94,7 +197,7 @@ fn write_cli_line(
     dead_code,
     reason = "The bounded CLI records the complete specified exit-status space."
 )]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Exit {
     Success = 0,
     Target = 1,
@@ -163,78 +266,67 @@ fn diagnostic_documentation(code: &str) -> Option<DiagnosticDocumentation> {
         "ORNA-S010-IMPORT" => DiagnosticDocumentation {
             code: "ORNA-S010-IMPORT",
             title: "imported module is unavailable",
-            explanation:
-                "The project names a module that is not part of its captured dependencies, so the module cannot be checked or executed.",
+            explanation: "The project names a module that is not part of its captured dependencies, so the module cannot be checked or executed.",
             help: "use a captured standard dependency or remove the import",
         },
         "ORNA-S012-UNRESOLVED" => DiagnosticDocumentation {
             code: "ORNA-S012-UNRESOLVED",
             title: "name could not be resolved",
-            explanation:
-                "The source refers to a name that is not declared or imported in the current namespace.",
+            explanation: "The source refers to a name that is not declared or imported in the current namespace.",
             help: "declare the name or add the matching `use` import before using it",
         },
         "ORNA-S021-TYPE" => DiagnosticDocumentation {
             code: "ORNA-S021-TYPE",
             title: "expression has the wrong type",
-            explanation:
-                "The value produced by an expression does not satisfy the type required at that source location.",
+            explanation: "The value produced by an expression does not satisfy the type required at that source location.",
             help: "change the expression or its declared type so the value and requirement agree",
         },
         "ORNA-REPL-EFFECT" => DiagnosticDocumentation {
             code: "ORNA-REPL-EFFECT",
             title: "REPL preview cannot perform an effect",
-            explanation:
-                "Interactive previews are read-only and cannot perform network, filesystem, process, or other external effects.",
+            explanation: "Interactive previews are read-only and cannot perform network, filesystem, process, or other external effects.",
             help: "evaluate a pure expression or invoke the operation through its admitted runtime entry point",
         },
         "ORNA-REPL-AT" => DiagnosticDocumentation {
             code: "ORNA-REPL-AT",
             title: "snapshot selection failed",
-            explanation:
-                "The requested CWD, HEAD, or reference snapshot could not be loaded as an admitted REPL context.",
+            explanation: "The requested CWD, HEAD, or reference snapshot could not be loaded as an admitted REPL context.",
             help: "choose an existing snapshot and keep the repository available while selecting it",
         },
         "ORNA091-E-RETURN-ARROW" => DiagnosticDocumentation {
             code: "ORNA091-E-RETURN-ARROW",
             title: "function return type uses the arrow form",
-            explanation:
-                "Orna function declarations separate the parameter list from the return type with a colon.",
+            explanation: "Orna function declarations separate the parameter list from the return type with a colon.",
             help: "replace `->` with `:` in the function declaration",
         },
         "ORNA091-E-VAR" => DiagnosticDocumentation {
             code: "ORNA091-E-VAR",
             title: "local declaration uses `var`",
-            explanation:
-                "Orna uses `let` for local declarations; reassignment updates that binding when permitted.",
+            explanation: "Orna uses `let` for local declarations; reassignment updates that binding when permitted.",
             help: "replace `var` with `let`",
         },
         "ORNA-A091-001" => DiagnosticDocumentation {
             code: "ORNA-A091-001",
             title: "refined type uses the legacy `where self` form",
-            explanation:
-                "Refined Orna types state their invariant in a brace-delimited assertion block owned by the type.",
+            explanation: "Refined Orna types state their invariant in a brace-delimited assertion block owned by the type.",
             help: "replace `where self` with a brace-delimited `assert` block",
         },
         "ORNA-A091-002" => DiagnosticDocumentation {
             code: "ORNA-A091-002",
             title: "table assertion repeats its owner",
-            explanation:
-                "A table assertion is already evaluated for its owning table, so an explicit owner pipeline is redundant.",
+            explanation: "A table assertion is already evaluated for its owning table, so an explicit owner pipeline is redundant.",
             help: "remove the leading `self |` or table-name pipeline from the assertion",
         },
         "ORNA-A091-003" => DiagnosticDocumentation {
             code: "ORNA-A091-003",
             title: "module assertion belongs to one table",
-            explanation:
-                "An assertion that depends on only one table must live with that table so its owner is explicit.",
+            explanation: "An assertion that depends on only one table must live with that table so its owner is explicit.",
             help: "move the assertion into the table body it depends on",
         },
         "ORNA-A091-004" => DiagnosticDocumentation {
             code: "ORNA-A091-004",
             title: "assertion predicate has the wrong owner",
-            explanation:
-                "The declaration's predicate does not describe the type or table that owns the assertion.",
+            explanation: "The declaration's predicate does not describe the type or table that owns the assertion.",
             help: "rewrite the predicate for the reported owner type",
         },
         "ORNA-A091-005" => DiagnosticDocumentation {
@@ -246,29 +338,25 @@ fn diagnostic_documentation(code: &str) -> Option<DiagnosticDocumentation> {
         "ORNA-A091-006" => DiagnosticDocumentation {
             code: "ORNA-A091-006",
             title: "assertion uses a dedicated recovery branch",
-            explanation:
-                "Assertions report failed propositions; they do not provide an assertion-specific `else` branch.",
+            explanation: "Assertions report failed propositions; they do not provide an assertion-specific `else` branch.",
             help: "use ordinary failure, recovery, or control flow instead",
         },
         "ORNA-A091-007" => DiagnosticDocumentation {
             code: "ORNA-A091-007",
             title: "assertion has a forbidden effect",
-            explanation:
-                "Declaration and refined assertions must be deterministic and cannot perform external effects.",
+            explanation: "Declaration and refined assertions must be deterministic and cannot perform external effects.",
             help: "remove the identified effect or nondeterministic operation",
         },
         "ORNA-A091-008" => DiagnosticDocumentation {
             code: "ORNA-A091-008",
             title: "assertion is false",
-            explanation:
-                "The executable or refined assertion does not hold for the value being checked.",
+            explanation: "The executable or refined assertion does not hold for the value being checked.",
             help: "inspect the owner and proposition, then provide a safe value",
         },
         "ORNA-A091-009" => DiagnosticDocumentation {
             code: "ORNA-A091-009",
             title: "table assertion is false",
-            explanation:
-                "A table or cross-table invariant does not hold for the deterministic rows being checked.",
+            explanation: "A table or cross-table invariant does not hold for the deterministic rows being checked.",
             help: "inspect the reported witness and repair the affected table data",
         },
         "ORNA-A091-010" => DiagnosticDocumentation {
@@ -286,92 +374,79 @@ fn diagnostic_documentation(code: &str) -> Option<DiagnosticDocumentation> {
         "ORNA-A091-012" => DiagnosticDocumentation {
             code: "ORNA-A091-012",
             title: "module assertion has no table dependency",
-            explanation:
-                "A module assertion is only valid when it depends on a table; otherwise it has no executable owner.",
+            explanation: "A module assertion is only valid when it depends on a table; otherwise it has no executable owner.",
             help: "place the check in executable or test code",
         },
         "ORNA091-E-MATCH" => DiagnosticDocumentation {
             code: "ORNA091-E-MATCH",
             title: "value branching uses the legacy `match` form",
-            explanation:
-                "Orna branches on values with `case` and colon-separated arms rather than `match` and arrows.",
+            explanation: "Orna branches on values with `case` and colon-separated arms rather than `match` and arrows.",
             help: "replace `match` with `case` and use `:` for each arm",
         },
         "ORNA091-E-RESULT" => DiagnosticDocumentation {
             code: "ORNA091-E-RESULT",
             title: "source uses an explicit `Result` value",
-            explanation:
-                "Orna returns the successful type directly and propagates failures automatically.",
+            explanation: "Orna returns the successful type directly and propagates failures automatically.",
             help: "return the successful type and use `|?` for recovery",
         },
         "ORNA091-E-POSTFIX-QUESTION" => DiagnosticDocumentation {
             code: "ORNA091-E-POSTFIX-QUESTION",
             title: "operation uses postfix failure propagation",
-            explanation:
-                "Orna propagates operation failures automatically instead of using a postfix `?` operator.",
+            explanation: "Orna propagates operation failures automatically instead of using a postfix `?` operator.",
             help: "remove the postfix `?` and use `|?` only for recovery",
         },
         "ORNA091-E-CURRENCY" => DiagnosticDocumentation {
             code: "ORNA091-E-CURRENCY",
             title: "source uses a special currency declaration",
-            explanation:
-                "Currencies are nominal types with a nested `Currency` implementation, not a separate declaration form.",
+            explanation: "Currencies are nominal types with a nested `Currency` implementation, not a separate declaration form.",
             help: "replace the currency declaration with a nominal type and nested `impl Currency`",
         },
         "ORNA091-E-CURRENCY-SYMBOL" => DiagnosticDocumentation {
             code: "ORNA091-E-CURRENCY-SYMBOL",
             title: "currency declares a universal symbol",
-            explanation:
-                "Currency symbols and placement depend on locale formatter data rather than a universal static field.",
+            explanation: "Currency symbols and placement depend on locale formatter data rather than a universal static field.",
             help: "move symbol and placement choices to the locale-aware money formatter",
         },
         "ORNA091-E-IMPL-FOR" => DiagnosticDocumentation {
             code: "ORNA091-E-IMPL-FOR",
             title: "protocol implementation uses the legacy top-level form",
-            explanation:
-                "Orna protocol implementations are nested inside the type that owns them.",
+            explanation: "Orna protocol implementations are nested inside the type that owns them.",
             help: "nest `impl P` inside the owning type instead of writing `impl P for T`",
         },
         "ORNA091-E-BOUND-COLON" => DiagnosticDocumentation {
             code: "ORNA091-E-BOUND-COLON",
             title: "generic bound uses the legacy colon form",
-            explanation:
-                "Generic protocol bounds use the `impl` keyword in Orna type parameters.",
+            explanation: "Generic protocol bounds use the `impl` keyword in Orna type parameters.",
             help: "replace `<T: P>` with `<T impl P>`",
         },
         "ORNA091-E-STATIC-FN" => DiagnosticDocumentation {
             code: "ORNA091-E-STATIC-FN",
             title: "protocol declares a static function",
-            explanation:
-                "Protocols expose static properties or ordinary functions rather than static function declarations.",
+            explanation: "Protocols expose static properties or ordinary functions rather than static function declarations.",
             help: "use a static property or an ordinary function",
         },
         "ORNA091-E-TRYFROM" => DiagnosticDocumentation {
             code: "ORNA091-E-TRYFROM",
             title: "source uses `TryFrom`",
-            explanation:
-                "Orna's `From<S>` conversion may fail without wrapping the successful value in a separate result type.",
+            explanation: "Orna's `From<S>` conversion may fail without wrapping the successful value in a separate result type.",
             help: "use `From<S>` for a conversion that may fail",
         },
         "ORNA091-E-CONVERSION-CHAIN" => DiagnosticDocumentation {
             code: "ORNA091-E-CONVERSION-CHAIN",
             title: "conversion chain is implicit",
-            explanation:
-                "Orna does not search for unspoken multi-step conversions between types.",
+            explanation: "Orna does not search for unspoken multi-step conversions between types.",
             help: "name each conversion step explicitly",
         },
         "ORNA091-E-OPAQUE" => DiagnosticDocumentation {
             code: "ORNA091-E-OPAQUE",
             title: "source uses an opaque type declaration",
-            explanation:
-                "Orna uses one nominal or refined `type` form instead of a separate opaque declaration.",
+            explanation: "Orna uses one nominal or refined `type` form instead of a separate opaque declaration.",
             help: "replace `opaque Name` with the unified nominal or refined `type` form",
         },
         "ORNA091-E-FIELD-CONSTRAINT" => DiagnosticDocumentation {
             code: "ORNA091-E-FIELD-CONSTRAINT",
             title: "field declares a legacy constraint",
-            explanation:
-                "Field uniqueness and checks are table assertions owned by the table, not field suffixes.",
+            explanation: "Field uniqueness and checks are table assertions owned by the table, not field suffixes.",
             help: "write an owner-local table assertion using `all_unique` or `every`",
         },
         _ => return None,
@@ -391,7 +466,6 @@ fn explain_diagnostic(code: &str) -> Result<String, Diagnostic> {
         documentation.code, documentation.title, documentation.explanation, documentation.help
     ))
 }
-
 
 fn cancellation_diagnostic(diagnostic: &orna_foundation_v1::Diagnostic) -> Diagnostic {
     let code = match diagnostic.code() {
@@ -612,6 +686,13 @@ enum Invocation {
     LibraryLend { book_id: String, borrower: String },
     ProjectFunction(String),
 }
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum OutputFormat {
+    #[default]
+    Human,
+    Short,
+    Json,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StatusFormat {
     Human,
@@ -635,7 +716,11 @@ enum Command {
 struct Parsed {
     endpoint: Endpoint,
     command: Command,
+<<<<<<< Updated upstream
     color: ColorMode,
+=======
+    output_format: OutputFormat,
+>>>>>>> Stashed changes
 }
 fn requested_color_mode(arguments: &[String]) -> ColorMode {
     let mut color = ColorMode::Auto;
@@ -671,11 +756,20 @@ fn requested_color_mode(arguments: &[String]) -> ColorMode {
 fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
     let mut endpoint = Endpoint::ManagedLocal;
     let mut has_explicit_endpoint = false;
+<<<<<<< Updated upstream
     let mut color = ColorMode::Auto;
     let mut words = arguments.iter().map(String::as_str).peekable();
     while matches!(words.peek(), Some(&"--db") | Some(&"--color")) {
         match words.next() {
             Some("--db") => {
+=======
+    let mut output_format = OutputFormat::Human;
+    let mut words = arguments.iter().map(String::as_str).peekable();
+    loop {
+        match words.peek().copied() {
+            Some("--db") => {
+                words.next();
+>>>>>>> Stashed changes
                 has_explicit_endpoint = true;
                 endpoint = Endpoint::parse(words.next().ok_or_else(|| {
                     Diagnostic::usage(
@@ -685,6 +779,7 @@ fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
                     )
                 })?)?;
             }
+<<<<<<< Updated upstream
             Some("--color") => {
                 let value = words.next().ok_or_else(|| {
                     Diagnostic::usage(
@@ -702,6 +797,23 @@ fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
                 })?;
             }
             _ => unreachable!("only global options enter this loop"),
+=======
+            Some("--format") => {
+                words.next();
+                output_format = parse_output_format(words.next().ok_or_else(|| {
+                    Diagnostic::usage(
+                        "E1001",
+                        "option `--format` needs a value",
+                        "use `--format human`, `--format short`, or `--format json`",
+                    )
+                })?)?;
+            }
+            Some(value) if value.starts_with("--format=") => {
+                words.next();
+                output_format = parse_output_format(&value["--format=".len()..])?;
+            }
+            _ => break,
+>>>>>>> Stashed changes
         }
     }
     let command = match words.next() {
@@ -831,7 +943,11 @@ fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
     Ok(Parsed {
         endpoint,
         command,
+<<<<<<< Updated upstream
         color,
+=======
+        output_format,
+>>>>>>> Stashed changes
     })
 }
 
@@ -1091,6 +1207,7 @@ fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
             "E2100",
             "local Git worktree status could not be read",
             "check that Git can read the local worktree, then retry `status --porcelain`",
+<<<<<<< Updated upstream
         ));
     }
     io::stdout()
@@ -1102,6 +1219,21 @@ fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
                 "retry `status --porcelain`",
             )
         })?;
+=======
+        )
+    })?;
+    if output_format() == OutputFormat::Human {
+        io::stdout()
+            .write_all(state.as_porcelain_v2_z())
+            .map_err(|_| {
+                Diagnostic::target(
+                    "E2100",
+                    "local Git worktree status could not be written",
+                    "retry `status --porcelain`",
+                )
+            })?;
+    }
+>>>>>>> Stashed changes
     Ok(())
 }
 
@@ -1448,6 +1580,7 @@ fn run_status_human(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diag
             "check that Git can read the local worktree, then retry `status`",
         ));
     }
+<<<<<<< Updated upstream
     let stdout = io::stdout();
     let link_root = if stdout.is_terminal() && terminal_supports_osc8() {
         repository.worktree().canonicalize().ok()
@@ -1457,13 +1590,22 @@ fn run_status_human(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diag
     let mut stdout = stdout.lock();
     write_human_status(&output.stdout, &mut stdout, color_enabled, link_root.as_deref()).map_err(
         |_| {
+=======
+    if output_format() == OutputFormat::Human {
+        io::stdout().write_all(&output.stdout).map_err(|_| {
+>>>>>>> Stashed changes
             Diagnostic::target(
                 "E2100",
                 "local Git worktree status could not be written",
                 "retry `status`",
             )
+<<<<<<< Updated upstream
         },
     )?;
+=======
+        })?;
+    }
+>>>>>>> Stashed changes
     Ok(())
 }
 
@@ -1542,6 +1684,7 @@ fn run_status_short(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diag
             "check that Git can read the local worktree, then retry `status --short`",
         ));
     }
+<<<<<<< Updated upstream
     let mut stdout = io::stdout().lock();
     write_short_status(&output.stdout, &mut stdout, color_enabled).map_err(|_| {
         Diagnostic::target(
@@ -1550,6 +1693,17 @@ fn run_status_short(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diag
             "retry `status --short`",
         )
     })?;
+=======
+    if output_format() == OutputFormat::Human {
+        io::stdout().write_all(&output.stdout).map_err(|_| {
+            Diagnostic::target(
+                "E2100",
+                "local Git worktree status could not be written",
+                "retry `status --short`",
+            )
+        })?;
+    }
+>>>>>>> Stashed changes
     Ok(())
 }
 
@@ -1604,7 +1758,12 @@ fn check_project(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnos
     let catalogue = semantic_catalogue();
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
     if analysis.is_ok() {
+<<<<<<< Updated upstream
         write_success_line("project valid", color_enabled)
+=======
+        emit_human("project valid");
+        Ok(())
+>>>>>>> Stashed changes
     } else {
         let first = analysis
             .diagnostics
@@ -1867,7 +2026,14 @@ fn run_project_invocation_with_arguments(
             )
         })?;
     match outcome {
+<<<<<<< Updated upstream
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
+=======
+        StageOutcome::Passed => {
+            emit_human("invocation completed");
+            Ok(())
+        }
+>>>>>>> Stashed changes
         StageOutcome::Failed(_) => Err(Diagnostic::target(
             "E2200",
             "durable project invocation was rejected",
@@ -1931,7 +2097,14 @@ fn run_project_stream_invocation_with_project(
             )
         })?;
     match outcome {
+<<<<<<< Updated upstream
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
+=======
+        StageOutcome::Passed => {
+            emit_human("invocation completed");
+            Ok(())
+        }
+>>>>>>> Stashed changes
         StageOutcome::Failed(_) => Err(Diagnostic::target(
             "E2200",
             "durable project stream delivery failed",
@@ -1957,11 +2130,13 @@ fn run_pure_invocation(
         let namespace = if module_name.is_empty() {
             Vec::new()
         } else {
-            module_name.split('.').map(str::to_owned).collect::<Vec<_>>()
+            module_name
+                .split('.')
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
         };
         if identity.namespace() == namespace {
-            let authority =
-                ApplicationAuthority::new(semantic_catalogue(), Limits::default());
+            let authority = ApplicationAuthority::new(semantic_catalogue(), Limits::default());
             let admitted = authority
                 .admit_module(identity.logical_path(), module.source.clone(), function)
                 .map_err(|error| {
@@ -1982,7 +2157,11 @@ fn run_pure_invocation(
                         error.to_string(),
                     )
                 })?;
+<<<<<<< Updated upstream
             write_success_line("invocation completed", color_enabled)?;
+=======
+            emit_human("invocation completed");
+>>>>>>> Stashed changes
             return Ok(());
         }
     }
@@ -2008,7 +2187,14 @@ fn run_pure_invocation(
         }
     }
     match evaluator.invoke(target) {
+<<<<<<< Updated upstream
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
+=======
+        StageOutcome::Passed => {
+            emit_human("invocation completed");
+            Ok(())
+        }
+>>>>>>> Stashed changes
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
             "requested invocation is not available",
@@ -2298,7 +2484,12 @@ fn initialize_repository(
     let target = target.unwrap_or_else(|| std::path::Path::new("."));
     orna_repository_v1::initialize_repository(target)
         .map_err(|error| repository_init_diagnostic(&error))?;
+<<<<<<< Updated upstream
     write_success_line("initialized Orna repository", color_enabled)
+=======
+    emit_human("initialized Orna repository");
+    Ok(())
+>>>>>>> Stashed changes
 }
 fn run_fetch(
     endpoint: &Endpoint,
@@ -2314,16 +2505,15 @@ fn run_fetch(
             "run `fetch` inside a Git worktree or provide a local project path",
         )
     })?;
-    let requested = orna_repository_v1::RequestedRef::branch(branch.to_owned()).map_err(
-        |error| {
+    let requested =
+        orna_repository_v1::RequestedRef::branch(branch.to_owned()).map_err(|error| {
             Diagnostic::target_with_detail(
                 "E2100",
                 "fetch branch is invalid",
                 "supply a valid Git branch name",
                 error.to_string(),
             )
-        },
-    )?;
+        })?;
     let request = orna_repository_v1::FetchRequest::new(remote.to_owned(), [requested], [])
         .map_err(|error| {
             Diagnostic::target_with_detail(
@@ -2353,6 +2543,7 @@ fn run_fetch(
     } else {
         ("unchanged", AnsiColor::Dim)
     };
+<<<<<<< Updated upstream
     let mut stdout = io::stdout().lock();
     write_styled(&mut stdout, AnsiColor::Green, b"fetched ", color_enabled)
         .and_then(|()| {
@@ -2382,29 +2573,48 @@ fn run_fetch(
                 "check that stdout is available, then retry the command",
             )
         })?;
+=======
+    emit_human(&format!(
+        "fetched {} -> {} ({state})",
+        fetched.source(),
+        fetched.destination()
+    ));
+>>>>>>> Stashed changes
     Ok(())
 }
-
 
 fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
     match parsed.command.clone() {
         Command::Help => {
+<<<<<<< Updated upstream
             println!(
                 "orna-cli-v1 [--color auto|always|never] [--db ENDPOINT] [repl [EXPRESSION]|status|status --porcelain|status --short|fetch [REMOTE] [BRANCH]|check|explain CODE|invoke TARGET|run [QUALIFIED_FUNCTION]|run seed|run exercise|run sensors.ingest|run library.lend BOOK_ID BORROWER]"
+=======
+            emit_human(
+                "orna-cli-v1 [--db ENDPOINT] [--format human|short|json] [repl [EXPRESSION]|status|status --porcelain|status --short|fetch [REMOTE] [BRANCH]|check|explain CODE|invoke TARGET|run [QUALIFIED_FUNCTION]|run seed|run exercise|run sensors.ingest|run library.lend BOOK_ID BORROWER]",
+>>>>>>> Stashed changes
             );
-            println!("orna-cli-v1 init [DIRECTORY]");
+            emit_human("orna-cli-v1 init [DIRECTORY]");
             Ok(())
         }
         Command::Version => {
-            println!("orna-cli-v1 0.1.0");
+            emit_human("orna-cli-v1 0.1.0");
             Ok(())
         }
+<<<<<<< Updated upstream
         Command::Init(ref target) => {
             initialize_repository(target.as_deref(), parsed.color.stdout_enabled())
         }
         Command::Fetch { ref remote, ref branch } => {
             run_fetch(&parsed.endpoint, remote, branch, parsed.color.stdout_enabled())
         }
+=======
+        Command::Init(ref target) => initialize_repository(target.as_deref()),
+        Command::Fetch {
+            ref remote,
+            ref branch,
+        } => run_fetch(&parsed.endpoint, remote, branch),
+>>>>>>> Stashed changes
         Command::Status {
             format: StatusFormat::Human,
         } => run_status_human(&parsed.endpoint, parsed.color.stdout_enabled()),
@@ -2419,7 +2629,7 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             run_pure_invocation(&parsed.endpoint, target, parsed.color.stdout_enabled())
         }
         Command::Explain(code) => {
-            println!("{}", explain_diagnostic(&code)?);
+            emit_human(&explain_diagnostic(&code)?);
             Ok(())
         }
         Command::Repl(ref expression) => {
@@ -2477,6 +2687,44 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
     }
 }
 
+<<<<<<< Updated upstream
+=======
+fn main() -> ExitCode {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    for (index, argument) in args.iter().enumerate() {
+        let candidate = if argument == "--format" {
+            args.get(index + 1).map(String::as_str)
+        } else {
+            argument.strip_prefix("--format=")
+        };
+        if let Some(candidate) = candidate {
+            if let Ok(format) = parse_output_format(candidate) {
+                set_output_format(format);
+            }
+            break;
+        }
+    }
+    let parsed = match parse_cli(&args) {
+        Ok(value) => value,
+        Err(error) => {
+            let format = output_format();
+            emit_diagnostic(format, &error);
+            return ExitCode::from(error.exit as u8);
+        }
+    };
+    set_output_format(parsed.output_format);
+    match execute(&parsed) {
+        Ok(()) => {
+            emit_success(parsed.output_format, &parsed.command);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            emit_diagnostic(parsed.output_format, &error);
+            ExitCode::from(error.exit as u8)
+        }
+    }
+}
+>>>>>>> Stashed changes
 
 #[cfg(test)]
 mod tests {
@@ -2840,7 +3088,11 @@ mod tests {
             execute(&Parsed {
                 endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
                 command: parsed.command,
+<<<<<<< Updated upstream
                 color: ColorMode::Auto,
+=======
+                output_format: OutputFormat::Human,
+>>>>>>> Stashed changes
             }),
             Ok(())
         );
@@ -3292,8 +3544,7 @@ mod tests {
     #[test]
     fn execution_project_preserves_reachable_loose_row_metadata() {
         let directory = tempfile::tempdir().expect("temporary project");
-        std::fs::create_dir_all(directory.path().join("contacts/Contact"))
-            .expect("row directory");
+        std::fs::create_dir_all(directory.path().join("contacts/Contact")).expect("row directory");
         std::fs::write(
             directory.path().join("main.orna"),
             "use contacts.main; pub fn run() {}",
@@ -3392,7 +3643,11 @@ mod tests {
             execute(&Parsed {
                 endpoint: endpoint.clone(),
                 command: Command::Check,
+<<<<<<< Updated upstream
                 color: ColorMode::Auto,
+=======
+                output_format: OutputFormat::Human,
+>>>>>>> Stashed changes
             }),
             Ok(())
         );
@@ -3400,7 +3655,11 @@ mod tests {
             execute(&Parsed {
                 endpoint: endpoint.clone(),
                 command: Command::Run(Invocation::Seed),
+<<<<<<< Updated upstream
                 color: ColorMode::Auto,
+=======
+                output_format: OutputFormat::Human,
+>>>>>>> Stashed changes
             }),
             Ok(())
         );
@@ -3425,7 +3684,11 @@ mod tests {
         let error = execute(&Parsed {
             endpoint: endpoint.clone(),
             command: Command::Run(Invocation::Seed),
+<<<<<<< Updated upstream
             color: ColorMode::Auto,
+=======
+            output_format: OutputFormat::Human,
+>>>>>>> Stashed changes
         })
         .expect_err("duplicate seed must be rejected");
         assert_eq!((error.code, error.exit), ("E2200", Exit::Target));
@@ -3433,7 +3696,11 @@ mod tests {
             execute(&Parsed {
                 endpoint: endpoint.clone(),
                 command: Command::Run(Invocation::Exercise),
+<<<<<<< Updated upstream
                 color: ColorMode::Auto,
+=======
+                output_format: OutputFormat::Human,
+>>>>>>> Stashed changes
             }),
             Ok(())
         );
@@ -3441,7 +3708,11 @@ mod tests {
             execute(&Parsed {
                 endpoint,
                 command: Command::Run(Invocation::SensorsIngest),
+<<<<<<< Updated upstream
                 color: ColorMode::Auto,
+=======
+                output_format: OutputFormat::Human,
+>>>>>>> Stashed changes
             }),
             Ok(())
         );
@@ -3473,7 +3744,11 @@ mod tests {
         let parsed = Parsed {
             endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
             command: Command::Run(Invocation::Seed),
+<<<<<<< Updated upstream
             color: ColorMode::Auto,
+=======
+            output_format: OutputFormat::Human,
+>>>>>>> Stashed changes
         };
         assert_eq!(execute(&parsed), Ok(()));
     }
@@ -3502,7 +3777,11 @@ mod tests {
         let parsed = Parsed {
             endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
             command: Command::Invoke("library.value".into()),
+<<<<<<< Updated upstream
             color: ColorMode::Auto,
+=======
+            output_format: OutputFormat::Human,
+>>>>>>> Stashed changes
         };
         assert_eq!(execute(&parsed), Ok(()));
     }
@@ -3586,7 +3865,11 @@ mod tests {
         let parsed = Parsed {
             endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
             command: Command::Invoke("seed".into()),
+<<<<<<< Updated upstream
             color: ColorMode::Auto,
+=======
+            output_format: OutputFormat::Human,
+>>>>>>> Stashed changes
         };
         let error = execute(&parsed).expect_err("uncaptured standard module");
         assert_eq!(
@@ -3619,7 +3902,11 @@ mod tests {
         let parsed = Parsed {
             endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
             command: Command::Invoke("seed".into()),
+<<<<<<< Updated upstream
             color: ColorMode::Auto,
+=======
+            output_format: OutputFormat::Human,
+>>>>>>> Stashed changes
         };
         let error = execute(&parsed).expect_err("uncaptured standard module");
         assert_eq!(
@@ -4030,7 +4317,11 @@ mod tests {
                 remote: "origin".into(),
                 branch: "main".into(),
             },
+<<<<<<< Updated upstream
             color: ColorMode::Auto,
+=======
+            output_format: OutputFormat::Human,
+>>>>>>> Stashed changes
         })
         .expect("fetch command");
         assert_eq!(git(&local, &["rev-parse", "HEAD"]), initial);

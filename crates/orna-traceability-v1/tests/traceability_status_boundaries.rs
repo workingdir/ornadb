@@ -1,8 +1,8 @@
 use orna_conformance_v1::{
-    EvidenceStatus, Harness, ImplementationEvidenceAggregate, ImplementationEvidenceBinding,
-    ImplementationEvidenceSource, Corpus,
+    Corpus, EvidenceStatus, Harness, ImplementationEvidenceAggregate,
+    ImplementationEvidenceBinding, ImplementationEvidenceSource,
 };
-use orna_traceability_v1::{generate, generate_with_implementation_evidence_overlay, Status};
+use orna_traceability_v1::{Status, generate, generate_with_implementation_evidence_overlay};
 use std::{
     collections::BTreeMap,
     fs,
@@ -11,8 +11,7 @@ use std::{
 
 const REQUIREMENT_ID: &str = "ORNA-RANGE-001";
 const FIXTURE_ID: &str = "valid/minimal-root.orna";
-const PUBLICATION_DIGEST: &str =
-    "d12cf5d86b9337ccbe45f257bcb8c25bc769e0505500bdc68e21a1b67d728d7d";
+const PUBLICATION_DIGEST: &str = "d12cf5d86b9337ccbe45f257bcb8c25bc769e0505500bdc68e21a1b67d728d7d";
 
 struct TemporaryReference(PathBuf);
 
@@ -43,7 +42,9 @@ impl Drop for TemporaryReference {
 fn reference_root() -> PathBuf {
     std::env::var_os("ORNA_REFERENCE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../reference/Orna-1.0.0"))
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../reference/Orna-1.0.0")
+        })
 }
 
 fn copy_dir(from: &Path, to: &Path) {
@@ -51,7 +52,11 @@ fn copy_dir(from: &Path, to: &Path) {
     for entry in fs::read_dir(from).expect("read authoritative reference directory") {
         let entry = entry.expect("read reference entry");
         let destination = to.join(entry.file_name());
-        if entry.file_type().expect("read reference entry type").is_dir() {
+        if entry
+            .file_type()
+            .expect("read reference entry type")
+            .is_dir()
+        {
             copy_dir(&entry.path(), &destination);
         } else {
             fs::copy(entry.path(), destination).expect("copy authoritative reference file");
@@ -101,18 +106,26 @@ fn bounded_evidence_cannot_promote_mixed_requirement_to_executed() {
     let overlay = harness
         .implementation_evidence_overlay(&bindings)
         .expect("bounded production bindings are accepted");
-    assert_eq!(overlay.aggregate(), ImplementationEvidenceAggregate::PartiallyExecuted);
+    assert_eq!(
+        overlay.aggregate(),
+        ImplementationEvidenceAggregate::PartiallyExecuted
+    );
 
     let report = generate_with_implementation_evidence_overlay(root.path(), &overlay)
         .expect("bounded evidence report is accepted");
     assert_eq!(
-        report.publication_digests.get("Orna-1.0.0.md").map(String::as_str),
+        report
+            .publication_digests
+            .get("Orna-1.0.0.md")
+            .map(String::as_str),
         Some(PUBLICATION_DIGEST)
     );
-    assert!(report
-        .requirements
-        .iter()
-        .all(|requirement| requirement.status != Status::Executed));
+    assert!(
+        report
+            .requirements
+            .iter()
+            .all(|requirement| requirement.status != Status::Executed)
+    );
 
     let requirement = report
         .requirements
@@ -120,19 +133,23 @@ fn bounded_evidence_cannot_promote_mixed_requirement_to_executed() {
         .find(|requirement| requirement.requirement_id == REQUIREMENT_ID)
         .expect("corpus requirement exists");
     assert_eq!(requirement.status, Status::PartiallyExecuted);
-    assert!(requirement
-        .boundaries
-        .iter()
-        .any(|boundary| boundary.status == Status::JustifiedGap));
+    assert!(
+        requirement
+            .boundaries
+            .iter()
+            .any(|boundary| boundary.status == Status::JustifiedGap)
+    );
     let bounded = requirement
         .boundaries
         .iter()
         .filter(|boundary| boundary.kind == "bounded-production-evidence")
         .collect::<Vec<_>>();
     assert_eq!(bounded.len(), 2);
-    assert!(bounded
-        .iter()
-        .all(|boundary| boundary.status == Status::PartiallyExecuted));
+    assert!(
+        bounded
+            .iter()
+            .all(|boundary| boundary.status == Status::PartiallyExecuted)
+    );
     let frozen_report = generate(root.path()).expect("copied model evidence report is valid");
     let frozen_requirement = frozen_report
         .requirements
@@ -140,14 +157,18 @@ fn bounded_evidence_cannot_promote_mixed_requirement_to_executed() {
         .find(|requirement| requirement.requirement_id == REQUIREMENT_ID)
         .expect("corpus requirement exists in model evidence report");
     assert_ne!(frozen_requirement.status, Status::Executed);
-    assert!(frozen_requirement
-        .boundaries
-        .iter()
-        .all(|boundary| boundary.status != Status::Executed));
-    assert!(report
-        .bounded_production_evidence
-        .iter()
-        .all(|evidence| evidence.status == Status::PartiallyExecuted));
+    assert!(
+        frozen_requirement
+            .boundaries
+            .iter()
+            .all(|boundary| boundary.status != Status::Executed)
+    );
+    assert!(
+        report
+            .bounded_production_evidence
+            .iter()
+            .all(|evidence| evidence.status == Status::PartiallyExecuted)
+    );
 }
 
 #[test]

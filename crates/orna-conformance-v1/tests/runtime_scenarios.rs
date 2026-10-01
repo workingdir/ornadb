@@ -449,13 +449,7 @@ async fn durable_function_value_table_assertion_commits_and_rolls_back_candidate
     };
     let evaluator = DurableTransactionalEvaluator::new("parent", Limits::default());
     let valid_outcome = evaluator
-        .execute_source(
-            &repository,
-            identity,
-            [93; 16],
-            [94; 32],
-            &valid_source,
-        )
+        .execute_source(&repository, identity, [93; 16], [94; 32], &valid_source)
         .await
         .expect("durable pure function assertion commit");
     assert!(
@@ -470,12 +464,16 @@ async fn durable_function_value_table_assertion_commits_and_rolls_back_candidate
         .await
         .expect("committed Note rows");
     assert_eq!(valid_rows.len(), 2);
-    assert!(valid_rows
-        .iter()
-        .any(|(key, _)| key == &Value::int(1.into()).encode().unwrap()));
-    assert!(valid_rows
-        .iter()
-        .any(|(key, _)| key == &Value::int(2.into()).encode().unwrap()));
+    assert!(
+        valid_rows
+            .iter()
+            .any(|(key, _)| key == &Value::int(1.into()).encode().unwrap())
+    );
+    assert!(
+        valid_rows
+            .iter()
+            .any(|(key, _)| key == &Value::int(2.into()).encode().unwrap())
+    );
     valid_state
         .recover_abandoned([93; 16], [95; 16])
         .await
@@ -498,13 +496,7 @@ async fn durable_function_value_table_assertion_commits_and_rolls_back_candidate
         "#,
     );
     let invalid_outcome = evaluator
-        .execute_source(
-            &repository,
-            identity,
-            [95; 16],
-            [94; 32],
-            &invalid_source,
-        )
+        .execute_source(&repository, identity, [95; 16], [94; 32], &invalid_source)
         .await
         .expect("durable pure function assertion rollback");
     assert!(
@@ -527,10 +519,12 @@ async fn durable_function_value_table_assertion_commits_and_rolls_back_candidate
         2,
         "the assertion failure must preserve only the prior committed rows"
     );
-    assert!(rows_after_rollback
-        .iter()
-        .all(|(key, _)| key == &Value::int(1.into()).encode().unwrap()
-            || key == &Value::int(2.into()).encode().unwrap()));
+    assert!(
+        rows_after_rollback
+            .iter()
+            .all(|(key, _)| key == &Value::int(1.into()).encode().unwrap()
+                || key == &Value::int(2.into()).encode().unwrap())
+    );
 }
 
 #[tokio::test]

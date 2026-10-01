@@ -220,7 +220,6 @@ impl CompactParquetKeySource {
         )
     }
 
-
     fn exact_keys_for_entry(
         &self,
         entry: &CompactManifestEntry,
@@ -416,7 +415,6 @@ fn validate_physical_column(
 
     let mut pages = row_group
         .get_column_page_reader(index)
-
         .map_err(|_| CompactParquetError::InvalidParquet)?;
     let mut page_values = 0_u64;
     while let Some(page) = pages
@@ -479,21 +477,10 @@ fn decode_verified_float_values_for_role(
         }
         let rows = usize::try_from(rows).map_err(|_| CompactParquetError::InvalidParquet)?;
         for column in 0..row_group.num_columns() {
-            validate_physical_column(
-                &*row_group,
-                column,
-                rows,
-                column == column_index,
-            )?;
+            validate_physical_column(&*row_group, column, rows, column == column_index)?;
         }
         let float_values = read_float_column(&*row_group, column_index, rows)?;
-        validate_float_statistics(
-            &reader,
-            row_group_index,
-            column_index,
-            rows,
-            &float_values,
-        )?;
+        validate_float_statistics(&reader, row_group_index, column_index, rows, &float_values)?;
         values.extend(float_values);
     }
     let observed = u64::try_from(values.len()).map_err(|_| CompactParquetError::InvalidParquet)?;
@@ -639,11 +626,8 @@ fn validate_float_statistics(
         let page_count = usize::try_from(page_index.num_pages())
             .map_err(|_| CompactParquetError::InvalidFloatStatistics)?;
         if page_count == 0
-            || (0..page_count).any(|index| {
-                page_index
-                    .null_count(index)
-                    .is_none_or(|count| count < 0)
-            })
+            || (0..page_count)
+                .any(|index| page_index.null_count(index).is_none_or(|count| count < 0))
         {
             return Err(CompactParquetError::InvalidFloatStatistics);
         }
@@ -814,9 +798,7 @@ fn compare_key_components(
                 };
                 left.cmp(right)
             }
-            (OvbRaw::Tag(60000, _), OvbRaw::Tag(60000, _)) => {
-                compare_decimal_values(left, right)?
-            }
+            (OvbRaw::Tag(60000, _), OvbRaw::Tag(60000, _)) => compare_decimal_values(left, right)?,
             (OvbRaw::Tag(60001, left), OvbRaw::Tag(60001, right)) => {
                 let (OvbRaw::Text(left), OvbRaw::Text(right)) = (left.as_ref(), right.as_ref())
                 else {
@@ -832,13 +814,11 @@ fn compare_key_components(
                 if left.len() != 2 || right.len() != 2 {
                     return Err(CompactParquetError::InvalidMetadata);
                 }
-                let (OvbRaw::Int(left_seconds), OvbRaw::Int(left_nanos)) =
-                    (&left[0], &left[1])
+                let (OvbRaw::Int(left_seconds), OvbRaw::Int(left_nanos)) = (&left[0], &left[1])
                 else {
                     return Err(CompactParquetError::InvalidMetadata);
                 };
-                let (OvbRaw::Int(right_seconds), OvbRaw::Int(right_nanos)) =
-                    (&right[0], &right[1])
+                let (OvbRaw::Int(right_seconds), OvbRaw::Int(right_nanos)) = (&right[0], &right[1])
                 else {
                     return Err(CompactParquetError::InvalidMetadata);
                 };
@@ -926,24 +906,31 @@ fn ensure_supported_profile(
             KeyColumnKind::Float => OvbRaw::Float(0.0f64.to_bits()),
             KeyColumnKind::Instant => OvbRaw::Tag(
                 60002,
-                Box::new(OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Int(0.into())])),
+                Box::new(OvbRaw::Array(vec![
+                    OvbRaw::Int(0.into()),
+                    OvbRaw::Int(0.into()),
+                ])),
             ),
             KeyColumnKind::Uuid => OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(vec![0; 16]))),
             KeyColumnKind::Bool | KeyColumnKind::OvbBool => OvbRaw::Bool(false),
             KeyColumnKind::Decimal { .. } | KeyColumnKind::OvbDecimal => OvbRaw::Tag(
                 60000,
-                Box::new(OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Int(0.into())])),
+                Box::new(OvbRaw::Array(vec![
+                    OvbRaw::Int(0.into()),
+                    OvbRaw::Int(0.into()),
+                ])),
             ),
             KeyColumnKind::Str | KeyColumnKind::OvbStr => OvbRaw::Text(String::new()),
-            KeyColumnKind::OvbUuid => {
-                OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(vec![0; 16])))
-            }
+            KeyColumnKind::OvbUuid => OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(vec![0; 16]))),
             KeyColumnKind::Date | KeyColumnKind::OvbDate => {
                 OvbRaw::Tag(60001, Box::new(OvbRaw::Text("1970-01-01".into())))
             }
             KeyColumnKind::OvbInstant => OvbRaw::Tag(
                 60002,
-                Box::new(OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Int(0.into())])),
+                Box::new(OvbRaw::Array(vec![
+                    OvbRaw::Int(0.into()),
+                    OvbRaw::Int(0.into()),
+                ])),
             ),
         })
         .collect::<Vec<_>>();
@@ -1108,8 +1095,11 @@ fn decimal_parameters(raw: &OvbRaw) -> Result<(u8, u8, u8), CompactParquetError>
     let OvbRaw::Array(parameters) = raw else {
         return Err(CompactParquetError::UnsupportedKeyMapping);
     };
-    let [OvbRaw::Int(precision), OvbRaw::Int(scale), OvbRaw::Int(storage_width)] =
-        parameters.as_slice()
+    let [
+        OvbRaw::Int(precision),
+        OvbRaw::Int(scale),
+        OvbRaw::Int(storage_width),
+    ] = parameters.as_slice()
     else {
         return Err(CompactParquetError::UnsupportedKeyMapping);
     };
@@ -1198,8 +1188,7 @@ fn descriptor_field_id(
         let OvbRaw::Array(logical_type) = &fields[2] else {
             return Err(CompactParquetError::UnsupportedKeyMapping);
         };
-        let kind = if logical_type
-            == &[OvbRaw::Int(0.into()), OvbRaw::Text("Decimal".to_owned())]
+        let kind = if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Decimal".to_owned())]
             && matches!(&fields[3], OvbRaw::Text(value) if value == "decimal")
         {
             let (precision, scale, storage_width) = decimal_parameters(&fields[4])?;
@@ -1232,8 +1221,7 @@ fn descriptor_field_id(
                 scale,
                 storage_width,
             }
-        } else if logical_type
-            == &[OvbRaw::Int(0.into()), OvbRaw::Text("Decimal".to_owned())]
+        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Decimal".to_owned())]
             && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
             && matches!(&fields[4], OvbRaw::Array(parameters) if parameters == &[OvbRaw::Int(1.into())])
             && column.physical_type() == Type::BYTE_ARRAY
@@ -1619,7 +1607,6 @@ fn profile_key_kinds(
             field_types
                 .get(&id)
                 .copied()
-
                 .ok_or(CompactParquetError::UnsupportedKeyMapping)
         })
         .collect()
@@ -1685,10 +1672,7 @@ fn read_uuid_column(
             if bytes.len() != 16 {
                 return Err(CompactParquetError::InvalidMetadata);
             }
-            Ok(OvbRaw::Tag(
-                37,
-                Box::new(OvbRaw::Bytes(bytes.to_vec())),
-            ))
+            Ok(OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(bytes.to_vec()))))
         })
         .collect()
 }
@@ -1886,18 +1870,17 @@ fn read_int32_column(
 /// Reads the immutable profile's descriptor-gated scalar `ovb` fallback.
 /// Each physical cell is the complete canonical OVB-1 value, never a scalar
 /// surrogate. The descriptor's logical type determines the accepted value.
-fn decimal_value(
-    unscaled: i128,
-    precision: u8,
-    scale: u8,
-) -> Result<OvbRaw, CompactParquetError> {
+fn decimal_value(unscaled: i128, precision: u8, scale: u8) -> Result<OvbRaw, CompactParquetError> {
     if unscaled.to_string().trim_start_matches('-').len() > usize::from(precision) {
         return Err(CompactParquetError::UnsupportedKeyMapping);
     }
     if unscaled == 0 {
         return Ok(OvbRaw::Tag(
             60000,
-            Box::new(OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Int(0.into())])),
+            Box::new(OvbRaw::Array(vec![
+                OvbRaw::Int(0.into()),
+                OvbRaw::Int(0.into()),
+            ])),
         ));
     }
     let mut coefficient = unscaled;
@@ -1943,7 +1926,11 @@ fn read_decimal_column(
     precision: u8,
     scale: u8,
 ) -> Result<Vec<OvbRaw>, CompactParquetError> {
-    let physical_type = row_group.metadata().schema_descr().column(index).physical_type();
+    let physical_type = row_group
+        .metadata()
+        .schema_descr()
+        .column(index)
+        .physical_type();
     match physical_type {
         Type::INT32 => read_int32_column(row_group, index, expected_rows)?
             .into_iter()
@@ -2000,11 +1987,7 @@ fn read_decimal_column(
             values
                 .into_iter()
                 .map(|value| {
-                    decimal_value(
-                        fixed_decimal_value(value.as_bytes())?,
-                        precision,
-                        scale,
-                    )
+                    decimal_value(fixed_decimal_value(value.as_bytes())?, precision, scale)
                 })
                 .collect()
         }
@@ -2118,7 +2101,6 @@ fn instant_value(nanoseconds: i64) -> OvbRaw {
     )
 }
 
-
 fn date_value(days: i32) -> Result<OvbRaw, CompactParquetError> {
     let z = i64::from(days) + 719_468;
     let era = if z >= 0 {
@@ -2150,8 +2132,11 @@ fn valid_canonical_date_text(value: &str) -> bool {
         return false;
     }
     let number = |part: &[u8]| {
-        part.iter()
-            .try_fold(0_u32, |value, byte| (*byte).is_ascii_digit().then_some(value * 10 + u32::from(*byte - b'0')))
+        part.iter().try_fold(0_u32, |value, byte| {
+            (*byte)
+                .is_ascii_digit()
+                .then_some(value * 10 + u32::from(*byte - b'0'))
+        })
     };
     let (Some(year), Some(month), Some(day)) = (
         number(&bytes[0..4]),
@@ -2314,9 +2299,7 @@ mod tests {
     };
     use parquet::{
         basic::{Compression, Encoding},
-        data_type::{
-            BoolType, ByteArray, ByteArrayType, DoubleType, Int32Type, Int64Type,
-        },
+        data_type::{BoolType, ByteArray, ByteArrayType, DoubleType, Int32Type, Int64Type},
         file::{
             metadata::KeyValue,
             properties::{WriterProperties, WriterVersion},
@@ -4348,27 +4331,34 @@ mod tests {
             false,
             None,
         );
-        let decoded =
-            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, keys.len() as u64)
-                .unwrap();
+        let decoded = CompactParquetKeySource::decode_verified_bytes(
+            &profile,
+            TABLE,
+            &bytes,
+            keys.len() as u64,
+        )
+        .unwrap();
         assert_eq!(
             decoded,
             keys.into_iter().map(expected_scalar).collect::<Vec<_>>()
         );
-        let floats =
-            CompactParquetKeySource::decode_verified_float_values(
-                &profile,
-                TABLE,
-                &bytes,
-                STORED_A,
-                values.len() as u64,
-            )
-            .unwrap();
+        let floats = CompactParquetKeySource::decode_verified_float_values(
+            &profile,
+            TABLE,
+            &bytes,
+            STORED_A,
+            values.len() as u64,
+        )
+        .unwrap();
         assert_eq!(
             floats,
             values
                 .into_iter()
-                .map(|value| Some(CanonicalValue::float_bits(value.to_bits()).encode().unwrap()))
+                .map(|value| Some(
+                    CanonicalValue::float_bits(value.to_bits())
+                        .encode()
+                        .unwrap()
+                ))
                 .collect::<Vec<_>>()
         );
     }

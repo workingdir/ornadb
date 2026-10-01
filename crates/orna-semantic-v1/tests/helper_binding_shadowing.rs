@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use orna_semantic_v1::{
-    analyze, Analysis, EffectSummary, ModuleHeader, ModuleInput, Namespace,
-    DIAG_ASSERTION_EFFECT, DIAG_ASSERTION_ONE_TABLE, DIAG_ASSERTION_SCOPE,
+    Analysis, DIAG_ASSERTION_EFFECT, DIAG_ASSERTION_ONE_TABLE, DIAG_ASSERTION_SCOPE, EffectSummary,
+    ModuleHeader, ModuleInput, Namespace, analyze,
 };
 
 const TABLE_HELPER: &str = r#"
@@ -154,10 +154,7 @@ fn same_module_helper_call_keeps_exact_transitive_table_dependencies() {
 fn imported_helper_call_keeps_exact_transitive_table_dependencies() {
     let analysis = analyze(&[
         ModuleInput::new("checks.orna", TABLE_HELPER),
-        ModuleInput::new(
-            "consumer.orna",
-            "use checks.{related}; assert related();",
-        ),
+        ModuleInput::new("consumer.orna", "use checks.{related}; assert related();"),
     ]);
 
     assert_eq!(

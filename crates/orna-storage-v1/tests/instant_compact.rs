@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::Uuid;
@@ -19,12 +19,10 @@ use parquet::{
 
 const TABLE: Uuid = Uuid::from_u128(1);
 const INSTANT: [u8; 16] = [
-    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
-    0x1f,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
 ];
 const OTHER: [u8; 16] = [
-    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e,
-    0x2f,
+    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
 ];
 
 fn uuid_raw(value: [u8; 16]) -> OvbRaw {
@@ -228,12 +226,7 @@ fn expected_composite(nanoseconds: i64, other: i64) -> Vec<u8> {
 #[test]
 fn scalar_instant_int64_timestamp_decodes_floor_seconds_and_nonnegative_remainder() {
     let profile = profile(&[INSTANT], &[instant_type()]);
-    let bytes = parquet(
-        &profile,
-        &[INSTANT],
-        &[instant_type()],
-        &[vec![-1]],
-    );
+    let bytes = parquet(&profile, &[INSTANT], &[instant_type()], &[vec![-1]]);
     assert_eq!(
         CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 1).unwrap(),
         vec![expected_instant(-1)]
@@ -276,8 +269,13 @@ fn dictionary_instant_int64_timestamp_decodes_canonical_tag_60002_values() {
             .any(|encoding| encoding == Encoding::RLE_DICTIONARY)
     );
     assert_eq!(
-        CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, values.len() as u64)
-            .unwrap(),
+        CompactParquetKeySource::decode_verified_bytes(
+            &profile,
+            TABLE,
+            &bytes,
+            values.len() as u64
+        )
+        .unwrap(),
         values.into_iter().map(expected_instant).collect::<Vec<_>>()
     );
 }
@@ -302,13 +300,21 @@ fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
         .iter()
         .enumerate()
         .flat_map(|(row_group, group)| {
-            group.columns().iter().enumerate().map(move |(column, meta)| {
-                let start = meta.dictionary_page_offset().unwrap_or_else(|| meta.data_page_offset()) as usize;
-                let end = start + meta.compressed_size() as usize;
-                let data_offset = meta.data_page_offset() as usize - start;
-                let (data, shift, inserted) = checksummed_chunk(&source[start..end], data_offset);
-                (row_group, column, start, end, data, shift, inserted)
-            })
+            group
+                .columns()
+                .iter()
+                .enumerate()
+                .map(move |(column, meta)| {
+                    let start = meta
+                        .dictionary_page_offset()
+                        .unwrap_or_else(|| meta.data_page_offset())
+                        as usize;
+                    let end = start + meta.compressed_size() as usize;
+                    let data_offset = meta.data_page_offset() as usize - start;
+                    let (data, shift, inserted) =
+                        checksummed_chunk(&source[start..end], data_offset);
+                    (row_group, column, start, end, data, shift, inserted)
+                })
         })
         .collect::<Vec<_>>();
     chunks.sort_by_key(|chunk| chunk.2);
@@ -345,10 +351,8 @@ fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
         }
         *group = builder.set_column_metadata(columns).build().unwrap();
     }
-    let metadata = parquet::file::metadata::ParquetMetaData::new(
-        metadata.file_metadata().clone(),
-        row_groups,
-    );
+    let metadata =
+        parquet::file::metadata::ParquetMetaData::new(metadata.file_metadata().clone(), row_groups);
     let mut footer_bytes = Vec::new();
     parquet::file::metadata::ParquetMetaDataWriter::new(&mut footer_bytes, &metadata)
         .finish()
@@ -375,7 +379,10 @@ fn checksummed_chunk(bytes: &[u8], data_offset: usize) -> (Vec<u8>, usize, usize
             let checksum = crc32(&bytes[body_start..body_end]);
             let delta = 4_u8.checked_sub(header.checksum_predecessor).unwrap();
             let mut checksum_field = vec![(delta << 4) | 5];
-            compact_varint(((i64::from(checksum as i32) << 1) ^ (i64::from(checksum as i32) >> 31)) as u64, &mut checksum_field);
+            compact_varint(
+                ((i64::from(checksum as i32) << 1) ^ (i64::from(checksum as i32) >> 31)) as u64,
+                &mut checksum_field,
+            );
             let mut page_header = bytes[cursor..body_start].to_vec();
             let insertion = header.next_field_offset.unwrap_or(header.stop_offset);
             page_header.splice(insertion..insertion, checksum_field.iter().copied());

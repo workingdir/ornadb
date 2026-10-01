@@ -4,9 +4,8 @@ use num_bigint::BigInt;
 use orna_evaluator_v1::{
     EffectHandler, Environment, EvaluationError, Functions, Limits, NominalDefinition,
     NominalDefinitions, NominalField, NominalVariant, PureFunction, RelationPage, StepBudget,
-    evaluate_expression,
-    evaluate_function, evaluate_parsed, evaluate_parsed_with_nominals, evaluate_repl,
-    evaluate_with_functions_and_nominals, invoke_named, invoke_named_with_effects,
+    evaluate_expression, evaluate_function, evaluate_parsed, evaluate_parsed_with_nominals,
+    evaluate_repl, evaluate_with_functions_and_nominals, invoke_named, invoke_named_with_effects,
     invoke_named_with_effects_and_budget, invoke_named_with_nominals,
 };
 use orna_syntax_v1::{
@@ -32,7 +31,10 @@ fn money_raw(coefficient: BigInt, exponent10: BigInt, currency: [u8; 16]) -> Raw
         Box::new(Raw::Array(vec![
             Raw::Tag(
                 60000,
-                Box::new(Raw::Array(vec![Raw::Int(coefficient), Raw::Int(exponent10)])),
+                Box::new(Raw::Array(vec![
+                    Raw::Int(coefficient),
+                    Raw::Int(exponent10),
+                ])),
             ),
             Raw::Tag(37, Box::new(Raw::Bytes(currency.to_vec()))),
         ])),
@@ -182,7 +184,11 @@ fn relation_pair(left: i64, right: i64) -> Value {
 }
 fn relation_window_row(values: &[i64]) -> Value {
     Value::new(Raw::Array(
-        values.iter().copied().map(|value| Raw::Int(value.into())).collect(),
+        values
+            .iter()
+            .copied()
+            .map(|value| Raw::Int(value.into()))
+            .collect(),
     ))
     .unwrap()
 }
@@ -237,11 +243,7 @@ fn relation_named_window_direct(source: Expr, size: Expr, step: Option<Expr>) ->
     }
 }
 
-fn relation_named_window_pipeline(
-    input: Expr,
-    size: Expr,
-    step: Option<Expr>,
-) -> Expr {
+fn relation_named_window_pipeline(input: Expr, size: Expr, step: Option<Expr>) -> Expr {
     let span = relation_span();
     let mut arguments = vec![orna_syntax_v1::Argument {
         name: Some("size".into()),
@@ -296,11 +298,7 @@ impl DistinctRelationEffects {
 }
 
 impl EffectHandler for DistinctRelationEffects {
-    fn handle(
-        &mut self,
-        _: &Expr,
-        _: &[Value],
-    ) -> Result<Option<Value>, EvaluationError> {
+    fn handle(&mut self, _: &Expr, _: &[Value]) -> Result<Option<Value>, EvaluationError> {
         Ok(None)
     }
 
@@ -342,11 +340,7 @@ impl UnionRelationEffects {
 }
 
 impl EffectHandler for UnionRelationEffects {
-    fn handle(
-        &mut self,
-        _: &Expr,
-        _: &[Value],
-    ) -> Result<Option<Value>, EvaluationError> {
+    fn handle(&mut self, _: &Expr, _: &[Value]) -> Result<Option<Value>, EvaluationError> {
         Ok(None)
     }
 
@@ -3119,7 +3113,6 @@ fn root_last_dispatch_respects_local_function_and_relation_shadowing() {
     );
 }
 
-
 #[test]
 fn std_collection_sum_accepts_direct_named_pipeline_and_function_calls() {
     let expected = Value::int(6.into());
@@ -3186,11 +3179,7 @@ fn std_collection_sum_debits_one_step_per_scanned_typed_value() {
     let cases = vec![
         (
             "Int",
-            Value::new(Raw::Array(vec![
-                Raw::Int(3.into()),
-                Raw::Int(1.into()),
-            ]))
-            .unwrap(),
+            Value::new(Raw::Array(vec![Raw::Int(3.into()), Raw::Int(1.into())])).unwrap(),
             Value::int(4.into()),
         ),
         (
@@ -3349,7 +3338,10 @@ fn money_aggregates_fail_closed_for_cross_currency_float_mixing_and_limits() {
     let two = money_raw(2.into(), 0.into(), currency);
     let foreign = money_raw(3.into(), 0.into(), other_currency);
     let environment = Environment::from([
-        ("cross_currency".into(), money_rows(vec![one.clone(), foreign])),
+        (
+            "cross_currency".into(),
+            money_rows(vec![one.clone(), foreign]),
+        ),
         (
             "float_mixed".into(),
             money_rows(vec![two, Raw::Float(1.5f64.to_bits())]),
@@ -3417,10 +3409,7 @@ fn malformed_or_noncanonical_money_is_rejected_before_evaluation() {
     let malformed = [
         Raw::Tag(
             60007,
-            Box::new(Raw::Array(vec![
-                Raw::Int(1.into()),
-                currency.clone(),
-            ])),
+            Box::new(Raw::Array(vec![Raw::Int(1.into()), currency.clone()])),
         ),
         Raw::Tag(
             60007,
@@ -3519,8 +3508,10 @@ fn std_collection_sum_rejects_unsupported_numeric_kinds_and_shapes() {
         60006,
         Box::new(Raw::Array(vec![Raw::Int(1.into()), currency.clone()])),
     );
-    let environment =
-        Environment::from([("values".into(), Value::new(Raw::Array(vec![affine])).unwrap())]);
+    let environment = Environment::from([(
+        "values".into(),
+        Value::new(Raw::Array(vec![affine])).unwrap(),
+    )]);
     assert_eq!(
         code(evaluate_expression(
             "sum(values)",
@@ -4050,7 +4041,10 @@ fn std_collection_min_and_max_debit_steps_for_each_scanned_value() {
                     .unwrap()
                     .raw()
                     .clone(),
-                Value::decimal(50.into(), (-2).into()).unwrap().raw().clone(),
+                Value::decimal(50.into(), (-2).into())
+                    .unwrap()
+                    .raw()
+                    .clone(),
             ]))
             .unwrap(),
             Value::option(Some(Value::decimal(50.into(), (-2).into()).unwrap())).unwrap(),
@@ -4529,7 +4523,6 @@ fn std_collection_every_and_exists_debit_each_scanned_predicate_value() {
     }
 }
 
-
 #[test]
 fn root_every_and_exists_remain_shadowable_by_admitted_functions_and_locals() {
     assert_eq!(
@@ -4898,8 +4891,7 @@ fn std_collection_partition_preserves_order_empty_and_invokes_predicate_once_per
     );
     assert_eq!(
         evaluate("std.collection.partition([], value => 1 / 0 == 0)"),
-        Value::new(Raw::Array(vec![Raw::Array(vec![]), Raw::Array(vec![])]))
-            .unwrap()
+        Value::new(Raw::Array(vec![Raw::Array(vec![]), Raw::Array(vec![])])).unwrap()
     );
 
     let functions = functions_from_source(
@@ -4964,7 +4956,8 @@ fn std_collection_partition_requires_bool_and_propagates_callback_failures() {
 }
 
 #[test]
-fn std_collection_partition_debits_one_step_per_scanned_value_without_duplicate_traversal_charging() {
+fn std_collection_partition_debits_one_step_per_scanned_value_without_duplicate_traversal_charging()
+{
     let expression = "std.collection.partition([1, 2], value => true)";
     assert_eq!(
         code(evaluate_expression(
@@ -5347,7 +5340,6 @@ fn std_collection_rank_honors_collection_and_step_limits() {
     );
 }
 
-
 #[test]
 fn std_collection_sort_by_orders_dates_and_preserves_equal_key_source_order() {
     let result = evaluate(
@@ -5723,7 +5715,8 @@ fn std_collection_split_when_requires_bool_and_propagates_callback_failures() {
 }
 
 #[test]
-fn std_collection_split_when_debits_one_step_per_scanned_value_without_duplicate_traversal_charging() {
+fn std_collection_split_when_debits_one_step_per_scanned_value_without_duplicate_traversal_charging()
+ {
     let expression = "std.collection.split_when([1, 2], value => true)";
     assert_eq!(
         code(evaluate_expression(
@@ -5850,7 +5843,8 @@ fn std_collection_group_by_requires_lawful_keys_and_propagates_callback_failures
 }
 
 #[test]
-fn std_collection_group_by_debits_one_step_per_scanned_value_without_duplicate_traversal_charging() {
+fn std_collection_group_by_debits_one_step_per_scanned_value_without_duplicate_traversal_charging()
+{
     let expression = "std.collection.group_by([1, 2], value => value)";
     assert_eq!(
         code(evaluate_expression(
@@ -7498,8 +7492,7 @@ fn matches_qualified_enum_patterns_from_retained_definitions_without_scope_senti
         ]),
     )]);
     let mut environment = Environment::from([("value".into(), waiting)]);
-    let source =
-        "case value { Availability.ready: \"ready\", Availability.waiting { reason }: \"waiting: {reason}\" }";
+    let source = "case value { Availability.ready: \"ready\", Availability.waiting { reason }: \"waiting: {reason}\" }";
     assert_eq!(
         evaluate_parsed_with_nominals(
             &parsed_expression(source),
@@ -7645,9 +7638,7 @@ fn std_stats_mean_returns_empty_null_and_preserves_exact_or_explicitly_rounded_r
         "ORNA-EVAL-VALUE"
     );
     assert_eq!(
-        evaluate(
-            "std.stats.mean([1.0, 2.0, 4.0], scale: 2, rounding: \"half_even\")"
-        ),
+        evaluate("std.stats.mean([1.0, 2.0, 4.0], scale: 2, rounding: \"half_even\")"),
         Value::decimal(233.into(), (-2).into()).unwrap()
     );
 
@@ -7664,10 +7655,7 @@ fn std_stats_mean_returns_empty_null_and_preserves_exact_or_explicitly_rounded_r
         evaluate_expression("std.stats.mean(rows)", &environment, Limits::default()).unwrap(),
         expected_float
     );
-    let singleton = Environment::from([(
-        "rows".into(),
-        float_rows(&[(-0.0f64).to_bits()]),
-    )]);
+    let singleton = Environment::from([("rows".into(), float_rows(&[(-0.0f64).to_bits()]))]);
     assert_eq!(
         evaluate_expression("std.stats.mean(rows)", &singleton, Limits::default()).unwrap(),
         Value::float_bits((-0.0f64).to_bits())
@@ -7704,12 +7692,7 @@ fn std_stats_median_sorts_by_total_order_and_rounds_only_when_requested() {
         ]),
     )]);
     assert_eq!(
-        evaluate_expression(
-            "std.stats.median(rows)",
-            &environment,
-            Limits::default()
-        )
-        .unwrap(),
+        evaluate_expression("std.stats.median(rows)", &environment, Limits::default()).unwrap(),
         Value::float_bits(0.0f64.to_bits())
     );
 }
@@ -7840,8 +7823,7 @@ fn union_relations_preserve_declared_order_duplicates_and_bounded_terminals() {
     );
     assert_eq!(effects.cursors.len(), 5);
 
-    let dropped_left_duplicate =
-        relation_stage(union.clone(), "drop", vec![relation_integer(2)]);
+    let dropped_left_duplicate = relation_stage(union.clone(), "drop", vec![relation_integer(2)]);
     let mut effects = UnionRelationEffects::new(left.clone(), right.clone());
     assert_eq!(
         invoke_relation(
@@ -7875,10 +7857,7 @@ fn union_relations_preserve_declared_order_duplicates_and_bounded_terminals() {
     );
     assert_eq!(
         effects.cursors,
-        vec![
-            ("Left".into(), None),
-            ("Left".into(), Some(vec![1])),
-        ],
+        vec![("Left".into(), None), ("Left".into(), Some(vec![1])),],
         "take must stop before scanning the right relation"
     );
 }
@@ -8010,10 +7989,8 @@ fn distinct_relation_take_zero_short_circuits_source_scanning() {
     let distinct = relation_stage(source, "distinct", Vec::new());
     let taken = relation_stage(distinct, "take", vec![relation_integer(0)]);
     let body = relation_terminal(taken, "count");
-    let mut effects = DistinctRelationEffects::new(vec![
-        Value::int(1.into()),
-        Value::int(2.into()),
-    ]);
+    let mut effects =
+        DistinctRelationEffects::new(vec![Value::int(1.into()), Value::int(2.into())]);
 
     assert_eq!(
         invoke_relation(body, &mut effects, Limits::default()).unwrap(),
@@ -8042,10 +8019,8 @@ fn distinct_relation_respects_step_budget_and_item_limit() {
         "ORNA-EVAL-LIMIT"
     );
 
-    let mut effects = DistinctRelationEffects::new(vec![
-        Value::int(1.into()),
-        Value::int(2.into()),
-    ]);
+    let mut effects =
+        DistinctRelationEffects::new(vec![Value::int(1.into()), Value::int(2.into())]);
     assert_eq!(
         code(invoke_relation(
             body,
@@ -8064,8 +8039,7 @@ fn distinct_relation_rejects_float_equality() {
     let source = relation_source_expression("FloatRows");
     let distinct = relation_stage(source, "distinct", Vec::new());
     let body = relation_terminal(distinct, "first");
-    let mut effects =
-        DistinctRelationEffects::new(vec![Value::float_bits(1.0f64.to_bits())]);
+    let mut effects = DistinctRelationEffects::new(vec![Value::float_bits(1.0f64.to_bits())]);
 
     assert_eq!(
         code(invoke_relation(body, &mut effects, Limits::default())),
@@ -8124,8 +8098,7 @@ fn pairs_relation_preserves_sorted_buffered_order_and_overlap() {
 
     assert_eq!(
         invoke_relation(body, &mut effects, Limits::default()).unwrap(),
-        Value::option(Some(relation_pair(2, 3)))
-        .expect("option is canonical")
+        Value::option(Some(relation_pair(2, 3))).expect("option is canonical")
     );
 }
 
@@ -8163,8 +8136,7 @@ fn pairs_relation_preserves_upstream_order_and_adjacent_overlapping_tuples() {
 
     assert_eq!(
         result,
-        Value::option(Some(relation_pair(2, 3)))
-        .expect("option is canonical")
+        Value::option(Some(relation_pair(2, 3))).expect("option is canonical")
     );
 }
 
@@ -8195,13 +8167,12 @@ fn pairs_relation_first_short_circuits_after_bounded_lookahead() {
         Value::int(4.into()),
     ]);
 
-    let result = invoke_relation(body, &mut effects, Limits::default())
-        .expect("first pair should evaluate");
+    let result =
+        invoke_relation(body, &mut effects, Limits::default()).expect("first pair should evaluate");
 
     assert_eq!(
         result,
-        Value::option(Some(relation_pair(1, 2)))
-        .expect("option is canonical")
+        Value::option(Some(relation_pair(1, 2))).expect("option is canonical")
     );
     assert_eq!(
         effects.cursors.len(),
@@ -8237,10 +8208,8 @@ fn pairs_relation_take_bounds_consumption_and_take_zero_skips_source() {
     let pairs = relation_stage(source, "pairs", Vec::new());
     let taken = relation_stage(pairs, "take", vec![relation_integer(0)]);
     let body = relation_terminal(taken, "count");
-    let mut effects = DistinctRelationEffects::new(vec![
-        Value::int(1.into()),
-        Value::int(2.into()),
-    ]);
+    let mut effects =
+        DistinctRelationEffects::new(vec![Value::int(1.into()), Value::int(2.into())]);
 
     assert_eq!(
         invoke_relation(body, &mut effects, Limits::default()).unwrap(),
@@ -8317,11 +8286,7 @@ fn flat_map_relation_invokes_named_callback_once_per_row_and_preserves_inner_ord
 #[test]
 fn flat_map_relation_allows_empty_inner_lists_without_skipping_source_pages() {
     let source = relation_source_expression("Note");
-    let flat_map = relation_stage(
-        source,
-        "flat_map",
-        vec![parsed_expression("value => []")],
-    );
+    let flat_map = relation_stage(source, "flat_map", vec![parsed_expression("value => []")]);
     let body = relation_terminal(flat_map, "count");
     let mut effects = DistinctRelationEffects::new(vec![
         Value::int(4.into()),
@@ -8343,13 +8308,10 @@ fn flat_map_relation_allows_empty_inner_lists_without_skipping_source_pages() {
 #[test]
 fn flat_map_relation_rejects_non_list_and_unsupported_inner_outputs() {
     let source = relation_source_expression("Note");
-    let flat_map =
-        relation_named_flat_map_stage(source, parsed_expression("value => value"));
+    let flat_map = relation_named_flat_map_stage(source, parsed_expression("value => value"));
     let body = relation_terminal(flat_map, "count");
-    let mut effects = DistinctRelationEffects::new(vec![
-        Value::int(1.into()),
-        Value::int(2.into()),
-    ]);
+    let mut effects =
+        DistinctRelationEffects::new(vec![Value::int(1.into()), Value::int(2.into())]);
     assert_eq!(
         code(invoke_relation(body, &mut effects, Limits::default())),
         "ORNA-EVAL-TYPE"
@@ -8426,9 +8388,8 @@ fn window_relation_preserves_overlap_and_omits_trailing_partial_windows() {
     );
     let second = relation_stage(windows, "drop", vec![relation_integer(1)]);
     let body = relation_terminal(second, "first");
-    let mut effects = DistinctRelationEffects::new(
-        (1..=5).map(|value| Value::int(value.into())).collect(),
-    );
+    let mut effects =
+        DistinctRelationEffects::new((1..=5).map(|value| Value::int(value.into())).collect());
 
     assert_eq!(
         invoke_relation(body, &mut effects, Limits::default()).unwrap(),
@@ -8442,9 +8403,8 @@ fn window_relation_preserves_overlap_and_omits_trailing_partial_windows() {
         vec![relation_integer(3), relation_integer(2)],
     );
     let body = relation_terminal(windows, "count");
-    let mut effects = DistinctRelationEffects::new(
-        (1..=5).map(|value| Value::int(value.into())).collect(),
-    );
+    let mut effects =
+        DistinctRelationEffects::new((1..=5).map(|value| Value::int(value.into())).collect());
     assert_eq!(
         invoke_relation(body, &mut effects, Limits::default()).unwrap(),
         Value::int(2.into()),
@@ -8462,9 +8422,8 @@ fn window_relation_handles_gaps_without_partial_windows() {
     );
     let second = relation_stage(windows, "drop", vec![relation_integer(1)]);
     let body = relation_terminal(second, "first");
-    let mut effects = DistinctRelationEffects::new(
-        (1..=7).map(|value| Value::int(value.into())).collect(),
-    );
+    let mut effects =
+        DistinctRelationEffects::new((1..=7).map(|value| Value::int(value.into())).collect());
 
     assert_eq!(
         invoke_relation(body, &mut effects, Limits::default()).unwrap(),
@@ -8478,9 +8437,8 @@ fn window_relation_handles_gaps_without_partial_windows() {
         vec![relation_integer(2), relation_integer(3)],
     );
     let body = relation_terminal(windows, "count");
-    let mut effects = DistinctRelationEffects::new(
-        (1..=7).map(|value| Value::int(value.into())).collect(),
-    );
+    let mut effects =
+        DistinctRelationEffects::new((1..=7).map(|value| Value::int(value.into())).collect());
     assert_eq!(
         invoke_relation(body, &mut effects, Limits::default()).unwrap(),
         Value::int(2.into()),
@@ -8569,9 +8527,8 @@ fn window_relation_accepts_direct_named_and_pipeline_argument_shapes() {
 
     for window in cases {
         let body = relation_terminal(window, "count");
-        let mut effects = DistinctRelationEffects::new(
-            (1..=4).map(|value| Value::int(value.into())).collect(),
-        );
+        let mut effects =
+            DistinctRelationEffects::new((1..=4).map(|value| Value::int(value.into())).collect());
         assert_eq!(
             invoke_relation(body, &mut effects, Limits::default()).unwrap(),
             Value::int(2.into())
@@ -8744,9 +8701,8 @@ fn last_relation_returns_the_final_value_through_filter_map_flat_map_sort_and_wi
 fn last_relation_scans_unsorted_pages_lazily_and_obeys_item_bounds() {
     let source = relation_source_expression("Note");
     let body = relation_terminal(source, "last");
-    let mut effects = DistinctRelationEffects::new(
-        (1..=4).map(|value| Value::int(value.into())).collect(),
-    );
+    let mut effects =
+        DistinctRelationEffects::new((1..=4).map(|value| Value::int(value.into())).collect());
 
     assert_eq!(
         invoke_relation(body.clone(), &mut effects, Limits::default()).unwrap(),
@@ -8758,9 +8714,8 @@ fn last_relation_scans_unsorted_pages_lazily_and_obeys_item_bounds() {
         "unsorted last must advance one source page at a time without an eager source shortcut"
     );
 
-    let mut bounded = DistinctRelationEffects::new(
-        (1..=4).map(|value| Value::int(value.into())).collect(),
-    );
+    let mut bounded =
+        DistinctRelationEffects::new((1..=4).map(|value| Value::int(value.into())).collect());
     assert_eq!(
         code(invoke_relation(
             body,
@@ -8828,11 +8783,7 @@ fn last_relation_rejects_extra_and_unknown_arguments_like_first() {
         "ORNA-EVAL-ARGUMENT"
     );
 
-    let unknown = relation_named_stage(
-        relation_source_expression("Note"),
-        "last",
-        "values",
-    );
+    let unknown = relation_named_stage(relation_source_expression("Note"), "last", "values");
     let mut effects = DistinctRelationEffects::new(vec![Value::int(1.into())]);
     assert_eq!(
         code(invoke_relation(unknown, &mut effects, Limits::default())),
@@ -8887,34 +8838,18 @@ fn relation_every_and_exists_accept_direct_pipeline_and_named_rows_forms() {
     let true_value = Value::new(Raw::Bool(true)).unwrap();
     let false_value = Value::new(Raw::Bool(false)).unwrap();
     for (name, predicate, expected) in [
-        (
-            "every",
-            "value => value > 0",
-            true_value.clone(),
-        ),
-        (
-            "exists",
-            "value => value == 2",
-            true_value.clone(),
-        ),
+        ("every", "value => value > 0", true_value.clone()),
+        ("exists", "value => value == 2", true_value.clone()),
     ] {
         let predicate = parsed_expression(predicate);
         let cases = [
-            relation_predicate_direct(
-                relation_source_expression("Note"),
-                name,
-                predicate.clone(),
-            ),
+            relation_predicate_direct(relation_source_expression("Note"), name, predicate.clone()),
             relation_predicate_pipeline(
                 relation_source_expression("Note"),
                 name,
                 predicate.clone(),
             ),
-            relation_predicate_named(
-                relation_source_expression("Note"),
-                name,
-                predicate,
-            ),
+            relation_predicate_named(relation_source_expression("Note"), name, predicate),
         ];
         for body in cases {
             let mut effects = DistinctRelationEffects::new(vec![
@@ -8933,11 +8868,7 @@ fn relation_every_and_exists_accept_direct_pipeline_and_named_rows_forms() {
     for (name, expected) in [("every", true_value), ("exists", false_value)] {
         let predicate = parsed_expression("value => value > 0");
         let cases = [
-            relation_predicate_direct(
-                relation_source_expression("Empty"),
-                name,
-                predicate.clone(),
-            ),
+            relation_predicate_direct(relation_source_expression("Empty"), name, predicate.clone()),
             relation_predicate_pipeline(
                 relation_source_expression("Empty"),
                 name,
@@ -9030,29 +8961,17 @@ fn relation_sum_min_and_max_accept_all_argument_forms_and_supported_numeric_type
     let typed_cases = [
         (
             "sum",
-            vec![
-                evaluate("1.25"),
-                evaluate("2.50"),
-                evaluate("-0.75"),
-            ],
+            vec![evaluate("1.25"), evaluate("2.50"), evaluate("-0.75")],
             evaluate("3.00"),
         ),
         (
             "min",
-            vec![
-                evaluate("1.25"),
-                evaluate("2.50"),
-                evaluate("-0.75"),
-            ],
+            vec![evaluate("1.25"), evaluate("2.50"), evaluate("-0.75")],
             Value::option(Some(evaluate("-0.75"))).expect("option is canonical"),
         ),
         (
             "max",
-            vec![
-                evaluate("1.25"),
-                evaluate("2.50"),
-                evaluate("-0.75"),
-            ],
+            vec![evaluate("1.25"), evaluate("2.50"), evaluate("-0.75")],
             Value::option(Some(evaluate("2.50"))).expect("option is canonical"),
         ),
         (
@@ -9081,8 +9000,7 @@ fn relation_sum_min_and_max_accept_all_argument_forms_and_supported_numeric_type
                 Value::float_bits((-2.0f64).to_bits()),
                 Value::float_bits(0.25f64.to_bits()),
             ],
-            Value::option(Some(Value::float_bits(1.5f64.to_bits())))
-                .expect("option is canonical"),
+            Value::option(Some(Value::float_bits(1.5f64.to_bits()))).expect("option is canonical"),
         ),
     ];
     for (name, rows, expected) in typed_cases {
@@ -9151,11 +9069,7 @@ fn relation_aggregates_support_sorted_transformed_suffixes_without_changing_orde
         ),
     ] {
         let source = relation_source_expression("Note");
-        let sorted = relation_stage(
-            source,
-            "sort_by",
-            vec![parsed_expression("value => value")],
-        );
+        let sorted = relation_stage(source, "sort_by", vec![parsed_expression("value => value")]);
         let mapped = relation_stage(
             sorted,
             "map",
@@ -9243,11 +9157,7 @@ fn relation_aggregate_calls_reject_invalid_arguments_and_values() {
         "ORNA-EVAL-ARGUMENT"
     );
 
-    let unknown = relation_named_stage(
-        relation_source_expression("Note"),
-        "max",
-        "values",
-    );
+    let unknown = relation_named_stage(relation_source_expression("Note"), "max", "values");
     let mut effects = DistinctRelationEffects::new(vec![Value::int(1.into())]);
     assert_eq!(
         code(invoke_relation(unknown, &mut effects, Limits::default())),
@@ -9300,8 +9210,8 @@ impl EffectHandler for Uuid7Effects {
 #[test]
 fn uuid7_is_root_effect_intrinsic_and_tag37_round_trips() {
     let bytes = [
-        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0x7c, 0xde, 0x8f, 0x01, 0x23, 0x45, 0x67, 0x89,
-        0xab, 0xcd,
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0x7c, 0xde, 0x8f, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+        0xcd,
     ];
     let expected = Value::uuid(bytes);
     let functions = functions_from_source("fn main() = uuid7();");
@@ -9324,8 +9234,14 @@ fn uuid7_is_root_effect_intrinsic_and_tag37_round_trips() {
     assert_eq!(effects.calls, 1);
     assert!(effects.arguments.is_empty());
     let encoded = result.encode().expect("canonical UUID encoding");
-    assert_eq!(Value::decode(&encoded).expect("canonical UUID decode"), result);
-    assert_eq!(result.raw(), &Raw::Tag(37, Box::new(Raw::Bytes(bytes.to_vec()))));
+    assert_eq!(
+        Value::decode(&encoded).expect("canonical UUID decode"),
+        result
+    );
+    assert_eq!(
+        result.raw(),
+        &Raw::Tag(37, Box::new(Raw::Bytes(bytes.to_vec())))
+    );
 }
 
 #[test]
@@ -9402,11 +9318,7 @@ fn invoke_relation_with_environment<E: EffectHandler>(
     invoke_named_with_effects("run", &functions, &Environment::new(), limits, effects)
 }
 
-fn relation_bucket_by(
-    input: Expr,
-    period: Expr,
-    zone: Option<Expr>,
-) -> Expr {
+fn relation_bucket_by(input: Expr, period: Expr, zone: Option<Expr>) -> Expr {
     let span = relation_span();
     let mut arguments = vec![
         relation_argument(input, &span),
@@ -9429,11 +9341,7 @@ fn relation_bucket_by(
     }
 }
 
-fn relation_bucket_by_pipeline(
-    input: Expr,
-    period: Expr,
-    zone: Option<Expr>,
-) -> Expr {
+fn relation_bucket_by_pipeline(input: Expr, period: Expr, zone: Option<Expr>) -> Expr {
     let span = relation_span();
     let mut arguments = vec![relation_argument(period, &span)];
     if let Some(zone) = zone {
@@ -9458,11 +9366,7 @@ fn relation_bucket_by_pipeline(
     }
 }
 
-fn relation_bucket_by_named(
-    input: Expr,
-    period: Expr,
-    zone: Option<Expr>,
-) -> Expr {
+fn relation_bucket_by_named(input: Expr, period: Expr, zone: Option<Expr>) -> Expr {
     let span = relation_span();
     let mut arguments = vec![
         orna_syntax_v1::Argument {
@@ -9557,11 +9461,13 @@ fn bucket_by_preserves_filter_map_flat_map_window_and_sort_suffixes() {
         bucket_instant(1_704_110_400 + 86_400 + 3_600),
     ];
     let source = relation_source_expression("Reading");
-    let bucket = || {
-        relation_bucket_by(source.clone(), parsed_expression("period"), None)
-    };
+    let bucket = || relation_bucket_by(source.clone(), parsed_expression("period"), None);
 
-    let mapped = relation_stage(bucket(), "map", vec![parsed_expression("group => count(group)")]);
+    let mapped = relation_stage(
+        bucket(),
+        "map",
+        vec![parsed_expression("group => count(group)")],
+    );
     let mut effects = DistinctRelationEffects::new(rows.clone());
     assert_eq!(
         invoke_relation_with_environment(
@@ -9591,7 +9497,11 @@ fn bucket_by_preserves_filter_map_flat_map_window_and_sort_suffixes() {
         Value::option(Some(bucket_group(&rows[..2]))).unwrap()
     );
 
-    let flattened = relation_stage(bucket(), "flat_map", vec![parsed_expression("group => group")]);
+    let flattened = relation_stage(
+        bucket(),
+        "flat_map",
+        vec![parsed_expression("group => group")],
+    );
     let mut effects = DistinctRelationEffects::new(rows.clone());
     assert_eq!(
         invoke_relation_with_environment(
@@ -9614,14 +9524,17 @@ fn bucket_by_preserves_filter_map_flat_map_window_and_sort_suffixes() {
             Limits::default(),
         )
         .unwrap(),
-        Value::option(Some(Value::new(Raw::Array(vec![
-            bucket_group(&rows[..2]).raw().clone(),
-        ]))
-        .unwrap()))
+        Value::option(Some(
+            Value::new(Raw::Array(vec![bucket_group(&rows[..2]).raw().clone(),])).unwrap()
+        ))
         .unwrap()
     );
 
-    let sorted = relation_stage(bucket(), "sort_by", vec![parsed_expression("group => count(group)")]);
+    let sorted = relation_stage(
+        bucket(),
+        "sort_by",
+        vec![parsed_expression("group => count(group)")],
+    );
     let mut effects = DistinctRelationEffects::new(rows);
     assert_eq!(
         invoke_relation_with_environment(
@@ -9759,16 +9672,12 @@ fn bucket_by_rejects_invalid_zone_and_period() {
 fn admitted_eval_producer_stages_effectful_source_without_publishing() {
     let mut session = orna_evaluator_v1::AdmittedReplSession::new(Limits::default());
     assert_eq!(session.submit("let answer: Int = 41;"), Ok(None));
+    assert_eq!(session.submit("answer"), Ok(Some(Value::int(41.into()))));
+    let before = session
+        .preview("$_")
+        .expect("last result should be visible");
     assert_eq!(
-        session.submit("answer"),
-        Ok(Some(Value::int(41.into())))
-    );
-    let before = session.preview("$_").expect("last result should be visible");
-    assert_eq!(
-        session
-            .stage_activation("40 + 2")
-            .unwrap_err()
-            .code(),
+        session.stage_activation("40 + 2").unwrap_err().code(),
         "ORNA-REPL-EFFECT",
         "the producer boundary admits only effectful activation input"
     );

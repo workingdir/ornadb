@@ -390,13 +390,12 @@ pub enum SystemEffect {
 }
 
 /// Exact `api/sys.json` descriptor for `sys.explain(Diagnostic)`.
-pub const SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.explain(Diagnostic)",
-        effect: SystemEffect::Read,
-        signature: "fn sys.explain(diagnostic: sys.Diagnostic): sys.Explanation",
-        purpose: "Return structured causal explanation.",
-    };
+pub const SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
+    name: "sys.explain(Diagnostic)",
+    effect: SystemEffect::Read,
+    signature: "fn sys.explain(diagnostic: sys.Diagnostic): sys.Explanation",
+    purpose: "Return structured causal explanation.",
+};
 
 /// Exact system-reference descriptor for `sys.admin.flush`.
 pub const SYS_ADMIN_FLUSH_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
@@ -762,7 +761,6 @@ impl PlanRef {
         &self.0
     }
 }
-
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum InvocationMode {
@@ -1804,13 +1802,7 @@ struct SynchronousReservation {
 impl SynchronousReservation {
     fn begin(mut self) -> Result<SynchronousExecution, AdmissionError> {
         #[cfg(test)]
-        if let Some(hook) = self
-            .executions
-            .enter_hook
-            .lock()
-            .unwrap()
-            .clone()
-        {
+        if let Some(hook) = self.executions.enter_hook.lock().unwrap().clone() {
             let (state, wake) = &*hook;
             let mut state = state.lock().unwrap();
             state.0 = true;
@@ -1855,7 +1847,6 @@ impl Drop for SynchronousReservation {
         }
     }
 }
-
 
 struct SynchronousExecution {
     executions: Arc<SynchronousExecutions>,
@@ -2218,9 +2209,7 @@ impl RuntimeSupervisor {
                     None => None,
                     Some(result) => {
                         let worker = match self.workers.lock() {
-                            Ok(mut workers) => {
-                                workers.remove(handle.invocation().id())
-                            }
+                            Ok(mut workers) => workers.remove(handle.invocation().id()),
                             Err(poisoned) => {
                                 self.workers.clear_poison();
                                 let mut workers = poisoned.into_inner();
@@ -2743,7 +2732,6 @@ pub fn explain_diagnostic(
         plan: None,
     })
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -4189,10 +4177,7 @@ mod tests {
             InvocationStatus::Queued
         );
         let reason = diagnostic("queued-cancelled");
-        assert_eq!(
-            supervisor.cancel(&handle, Some(reason.clone())),
-            Ok(true)
-        );
+        assert_eq!(supervisor.cancel(&handle, Some(reason.clone())), Ok(true));
         supervisor.release_held_worker_start();
 
         let result = supervisor
@@ -4492,7 +4477,6 @@ mod tests {
         assert_eq!(result.status, InvocationStatus::Succeeded);
         assert!(supervisor.workers.lock().unwrap().is_empty());
     }
-
 
     #[test]
     fn public_handle_and_await_result_have_the_portable_terminal_shape() {

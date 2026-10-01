@@ -46,8 +46,12 @@ fn repository() -> (TempDir, Repository) {
         .env_remove("GIT_COMMON_DIR")
         .output()
         .expect("start git init for stream admission fixture");
-    assert!(initialized.status.success(), "initialize stream admission repository");
-    let repository = Repository::discover(directory.path()).expect("discover stream admission repository");
+    assert!(
+        initialized.status.success(),
+        "initialize stream admission repository"
+    );
+    let repository =
+        Repository::discover(directory.path()).expect("discover stream admission repository");
     (directory, repository)
 }
 
@@ -63,7 +67,10 @@ async fn runtime() -> (TempDir, RuntimeState, WriterLease) {
     )
     .await
     .expect("open runtime");
-    let writer = state.acquire_lease([4; 16]).await.expect("acquire writer lease");
+    let writer = state
+        .acquire_lease([4; 16])
+        .await
+        .expect("acquire writer lease");
     (directory, state, writer)
 }
 
@@ -321,8 +328,7 @@ async fn stale_acquire_rejects_before_failure_payload_retention() {
 
     release.notify_one();
     assert_eq!(
-        run.await
-            .expect("stale delivery should return a rejection"),
+        run.await.expect("stale delivery should return a rejection"),
         StreamStep::Rejected(RejectReason::StaleCheckpoint)
     );
     assert_eq!(stale_calls.load(Ordering::SeqCst), 0);
@@ -333,7 +339,10 @@ async fn stale_acquire_rejects_before_failure_payload_retention() {
         .await
         .expect("read checkpoint after stale rejection");
     assert_eq!(checkpoint.version, 1);
-    assert_eq!(checkpoint.committed.unwrap().token.as_str(), "racing-successor");
+    assert_eq!(
+        checkpoint.committed.unwrap().token.as_str(),
+        "racing-successor"
+    );
 }
 
 #[tokio::test]
@@ -363,7 +372,8 @@ async fn paused_acquire_rejects_after_poll_without_failure_payload_retention() {
     );
     release.notify_one();
     assert!(matches!(
-        run.await.expect("paused acquire should return a stream step"),
+        run.await
+            .expect("paused acquire should return a stream step"),
         StreamStep::Paused { .. }
     ));
     assert_eq!(payload_calls.load(Ordering::SeqCst), 0);

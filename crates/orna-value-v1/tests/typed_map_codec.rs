@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use orna_value_v1::{
-    decode, decode_typed, encode, encode_typed, DecodeError, Error, OvbCodec, Raw, Result, Value,
+    DecodeError, Error, OvbCodec, Raw, Result, Value, decode, decode_typed, encode, encode_typed,
 };
 
 fn hex_bytes(input: &str) -> Vec<u8> {
@@ -61,7 +61,9 @@ fn map_keys_are_sorted_by_complete_encoded_key_bytes() {
     // then -1. The expected map makes the complete-byte ordering observable.
     assert_eq!(
         encode_typed(&value).expect("map encoding succeeds"),
-        hex_bytes("a400647a65726f18186b7477656e74792d666f75721901006c74776f2d666976652d73697820686e65676174697665")
+        hex_bytes(
+            "a400647a65726f18186b7477656e74792d666f75721901006c74776f2d666976652d73697820686e65676174697665"
+        )
     );
 }
 
@@ -100,16 +102,8 @@ fn duplicate_canonical_key_encodings_are_rejected_on_encode() {
 #[test]
 fn malformed_duplicate_unordered_and_noncanonical_maps_are_rejected_at_map_path() {
     for (name, encoded, expected) in [
-        (
-            "duplicate",
-            "a200010002",
-            Error::DuplicateOrUnorderedMapKey,
-        ),
-        (
-            "unordered",
-            "a220010002",
-            Error::DuplicateOrUnorderedMapKey,
-        ),
+        ("duplicate", "a200010002", Error::DuplicateOrUnorderedMapKey),
+        ("unordered", "a220010002", Error::DuplicateOrUnorderedMapKey),
         ("noncanonical", "a1180001", Error::NonCanonical),
     ] {
         let error = match decode_typed::<BTreeMap<i64, i64>>(&hex_bytes(encoded)) {
@@ -149,21 +143,18 @@ fn map_codec_preserves_prior_generic_encode_decode_aliases() {
     value.insert("missing".to_owned(), None);
 
     let encoded = encode(&value).expect("generic encode alias succeeds");
-    assert_eq!(
-        decode::<BTreeMap<String, Option<i64>>>(&encoded),
-        Ok(value)
-    );
+    assert_eq!(decode::<BTreeMap<String, Option<i64>>>(&encoded), Ok(value));
 }
 
 #[test]
 fn map_codec_reuses_raw_value_round_trip_for_nested_supported_values() {
     let mut value = BTreeMap::new();
-    value.insert("blob".to_owned(), Value::new(Raw::Bytes(vec![1, 2, 3])).unwrap());
+    value.insert(
+        "blob".to_owned(),
+        Value::new(Raw::Bytes(vec![1, 2, 3])).unwrap(),
+    );
     value.insert("null".to_owned(), Value::new(Raw::Null).unwrap());
 
     let encoded = encode_typed(&value).expect("Value map encoding succeeds");
-    assert_eq!(
-        decode_typed::<BTreeMap<String, Value>>(&encoded),
-        Ok(value)
-    );
+    assert_eq!(decode_typed::<BTreeMap<String, Value>>(&encoded), Ok(value));
 }

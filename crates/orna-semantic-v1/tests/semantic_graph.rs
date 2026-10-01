@@ -77,7 +77,10 @@ fn standard_dependency_revision_is_canonical_and_captures_provenance() {
         ordered.revision_digest(),
         StandardDependencyProfile::from_sources(
             "orna.std/snapshot-1",
-            [("std/renamed.orna".to_owned(), first.1.clone()), second.clone()],
+            [
+                ("std/renamed.orna".to_owned(), first.1.clone()),
+                second.clone()
+            ],
         )
         .expect("path-sensitive profile")
         .revision_digest(),
@@ -121,11 +124,9 @@ fn standard_catalogue_retains_verified_dependency_provenance() {
         [("std/a.orna".to_owned(), source.to_owned())],
     )
     .expect("profile");
-    let catalogue = Catalogue::from_standard_sources(
-        &profile,
-        [("std/a.orna".to_owned(), source.to_owned())],
-    )
-    .expect("catalogue");
+    let catalogue =
+        Catalogue::from_standard_sources(&profile, [("std/a.orna".to_owned(), source.to_owned())])
+            .expect("catalogue");
 
     assert_eq!(catalogue.standard_dependency_profile(), Some(&profile));
     assert_eq!(
@@ -692,9 +693,7 @@ fn decimal_primary_key_upsert_admits_partial_rows_but_insert_requires_completene
 
     let partial_upsert = analyze(&[ModuleInput::new(
         "decimal-upsert.orna",
-        format!(
-            "{declaration} fn patch() = Reading.upsert({{ value: 1.25, label: \"after\" }});"
-        ),
+        format!("{declaration} fn patch() = Reading.upsert({{ value: 1.25, label: \"after\" }});"),
     )]);
     assert!(
         partial_upsert.is_ok(),
@@ -704,9 +703,7 @@ fn decimal_primary_key_upsert_admits_partial_rows_but_insert_requires_completene
 
     let incomplete_insert = analyze(&[ModuleInput::new(
         "decimal-insert.orna",
-        format!(
-            "{declaration} fn create() = Reading.insert({{ value: 1.25, label: \"new\" }});"
-        ),
+        format!("{declaration} fn create() = Reading.insert({{ value: 1.25, label: \"new\" }});"),
     )]);
     assert!(
         incomplete_insert
@@ -733,9 +730,7 @@ fn decimal_primary_key_upsert_admits_partial_rows_but_insert_requires_completene
 
     let invalid_supplied_field = analyze(&[ModuleInput::new(
         "decimal-invalid-field.orna",
-        format!(
-            "{declaration} fn patch() = Reading.upsert({{ value: 1.25, label: 42 }});"
-        ),
+        format!("{declaration} fn patch() = Reading.upsert({{ value: 1.25, label: 42 }});"),
     )]);
     assert!(
         invalid_supplied_field
@@ -1609,11 +1604,7 @@ fn imported_generic_calls_reject_invalid_explicit_type_arguments() {
             ),
             ModuleInput::new("consumer.orna", format!("use library; {body}")),
         ]);
-        assert!(
-            has(&result, DIAG_TYPE),
-            "{name}: {:?}",
-            result.diagnostics
-        );
+        assert!(has(&result, DIAG_TYPE), "{name}: {:?}", result.diagnostics);
         let consumer = result
             .modules
             .get(&Namespace(vec!["consumer".into()]))
@@ -1871,8 +1862,10 @@ fn frozen_nominal_nested_impl_uses_authoritative_fixture_surface() {
             }
         }
     "#;
-    let valid =
-        analyze_with_catalogue(&[ModuleInput::new("nominal-type-nested-impl.orna", source)], &Catalogue::authoritative_fixture());
+    let valid = analyze_with_catalogue(
+        &[ModuleInput::new("nominal-type-nested-impl.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
     assert!(valid.is_ok(), "{:#?}", valid.diagnostics);
 
     let unresolved_helper = analyze_with_catalogue(
@@ -2125,7 +2118,12 @@ fn module_assertion_scope_distinguishes_zero_and_one_table_invariants() {
     }));
 
     let zero_table = analyze(&[ModuleInput::new("zero.orna", "assert 1 + 1 == 2;")]);
-    assert_eq!(zero_table.diagnostics.len(), 1, "{:?}", zero_table.diagnostics);
+    assert_eq!(
+        zero_table.diagnostics.len(),
+        1,
+        "{:?}",
+        zero_table.diagnostics
+    );
     assert_eq!(zero_table.diagnostics[0].code(), DIAG_ASSERTION_SCOPE);
     assert_eq!(
         zero_table.diagnostics[0].message(),
@@ -2169,10 +2167,7 @@ fn module_assertion_invoking_pure_helper_retains_transitive_table_dependencies()
         result.diagnostics
     );
     let module = result.modules.values().next().expect("semantic module");
-    let helper = module
-        .exports
-        .get("related")
-        .expect("pure helper export");
+    let helper = module.exports.get("related").expect("pure helper export");
     assert_eq!(
         helper.effects.effects,
         std::collections::BTreeSet::from(["database read".into()])
@@ -2584,9 +2579,8 @@ fn authoritative_fixture_resolves_attached_tables_connectors_and_modules() {
 
 #[test]
 fn frozen_historical_program_resolves_through_authoritative_projection() {
-    let source = include_str!(
-        "../../../../reference/Orna-1.0.0/examples/valid/historical-program.orna"
-    );
+    let source =
+        include_str!("../../../../reference/Orna-1.0.0/examples/valid/historical-program.orna");
     let result = analyze_with_catalogue(
         &[ModuleInput::new("historical-program.orna", source)],
         &Catalogue::authoritative_fixture(),
@@ -2629,12 +2623,9 @@ fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
         );
         assert!(!result.is_ok(), "{source}: {:?}", result.diagnostics);
         assert!(
-            result
-                .diagnostics
-                .iter()
-                .any(|diagnostic| {
-                    diagnostic.code() == DIAG_TYPE || diagnostic.code() == DIAG_UNRESOLVED
-                }),
+            result.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code() == DIAG_TYPE || diagnostic.code() == DIAG_UNRESOLVED
+            }),
             "{source}: {:?}",
             result.diagnostics
         );
@@ -2671,7 +2662,13 @@ fn historical_effect_catalogue(effect: &str) -> Catalogue {
 
 #[test]
 fn historical_callables_are_read_effect_only() {
-    for effect in ["database write", "checkpoint", "secret", "network", "external"] {
+    for effect in [
+        "database write",
+        "checkpoint",
+        "secret",
+        "network",
+        "external",
+    ] {
         let result = analyze_with_catalogue(
             &[ModuleInput::new(
                 "historical-effect.orna",
@@ -4318,7 +4315,11 @@ fn relation_distinct_preserves_relation_type_and_rejects_non_relation_fallbacks(
         "#,
     )]);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
-    let module = valid.modules.values().next().expect("relation distinct module");
+    let module = valid
+        .modules
+        .values()
+        .next()
+        .expect("relation distinct module");
     let readings = &module.symbols["readings"];
     assert!(matches!(
         &readings.ty,
@@ -4343,11 +4344,7 @@ fn relation_distinct_preserves_relation_type_and_rejects_non_relation_fallbacks(
         )],
         &Catalogue::authoritative_fixture(),
     );
-    assert!(
-        catalogue_valid.is_ok(),
-        "{:?}",
-        catalogue_valid.diagnostics
-    );
+    assert!(catalogue_valid.is_ok(), "{:?}", catalogue_valid.diagnostics);
     let module = catalogue_valid
         .modules
         .values()

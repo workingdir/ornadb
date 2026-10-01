@@ -21,10 +21,7 @@ use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 use parquet::{
     basic::{Compression, ConvertedType, Encoding, PageType, Type},
-    column::{
-        page::Page,
-        reader::ColumnReader,
-    },
+    column::{page::Page, reader::ColumnReader},
     data_type::{AsBytes, BoolType, ByteArrayType, Int32Type, Int64Type},
     file::reader::{FileReader, SerializedFileReader},
 };
@@ -1020,17 +1017,10 @@ fn verify_ovb_values(
             let mut records = 0usize;
             while records < expected_rows {
                 let remaining = expected_rows - records;
-                let definition_levels =
-                    (physical.max_def_level != 0).then_some(&mut definitions);
-                let repetition_levels =
-                    (physical.max_rep_level != 0).then_some(&mut repetitions);
+                let definition_levels = (physical.max_def_level != 0).then_some(&mut definitions);
+                let repetition_levels = (physical.max_rep_level != 0).then_some(&mut repetitions);
                 let (read_records, _values_read, levels_read) = column
-                    .read_records(
-                        remaining,
-                        definition_levels,
-                        repetition_levels,
-                        &mut values,
-                    )
+                    .read_records(remaining, definition_levels, repetition_levels, &mut values)
                     .map_err(|_| RepositoryError::InvalidCompactManifest)?;
                 if read_records == 0 || levels_read != read_records {
                     return Err(RepositoryError::InvalidCompactManifest);
@@ -1091,7 +1081,6 @@ fn verify_ovb_values(
     }
     Ok(())
 }
-
 
 fn decode_projection_column(
     row_group: &dyn parquet::file::reader::RowGroupReader,
@@ -1183,35 +1172,41 @@ fn decode_projection_column(
             let ColumnReader::ByteArrayColumnReader(mut column) = reader else {
                 return Err(RepositoryError::InvalidCompactManifest);
             };
-            read_values!(column, parquet::data_type::ByteArray, |value: &parquet::data_type::ByteArray| {
-                String::from_utf8(value.data().to_vec())
-                    .map(OvbRaw::Text)
-                    .map_err(|_| RepositoryError::InvalidCompactManifest)
-            })
+            read_values!(
+                column,
+                parquet::data_type::ByteArray,
+                |value: &parquet::data_type::ByteArray| {
+                    String::from_utf8(value.data().to_vec())
+                        .map(OvbRaw::Text)
+                        .map_err(|_| RepositoryError::InvalidCompactManifest)
+                }
+            )
         }
         PhysicalValueKind::Date => {
             let ColumnReader::Int32ColumnReader(mut column) = reader else {
                 return Err(RepositoryError::InvalidCompactManifest);
             };
-            read_values!(column, i32, |value: &i32| {
-                compact_date_value(*value)
-            })
+            read_values!(column, i32, |value: &i32| { compact_date_value(*value) })
         }
         PhysicalValueKind::Ovb(fallback) => {
             let ColumnReader::ByteArrayColumnReader(mut column) = reader else {
                 return Err(RepositoryError::InvalidCompactManifest);
             };
-            read_values!(column, parquet::data_type::ByteArray, |value: &parquet::data_type::ByteArray| {
-                let value = CanonicalValue::decode(value.data())
-                    .map_err(|_| RepositoryError::InvalidCompactManifest)?;
-                let supported = match fallback {
-                    OvbFallbackKind::Int => matches!(value.raw(), OvbRaw::Int(_)),
-                    OvbFallbackKind::Bool => matches!(value.raw(), OvbRaw::Bool(_)),
-                };
-                supported
-                    .then(|| value.raw().clone())
-                    .ok_or(RepositoryError::InvalidCompactManifest)
-            })
+            read_values!(
+                column,
+                parquet::data_type::ByteArray,
+                |value: &parquet::data_type::ByteArray| {
+                    let value = CanonicalValue::decode(value.data())
+                        .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+                    let supported = match fallback {
+                        OvbFallbackKind::Int => matches!(value.raw(), OvbRaw::Int(_)),
+                        OvbFallbackKind::Bool => matches!(value.raw(), OvbRaw::Bool(_)),
+                    };
+                    supported
+                        .then(|| value.raw().clone())
+                        .ok_or(RepositoryError::InvalidCompactManifest)
+                }
+            )
         }
     }
 }
@@ -1251,7 +1246,9 @@ fn schema_row_fields(
     let value_for = |number: i64| {
         entries
             .iter()
-            .find_map(|(key, value)| matches!(key, OvbRaw::Int(value) if *value == number.into()).then_some(value))
+            .find_map(|(key, value)| {
+                matches!(key, OvbRaw::Int(value) if *value == number.into()).then_some(value)
+            })
             .ok_or(RepositoryError::InvalidCompactManifest)
     };
     let ids = |value: &OvbRaw| {
@@ -1357,8 +1354,9 @@ fn decode_compact_segment_projection(
                 rows,
             )?);
         }
-        if values.len() != usize::try_from(entry.row_count())
-            .map_err(|_| RepositoryError::InvalidCompactManifest)?
+        if values.len()
+            != usize::try_from(entry.row_count())
+                .map_err(|_| RepositoryError::InvalidCompactManifest)?
         {
             return Err(RepositoryError::InvalidCompactManifest);
         }
@@ -1403,10 +1401,7 @@ fn decode_compact_segment_projection(
             }
             let raw = OvbRaw::Tag(
                 60009,
-                Box::new(OvbRaw::Array(vec![
-                    OvbRaw::Null,
-                    OvbRaw::Array(fields),
-                ])),
+                Box::new(OvbRaw::Array(vec![OvbRaw::Null, OvbRaw::Array(fields)])),
             );
             Some(CanonicalValue::new(raw).map_err(|_| RepositoryError::InvalidCompactManifest)?)
         };
@@ -1442,9 +1437,7 @@ struct ExpectedPhysicalLeaf {
     max_rep_level: i16,
 }
 
-fn parse_physical_field_id_path(
-    path: &[OvbRaw],
-) -> Result<(Uuid, Vec<String>), RepositoryError> {
+fn parse_physical_field_id_path(path: &[OvbRaw]) -> Result<(Uuid, Vec<String>), RepositoryError> {
     let Some((OvbRaw::Tag(37, field_id), suffix)) = path.split_first() else {
         return Err(RepositoryError::InvalidCompactManifest);
     };
@@ -1494,8 +1487,8 @@ fn required_physical_leaves(
         let OvbRaw::Bytes(field_id_bytes) = field_id.as_ref() else {
             return Err(RepositoryError::InvalidCompactManifest);
         };
-        let field_id =
-            Uuid::from_slice(field_id_bytes).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+        let field_id = Uuid::from_slice(field_id_bytes)
+            .map_err(|_| RepositoryError::InvalidCompactManifest)?;
         let role_is_key = role.to_string() == "0";
         let required_for_segment = match (segment_role, role.to_string().as_str()) {
             (CompactSegmentRole::Data | CompactSegmentRole::Replacement, "0" | "1")
@@ -2555,9 +2548,7 @@ impl Repository {
             &CompactCommittedSegmentProjection,
         ) -> Result<T, RepositoryError>,
     {
-        if expected_profile != COMPACT_PROFILE
-            || self.head()?.as_ref() != Some(expected_head)
-        {
+        if expected_profile != COMPACT_PROFILE || self.head()?.as_ref() != Some(expected_head) {
             return Err(RepositoryError::StaleHead);
         }
         let manifest = self
@@ -4613,21 +4604,15 @@ mod tests {
     }
 
     const NESTED_TABLE: Uuid = Uuid::from_u128(3);
-    const NESTED_KEY: Uuid =
-        Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0010);
-    const NESTED_OPTION: Uuid =
-        Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0011);
-    const NESTED_LIST: Uuid =
-        Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0012);
+    const NESTED_KEY: Uuid = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0010);
+    const NESTED_OPTION: Uuid = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0011);
+    const NESTED_LIST: Uuid = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0012);
 
     fn nested_schema() -> SchemaDescriptor {
         nested_schema_with_list_type(
             OvbRaw::Array(vec![
                 OvbRaw::Int(1.into()),
-                OvbRaw::Array(vec![
-                    OvbRaw::Int(0.into()),
-                    OvbRaw::Text("Int".into()),
-                ]),
+                OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".into())]),
             ]),
             OvbRaw::Int(1.into()),
         )
@@ -4637,10 +4622,7 @@ mod tests {
         nested_schema_with_list_type(
             OvbRaw::Array(vec![
                 OvbRaw::Int(1.into()),
-                OvbRaw::Array(vec![
-                    OvbRaw::Int(0.into()),
-                    OvbRaw::Text("Int".into()),
-                ]),
+                OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".into())]),
             ]),
             list_role,
         )
@@ -4663,12 +4645,12 @@ mod tests {
             (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
             (
                 OvbRaw::Int(1.into()),
-                OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(NESTED_TABLE.as_bytes().to_vec()))),
+                OvbRaw::Tag(
+                    37,
+                    Box::new(OvbRaw::Bytes(NESTED_TABLE.as_bytes().to_vec())),
+                ),
             ),
-            (
-                OvbRaw::Int(2.into()),
-                OvbRaw::Array(key_fields),
-            ),
+            (OvbRaw::Int(2.into()), OvbRaw::Array(key_fields)),
             (
                 OvbRaw::Int(3.into()),
                 OvbRaw::Array(vec![
@@ -4802,7 +4784,6 @@ mod tests {
         )
     }
 
-
     fn nested_parquet_with_list_values(
         schema: &SchemaDescriptor,
         columns: &[u8],
@@ -4893,7 +4874,13 @@ mod tests {
             .unwrap();
         column.close().unwrap();
         let element_definition_level: i16 = match shape {
-            NestedListShape::Required => if optional_element { 2 } else { 1 },
+            NestedListShape::Required => {
+                if optional_element {
+                    2
+                } else {
+                    1
+                }
+            }
             NestedListShape::OptionList | NestedListShape::ListOption => 2,
         };
         let element_definition_levels = vec![element_definition_level; list_values.len()];
@@ -5664,8 +5651,14 @@ mod tests {
         assert_eq!(projection.profile(), COMPACT_PROFILE);
         assert_eq!(projection.generation(), 1);
         assert_eq!(projection.rows().len(), 2);
-        assert!(matches!(projection.rows()[0].key().raw(), OvbRaw::Bool(false)));
-        assert!(matches!(projection.rows()[1].key().raw(), OvbRaw::Bool(true)));
+        assert!(matches!(
+            projection.rows()[0].key().raw(),
+            OvbRaw::Bool(false)
+        ));
+        assert!(matches!(
+            projection.rows()[1].key().raw(),
+            OvbRaw::Bool(true)
+        ));
         assert!(projection.rows().iter().all(|row| row.value().is_some()));
         drop(root);
     }
@@ -5676,8 +5669,7 @@ mod tests {
         let schema = schema_descriptor_fingerprint(&schema_descriptor).unwrap();
         let columns = nested_columns();
         let bytes = nested_parquet(&schema_descriptor, &columns);
-        let physical_reader =
-            SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
+        let physical_reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
         let physical_group = physical_reader.get_row_group(0).unwrap();
         assert_eq!(physical_group.metadata().num_rows(), 2);
         assert_eq!(physical_group.metadata().column(2).num_values(), 3);
@@ -5757,10 +5749,8 @@ mod tests {
             OvbRaw::Int(2.into()),
             OvbRaw::Array(vec![OvbRaw::Int(1.into()), primitive.clone()]),
         ]);
-        let option_list_schema =
-            nested_schema_with_list_type(option_list, OvbRaw::Int(1.into()));
-        let option_list_columns =
-            nested_columns_with_list_suffix(&["value", "list", "element"]);
+        let option_list_schema = nested_schema_with_list_type(option_list, OvbRaw::Int(1.into()));
+        let option_list_columns = nested_columns_with_list_suffix(&["value", "list", "element"]);
         let option_list_bytes = nested_parquet_with_list_values(
             &option_list_schema,
             &option_list_columns,
@@ -5780,10 +5770,8 @@ mod tests {
             OvbRaw::Int(1.into()),
             OvbRaw::Array(vec![OvbRaw::Int(2.into()), primitive]),
         ]);
-        let list_option_schema =
-            nested_schema_with_list_type(list_option, OvbRaw::Int(1.into()));
-        let list_option_columns =
-            nested_columns_with_list_suffix(&["list", "element", "value"]);
+        let list_option_schema = nested_schema_with_list_type(list_option, OvbRaw::Int(1.into()));
+        let list_option_columns = nested_columns_with_list_suffix(&["list", "element", "value"]);
         let list_option_bytes = nested_parquet_with_list_values(
             &list_option_schema,
             &list_option_columns,
@@ -5805,8 +5793,7 @@ mod tests {
         let schema_descriptor = nested_schema();
         let schema = schema_descriptor_fingerprint(&schema_descriptor).unwrap();
         let columns = nested_columns();
-        let bytes =
-            nested_parquet_with_list_element_optional(&schema_descriptor, &columns, true);
+        let bytes = nested_parquet_with_list_element_optional(&schema_descriptor, &columns, true);
 
         assert!(matches!(
             verify_physical_metadata(
@@ -5880,10 +5867,15 @@ mod tests {
             CompactSegmentRole::Data,
         );
         let (_, physical) = result.unwrap();
-        assert_eq!((physical[&1].max_def_level, physical[&1].max_rep_level), (1, 0));
-        assert_eq!((physical[&2].max_def_level, physical[&2].max_rep_level), (1, 1));
+        assert_eq!(
+            (physical[&1].max_def_level, physical[&1].max_rep_level),
+            (1, 0)
+        );
+        assert_eq!(
+            (physical[&2].max_def_level, physical[&2].max_rep_level),
+            (1, 1)
+        );
     }
-
 
     #[test]
     fn list_definition_and_repetition_levels_include_optional_layers() {
@@ -5905,7 +5897,10 @@ mod tests {
         };
 
         assert_eq!(
-            levels(OvbRaw::Array(vec![OvbRaw::Int(1.into()), primitive.clone()])),
+            levels(OvbRaw::Array(vec![
+                OvbRaw::Int(1.into()),
+                primitive.clone()
+            ])),
             (1, 1)
         );
         assert_eq!(

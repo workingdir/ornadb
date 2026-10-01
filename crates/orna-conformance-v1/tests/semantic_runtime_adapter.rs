@@ -181,7 +181,7 @@ fn admitted_source_relation_pages_traverse_decimal_keys() {
             Reading.insert({ value: 0.1, label: "one-tenth" });
             Reading.insert({ value: 1.0, label: "one" });
             Reading.insert({ value: 0.01, label: "one-hundredth" });
-        "#
+        "#,
     ));
     assert!(
         matches!(inserted, StageOutcome::Passed),
@@ -198,7 +198,7 @@ fn admitted_source_relation_pages_traverse_decimal_keys() {
             assert (Reading | take(3) | count) == 3;
             assert (Reading | drop(3) | count) == 1;
             assert (Reading | drop(4) | count) == 0;
-        "#
+        "#,
     ));
     assert!(
         matches!(paged, StageOutcome::Passed),
@@ -267,8 +267,7 @@ fn semantic_adapter_typechecks_imported_generic_sys_meta_with_declared_metadata(
                 fixture_id: "imported-generic-sys-meta".into(),
                 source_id: "logical/project/main.orna".into(),
                 parse_as: "module_unit".into(),
-                source: "use library; pub fn read(value: Int) = library.lookup<Int>(value);"
-                    .into(),
+                source: "use library; pub fn read(value: Int) = library.lookup<Int>(value);".into(),
             },
         ],
         loose_rows: Vec::new(),
@@ -518,7 +517,6 @@ fn semantic_project_adapter_rejects_non_string_sys_resolve_argument_at_typecheck
     assert_eq!(adapter.diagnostic_code(&diagnostic), "ORNA-S021-TYPE");
 }
 
-
 #[test]
 fn semantic_project_adapter_admits_sys_snapshot_string_as_pinned_read() {
     let source = include_str!("fixtures/sys-snapshot-string.orna");
@@ -569,8 +567,7 @@ fn semantic_project_adapter_admits_sys_current_snapshot_as_snapshot_ref_observat
         &Catalogue::authoritative_fixture(),
     );
     assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
-    let current_snapshot =
-        &analysis.modules.values().next().unwrap().exports["current_snapshot"];
+    let current_snapshot = &analysis.modules.values().next().unwrap().exports["current_snapshot"];
     assert!(matches!(
         &current_snapshot.ty,
         Type::Function { result, .. }
@@ -591,9 +588,11 @@ fn semantic_project_adapter_rejects_unsupported_sys_current_member_at_typecheck(
     let StageOutcome::Failed(diagnostic) = adapter.typecheck_project(&project) else {
         panic!("unsupported sys.current member must fail at typecheck");
     };
-    assert_eq!(adapter.diagnostic_code(&diagnostic), "ORNA-S022-UNSUPPORTED");
+    assert_eq!(
+        adapter.diagnostic_code(&diagnostic),
+        "ORNA-S022-UNSUPPORTED"
+    );
 }
-
 
 #[test]
 fn semantic_project_adapter_rejects_non_string_sys_snapshot_argument_at_typecheck() {
@@ -681,7 +680,10 @@ fn semantic_project_adapter_rejects_unsupported_sys_database_member_at_typecheck
     let StageOutcome::Failed(diagnostic) = adapter.typecheck_project(&project) else {
         panic!("unsupported sys.database member must fail at typecheck");
     };
-    assert_eq!(adapter.diagnostic_code(&diagnostic), "ORNA-S022-UNSUPPORTED");
+    assert_eq!(
+        adapter.diagnostic_code(&diagnostic),
+        "ORNA-S022-UNSUPPORTED"
+    );
 }
 
 #[test]
@@ -725,7 +727,10 @@ fn semantic_project_adapter_rejects_removed_sys_runtime_with_native_diagnostic()
     let StageOutcome::Failed(diagnostic) = adapter.resolve_project(&project) else {
         panic!("removed sys.runtime must fail during source resolution");
     };
-    assert_eq!(adapter.diagnostic_code(&diagnostic), "ORNA100-E-SYS-RUNTIME");
+    assert_eq!(
+        adapter.diagnostic_code(&diagnostic),
+        "ORNA100-E-SYS-RUNTIME"
+    );
     assert_eq!(
         adapter.diagnostic_message(&diagnostic),
         "`sys.runtime` was renamed to `sys.rt`"
@@ -792,8 +797,7 @@ fn semantic_project_adapter_rejects_typed_sys_invoke_mismatched_witness() {
 }
 #[test]
 fn semantic_project_adapter_admits_erased_sys_invoke_with_value_result_and_invoke_effect() {
-    let source =
-        "pub fn erased(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
+    let source = "pub fn erased(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
          sys.invoke(function, arguments);";
     let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
@@ -879,8 +883,7 @@ fn semantic_project_adapter_admits_typed_sys_start_with_explicit_witness() {
 }
 #[test]
 fn semantic_project_adapter_admits_erased_sys_start_with_value_handle_and_invoke_effect() {
-    let source =
-        "pub fn start_erased(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
+    let source = "pub fn start_erased(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
          sys.start(function, arguments);";
     let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
@@ -933,7 +936,6 @@ fn semantic_project_adapter_rejects_typed_sys_start_without_explicit_witness() {
     );
 }
 
-
 #[test]
 fn semantic_project_adapter_rejects_typed_sys_start_mismatched_witness() {
     let project = typed_invoke_project(
@@ -953,7 +955,6 @@ fn semantic_project_adapter_rejects_typed_sys_start_mismatched_witness() {
         "sys.start explicit type argument must match the as: witness"
     );
 }
-
 
 #[test]
 fn semantic_project_adapter_admits_inferred_and_explicit_typed_sys_await() {
@@ -1003,7 +1004,6 @@ fn semantic_project_adapter_rejects_mismatched_explicit_sys_await_type() {
     };
     assert_eq!(adapter.diagnostic_code(&diagnostic), "ORNA-S021-TYPE");
 }
-
 
 #[tokio::test]
 async fn project_stream_ignores_unrelated_false_module_assertion() {
@@ -2834,7 +2834,11 @@ async fn project_stream_checkpoint_restarts_by_position_and_binds_list_contents(
         .committed_table_rows("Reading")
         .await
         .expect("first committed rows");
-    assert_eq!(rows.len(), 2, "both zero-based list items must be delivered");
+    assert_eq!(
+        rows.len(),
+        2,
+        "both zero-based list items must be delivered"
+    );
     let streams = state.stream_observations().await.expect("first stream");
     assert_eq!(streams.len(), 1);
     let first_stream = &streams[0];
@@ -2946,11 +2950,17 @@ async fn project_stream_checkpoint_restarts_by_position_and_binds_list_contents(
             "changed list item {value} must be delivered from position zero"
         );
     }
-    let streams = state.stream_observations().await.expect("all stream observations");
-    assert_eq!(streams.len(), 2, "changed source identity creates a new stream");
+    let streams = state
+        .stream_observations()
+        .await
+        .expect("all stream observations");
+    assert_eq!(
+        streams.len(),
+        2,
+        "changed source identity creates a new stream"
+    );
     assert_ne!(
-        streams[0].checkpoint.source,
-        streams[1].checkpoint.source,
+        streams[0].checkpoint.source, streams[1].checkpoint.source,
         "the complete immutable list content participates in source identity"
     );
     for stream in streams {

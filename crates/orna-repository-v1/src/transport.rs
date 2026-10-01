@@ -158,9 +158,10 @@ impl PushRequest {
             return Err(FetchError::InvalidRemote);
         }
         let mut seen = BTreeSet::new();
-        if internal.iter().any(|reference| {
-            !valid_fetch_full_ref(reference) || !seen.insert(reference.clone())
-        }) {
+        if internal
+            .iter()
+            .any(|reference| !valid_fetch_full_ref(reference) || !seen.insert(reference.clone()))
+        {
             return Err(FetchError::InvalidContinuity);
         }
         Ok(Self {
@@ -182,7 +183,6 @@ impl PushRequest {
         &self.internal
     }
 }
-
 
 /// Stable failures from the fetch boundary.  No Git command line, URL,
 /// credential, local path, or stderr is retained in this type.
@@ -452,12 +452,7 @@ impl Repository {
         let required = request
             .continuity
             .iter()
-            .map(|witness| {
-                (
-                    witness.reference().as_str(),
-                    witness.expected().as_str(),
-                )
-            })
+            .map(|witness| (witness.reference().as_str(), witness.expected().as_str()))
             .collect::<BTreeMap<_, _>>();
         for (source, object_id) in advertised
             .iter()
@@ -559,9 +554,12 @@ impl Repository {
         }
         let repository = Repository::discover(destination).map_err(FetchError::Repository)?;
         let mut advertised = repository.observer_command();
-        advertised
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .args(["ls-remote", "--refs", "origin", "refs/orna/*"]);
+        advertised.env("GIT_TERMINAL_PROMPT", "0").args([
+            "ls-remote",
+            "--refs",
+            "origin",
+            "refs/orna/*",
+        ]);
         let output = advertised
             .output()
             .map_err(|_| FetchError::RemoteUnavailable)?;
@@ -570,17 +568,15 @@ impl Repository {
         }
         if !output.stdout.is_empty() {
             let mut fetch = repository.observer_command();
-            fetch
-                .env("GIT_TERMINAL_PROMPT", "0")
-                .args([
-                    "fetch",
-                    "--no-tags",
-                    "--no-recurse-submodules",
-                    "--no-write-fetch-head",
-                    "--refmap=",
-                    "origin",
-                    "+refs/orna/*:refs/orna/*",
-                ]);
+            fetch.env("GIT_TERMINAL_PROMPT", "0").args([
+                "fetch",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "--no-write-fetch-head",
+                "--refmap=",
+                "origin",
+                "+refs/orna/*:refs/orna/*",
+            ]);
             if !fetch
                 .status()
                 .map_err(|_| FetchError::RemoteUnavailable)?
@@ -597,7 +593,6 @@ impl Repository {
     pub fn pull(&self, request: &FetchRequest) -> Result<FetchReport, FetchError> {
         self.fetch(request)
     }
-
 }
 impl Repository {
     /// Pushes Orna continuity refs before the ordinary branch ref. The
@@ -613,13 +608,7 @@ impl Repository {
         }
         let branch_ref = format!("refs/heads/{}", request.branch());
         let mut internal = request.internal.clone();
-        internal.sort_by_key(|reference| {
-            if reference == ALLOCATOR_REF {
-                0
-            } else {
-                1
-            }
-        });
+        internal.sort_by_key(|reference| if reference == ALLOCATOR_REF { 0 } else { 1 });
         let mut ordered = internal
             .into_iter()
             .map(|reference| format!("{reference}:{reference}"))
@@ -632,7 +621,11 @@ impl Repository {
             .position(|refspec| refspec == &format!("{ALLOCATOR_REF}:{ALLOCATOR_REF}"));
         if let Some(index) = allocator {
             let allocator_ref = ordered.remove(index);
-            self.push_refspecs(request.remote(), std::slice::from_ref(&allocator_ref), false)?;
+            self.push_refspecs(
+                request.remote(),
+                std::slice::from_ref(&allocator_ref),
+                false,
+            )?;
         }
         self.push_refspecs(request.remote(), &ordered, true)
     }
@@ -649,9 +642,7 @@ impl Repository {
             remote,
             &branch_refspec,
         ]);
-        command
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        command.stdout(Stdio::null()).stderr(Stdio::null());
         command
             .status()
             .map_err(|_| FetchError::RemoteUnavailable)?
@@ -860,8 +851,7 @@ fn advertise_fetch(
         let (object_id, reference) = record
             .split_once('\t')
             .ok_or(FetchError::MalformedAdvertisement)?;
-        if (!expected.contains(reference)
-            && !reference.starts_with("refs/orna/")
+        if (!expected.contains(reference) && !reference.starts_with("refs/orna/")
             || !valid_fetch_full_ref(reference)
             || object_id.len() != object_id_length
             || !object_id.bytes().all(|byte| byte.is_ascii_hexdigit()))
@@ -874,8 +864,6 @@ fn advertise_fetch(
     }
     Ok(advertised)
 }
-
-
 
 fn continuity_state(
     required: &[RequiredInternalRef],

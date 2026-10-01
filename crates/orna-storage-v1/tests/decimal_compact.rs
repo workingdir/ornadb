@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::Uuid;
 use orna_storage_v1::{CompactOvbProfile, CompactParquetKeySource};
 use parquet::{
     basic::{Compression, Encoding},
-    data_type::{ByteArray, ByteArrayType, FixedLenByteArray, FixedLenByteArrayType, Int32Type, Int64Type},
+    data_type::{
+        ByteArray, ByteArrayType, FixedLenByteArray, FixedLenByteArrayType, Int32Type, Int64Type,
+    },
     file::{
         metadata::KeyValue,
         properties::{WriterProperties, WriterVersion},
@@ -19,16 +21,13 @@ use parquet::{
 
 const TABLE: Uuid = Uuid::from_u128(1);
 const KEY_A: [u8; 16] = [
-    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
-    0x1f,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
 ];
 const KEY_B: [u8; 16] = [
-    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e,
-    0x2f,
+    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
 ];
 const KEY_C: [u8; 16] = [
-    0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e,
-    0x3f,
+    0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
 ];
 
 fn uuid_raw(value: [u8; 16]) -> OvbRaw {
@@ -78,11 +77,7 @@ fn profile(key_ids: &[[u8; 16]]) -> CompactOvbProfile {
     CompactOvbProfile::new(SchemaDescriptor::new(schema).unwrap()).unwrap()
 }
 
-fn descriptor(
-    id: [u8; 16],
-    encoding: &str,
-    parameters: Vec<OvbRaw>,
-) -> OvbRaw {
+fn descriptor(id: [u8; 16], encoding: &str, parameters: Vec<OvbRaw>) -> OvbRaw {
     OvbRaw::Array(vec![
         OvbRaw::Array(vec![uuid_raw(id)]),
         OvbRaw::Array(vec![OvbRaw::Text(format!(
@@ -213,10 +208,7 @@ fn parquet_with_dictionary(
                     .unwrap();
             }
             PhysicalValues::ByteArray(values) => {
-                let values = values
-                    .into_iter()
-                    .map(ByteArray::from)
-                    .collect::<Vec<_>>();
+                let values = values.into_iter().map(ByteArray::from).collect::<Vec<_>>();
                 parquet_column
                     .typed::<ByteArrayType>()
                     .write_batch(&values, None, None)
@@ -417,9 +409,11 @@ fn dictionary_decimal_mixed_physical_forms_decode_canonical_values_in_key_order(
     );
     let reader = SerializedFileReader::new(Bytes::copy_from_slice(&bytes)).unwrap();
     let columns = reader.metadata().row_group(0).columns();
-    assert!(columns
-        .iter()
-        .all(|column| matches!(column.compression(), Compression::ZSTD(_))));
+    assert!(
+        columns
+            .iter()
+            .all(|column| matches!(column.compression(), Compression::ZSTD(_)))
+    );
     assert!(columns.iter().all(|column| {
         column
             .encodings()
@@ -482,13 +476,21 @@ fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
         .iter()
         .enumerate()
         .flat_map(|(row_group, group)| {
-            group.columns().iter().enumerate().map(move |(column, meta)| {
-                let start = meta.dictionary_page_offset().unwrap_or_else(|| meta.data_page_offset()) as usize;
-                let end = start + meta.compressed_size() as usize;
-                let data_offset = meta.data_page_offset() as usize - start;
-                let (data, shift, inserted) = checksummed_chunk(&source[start..end], data_offset);
-                (row_group, column, start, end, data, shift, inserted)
-            })
+            group
+                .columns()
+                .iter()
+                .enumerate()
+                .map(move |(column, meta)| {
+                    let start = meta
+                        .dictionary_page_offset()
+                        .unwrap_or_else(|| meta.data_page_offset())
+                        as usize;
+                    let end = start + meta.compressed_size() as usize;
+                    let data_offset = meta.data_page_offset() as usize - start;
+                    let (data, shift, inserted) =
+                        checksummed_chunk(&source[start..end], data_offset);
+                    (row_group, column, start, end, data, shift, inserted)
+                })
         })
         .collect::<Vec<_>>();
     chunks.sort_by_key(|chunk| chunk.2);
@@ -525,10 +527,8 @@ fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
         }
         *group = builder.set_column_metadata(columns).build().unwrap();
     }
-    let metadata = parquet::file::metadata::ParquetMetaData::new(
-        metadata.file_metadata().clone(),
-        row_groups,
-    );
+    let metadata =
+        parquet::file::metadata::ParquetMetaData::new(metadata.file_metadata().clone(), row_groups);
     let mut footer_bytes = Vec::new();
     parquet::file::metadata::ParquetMetaDataWriter::new(&mut footer_bytes, &metadata)
         .finish()

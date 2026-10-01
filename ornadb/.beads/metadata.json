@@ -1,0 +1,7 @@
+{
+  "database": "beads.db",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "ornadb",
+  "project_id": "ce37bdd3-53ba-4136-864e-3143f32cdf95"
+}

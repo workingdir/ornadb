@@ -135,10 +135,8 @@ fn records_reachable_standard_module_names_without_changing_ordinary_loading() {
 
 #[test]
 fn maps_standard_root_import_to_directory_main_module() {
-    let (_directory, repository) = repository(&[(
-        "main.orna",
-        "use std as _; pub fn run(): Int = answer();",
-    )]);
+    let (_directory, repository) =
+        repository(&[("main.orna", "use std as _; pub fn run(): Int = answer();")]);
     let source = "pub fn answer(): Int = 42;";
     let profile = StandardDependencyProfile::from_sources(
         "std-snapshot-1",
@@ -158,10 +156,12 @@ fn maps_standard_root_import_to_directory_main_module() {
             .collect::<Vec<_>>(),
         ["std/main.orna"]
     );
-    assert!(project
-        .standard_catalogue([("std/main.orna".into(), source.into())])
-        .unwrap()
-        .is_some());
+    assert!(
+        project
+            .standard_catalogue([("std/main.orna".into(), source.into())])
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -559,36 +559,29 @@ fn rejects_unreachable_symlinks_during_metadata_preflight() {
 fn discovers_only_reachable_table_rows_with_opaque_path_metadata() {
     let (directory, repository) = repository(&[
         ("main.orna", "use contacts; pub fn run() {}"),
-        (
-            "contacts.orna",
-            "pub table Contact(id: Int) { name: Str, }",
-        ),
-        (
-            "contacts/Contact/42.orna",
-            "{ name: \"reachable\" }",
-        ),
-        (
-            "contacts/Contact/malformed.orna",
-            "not a row expression",
-        ),
-        (
-            "unused/Contact/1.orna",
-            "not reachable row data",
-        ),
+        ("contacts.orna", "pub table Contact(id: Int) { name: Str, }"),
+        ("contacts/Contact/42.orna", "{ name: \"reachable\" }"),
+        ("contacts/Contact/malformed.orna", "not a row expression"),
+        ("unused/Contact/1.orna", "not reachable row data"),
     ]);
     commit_all(&directory);
 
     let worktree = ProjectLoader::default().load(&repository).unwrap();
     assert_eq!(worktree.loose_rows().len(), 2);
-    assert_eq!(worktree.loose_rows()[0].logical_path(), "contacts/Contact/42.orna");
+    assert_eq!(
+        worktree.loose_rows()[0].logical_path(),
+        "contacts/Contact/42.orna"
+    );
     assert_eq!(worktree.loose_rows()[0].table_path(), "contacts/Contact");
     assert_eq!(worktree.loose_rows()[0].key_path(), ["42.orna"]);
     assert_eq!(worktree.loose_rows()[0].parse_as(), "row_unit");
     assert_eq!(worktree.loose_rows()[1].source(), "not a row expression");
-    assert!(!worktree
-        .loose_rows()
-        .iter()
-        .any(|row| row.logical_path() == "unused/Contact/1.orna"));
+    assert!(
+        !worktree
+            .loose_rows()
+            .iter()
+            .any(|row| row.logical_path() == "unused/Contact/1.orna")
+    );
 
     let commit = repository.resolve_snapshot("HEAD").unwrap();
     let committed = ProjectLoader::default()
@@ -600,6 +593,9 @@ fn discovers_only_reachable_table_rows_with_opaque_path_metadata() {
             .iter()
             .map(|row| row.logical_path())
             .collect::<Vec<_>>(),
-        ["contacts/Contact/42.orna", "contacts/Contact/malformed.orna"]
+        [
+            "contacts/Contact/42.orna",
+            "contacts/Contact/malformed.orna"
+        ]
     );
 }

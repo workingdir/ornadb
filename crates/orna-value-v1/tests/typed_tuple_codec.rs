@@ -1,4 +1,4 @@
-use orna_value_v1::{decode_typed, encode_typed, Error, Raw, Value};
+use orna_value_v1::{Error, Raw, Value, decode_typed, encode_typed};
 
 fn hex_bytes(input: &str) -> Vec<u8> {
     hex::decode(input).expect("valid test vector hex")
@@ -10,7 +10,10 @@ fn unit_tuple_uses_the_canonical_unit_tag_and_round_trips() {
 
     assert_eq!(encoded, hex_bytes("d9ea6e80"));
     assert_eq!(decode_typed::<()>(&encoded), Ok(()));
-    assert_eq!(Value::decode(&encoded).expect("unit bytes decode"), Value::unit());
+    assert_eq!(
+        Value::decode(&encoded).expect("unit bytes decode"),
+        Value::unit()
+    );
 }
 
 #[test]

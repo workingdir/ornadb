@@ -29,15 +29,14 @@ use orna_foundation_v1::{
     CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value,
 };
 use orna_protocol_v1::{
-
     Envelope, Limits as ProtocolLimits, Message, RequestState, ResultBody, ResultStatus,
     TargetKind, canonical_request_fingerprint,
 };
 use orna_runtime_v1::{
     Component, ConsumerIdentity, FaultInjector, RecoveryDisposition, RequestIdentity, RequestOwner,
     RequestState as DurableRequestState, RequestStatus as DurableRequestStatus,
-    RunObservationRegistration, RuntimeActivationContext, RuntimeError, RuntimeState, StagedTableActivation,
-    TableMutation, TerminalOutcome, WriterLease,
+    RunObservationRegistration, RuntimeActivationContext, RuntimeError, RuntimeState,
+    StagedTableActivation, TableMutation, TerminalOutcome, WriterLease,
 };
 use orna_security_v1::{
     AttachOutcome, AttachmentId, BoundaryError, CredentialIssuer, OpaqueCredential, Origin,
@@ -953,7 +952,6 @@ impl ActionAuthority for ActionAuthorityRegistry {
     }
 }
 
-
 /// Narrow seam for application-owned source execution. The adapter owns wire
 /// admission and response identity; implementations must return a canonical
 /// host response rather than an untyped success flag.
@@ -1090,7 +1088,6 @@ pub trait LiveApplication {
             Ok(LiveEvalResponse::pure(response))
         })
     }
-
 
     /// Dispatches an admitted application operation under its ownership
     /// lease. Existing synchronous implementations inherit this compatibility
@@ -2379,8 +2376,7 @@ impl LiveHost {
             && matches!(
                 envelope.message,
                 Message::Eval { .. } | Message::Event { .. }
-            )
-        {
+            ) {
             Some(
                 self.runtime
                     .as_ref()
@@ -3141,13 +3137,7 @@ impl LiveHost {
         };
         let mut work = self.application_work.admit(session, request)?;
         let result = application
-            .dispatch_eval_with_work(
-                session,
-                request,
-                message,
-                context.as_ref(),
-                &mut work,
-            )
+            .dispatch_eval_with_work(session, request, message, context.as_ref(), &mut work)
             .await;
         work.complete();
         let result = result?;
@@ -3165,9 +3155,7 @@ impl LiveHost {
                     request,
                     fingerprint,
                     None,
-                    context
-                        .as_ref()
-                        .ok_or(Error::UnsupportedOperation)?,
+                    context.as_ref().ok_or(Error::UnsupportedOperation)?,
                     response,
                     transaction,
                 )
@@ -3224,9 +3212,7 @@ impl LiveHost {
                     request,
                     fingerprint,
                     watch,
-                    context
-                        .as_ref()
-                        .ok_or(Error::UnsupportedOperation)?,
+                    context.as_ref().ok_or(Error::UnsupportedOperation)?,
                     response,
                     transaction,
                 )
@@ -3815,13 +3801,7 @@ impl LiveHost {
         )
         .map_err(|error| map_runtime(&error))?;
         let committed = runtime
-            .commit_staged_table_request_activation(
-                lease,
-                identity,
-                fingerprint,
-                &staged,
-                terminal,
-            )
+            .commit_staged_table_request_activation(lease, identity, fingerprint, &staged, terminal)
             .await
             .map_err(|error| map_runtime(&error))?;
         let retained = committed
@@ -3832,9 +3812,10 @@ impl LiveHost {
         let response = self.decode(retained.as_bytes())?;
         self.validate_recovered_response(&committed.request, &response)
             .await?;
-        let response = validate_result_response(request, fingerprint, response, self.limits.protocol)?
-            .response
-            .ok_or(Error::ApplicationRejected)?;
+        let response =
+            validate_result_response(request, fingerprint, response, self.limits.protocol)?
+                .response
+                .ok_or(Error::ApplicationRejected)?;
         if mutating {
             if let Some(watch) = watch {
                 self.close_watch(session, watch)?;
@@ -7710,8 +7691,7 @@ fn validate_close_payload(payload: &[u8]) -> Result<(Option<u16>, Vec<u8>)> {
     if !(matches!(code, 1000..=1003 | 1007..=1014) || matches!(code, 3000..=4999)) {
         return Err(Error::InvalidFrame);
     }
-    core::str::from_utf8(&payload[2..])
-        .map_err(|_| Error::InvalidFrame)?;
+    core::str::from_utf8(&payload[2..]).map_err(|_| Error::InvalidFrame)?;
     Ok((Some(code), payload[2..].to_vec()))
 }
 
@@ -9698,11 +9678,7 @@ mod tests {
         let descriptor = ActionDescriptor::new("save", "std.text", [4; 32]);
         let mut registry = ActionAuthorityRegistry::new();
         assert_eq!(
-            registry.register_descriptor(
-                binding,
-                descriptor.clone(),
-                DescriptorActionHandler,
-            ),
+            registry.register_descriptor(binding, descriptor.clone(), DescriptorActionHandler,),
             Ok(())
         );
         assert_eq!(registry.descriptor(binding), Some(&descriptor));

@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::Uuid;
 use orna_storage_v1::{CompactOvbProfile, CompactParquetError, CompactParquetKeySource};
 use parquet::{
     basic::{Compression, Encoding},
-    data_type::{ByteArray, ByteArrayType, FixedLenByteArray, FixedLenByteArrayType, Int32Type, Int64Type},
+    data_type::{
+        ByteArray, ByteArrayType, FixedLenByteArray, FixedLenByteArrayType, Int32Type, Int64Type,
+    },
     file::{
         metadata::KeyValue,
         properties::{WriterProperties, WriterVersion},
@@ -19,8 +21,7 @@ use parquet::{
 
 const TABLE: Uuid = Uuid::from_u128(1);
 const KEY: [u8; 16] = [
-    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
-    0x1f,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
 ];
 
 fn uuid_raw(value: [u8; 16]) -> OvbRaw {
@@ -42,10 +43,7 @@ fn profile() -> CompactOvbProfile {
     let schema = OvbRaw::Map(vec![
         (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
         (OvbRaw::Int(1.into()), uuid_raw(*TABLE.as_bytes())),
-        (
-            OvbRaw::Int(2.into()),
-            OvbRaw::Array(vec![uuid_raw(KEY)]),
-        ),
+        (OvbRaw::Int(2.into()), OvbRaw::Array(vec![uuid_raw(KEY)])),
         (OvbRaw::Int(3.into()), OvbRaw::Array(vec![field])),
         (OvbRaw::Int(4.into()), OvbRaw::Array(Vec::new())),
     ]);
@@ -86,7 +84,10 @@ fn metadata(profile: &CompactOvbProfile, column_descriptor: OvbRaw) -> Vec<KeyVa
             Some(BASE64.encode(profile.schema().encode().unwrap())),
         ),
         KeyValue::new("orna.columns.ovb".into(), Some(BASE64.encode(columns))),
-        KeyValue::new("orna.encoder".into(), Some("decimal-malformed-proof-v1".into())),
+        KeyValue::new(
+            "orna.encoder".into(),
+            Some("decimal-malformed-proof-v1".into()),
+        ),
     ]
 }
 
@@ -280,7 +281,6 @@ fn corrupt_dictionary_page_offset(bytes: Vec<u8>, offset_delta: i64) -> Vec<u8> 
     output
 }
 
-
 fn ovb_parquet(
     profile: &CompactOvbProfile,
     level: KeyLevel,
@@ -337,7 +337,6 @@ fn ovb_parquet(
     with_page_checksums(bytes)
 }
 
-
 fn footer_start(bytes: &[u8]) -> usize {
     let length = u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap());
     bytes.len() - 8 - length as usize
@@ -362,13 +361,21 @@ fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
         .iter()
         .enumerate()
         .flat_map(|(row_group, group)| {
-            group.columns().iter().enumerate().map(move |(column, meta)| {
-                let start = meta.dictionary_page_offset().unwrap_or_else(|| meta.data_page_offset()) as usize;
-                let end = start + meta.compressed_size() as usize;
-                let data_offset = meta.data_page_offset() as usize - start;
-                let (data, shift, inserted) = checksummed_chunk(&source[start..end], data_offset);
-                (row_group, column, start, end, data, shift, inserted)
-            })
+            group
+                .columns()
+                .iter()
+                .enumerate()
+                .map(move |(column, meta)| {
+                    let start = meta
+                        .dictionary_page_offset()
+                        .unwrap_or_else(|| meta.data_page_offset())
+                        as usize;
+                    let end = start + meta.compressed_size() as usize;
+                    let data_offset = meta.data_page_offset() as usize - start;
+                    let (data, shift, inserted) =
+                        checksummed_chunk(&source[start..end], data_offset);
+                    (row_group, column, start, end, data, shift, inserted)
+                })
         })
         .collect::<Vec<_>>();
     chunks.sort_by_key(|chunk| chunk.2);
@@ -405,10 +412,8 @@ fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
         }
         *group = builder.set_column_metadata(columns).build().unwrap();
     }
-    let metadata = parquet::file::metadata::ParquetMetaData::new(
-        metadata.file_metadata().clone(),
-        row_groups,
-    );
+    let metadata =
+        parquet::file::metadata::ParquetMetaData::new(metadata.file_metadata().clone(), row_groups);
     let mut footer_bytes = Vec::new();
     parquet::file::metadata::ParquetMetaDataWriter::new(&mut footer_bytes, &metadata)
         .finish()
@@ -600,7 +605,11 @@ fn rejects_decimal_physical_type_precision_scale_and_width_mismatches() {
                 KeyLevel::Required,
                 Encoding::PLAIN,
                 "decimal",
-                vec![OvbRaw::Int(9.into()), OvbRaw::Int(2.into()), OvbRaw::Int(4.into())],
+                vec![
+                    OvbRaw::Int(9.into()),
+                    OvbRaw::Int(2.into()),
+                    OvbRaw::Int(4.into()),
+                ],
                 &[120],
             ),
         ),
@@ -613,7 +622,11 @@ fn rejects_decimal_physical_type_precision_scale_and_width_mismatches() {
                 KeyLevel::Required,
                 Encoding::PLAIN,
                 "decimal",
-                vec![OvbRaw::Int(10.into()), OvbRaw::Int(2.into()), OvbRaw::Int(4.into())],
+                vec![
+                    OvbRaw::Int(10.into()),
+                    OvbRaw::Int(2.into()),
+                    OvbRaw::Int(4.into()),
+                ],
                 &[120],
             ),
         ),
@@ -626,7 +639,11 @@ fn rejects_decimal_physical_type_precision_scale_and_width_mismatches() {
                 KeyLevel::Required,
                 Encoding::PLAIN,
                 "decimal",
-                vec![OvbRaw::Int(9.into()), OvbRaw::Int(3.into()), OvbRaw::Int(4.into())],
+                vec![
+                    OvbRaw::Int(9.into()),
+                    OvbRaw::Int(3.into()),
+                    OvbRaw::Int(4.into()),
+                ],
                 &[120],
             ),
         ),
@@ -639,7 +656,11 @@ fn rejects_decimal_physical_type_precision_scale_and_width_mismatches() {
                 KeyLevel::Required,
                 Encoding::PLAIN,
                 "decimal",
-                vec![OvbRaw::Int(0.into()), OvbRaw::Int(0.into()), OvbRaw::Int(4.into())],
+                vec![
+                    OvbRaw::Int(0.into()),
+                    OvbRaw::Int(0.into()),
+                    OvbRaw::Int(4.into()),
+                ],
                 &[120],
             ),
         ),
@@ -652,7 +673,11 @@ fn rejects_decimal_physical_type_precision_scale_and_width_mismatches() {
                 KeyLevel::Required,
                 Encoding::PLAIN,
                 "decimal",
-                vec![OvbRaw::Int(9.into()), OvbRaw::Int(10.into()), OvbRaw::Int(4.into())],
+                vec![
+                    OvbRaw::Int(9.into()),
+                    OvbRaw::Int(10.into()),
+                    OvbRaw::Int(4.into()),
+                ],
                 &[120],
             ),
         ),
@@ -665,7 +690,11 @@ fn rejects_decimal_physical_type_precision_scale_and_width_mismatches() {
                 KeyLevel::Required,
                 Encoding::PLAIN,
                 "decimal",
-                vec![OvbRaw::Int(20.into()), OvbRaw::Int(2.into()), OvbRaw::Int(3.into())],
+                vec![
+                    OvbRaw::Int(20.into()),
+                    OvbRaw::Int(2.into()),
+                    OvbRaw::Int(3.into()),
+                ],
                 &[120],
             ),
         ),
@@ -688,7 +717,11 @@ fn rejects_decimal_annotation_and_unit_mismatches() {
             Physical::Int64,
             Some("DECIMAL(10,2)"),
         ),
-        ("wrong scale annotation", Physical::Int32, Some("DECIMAL(9,3)")),
+        (
+            "wrong scale annotation",
+            Physical::Int32,
+            Some("DECIMAL(9,3)"),
+        ),
     ] {
         let bytes = decimal_parquet(
             &profile,
@@ -697,7 +730,11 @@ fn rejects_decimal_annotation_and_unit_mismatches() {
             KeyLevel::Required,
             Encoding::PLAIN,
             "decimal",
-            vec![OvbRaw::Int(9.into()), OvbRaw::Int(2.into()), OvbRaw::Int(4.into())],
+            vec![
+                OvbRaw::Int(9.into()),
+                OvbRaw::Int(2.into()),
+                OvbRaw::Int(4.into()),
+            ],
             &[120],
         );
         assert!(
@@ -717,7 +754,11 @@ fn rejects_unsupported_decimal_value_page_encoding() {
         KeyLevel::Required,
         Encoding::DELTA_BINARY_PACKED,
         "decimal",
-        vec![OvbRaw::Int(9.into()), OvbRaw::Int(2.into()), OvbRaw::Int(4.into())],
+        vec![
+            OvbRaw::Int(9.into()),
+            OvbRaw::Int(2.into()),
+            OvbRaw::Int(4.into()),
+        ],
         &[120],
     );
     assert!(
@@ -736,7 +777,11 @@ fn rejects_nullable_and_repeated_decimal_key_levels() {
         KeyLevel::Optional,
         Encoding::PLAIN,
         "decimal",
-        vec![OvbRaw::Int(9.into()), OvbRaw::Int(2.into()), OvbRaw::Int(4.into())],
+        vec![
+            OvbRaw::Int(9.into()),
+            OvbRaw::Int(2.into()),
+            OvbRaw::Int(4.into()),
+        ],
         &[0, 120],
     );
     assert!(
@@ -751,7 +796,11 @@ fn rejects_nullable_and_repeated_decimal_key_levels() {
         KeyLevel::Repeated,
         Encoding::PLAIN,
         "decimal",
-        vec![OvbRaw::Int(9.into()), OvbRaw::Int(2.into()), OvbRaw::Int(4.into())],
+        vec![
+            OvbRaw::Int(9.into()),
+            OvbRaw::Int(2.into()),
+            OvbRaw::Int(4.into()),
+        ],
         &[0, 120],
     );
     assert!(
@@ -770,7 +819,11 @@ fn rejects_truncated_and_malformed_decimal_pages() {
         KeyLevel::Required,
         Encoding::PLAIN,
         "decimal",
-        vec![OvbRaw::Int(9.into()), OvbRaw::Int(2.into()), OvbRaw::Int(4.into())],
+        vec![
+            OvbRaw::Int(9.into()),
+            OvbRaw::Int(2.into()),
+            OvbRaw::Int(4.into()),
+        ],
         &[120],
     );
     let truncated = bytes[..footer_start(&bytes)].to_vec();
@@ -798,7 +851,11 @@ fn rejects_decimal_dictionary_page_boundary_metadata_corruption() {
     let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
     let column = &reader.metadata().row_groups()[0].columns()[0];
     assert!(column.dictionary_page_offset().is_some());
-    assert!(column.encodings().any(|encoding| encoding == Encoding::RLE_DICTIONARY));
+    assert!(
+        column
+            .encodings()
+            .any(|encoding| encoding == Encoding::RLE_DICTIONARY)
+    );
 
     let malformed = corrupt_dictionary_page_offset(bytes, 1);
     assert!(matches!(
@@ -812,7 +869,6 @@ fn rejects_decimal_dictionary_page_boundary_metadata_corruption() {
     ));
 }
 
-
 #[test]
 fn rejects_decimal_row_count_mismatch_before_key_use() {
     let profile = profile();
@@ -823,7 +879,11 @@ fn rejects_decimal_row_count_mismatch_before_key_use() {
         KeyLevel::Required,
         Encoding::PLAIN,
         "decimal",
-        vec![OvbRaw::Int(9.into()), OvbRaw::Int(2.into()), OvbRaw::Int(4.into())],
+        vec![
+            OvbRaw::Int(9.into()),
+            OvbRaw::Int(2.into()),
+            OvbRaw::Int(4.into()),
+        ],
         &[120],
     );
     assert!(matches!(

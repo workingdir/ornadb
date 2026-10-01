@@ -1061,12 +1061,12 @@ impl Producer<'_> {
                 let expected = self.record_pattern_fields(key, ty, scope)?;
                 let mut encoded = Vec::with_capacity(fields.len());
                 for (name, nested, span) in fields {
-                    let field_ty = expected
-                        .get(name)
-                        .ok_or_else(|| self.error(key, SemanticPayloadErrorKind::UnsupportedPattern))?;
-                    let nested = nested.clone().unwrap_or_else(|| {
-                        Pattern::Name(name.clone(), span.clone())
-                    });
+                    let field_ty = expected.get(name).ok_or_else(|| {
+                        self.error(key, SemanticPayloadErrorKind::UnsupportedPattern)
+                    })?;
+                    let nested = nested
+                        .clone()
+                        .unwrap_or_else(|| Pattern::Name(name.clone(), span.clone()));
                     encoded.push(array(vec![
                         text(name),
                         self.pattern(key, &nested, field_ty, scope, locals)?,
@@ -1098,12 +1098,13 @@ impl Producer<'_> {
                     .collect::<Result<Vec<_>>>()?;
                 let mut encoded_fields = Vec::with_capacity(fields.len());
                 for field in fields {
-                    let field_ty = field_types
-                        .get(&field.name)
-                        .ok_or_else(|| self.error(key, SemanticPayloadErrorKind::UnsupportedPattern))?;
-                    let nested = field.pattern.clone().unwrap_or_else(|| {
-                        Pattern::Name(field.name.clone(), field.span.clone())
-                    });
+                    let field_ty = field_types.get(&field.name).ok_or_else(|| {
+                        self.error(key, SemanticPayloadErrorKind::UnsupportedPattern)
+                    })?;
+                    let nested = field
+                        .pattern
+                        .clone()
+                        .unwrap_or_else(|| Pattern::Name(field.name.clone(), field.span.clone()));
                     encoded_fields.push(array(vec![
                         text(&field.name),
                         self.pattern(key, &nested, field_ty, scope, locals)?,
@@ -1182,7 +1183,6 @@ impl Producer<'_> {
         }
     }
 
-
     fn constructor_pattern_shape(
         &self,
         key: &Key,
@@ -1212,15 +1212,11 @@ impl Producer<'_> {
                 .collect::<Vec<_>>()
                 .join(".");
             let variant = path.last().expect("path length checked").text.as_str();
-            let variants = scope
-                .enum_variants
-                .get(enum_or_nominal)
-                .or_else(|| {
-                    scope.enum_variants.iter().find_map(|(name, variants)| {
-                        (name == &owner || name.ends_with(&format!(".{owner}")))
-                            .then_some(variants)
-                    })
-                });
+            let variants = scope.enum_variants.get(enum_or_nominal).or_else(|| {
+                scope.enum_variants.iter().find_map(|(name, variants)| {
+                    (name == &owner || name.ends_with(&format!(".{owner}"))).then_some(variants)
+                })
+            });
             if let Some(fields) = variants.and_then(|variants| variants.get(variant)) {
                 return Ok((Vec::new(), fields.clone()));
             }
@@ -1600,11 +1596,9 @@ mod tests {
         }
         fn has_tag(raw: &Raw, tag: &str) -> bool {
             match raw {
-                Raw::Array(values) => {
-                    values.iter().any(|value| {
-                        matches!(value, Raw::Text(text) if text == tag) || has_tag(value, tag)
-                    })
-                }
+                Raw::Array(values) => values.iter().any(|value| {
+                    matches!(value, Raw::Text(text) if text == tag) || has_tag(value, tag)
+                }),
                 _ => false,
             }
         }
@@ -1666,11 +1660,7 @@ mod tests {
             .pattern(
                 &key,
                 &Pattern::Record {
-                    fields: vec![(
-                        "x".into(),
-                        None,
-                        span(),
-                    )],
+                    fields: vec![("x".into(), None, span())],
                     span: span(),
                 },
                 &Type::Record(BTreeMap::from([("x".into(), Type::Int)])),

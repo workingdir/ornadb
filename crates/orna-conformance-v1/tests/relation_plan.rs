@@ -133,16 +133,7 @@ fn relation_union_preserves_left_then_right_bounded_order() {
 #[test]
 fn lexical_filter_shadow_is_not_hijacked_by_relation_intrinsic() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let unit = relation_source(
-        r#"
-            pub table Note(id: Int) { value: Int, }
-            fn apply(filter: Int) = Note | filter(note => true) | count;
-            fn parent() {
-                Note.insert({ id: 1, value: 1 });
-                apply(1);
-            }
-        "#,
-    );
+    let unit = relation_source(include_str!("fixtures/relation-plan-shadow.orna"));
 
     assert!(matches!(
         runtime.execute_source(&unit),

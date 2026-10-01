@@ -606,7 +606,6 @@ mod batch_tests {
             .expect("retained type resolves at its admitted capture");
         assert_eq!(pinned_type.object_id(), first.types[0].object_id());
 
-
         // Multiple later generations must not impose predecessor adjacency
         // on reads of an older pinned reference (ORNA-SYS-019).
         advance(&state, lease, 12).await;

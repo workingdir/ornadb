@@ -1754,12 +1754,16 @@ fn table_assertion_admits_pure_relation_function_value_and_retains_plan() {
         .next()
         .expect("table assertion plan");
     assert_eq!(plans.len(), 3);
-    assert!(plans
-        .iter()
-        .all(|plan| plan.owner == AssertionOwner::Table("Note".into())));
-    assert!(plans
-        .iter()
-        .all(|plan| plan.effects == EffectSummary::default()));
+    assert!(
+        plans
+            .iter()
+            .all(|plan| plan.owner == AssertionOwner::Table("Note".into()))
+    );
+    assert!(
+        plans
+            .iter()
+            .all(|plan| plan.effects == EffectSummary::default())
+    );
 }
 
 #[test]

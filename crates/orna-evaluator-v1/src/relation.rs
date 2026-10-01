@@ -5,8 +5,10 @@ use num_integer::Integer;
 use num_traits::ToPrimitive;
 
 use super::{
-    timezone::{resolve_time_zone, Instant, LocalDateTime, LocalTimeResolution, TimeZone, TimeZoneError},
     Value,
+    timezone::{
+        Instant, LocalDateTime, LocalTimeResolution, TimeZone, TimeZoneError, resolve_time_zone,
+    },
 };
 
 /// The two boundary models admitted by `bucket_by`.
@@ -24,7 +26,6 @@ pub(super) struct BucketBySpec {
     pub(super) period: BucketPeriod,
     pub(super) zone: Option<String>,
 }
-
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RelationBucketError {
@@ -75,7 +76,7 @@ impl RelationBucketState {
                 Some(resolve_time_zone(name).map_err(RelationBucketError::TimeZone)?)
             }
             (BucketPeriod::CalendarDays { .. }, None) => {
-                return Err(RelationBucketError::MissingZone)
+                return Err(RelationBucketError::MissingZone);
             }
             (BucketPeriod::Elapsed { .. }, _) => None,
         };
@@ -122,7 +123,6 @@ impl RelationBucketState {
         self.current.take()
     }
 
-
     fn boundaries(&self, instant: Instant) -> Result<(Instant, Instant), RelationBucketError> {
         match &self.spec.period {
             BucketPeriod::Elapsed {
@@ -130,10 +130,7 @@ impl RelationBucketState {
                 nanosecond,
             } => elapsed_boundaries(instant, seconds, *nanosecond),
             BucketPeriod::CalendarDays { days } => {
-                let zone = self
-                    .zone
-                    .as_ref()
-                    .ok_or(RelationBucketError::MissingZone)?;
+                let zone = self.zone.as_ref().ok_or(RelationBucketError::MissingZone)?;
                 calendar_boundaries(instant, zone, *days)
             }
         }
@@ -169,9 +166,8 @@ fn elapsed_boundaries(
     if width <= BigInt::from(0u8) {
         return Err(RelationBucketError::InvalidPeriod);
     }
-    let instant_nanos =
-        BigInt::from(instant.unix_seconds) * BigInt::from(1_000_000_000u32)
-            + BigInt::from(instant.nanosecond);
+    let instant_nanos = BigInt::from(instant.unix_seconds) * BigInt::from(1_000_000_000u32)
+        + BigInt::from(instant.nanosecond);
     let start_nanos = instant_nanos.div_floor(&width) * &width;
     let end_nanos = &start_nanos + width;
     Ok((

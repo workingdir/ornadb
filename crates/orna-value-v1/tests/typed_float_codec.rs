@@ -1,4 +1,4 @@
-use orna_value_v1::{decode_typed, encode_typed, Error, CANONICAL_NAN_BITS};
+use orna_value_v1::{CANONICAL_NAN_BITS, Error, decode_typed, encode_typed};
 
 fn hex_bytes(input: &str) -> Vec<u8> {
     hex::decode(input).expect("valid test vector hex")
@@ -17,7 +17,10 @@ fn float_codec_emits_canonical_binary64_bytes() {
     let value = 1.5_f64;
     let expected = hex_bytes("fb3ff8000000000000");
 
-    assert_eq!(encode_typed(&value).expect("typed Float encoding succeeds"), expected);
+    assert_eq!(
+        encode_typed(&value).expect("typed Float encoding succeeds"),
+        expected
+    );
     assert_eq!(decode_typed::<f64>(&expected), Ok(value));
 }
 
@@ -29,8 +32,14 @@ fn float_codec_preserves_signed_zero_in_canonical_bytes_and_bits() {
     assert_eq!(positive, hex_bytes("fb0000000000000000"));
     assert_eq!(negative, hex_bytes("fb8000000000000000"));
     assert_ne!(positive, negative);
-    assert_eq!(decode_typed::<f64>(&positive).unwrap().to_bits(), 0x0000_0000_0000_0000);
-    assert_eq!(decode_typed::<f64>(&negative).unwrap().to_bits(), 0x8000_0000_0000_0000);
+    assert_eq!(
+        decode_typed::<f64>(&positive).unwrap().to_bits(),
+        0x0000_0000_0000_0000
+    );
+    assert_eq!(
+        decode_typed::<f64>(&negative).unwrap().to_bits(),
+        0x8000_0000_0000_0000
+    );
 }
 
 #[test]
@@ -38,7 +47,10 @@ fn float_codec_canonicalizes_nan_payloads_without_losing_nan_semantics() {
     let noncanonical_nan = f64::from_bits(0x7ff0_0000_0000_0001);
     let expected = hex_bytes("fb7ff8000000000000");
 
-    assert_eq!(encode_typed(&noncanonical_nan).expect("NaN encoding succeeds"), expected);
+    assert_eq!(
+        encode_typed(&noncanonical_nan).expect("NaN encoding succeeds"),
+        expected
+    );
     let decoded = decode_typed::<f64>(&expected).expect("canonical NaN decoding succeeds");
     assert!(decoded.is_nan());
     assert_eq!(decoded.to_bits(), CANONICAL_NAN_BITS);

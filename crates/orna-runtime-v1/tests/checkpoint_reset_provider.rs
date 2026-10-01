@@ -12,8 +12,13 @@ use std::{
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     CheckpointKey, CheckpointResetAudit, CheckpointResetProvider, CheckpointResetRequest,
+<<<<<<< Updated upstream
     Component, ConsumerIdentity, FailureStatus, RuntimeError, RuntimeIdentity, RuntimeState,
     StreamAdministrationOutcome,
+=======
+    Component, ConsumerIdentity, RuntimeError, RuntimeIdentity, RuntimeState,
+    StreamAdministrationOutcome, WriterLease,
+>>>>>>> Stashed changes
 };
 use orna_stream_v1::{
     AsyncCheckpointBackend, CheckpointPrecondition, CommitIntent, CommitResult, DeliveryIdentity,
@@ -159,7 +164,7 @@ async fn unsupported_target_and_key_format_mismatch_fail_before_mutation() {
 
     let mut mismatched_key = key.clone();
     mismatched_key.position_format = Component::new("position-format-v2").unwrap();
-    let mismatch_provider = provider(mismatched_key, true);
+    let mismatch_provider = provider(mismatched_key.clone(), true);
     let rejected = state
         .reset_checkpoint_with_provider(
             writer,
@@ -184,6 +189,47 @@ async fn unsupported_target_and_key_format_mismatch_fail_before_mutation() {
     assert!(!audits[2].succeeded);
     assert_eq!(audits[2].function, "sys.admin.reset_checkpoint");
     assert!(audits[2].safe_arguments.contains("expected_version=0"));
+
+    let _replacement = state.takeover_lease(writer, [5; 16]).await.unwrap();
+    for lease in [
+        writer,
+        WriterLease {
+            owner_id: [6; 16],
+            epoch: 1,
+        },
+        WriterLease {
+            owner_id: [5; 16],
+            epoch: 0,
+        },
+    ] {
+        let rejected = state
+            .reset_checkpoint_with_provider(
+                lease,
+                CheckpointResetRequest {
+                    key: key.clone(),
+                    expected: expected_initial(),
+                    to: position("forged-provider-mismatch"),
+                    reason: "forged provider mismatch".into(),
+                },
+                &provider(mismatched_key.clone(), true),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            rejected,
+            RuntimeError::CheckpointNotReplayable,
+            "provider mismatch must preserve its original error for invalid leases"
+        );
+    }
+    assert_eq!(state.stream_checkpoint(&key).await.unwrap(), before);
+    assert_eq!(state.admin_invocation_audits().await.unwrap().len(), 3);
+    assert!(
+        state
+            .checkpoint_reset_audits(&key)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -255,8 +301,8 @@ async fn supported_target_advances_once_and_audits_once() {
             old_position: None,
             new_version: 1,
             new_position: target,
-            reason: "operator rewind".into(),
-            redacted: false,
+            reason: "<redacted>".into(),
+            redacted: true,
         }]
     );
 }
@@ -518,4 +564,46 @@ async fn generic_admin_audit_is_redacted_atomic_and_reopenable() {
     assert!(audits[3].terminal_outcome.starts_with("failure:"));
     assert!(audits[3].redacted);
     assert!(!audits[3].safe_arguments.contains("secret"));
+<<<<<<< Updated upstream
+=======
+}
+
+#[tokio::test]
+async fn valid_secret_reasons_are_redacted_from_pause_and_reset_projections() {
+    let (_directory, state, writer, key) = fixture().await;
+    let mut pause_key = key.clone();
+    pause_key.source = Component::new("secret-pause-source").unwrap();
+    assert_eq!(
+        state
+            .pause_stream_with_reason(writer, pause_key.clone(), "token=super-secret".into())
+            .await,
+        Ok(StreamAdministrationOutcome::Paused { changed: true })
+    );
+    assert_eq!(
+        state.stream_pause_reason(&pause_key).await,
+        Ok(Some("<redacted>".into()))
+    );
+    let audits = state.admin_invocation_audits().await.unwrap();
+    let pause_audit = audits.last().unwrap();
+    assert!(pause_audit.redacted);
+    assert!(pause_audit.safe_arguments.contains("reason=<redacted>"));
+    assert!(!pause_audit.safe_arguments.contains("super-secret"));
+
+    state
+        .reset_checkpoint(
+            writer,
+            CheckpointResetRequest {
+                key: key.clone(),
+                expected: expected_initial(),
+                to: position("secret-reset-target"),
+                reason: "token=super-secret".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let reset_audit = state.checkpoint_reset_audits(&key).await.unwrap();
+    assert_eq!(reset_audit.len(), 1);
+    assert_eq!(reset_audit[0].reason, "<redacted>");
+    assert!(reset_audit[0].redacted);
+>>>>>>> Stashed changes
 }

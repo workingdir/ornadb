@@ -4120,6 +4120,19 @@ impl Parser {
                     self.current().span.clone(),
                 ));
             }
+            if prec > 5 && matches!(&lhs, Expr::Binary { op, .. } if matches!(op.as_str(), "|" | "|?"))
+            {
+                self.errors.push(Diagnostic::error(
+                    "ORNA-PARSE-001",
+                    "pipeline stages must be postfix expressions",
+                    self.current().span.clone(),
+                ));
+                self.bump();
+                if self.can_start_expression() {
+                    let _ = self.recurse(|parser| parser.pratt(prec + 1, mode.nested()));
+                }
+                break;
+            }
             self.bump();
             if matches!(op.as_str(), ".." | "..=") {
                 if matches!(lhs, Expr::Range { .. }) {
@@ -4169,8 +4182,13 @@ impl Parser {
                 );
                 break;
             }
-            let rhs = self
-                .recurse(|parser| parser.pratt(if right { prec } else { prec + 1 }, mode.nested()));
+            let rhs = self.recurse(|parser| {
+                if matches!(op.as_str(), "|" | "|?") {
+                    parser.pratt(u8::MAX, mode.nested())
+                } else {
+                    parser.pratt(if right { prec } else { prec + 1 }, mode.nested())
+                }
+            });
             let Some(rhs) = rhs else { break };
             if !self.within_depth(expr_depth(&lhs).max(expr_depth(&rhs)) + 1) {
                 return Some(lhs);
@@ -5175,5 +5193,44 @@ mod tests {
         assert!(
             matches!(&statements[1], Statement::Assignment { target: AssignmentTarget::Field { base, name, .. }, operator: AssignmentOperator::Add, .. } if name == "amount" && matches!(base.as_ref(), AssignmentTarget::Index { base, .. } if matches!(base.as_ref(), AssignmentTarget::Field { .. })))
         );
+    }
+    #[test]
+    fn pipeline_stages_require_postfix_expressions_unless_grouped() {
+        let parsed = parse_module(include_str!("../tests/fixtures/pipeline-stage-postfix.orna"));
+        assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+        assert_eq!(parsed.diagnostics[0].code, "ORNA-PARSE-001");
+        assert_eq!(
+            parsed.diagnostics[0].message,
+            "pipeline stages must be postfix expressions"
+        );
+
+        let body = |name: &str| {
+            parsed
+                .value
+                .items
+                .iter()
+                .find_map(|item| match &item.declaration {
+                    Declaration::Function { signature, body }
+                        if signature.name == name =>
+                    {
+                        Some(body)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing function {name}"))
+        };
+        assert!(matches!(
+            body("grouped_stage"),
+            Expr::Binary { op, rhs, .. }
+                if op == "|"
+                    && matches!(rhs.as_ref(), Expr::Group { inner, .. }
+                        if matches!(inner.as_ref(), Expr::Binary { op, .. } if op == "+"))
+        ));
+        assert!(matches!(
+            body("comparison_after_pipeline"),
+            Expr::Binary { op, lhs, .. }
+                if op == ">"
+                    && matches!(lhs.as_ref(), Expr::Binary { op, .. } if op == "|")
+        ));
     }
 }

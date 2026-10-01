@@ -51,8 +51,14 @@ fn money_tag_60007_canonical_vectors_round_trip() {
         assert_eq!(encoded, hex_bytes(expected_hex));
         let money = Money::decode(&encoded).expect("typed Money decoding succeeds");
         assert_eq!(money.value(), &value);
-        assert_eq!(money.encode().expect("typed Money encoding succeeds"), encoded);
-        assert_eq!(Value::decode(&encoded).expect("Money decoding succeeds"), value);
+        assert_eq!(
+            money.encode().expect("typed Money encoding succeeds"),
+            encoded
+        );
+        assert_eq!(
+            Value::decode(&encoded).expect("Money decoding succeeds"),
+            value
+        );
     }
 }
 
@@ -118,7 +124,10 @@ fn money_witness_round_trip_preserves_currency_identity() {
     .expect("matching Money currency witness is valid");
 
     let encoded = value.encode().expect("witnessed Money encoding succeeds");
-    assert_eq!(Value::decode(&encoded).expect("witnessed Money decoding succeeds"), value);
+    assert_eq!(
+        Value::decode(&encoded).expect("witnessed Money decoding succeeds"),
+        value
+    );
 }
 
 fn assert_money_decode_rejects(bytes: &[u8], expected: orna_value_v1::Error) {
@@ -150,8 +159,7 @@ fn rejects_malformed_money_outer_and_nested_payloads() {
 
 #[test]
 fn rejects_noncanonical_money_decimal_and_tag_forms() {
-    let decimal_alias =
-        hex_bytes("d9ea6782d9ea608219303422d8255001010101010101010101010101010101");
+    let decimal_alias = hex_bytes("d9ea6782d9ea608219303422d8255001010101010101010101010101010101");
     assert_money_decode_rejects(&decimal_alias, orna_value_v1::Error::NonCanonical);
 
     let wide_tag =
@@ -165,10 +173,7 @@ fn rejects_money_currency_witness_with_different_object_id() {
     let payload_currency = [0x08; 16];
     let type_node = Raw::Array(vec![
         Raw::Int(BigInt::from(8_i64)),
-        Raw::Tag(
-            37,
-            Box::new(Raw::Bytes(declared_currency.into())),
-        ),
+        Raw::Tag(37, Box::new(Raw::Bytes(declared_currency.into()))),
     ]);
     let witnessed_money = Raw::Tag(
         60007,
@@ -182,7 +187,10 @@ fn rejects_money_currency_witness_with_different_object_id() {
         Box::new(Raw::Array(vec![type_node, witnessed_money])),
     );
 
-    assert_eq!(Value::new(mismatched), Err(orna_value_v1::Error::InvalidValue));
+    assert_eq!(
+        Value::new(mismatched),
+        Err(orna_value_v1::Error::InvalidValue)
+    );
 }
 
 #[test]
@@ -194,15 +202,13 @@ fn rejects_decimal_and_money_exponents_beyond_exact_limit() {
         );
     }
 
-    let positive =
-        hex_bytes("d9ea6782d9ea6082011a000f4241d8255001010101010101010101010101010101");
+    let positive = hex_bytes("d9ea6782d9ea6082011a000f4241d8255001010101010101010101010101010101");
     assert_eq!(
         Money::decode(&positive),
         Err(orna_value_v1::Error::DecimalLimit)
     );
 
-    let negative =
-        hex_bytes("d9ea6782d9ea6082013a000f4240d8255001010101010101010101010101010101");
+    let negative = hex_bytes("d9ea6782d9ea6082013a000f4240d8255001010101010101010101010101010101");
     assert_eq!(
         Money::decode(&negative),
         Err(orna_value_v1::Error::DecimalLimit)

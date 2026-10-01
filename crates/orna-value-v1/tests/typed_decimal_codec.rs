@@ -1,5 +1,5 @@
 use num_bigint::BigInt;
-use orna_value_v1::{decode_typed, encode_typed, Decimal, Error};
+use orna_value_v1::{Decimal, Error, decode_typed, encode_typed};
 
 fn hex_bytes(input: &str) -> Vec<u8> {
     hex::decode(input).expect("valid test vector hex")
@@ -22,7 +22,10 @@ fn decimal_codec_emits_the_canonical_tag_60000_golden_bytes() {
         .expect("finite Decimal construction succeeds");
     let expected = hex_bytes("d9ea60821904d221");
 
-    assert_eq!(encode_typed(&value).expect("typed Decimal encoding succeeds"), expected);
+    assert_eq!(
+        encode_typed(&value).expect("typed Decimal encoding succeeds"),
+        expected
+    );
     assert_eq!(decode_typed::<Decimal>(&expected), Ok(value));
 }
 
@@ -34,7 +37,10 @@ fn decimal_zero_uses_one_canonical_coefficient_and_exponent() {
     let bytes = hex_bytes("d9ea60820000");
 
     assert_eq!(value, expected);
-    assert_eq!(encode_typed(&value).expect("typed zero encoding succeeds"), bytes);
+    assert_eq!(
+        encode_typed(&value).expect("typed zero encoding succeeds"),
+        bytes
+    );
     assert_eq!(decode_typed::<Decimal>(&bytes), Ok(expected));
 }
 
@@ -47,7 +53,10 @@ fn decimal_trailing_zeroes_normalize_before_encoding_and_round_trip() {
     let expected = hex_bytes("d9ea60821904d221");
 
     assert_eq!(unnormalized, normalized);
-    assert_eq!(encode_typed(&unnormalized).expect("typed Decimal encoding succeeds"), expected);
+    assert_eq!(
+        encode_typed(&unnormalized).expect("typed Decimal encoding succeeds"),
+        expected
+    );
     assert_eq!(decode_typed::<Decimal>(&expected), Ok(normalized));
 }
 

@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use orna_sys_v1::{
-    Diagnostic, DiagnosticExplanationError, DiagnosticField, SystemEffect,
-    SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR, TypeId, explain_diagnostic, system_function_descriptor,
+    Diagnostic, DiagnosticExplanationError, DiagnosticField, SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR,
+    SystemEffect, TypeId, explain_diagnostic, system_function_descriptor,
 };
 
 #[test]
@@ -91,7 +91,10 @@ fn sys_explain_diagnostic_returns_known_result_without_leaking_redacted_fields()
         "cause-field-secret",
         "cause-detail",
     ] {
-        assert!(!encoded.contains(secret), "serialized explanation leaked {secret}");
+        assert!(
+            !encoded.contains(secret),
+            "serialized explanation leaked {secret}"
+        );
     }
 }
 

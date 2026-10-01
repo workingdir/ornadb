@@ -766,7 +766,11 @@ async fn failed_table_replay_preserves_skipped_identity_and_checkpoint() {
     assert_eq!(failed.diagnostic, diagnostic());
     assert_eq!(fixture.failure(fixture.writer).await, failed);
     assert_eq!(
-        fixture.state.committed_table_row("books", &[5]).await.unwrap(),
+        fixture
+            .state
+            .committed_table_row("books", &[5])
+            .await
+            .unwrap(),
         None
     );
     assert!(fixture.state.pending().await.unwrap().is_empty());
@@ -994,7 +998,10 @@ async fn failed_table_delivery_retains_failure_and_retries_same_identity() {
     assert_eq!(failure.attempts, 1);
     assert_eq!(failure.diagnostic, diagnostic());
     assert_eq!(state.capture().await.unwrap(), capture);
-    assert_eq!(state.committed_table_row("books", &[4]).await.unwrap(), None);
+    assert_eq!(
+        state.committed_table_row("books", &[4]).await.unwrap(),
+        None
+    );
     assert!(state.pending().await.unwrap().is_empty());
     assert_eq!(
         state
@@ -1029,12 +1036,11 @@ async fn failed_table_delivery_retains_failure_and_retries_same_identity() {
         }),
         polls: 0,
     };
-    let mut retry_handler = CountingHandler::new(StreamHandlerResult::Commit(
-        StreamMutationBatch {
+    let mut retry_handler =
+        CountingHandler::new(StreamHandlerResult::Commit(StreamMutationBatch {
             mutations: Vec::new(),
             next_digest: capture.generation_digest(),
-        },
-    ));
+        }));
     assert!(matches!(
         state
             .run_stream_once(writer, &key, &mut retry_source, &mut retry_handler)
@@ -1069,7 +1075,6 @@ async fn failed_table_delivery_retains_failure_and_retries_same_identity() {
     drop(repository);
     drop(directory);
 }
-
 
 #[tokio::test]
 async fn stale_stream_writer_is_rejected_before_source_poll() {

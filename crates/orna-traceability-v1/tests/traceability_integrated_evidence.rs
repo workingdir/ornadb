@@ -1,5 +1,7 @@
-use orna_conformance_v1::{BoundedEvaluator, Corpus, FixtureStageBinding, Harness, RuntimeAdapter, Stage};
-use orna_traceability_v1::{generate_with_engine_witnesses, Status};
+use orna_conformance_v1::{
+    BoundedEvaluator, Corpus, FixtureStageBinding, Harness, RuntimeAdapter, Stage,
+};
+use orna_traceability_v1::{Status, generate_with_engine_witnesses};
 use serde_json::Value;
 use std::{
     fs,
@@ -10,8 +12,7 @@ use std::{
 const REQUIREMENT_ID: &str = "ORNA-SOURCE-001";
 const FIXTURE_ID: &str = "valid/minimal-root.orna";
 const FIXTURE_PATH: &str = "examples/valid/minimal-root.orna";
-const IMPLEMENTATION_REF: &str =
-    "crates/orna-conformance-v1/src/lib.rs::Harness::engine_witnesses";
+const IMPLEMENTATION_REF: &str = "crates/orna-conformance-v1/src/lib.rs::Harness::engine_witnesses";
 const TEST_REF: &str = "crates/orna-traceability-v1/tests/traceability_integrated_evidence.rs::declared_parse_witness_preserves_publication_identity_and_partial_requirement_boundary";
 const CANONICAL_MARKDOWN_DIGEST: &str =
     "d12cf5d86b9337ccbe45f257bcb8c25bc769e0505500bdc68e21a1b67d728d7d";
@@ -19,7 +20,9 @@ const CANONICAL_MARKDOWN_DIGEST: &str =
 fn reference_root() -> PathBuf {
     std::env::var_os("ORNA_REFERENCE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../reference/Orna-1.0.0"))
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../reference/Orna-1.0.0")
+        })
 }
 
 struct CopiedReference {

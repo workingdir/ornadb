@@ -2626,9 +2626,10 @@ impl Harness {
                         continue;
                     }
                 };
-                if stage_values.iter().any(|value| {
-                    *value == stage.expectation_key() || *value == stage.phase_name()
-                }) && seen.insert(entry.requirement.clone())
+                if stage_values
+                    .iter()
+                    .any(|value| *value == stage.expectation_key() || *value == stage.phase_name())
+                    && seen.insert(entry.requirement.clone())
                 {
                     linked.push(entry.requirement.clone());
                 }
@@ -2731,10 +2732,7 @@ fn is_evidence_stage(stage: &str) -> bool {
     )
 }
 
-fn validate_requirement_evidence_test(
-    test: &Value,
-    requirement: &str,
-) -> Result<(), CorpusError> {
+fn validate_requirement_evidence_test(test: &Value, requirement: &str) -> Result<(), CorpusError> {
     let object = test
         .as_object()
         .ok_or_else(|| CorpusError("requirement evidence test must be an object".into()))?;
@@ -2749,7 +2747,6 @@ fn validate_requirement_evidence_test(
         .map(|_| ())
         .map_err(|message| CorpusError(message.into()))
 }
-
 
 /// Reports expose only the diagnostic identity.  Adapter diagnostics may have
 /// spans, labels or native payloads containing source observations; preserving

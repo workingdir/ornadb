@@ -774,6 +774,9 @@ fn finite_list_decimal_min_max_execute_from_source_with_exact_and_empty_results(
         let actual = evaluator
             .invoke_value_with(function, &BTreeMap::new())
             .unwrap_or_else(|diagnostic| panic!("{function} failed: {diagnostic:?}"));
-        assert_eq!(actual, expected, "{function} returned an unexpected Decimal extrema");
+        assert_eq!(
+            actual, expected,
+            "{function} returned an unexpected Decimal extrema"
+        );
     }
 }

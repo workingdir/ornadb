@@ -536,15 +536,24 @@ fn render_human_diagnostic(diagnostic: &CompilerDiagnostic, source_text: &str) -
     rendered
 }
 
-fn source_line_for_offset(source_text: &str, offset: usize) -> Option<(usize, usize, usize, usize)> {
+fn source_line_for_offset(
+    source_text: &str,
+    offset: usize,
+) -> Option<(usize, usize, usize, usize)> {
     if offset > source_text.len() || !source_text.is_char_boundary(offset) {
         return None;
     }
-    let line_start = source_text[..offset].rfind('\n').map_or(0, |index| index + 1);
+    let line_start = source_text[..offset]
+        .rfind('\n')
+        .map_or(0, |index| index + 1);
     let line_end = source_text[offset..]
         .find('\n')
         .map_or(source_text.len(), |index| offset + index);
-    let line_number = source_text[..line_start].bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let line_number = source_text[..line_start]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1;
     let column_number = source_text[line_start..offset].chars().count() + 1;
     Some((line_number, column_number, line_start, line_end))
 }
@@ -559,7 +568,6 @@ fn append_human_extras(rendered: &mut String, diagnostic: &CompilerDiagnostic) {
         rendered.push_str(note);
     }
 }
-
 
 /// One lossless source unit parsed by the compiler.
 #[derive(Clone, Debug)]
@@ -631,7 +639,6 @@ impl ParseReport {
             .collect::<Vec<_>>()
             .join("\n\n")
     }
-
 
     /// Returns whether parsing produced any error-level diagnostics.
     pub fn has_errors(&self) -> bool {

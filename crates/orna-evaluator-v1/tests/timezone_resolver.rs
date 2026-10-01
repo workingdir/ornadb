@@ -84,7 +84,10 @@ fn london_spring_forward_reports_the_nonexistent_interval() {
     assert_eq!(after, instant(1_711_846_800, 0));
 
     let before_local = london.at(before).expect("transition predecessor is valid");
-    assert_eq!(before_local.local, local(2024, 3, 31, 0, 59, 59, 999_999_999));
+    assert_eq!(
+        before_local.local,
+        local(2024, 3, 31, 0, 59, 59, 999_999_999)
+    );
     assert_eq!(before_local.offset_seconds, 0);
 
     let after_local = london.at(after).expect("transition instant is valid");

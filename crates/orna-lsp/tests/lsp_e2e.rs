@@ -939,7 +939,6 @@ fn serves_accepted_corpus_manifest_diagnostics_with_valid_utf16_ranges() {
     client.shutdown();
 }
 
-
 fn assert_hover_contains(client: &mut Client, uri: &str, position: Value, expected: &str) {
     let hover = client.request(
         "textDocument/hover",
@@ -976,7 +975,6 @@ fn assert_definition_starts_on(
         "definition line: {definition}"
     );
 }
-
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DecodedSemanticToken {

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::Uuid;
@@ -19,8 +19,7 @@ use parquet::{
 
 const TABLE: Uuid = Uuid::from_u128(1);
 const KEY: [u8; 16] = [
-    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
-    0x1f,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -69,10 +68,7 @@ fn profile(kind: Kind) -> CompactOvbProfile {
     let schema = OvbRaw::Map(vec![
         (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
         (OvbRaw::Int(1.into()), uuid_raw(*TABLE.as_bytes())),
-        (
-            OvbRaw::Int(2.into()),
-            OvbRaw::Array(vec![uuid_raw(KEY)]),
-        ),
+        (OvbRaw::Int(2.into()), OvbRaw::Array(vec![uuid_raw(KEY)])),
         (OvbRaw::Int(3.into()), OvbRaw::Array(vec![field])),
         (OvbRaw::Int(4.into()), OvbRaw::Array(Vec::new())),
     ]);
@@ -113,7 +109,10 @@ fn metadata(profile: &CompactOvbProfile, column_descriptor: OvbRaw) -> Vec<KeyVa
             Some(BASE64.encode(profile.schema().encode().unwrap())),
         ),
         KeyValue::new("orna.columns.ovb".into(), Some(BASE64.encode(columns))),
-        KeyValue::new("orna.encoder".into(), Some("ovb-fallback-malformed-v1".into())),
+        KeyValue::new(
+            "orna.encoder".into(),
+            Some("ovb-fallback-malformed-v1".into()),
+        ),
     ]
 }
 
@@ -177,11 +176,7 @@ fn parquet_with_logical(
             .set_writer_version(WriterVersion::PARQUET_2_0)
             .set_key_value_metadata(Some(metadata(
                 profile,
-                descriptor(
-                    logical_kind,
-                    descriptor_encoding,
-                    parameters,
-                ),
+                descriptor(logical_kind, descriptor_encoding, parameters),
             )))
             .build(),
     );
@@ -270,7 +265,6 @@ fn dictionary_parquet(profile: &CompactOvbProfile, values: &[Vec<u8>]) -> Vec<u8
     with_page_checksums(bytes)
 }
 
-
 fn canonical(raw: OvbRaw) -> Vec<u8> {
     CanonicalValue::new(raw).unwrap().encode().unwrap()
 }
@@ -285,7 +279,10 @@ fn valid_value(kind: Kind) -> Vec<u8> {
         )),
         Kind::Instant => canonical(OvbRaw::Tag(
             60002,
-            Box::new(OvbRaw::Array(vec![OvbRaw::Int((-1).into()), OvbRaw::Int(1.into())])),
+            Box::new(OvbRaw::Array(vec![
+                OvbRaw::Int((-1).into()),
+                OvbRaw::Int(1.into()),
+            ])),
         )),
     }
 }
@@ -300,36 +297,36 @@ fn malformed_values(kind: Kind) -> Vec<(&'static str, Vec<u8>)> {
         Kind::Uuid => vec![
             ("wrong tag", canonical(OvbRaw::Text("alpha".into()))),
             ("wrong payload", vec![0xd8, 0x25, 0x41, 0x00]),
-            (
-                "wrong UUID width",
-                {
-                    let mut bytes = vec![0xd8, 0x25, 0x4f];
-                    bytes.extend([0; 15]);
-                    bytes
-                },
-            ),
-            (
-                "noncanonical CBOR",
-                {
-                    let mut bytes = vec![0xd9, 0x00, 0x25, 0x50];
-                    bytes.extend([0; 16]);
-                    bytes
-                },
-            ),
+            ("wrong UUID width", {
+                let mut bytes = vec![0xd8, 0x25, 0x4f];
+                bytes.extend([0; 15]);
+                bytes
+            }),
+            ("noncanonical CBOR", {
+                let mut bytes = vec![0xd9, 0x00, 0x25, 0x50];
+                bytes.extend([0; 16]);
+                bytes
+            }),
         ],
         Kind::Date => vec![
             ("wrong tag", canonical(uuid_raw(KEY))),
+            ("wrong payload", {
+                let mut bytes = vec![0xd9, 0xea, 0x61, 0x50];
+                bytes.extend([0; 16]);
+                bytes
+            }),
             (
-                "wrong payload",
-                {
-                    let mut bytes = vec![0xd9, 0xea, 0x61, 0x50];
-                    bytes.extend([0; 16]);
-                    bytes
-                },
+                "invalid Gregorian date",
+                b"\xd9\xea\x61\x6a2024-02-30".to_vec(),
             ),
-            ("invalid Gregorian date", b"\xd9\xea\x61\x6a2024-02-30".to_vec()),
-            ("noncanonical date text", b"\xd9\xea\x61\x692024-2-29".to_vec()),
-            ("noncanonical CBOR", b"\xd9\xea\x61\x78\x0a2024-02-29".to_vec()),
+            (
+                "noncanonical date text",
+                b"\xd9\xea\x61\x692024-2-29".to_vec(),
+            ),
+            (
+                "noncanonical CBOR",
+                b"\xd9\xea\x61\x78\x0a2024-02-29".to_vec(),
+            ),
         ],
         Kind::Instant => vec![
             ("wrong tag", canonical(uuid_raw(KEY))),
@@ -339,7 +336,10 @@ fn malformed_values(kind: Kind) -> Vec<(&'static str, Vec<u8>)> {
                 "nanosecond out of range",
                 b"\xd9\xea\x62\x82\x00\x1a\x3b\x9a\xca\x00".to_vec(),
             ),
-            ("noncanonical CBOR", b"\xd9\xea\x62\x98\x02\x00\x00".to_vec()),
+            (
+                "noncanonical CBOR",
+                b"\xd9\xea\x62\x98\x02\x00\x00".to_vec(),
+            ),
         ],
     }
 }
@@ -648,12 +648,10 @@ fn rejects_malformed_rle_dictionary_ovb_dictionary_and_page_boundaries() {
         &malformed_metadata,
         values.len() as u64,
     );
-    assert!(
-        matches!(
-            result.as_ref(),
-            Err(CompactParquetError::InvalidParquet)
-        )
-    );
+    assert!(matches!(
+        result.as_ref(),
+        Err(CompactParquetError::InvalidParquet)
+    ));
     assert_eq!(
         result.unwrap_err().to_string(),
         "invalid compact Parquet data"
@@ -674,7 +672,6 @@ fn rejects_malformed_rle_dictionary_ovb_dictionary_and_page_boundaries() {
     ));
 }
 
-
 fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
     let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
     let metadata = reader.metadata().clone();
@@ -684,7 +681,9 @@ fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
         .iter()
         .flat_map(|group| {
             group.columns().iter().map(|meta| {
-                let start = meta.dictionary_page_offset().unwrap_or_else(|| meta.data_page_offset()) as usize;
+                let start =
+                    meta.dictionary_page_offset()
+                        .unwrap_or_else(|| meta.data_page_offset()) as usize;
                 let end = start + meta.compressed_size() as usize;
                 let data_offset = meta.data_page_offset() as usize - start;
                 let (data, shift, inserted) = checksummed_chunk(&bytes[start..end], data_offset);
@@ -709,8 +708,12 @@ fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
         let mut builder = group.clone().into_builder();
         let mut columns = builder.take_columns();
         for column in &mut columns {
-            let old_start = column.dictionary_page_offset().unwrap_or_else(|| column.data_page_offset()) as usize;
-            let Some((_, _, new_start, data_offset, inserted)) = updates.iter().find(|item| item.0 == old_start) else {
+            let old_start = column
+                .dictionary_page_offset()
+                .unwrap_or_else(|| column.data_page_offset()) as usize;
+            let Some((_, _, new_start, data_offset, inserted)) =
+                updates.iter().find(|item| item.0 == old_start)
+            else {
                 continue;
             };
             let shift = *new_start as i64 - old_start as i64;
@@ -718,7 +721,9 @@ fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
                 .clone()
                 .into_builder()
                 .set_data_page_offset(column.data_page_offset() + shift)
-                .set_dictionary_page_offset(column.dictionary_page_offset().map(|offset| offset + shift))
+                .set_dictionary_page_offset(
+                    column.dictionary_page_offset().map(|offset| offset + shift),
+                )
                 .set_total_compressed_size(column.compressed_size() + *inserted as i64)
                 .build()
                 .unwrap();
@@ -726,7 +731,8 @@ fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
         }
         *group = builder.set_column_metadata(columns).build().unwrap();
     }
-    let rewritten = parquet::file::metadata::ParquetMetaData::new(metadata.file_metadata().clone(), groups);
+    let rewritten =
+        parquet::file::metadata::ParquetMetaData::new(metadata.file_metadata().clone(), groups);
     let mut footer_bytes = Vec::new();
     parquet::file::metadata::ParquetMetaDataWriter::new(&mut footer_bytes, &rewritten)
         .finish()

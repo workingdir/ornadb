@@ -2129,13 +2129,11 @@ mod tests {
     }
     #[test]
     fn duplicate_structural_map_keys_are_rejected_before_admission() {
-        let nested = Node::Map(vec![
-            (uint(0), Node::Map(vec![(uint(1), uint(2)), (uint(1), uint(3))])),
-        ]);
-        assert_eq!(
-            reject_duplicate_map_keys(&nested),
-            Err(Error::NonCanonical)
-        );
+        let nested = Node::Map(vec![(
+            uint(0),
+            Node::Map(vec![(uint(1), uint(2)), (uint(1), uint(3))]),
+        )]);
+        assert_eq!(reject_duplicate_map_keys(&nested), Err(Error::NonCanonical));
     }
     fn wire(code: u64, request: Option<[u8; 16]>, watch: Option<[u8; 16]>, body: Node) -> Vec<u8> {
         encode_node(&Node::Map(vec![

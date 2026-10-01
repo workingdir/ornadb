@@ -37,7 +37,12 @@ fn admitted() -> Serving {
     })
     .unwrap();
     state
-        .admit(id(1), Credential::new([7; 32]), Origin(id(2)), &subscribe(id(3)))
+        .admit(
+            id(1),
+            Credential::new([7; 32]),
+            Origin(id(2)),
+            &subscribe(id(3)),
+        )
         .unwrap();
     state
 }
@@ -110,11 +115,23 @@ fn retained_pin_revision_mismatch_is_atomic_and_does_not_stale_watches() {
     assert_eq!(state.retain_pin(id(1)).unwrap(), Some(pin(3)));
     let replay = state.resync(id(1), 0).unwrap();
     assert_eq!(
-        replay.iter().map(|revision| revision.revision).collect::<Vec<_>>(),
+        replay
+            .iter()
+            .map(|revision| revision.revision)
+            .collect::<Vec<_>>(),
         vec![1, 2, 3]
     );
-    assert_eq!(replay.last().unwrap().page.get("a"), Some(&"one".to_owned()));
-    assert_eq!(replay.last().unwrap().page.get("b"), Some(&"two".to_owned()));
-    assert_eq!(replay.last().unwrap().page.get("c"), Some(&"three".to_owned()));
+    assert_eq!(
+        replay.last().unwrap().page.get("a"),
+        Some(&"one".to_owned())
+    );
+    assert_eq!(
+        replay.last().unwrap().page.get("b"),
+        Some(&"two".to_owned())
+    );
+    assert_eq!(
+        replay.last().unwrap().page.get("c"),
+        Some(&"three".to_owned())
+    );
     state.action(id(1), id(5), 3, 0).unwrap();
 }

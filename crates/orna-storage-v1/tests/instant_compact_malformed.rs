@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::Uuid;
@@ -19,8 +19,7 @@ use parquet::{
 
 const TABLE: Uuid = Uuid::from_u128(1);
 const KEY: [u8; 16] = [
-    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
-    0x1f,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
 ];
 
 fn instant_type() -> OvbRaw {
@@ -30,7 +29,10 @@ fn instant_type() -> OvbRaw {
 fn profile() -> CompactOvbProfile {
     let schema = OvbRaw::Map(vec![
         (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
-        (OvbRaw::Int(1.into()), OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(TABLE.as_bytes().to_vec())))),
+        (
+            OvbRaw::Int(1.into()),
+            OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(TABLE.as_bytes().to_vec()))),
+        ),
         (
             OvbRaw::Int(2.into()),
             OvbRaw::Array(vec![OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(KEY.to_vec())))]),
@@ -53,7 +55,10 @@ fn profile() -> CompactOvbProfile {
 fn descriptor(encoding: &str, parameters: Vec<OvbRaw>) -> OvbRaw {
     OvbRaw::Array(vec![
         OvbRaw::Array(vec![OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(KEY.to_vec())))]),
-        OvbRaw::Array(vec![OvbRaw::Text(format!("f_{}", Uuid::from_bytes(KEY).simple()))]),
+        OvbRaw::Array(vec![OvbRaw::Text(format!(
+            "f_{}",
+            Uuid::from_bytes(KEY).simple()
+        ))]),
         instant_type(),
         OvbRaw::Text(encoding.into()),
         OvbRaw::Array(parameters),
@@ -81,7 +86,10 @@ fn metadata(profile: &CompactOvbProfile, column_descriptor: OvbRaw) -> Vec<KeyVa
             Some(BASE64.encode(profile.schema().encode().unwrap())),
         ),
         KeyValue::new("orna.columns.ovb".into(), Some(BASE64.encode(columns))),
-        KeyValue::new("orna.encoder".into(), Some("instant-malformed-proof-v1".into())),
+        KeyValue::new(
+            "orna.encoder".into(),
+            Some("instant-malformed-proof-v1".into()),
+        ),
     ]
 }
 
@@ -116,7 +124,10 @@ fn instant_parquet(
             .set_dictionary_enabled(false)
             .set_encoding(encoding)
             .set_writer_version(WriterVersion::PARQUET_2_0)
-            .set_key_value_metadata(Some(metadata(profile, descriptor("instant_ns", Vec::new()))))
+            .set_key_value_metadata(Some(metadata(
+                profile,
+                descriptor("instant_ns", Vec::new()),
+            )))
             .build(),
     );
     let mut bytes = Vec::new();
@@ -171,7 +182,6 @@ fn instant_dictionary_parquet(profile: &CompactOvbProfile, values: &[i64]) -> Ve
     writer.close().unwrap();
     with_page_checksums(bytes)
 }
-
 
 struct PageHeader {
     encoded_len: usize,
@@ -325,9 +335,11 @@ fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
         .iter()
         .flat_map(|group| {
             group.columns().iter().map(|meta| {
-                let start = meta.dictionary_page_offset().unwrap_or_else(|| meta.data_page_offset()) as usize;
+                let start =
+                    meta.dictionary_page_offset()
+                        .unwrap_or_else(|| meta.data_page_offset()) as usize;
                 let end = start + meta.compressed_size() as usize;
-                (start, end, checksummed_chunk(&bytes[start..end]) )
+                (start, end, checksummed_chunk(&bytes[start..end]))
             })
         })
         .collect::<Vec<_>>();
@@ -348,21 +360,36 @@ fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
         let mut builder = group.clone().into_builder();
         let mut columns = builder.take_columns();
         for column in &mut columns {
-            let old_start = column.dictionary_page_offset().unwrap_or_else(|| column.data_page_offset()) as usize;
-            let Some((_, _, new_start, new_len)) = updates.iter().find(|item| item.0 == old_start) else { continue };
+            let old_start = column
+                .dictionary_page_offset()
+                .unwrap_or_else(|| column.data_page_offset()) as usize;
+            let Some((_, _, new_start, new_len)) = updates.iter().find(|item| item.0 == old_start)
+            else {
+                continue;
+            };
             let shift = *new_start as i64 - old_start as i64;
-            let replacement = column.clone().into_builder()
+            let replacement = column
+                .clone()
+                .into_builder()
                 .set_data_page_offset(column.data_page_offset() + shift)
-                .set_dictionary_page_offset(column.dictionary_page_offset().map(|offset| offset + shift))
-                .set_total_compressed_size(column.compressed_size() + (*new_len as i64 - column.compressed_size()))
-                .build().unwrap();
+                .set_dictionary_page_offset(
+                    column.dictionary_page_offset().map(|offset| offset + shift),
+                )
+                .set_total_compressed_size(
+                    column.compressed_size() + (*new_len as i64 - column.compressed_size()),
+                )
+                .build()
+                .unwrap();
             *column = replacement;
         }
         *group = builder.set_column_metadata(columns).build().unwrap();
     }
-    let rewritten = parquet::file::metadata::ParquetMetaData::new(metadata.file_metadata().clone(), groups);
+    let rewritten =
+        parquet::file::metadata::ParquetMetaData::new(metadata.file_metadata().clone(), groups);
     let mut new_footer = Vec::new();
-    parquet::file::metadata::ParquetMetaDataWriter::new(&mut new_footer, &rewritten).finish().unwrap();
+    parquet::file::metadata::ParquetMetaDataWriter::new(&mut new_footer, &rewritten)
+        .finish()
+        .unwrap();
     data.extend(new_footer);
     data
 }
@@ -386,13 +413,19 @@ fn corrupt_metadata(bytes: Vec<u8>, corruption: MetadataCorruption) -> Vec<u8> {
     let mut column_builder = column.clone().into_builder();
     match corruption {
         MetadataCorruption::DictionaryOffset(offset) => {
-            *column = column_builder.set_dictionary_page_offset(Some(offset)).build().unwrap();
+            *column = column_builder
+                .set_dictionary_page_offset(Some(offset))
+                .build()
+                .unwrap();
         }
         MetadataCorruption::DataOffset(offset) => {
             *column = column_builder.set_data_page_offset(offset).build().unwrap();
         }
         MetadataCorruption::CompressedSize(size) => {
-            *column = column_builder.set_total_compressed_size(size).build().unwrap();
+            *column = column_builder
+                .set_total_compressed_size(size)
+                .build()
+                .unwrap();
         }
         MetadataCorruption::ColumnValues(values) => {
             *column = column_builder.set_num_values(values).build().unwrap();
@@ -470,7 +503,13 @@ fn rejects_instant_annotation_and_unit_mismatches_before_key_use() {
         ("wrong timestamp unit", Some("TIMESTAMP(MICROS,true)")),
         ("wrong adjusted-to-utc flag", Some("TIMESTAMP(NANOS,false)")),
     ] {
-        let bytes = instant_parquet(&profile, annotation, KeyLevel::Required, Encoding::PLAIN, &[0]);
+        let bytes = instant_parquet(
+            &profile,
+            annotation,
+            KeyLevel::Required,
+            Encoding::PLAIN,
+            &[0],
+        );
         assert!(
             matches!(
                 CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 1),
@@ -507,14 +546,10 @@ fn preserves_signed_nanosecond_boundaries_without_invalid_remainders() {
         Encoding::PLAIN,
         &values,
     );
-    let keys =
-        CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 2).unwrap();
+    let keys = CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 2).unwrap();
     assert_eq!(
         keys,
-        values
-            .into_iter()
-            .map(expected_instant)
-            .collect::<Vec<_>>()
+        values.into_iter().map(expected_instant).collect::<Vec<_>>()
     );
 }
 
@@ -611,14 +646,19 @@ fn rejects_corrupt_instant_dictionary_page_body_before_key_use() {
     let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
     let column = &reader.metadata().row_groups()[0].columns()[0];
     assert!(
-        column.encodings().any(|encoding| encoding == Encoding::RLE_DICTIONARY),
+        column
+            .encodings()
+            .any(|encoding| encoding == Encoding::RLE_DICTIONARY),
         "fixture must contain a dictionary-encoded data page"
     );
     let dictionary_start = column.dictionary_page_offset().unwrap() as usize;
     let data_start = column.data_page_offset() as usize;
     let dictionary_header = page_header(&bytes[dictionary_start..]);
     let dictionary_body = dictionary_start + dictionary_header.encoded_len;
-    assert!(dictionary_body < data_start, "fixture must contain a dictionary page");
+    assert!(
+        dictionary_body < data_start,
+        "fixture must contain a dictionary page"
+    );
     let mut corrupted = bytes;
     corrupted[dictionary_body] ^= 0x80;
     assert!(matches!(
@@ -672,10 +712,9 @@ fn rejects_dictionary_column_and_row_group_boundary_mismatches() {
         let malformed = corrupt_metadata(bytes.clone(), corruption);
         let result = CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &malformed, 4);
         match name {
-            "column value count" => assert!(matches!(
-                result,
-                Err(CompactParquetError::InvalidParquet)
-            )),
+            "column value count" => {
+                assert!(matches!(result, Err(CompactParquetError::InvalidParquet)))
+            }
             "row-group row count" => assert!(matches!(
                 result,
                 Err(CompactParquetError::RowCountMismatch {

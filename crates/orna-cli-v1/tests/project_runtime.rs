@@ -255,7 +255,11 @@ fn binary_explain_returns_extended_orna_diagnostic_guidance() {
         .output()
         .expect("CLI process");
     assert!(!unknown.status.success());
-    assert_eq!(unknown.status.code(), Some(2), "unknown explain uses usage exit status");
+    assert_eq!(
+        unknown.status.code(),
+        Some(2),
+        "unknown explain uses usage exit status"
+    );
     assert!(unknown.stdout.is_empty());
     assert_eq!(
         unknown.stderr,

@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use orna_semantic_v1::{
-    admit_row_unit, analyze, Analysis, DIAG_ASSERTION_EFFECT, DIAG_BAD_PATH, DIAG_TYPE,
-    DIAG_UNRESOLVED, DIAG_UNSUPPORTED, ModuleInput, RowUnitInput,
+    Analysis, DIAG_ASSERTION_EFFECT, DIAG_BAD_PATH, DIAG_TYPE, DIAG_UNRESOLVED, DIAG_UNSUPPORTED,
+    ModuleInput, RowUnitInput, admit_row_unit, analyze,
 };
 
 fn analysis_for(source: &str) -> Analysis {
@@ -27,7 +27,10 @@ fn candidate<'a>(
 
 fn assert_code(admission: &orna_semantic_v1::RowUnitAdmission, code: &str) {
     assert!(
-        admission.diagnostics.iter().any(|diagnostic| diagnostic.code() == code),
+        admission
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == code),
         "expected {code}, got {:?}",
         admission.diagnostics
     );
@@ -198,16 +201,8 @@ fn row_unit_rejects_malformed_key_escape() {
     );
 }
 
-fn reading_candidate<'a>(
-    logical_path: &'a str,
-    key_path: &'a [String],
-) -> RowUnitInput<'a> {
-    candidate(
-        logical_path,
-        "contacts/Reading",
-        key_path,
-        "{ value: 1.5 }",
-    )
+fn reading_candidate<'a>(logical_path: &'a str, key_path: &'a [String]) -> RowUnitInput<'a> {
+    candidate(logical_path, "contacts/Reading", key_path, "{ value: 1.5 }")
 }
 
 #[test]
@@ -226,15 +221,11 @@ fn row_unit_rejects_missing_extra_ordered_and_mistyped_keys() {
 
     for key_path in cases {
         let logical_path = format!("contacts/Reading/{}", key_path.join("/"));
-        let admitted = admit_row_unit(
-            &analysis,
-            &reading_candidate(&logical_path, &key_path),
-        );
+        let admitted = admit_row_unit(&analysis, &reading_candidate(&logical_path, &key_path));
         assert!(!admitted.is_ok(), "unexpected admission for {key_path:?}");
         assert_code(&admitted, DIAG_TYPE);
     }
 }
-
 
 #[test]
 fn row_unit_rejects_wrong_unknown_and_missing_non_key_fields() {

@@ -5,8 +5,6 @@ use std::{
     process::Command,
 };
 
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use ed25519_dalek::{Signer, SigningKey};
 use fs2::FileExt;
 use orna_foundation_v1::{CanonicalValue, GitHash, OvbRaw, SchemaDescriptor};
@@ -30,6 +28,8 @@ use parquet::{
     schema::parser::parse_message_type,
 };
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -1907,7 +1907,6 @@ fn checkout_force_revalidation_rejects_executable_bit_drift() {
     ));
     assert_eq!(git_state(&repo, root.path()), before);
 }
-
 
 #[test]
 fn checkout_preflight_revalidation_rejects_index_head_and_branch_tip_drift() {
@@ -5364,12 +5363,7 @@ fn cross_protocol_recovery_journals_are_mutually_exclusive() {
     let plan = repo.plan_checkout("experiment", runtime).unwrap();
     let token = plan.force_token();
     let discard = repo
-        .validate_checkout_discard_set(
-            &plan,
-            true,
-            Some(&token),
-            plan.git().discardable_paths(),
-        )
+        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
         .unwrap();
     repo.persist_validated_checkout_discard(&discard).unwrap();
     let checkout_path = repo.runtime_paths().root().join("checkout-journal.bin");
@@ -5421,14 +5415,8 @@ fn cross_protocol_recovery_journals_are_mutually_exclusive() {
         repo.recover_compact_publication_boundary(),
         Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
     ));
-    let receipt = CompactRuntimeReceipt::new(
-        [87; 16],
-        [88; 32],
-        head.clone(),
-        [89; 32],
-        [0; 64],
-    )
-    .unwrap();
+    let receipt =
+        CompactRuntimeReceipt::new([87; 16], [88; 32], head.clone(), [89; 32], [0; 64]).unwrap();
     assert!(matches!(
         repo.finish_compact_with_receipt(&receipt),
         Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)

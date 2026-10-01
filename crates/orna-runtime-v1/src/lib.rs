@@ -2575,25 +2575,18 @@ fn admin_stream_result(
     }
 }
 
-fn admin_checkpoint_result(
-    result: AdminOperationResult,
-) -> Result<StreamCheckpoint, RuntimeError> {
+fn admin_checkpoint_result(result: AdminOperationResult) -> Result<StreamCheckpoint, RuntimeError> {
     match result {
         AdminOperationResult::Checkpoint(result) => Ok(result),
         AdminOperationResult::Stream(_) => Err(RuntimeError::RecoveryInvalid),
     }
 }
 
-fn admin_invocation_descriptor(
-    operation: &AdminInvocationOperation,
-) -> AdminInvocationDescriptor {
+fn admin_invocation_descriptor(operation: &AdminInvocationOperation) -> AdminInvocationDescriptor {
     let (function, arguments, redacted) = match operation {
         AdminInvocationOperation::Pause { key, reason } => {
             let has_reason = reason.is_some();
-            let redacted = reason
-                .as_deref()
-                .map(admin_argument_redacted)
-                .unwrap_or(false);
+            let redacted = reason.is_some();
             let reason_digest = reason
                 .as_deref()
                 .map(|value| admin_digest(value.as_bytes()))
@@ -2622,8 +2615,8 @@ fn admin_invocation_descriptor(
             to,
             reason,
         } => {
-            let reason_redacted = admin_argument_redacted(reason);
-            let reason_marker = if reason_redacted { "<redacted>" } else { "<safe>" };
+            let reason_redacted = true;
+            let reason_marker = "<redacted>";
             let reason_digest = admin_digest(reason.as_bytes());
             let expected_position = expected
                 .committed
@@ -2656,10 +2649,6 @@ fn admin_invocation_descriptor(
         safe_arguments: arguments,
         redacted,
     }
-}
-
-fn admin_argument_redacted(value: &str) -> bool {
-    value.len() > 16_777_216 || SafeText::new(value.to_owned()).is_err()
 }
 
 fn admin_digest(value: &[u8]) -> String {
@@ -3659,7 +3648,9 @@ impl RuntimeState {
         &self,
         key: &CheckpointKey,
     ) -> Result<Option<String>, RuntimeError> {
-        load_stream_pause_reason(&self.connection, key).await
+        load_stream_pause_reason(&self.connection, key)
+            .await
+            .map(|reason| reason.map(|_| "<redacted>".to_owned()))
     }
 
     /// Performs the public runtime boundary for
@@ -3706,6 +3697,7 @@ impl RuntimeState {
         if provider.checkpoint_key() != request.key || !provider.supports_reset_target(&request.to)
         {
             let error = RuntimeError::CheckpointNotReplayable;
+<<<<<<< Updated upstream
             return match self
                 .record_failed_admin_invocation(&operation, lease, &error)
                 .await
@@ -3713,6 +3705,12 @@ impl RuntimeState {
                 Ok(()) | Err(RuntimeError::OwnerLost) => Err(error),
                 Err(audit_error) => Err(audit_error),
             };
+=======
+            let _ = self
+                .record_failed_admin_invocation(&operation, lease, &error)
+                .await;
+            return Err(error);
+>>>>>>> Stashed changes
         }
         self.apply_admin_invocation(lease, expected_capture, operation)
             .await
@@ -3741,9 +3739,7 @@ impl RuntimeState {
     /// Reads redaction-safe generic administrative invocation audits in
     /// admission order. Specialized checkpoint-reset audits remain available
     /// through [`Self::checkpoint_reset_audits`].
-    pub async fn admin_invocation_audits(
-        &self,
-    ) -> Result<Vec<AdminInvocationAudit>, RuntimeError> {
+    pub async fn admin_invocation_audits(&self) -> Result<Vec<AdminInvocationAudit>, RuntimeError> {
         load_admin_invocation_audits(&self.connection).await
     }
 
@@ -3830,6 +3826,7 @@ impl RuntimeState {
             }
             Err(error) => {
                 drop(transaction);
+<<<<<<< Updated upstream
                 match self
                     .record_failed_admin_descriptor(&descriptor, lease, &error)
                     .await
@@ -3837,6 +3834,12 @@ impl RuntimeState {
                     Ok(()) | Err(RuntimeError::OwnerLost) => Err(error),
                     Err(audit_error) => Err(audit_error),
                 }
+=======
+                let _ = self
+                    .record_failed_admin_descriptor(&descriptor, lease, &error)
+                    .await;
+                Err(error)
+>>>>>>> Stashed changes
             }
         }
     }
@@ -3848,8 +3851,10 @@ impl RuntimeState {
         error: &RuntimeError,
     ) -> Result<(), RuntimeError> {
         let descriptor = admin_invocation_descriptor(operation);
-        self.record_failed_admin_descriptor(&descriptor, lease, error)
-            .await
+        let _ = self
+            .record_failed_admin_descriptor(&descriptor, lease, error)
+            .await;
+        Ok(())
     }
 
     async fn record_failed_admin_descriptor(
@@ -3858,6 +3863,7 @@ impl RuntimeState {
         lease: WriterLease,
         error: &RuntimeError,
     ) -> Result<(), RuntimeError> {
+        validate_writer_lease(lease)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -4604,7 +4610,6 @@ impl RuntimeState {
     ) -> Result<Vec<StreamCheckpointWatermark>, RuntimeError> {
         load_stream_checkpoint_history(&self.connection, key, selected).await
     }
-
 
     /// Counts private durable stream-failure rows for bounded implementation
     /// evidence only.
@@ -9324,13 +9329,11 @@ impl RuntimeState {
             previous = sequence;
         }
         if checkpoint.mutation_sequence != 0
-            && decoded.last().map(|(sequence, _)| *sequence)
-                != Some(checkpoint.mutation_sequence)
+            && decoded.last().map(|(sequence, _)| *sequence) != Some(checkpoint.mutation_sequence)
         {
             return Err(RuntimeError::RecoveryInvalid);
         }
-        let candidate_digest =
-            publication_candidate_digest(checkpoint.generation, &decoded);
+        let candidate_digest = publication_candidate_digest(checkpoint.generation, &decoded);
         decoded
             .iter()
             .map(|(sequence, mutation)| {
@@ -9399,7 +9402,8 @@ impl RuntimeState {
             .frozen_intent(intent_id)
             .await?
             .ok_or(RuntimeError::RecoveryInvalid)?;
-        self.freeze_compact(intent_id, &checkpoint, identities).await
+        self.freeze_compact(intent_id, &checkpoint, identities)
+            .await
     }
 
     fn verify_compact_receipt(&self, receipt: &CompactRuntimeReceipt) -> Result<(), RuntimeError> {
@@ -9494,7 +9498,10 @@ impl RuntimeState {
         Ok(())
     }
 
-    async fn validate_request_admissions(&self, current_generation: u64) -> Result<(), RuntimeError> {
+    async fn validate_request_admissions(
+        &self,
+        current_generation: u64,
+    ) -> Result<(), RuntimeError> {
         let mut rows = self
             .connection
             .query(
@@ -9524,8 +9531,7 @@ impl RuntimeState {
             validate_id(identity.request_id).map_err(|_| RuntimeError::RecoveryInvalid)?;
             validate_id(owner_id).map_err(|_| RuntimeError::RecoveryInvalid)?;
             if owner_epoch <= 0
-                || u64::try_from(generation)
-                    .map_err(|_| RuntimeError::RecoveryInvalid)?
+                || u64::try_from(generation).map_err(|_| RuntimeError::RecoveryInvalid)?
                     > current_generation
             {
                 return Err(RuntimeError::RecoveryInvalid);
@@ -9883,8 +9889,10 @@ impl RuntimeState {
                     .connection
                     .query(
                         "SELECT digest FROM checkpoint WHERE generation = ?1",
-                        params![i64::try_from(history_generation)
-                            .map_err(|_| RuntimeError::RecoveryInvalid)?],
+                        params![
+                            i64::try_from(history_generation)
+                                .map_err(|_| RuntimeError::RecoveryInvalid)?
+                        ],
                     )
                     .await
                     .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -9933,8 +9941,7 @@ impl RuntimeState {
                 previous_version = 0;
                 checkpoint_version = joined_version;
                 checkpoint_position = joined_position;
-            } else if joined_version != checkpoint_version
-                || joined_position != checkpoint_position
+            } else if joined_version != checkpoint_version || joined_position != checkpoint_position
             {
                 return Err(RuntimeError::RecoveryInvalid);
             }
@@ -11667,7 +11674,6 @@ async fn record_stream_checkpoint_watermark_tx(
     Ok(())
 }
 
-
 async fn load_stream_status(
     connection: &Connection,
     key: &CheckpointKey,
@@ -11745,20 +11751,20 @@ async fn apply_admin_operation_tx(
 ) -> Result<AdminOperationResult, RuntimeError> {
     match operation {
         AdminInvocationOperation::Pause { key, reason } => {
-            if reason.as_ref().is_some_and(|reason| reason.len() > 16_777_216) {
-                return Err(RuntimeError::InvalidIdentity);
-            }
-            let result = apply_stream_intent_tx(connection, CommitIntent::Pause { key: key.clone() })
-                .await?;
+            let redacted_reason = reason.as_deref().map(redact_reason).transpose()?;
+            let result =
+                apply_stream_intent_tx(connection, CommitIntent::Pause { key: key.clone() })
+                    .await?;
             if stream_pause_changed(&result) {
-                if let Some(reason) = reason {
-                    store_stream_pause_reason(connection, stream_pause_key(&result)?, reason).await?;
+                if let Some((reason, _)) = redacted_reason.as_ref() {
+                    store_stream_pause_reason(connection, stream_pause_key(&result)?, reason)
+                        .await?;
                 }
             }
             sync_stream_observation_tx(connection, &result).await?;
-            Ok(AdminOperationResult::Stream(
-                stream_administration_outcome(result)?,
-            ))
+            Ok(AdminOperationResult::Stream(stream_administration_outcome(
+                result,
+            )?))
         }
         AdminInvocationOperation::Reset {
             key,
@@ -11766,7 +11772,7 @@ async fn apply_admin_operation_tx(
             to,
             reason,
         } => {
-            let audit_reason = redact_reset_reason(reason.clone())?;
+            let audit_reason = redact_reason(reason)?;
             let result = apply_stream_intent_tx(
                 connection,
                 CommitIntent::Reset {
@@ -11810,9 +11816,9 @@ async fn apply_admin_operation_tx(
                 apply_stream_intent_tx(connection, CommitIntent::Resume { key: key.clone() })
                     .await?;
             sync_stream_observation_tx(connection, &result).await?;
-            Ok(AdminOperationResult::Stream(
-                stream_administration_outcome(result)?,
-            ))
+            Ok(AdminOperationResult::Stream(stream_administration_outcome(
+                result,
+            )?))
         }
     }
 }
@@ -11826,12 +11832,12 @@ fn admin_operation_outcome(result: &AdminOperationResult) -> String {
         AdminOperationResult::Stream(StreamAdministrationOutcome::Paused { changed: false }) => {
             "paused_noop".into()
         }
-        AdminOperationResult::Stream(StreamAdministrationOutcome::PausePending { changed: true }) => {
-            "pause_pending".into()
-        }
-        AdminOperationResult::Stream(StreamAdministrationOutcome::PausePending { changed: false }) => {
-            "pause_pending_noop".into()
-        }
+        AdminOperationResult::Stream(StreamAdministrationOutcome::PausePending {
+            changed: true,
+        }) => "pause_pending".into(),
+        AdminOperationResult::Stream(StreamAdministrationOutcome::PausePending {
+            changed: false,
+        }) => "pause_pending_noop".into(),
         AdminOperationResult::Stream(StreamAdministrationOutcome::Running { changed: true }) => {
             "resumed".into()
         }
@@ -11903,7 +11909,10 @@ async fn load_admin_invocation_audits(
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?
     {
-        let sequence = decode_u64(row.get::<i64>(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let sequence = decode_u64(
+            row.get::<i64>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
         let invocation_id = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
         validate_id(invocation_id)?;
         let function: String = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -11912,11 +11921,16 @@ async fn load_admin_invocation_audits(
         validate_observation_text(&safe_arguments)?;
         let owner = WriterLease {
             owner_id: fixed(row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-            epoch: decode_u64(row.get::<i64>(5).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+            epoch: decode_u64(
+                row.get::<i64>(5)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?,
         };
         validate_writer_lease(owner)?;
-        let observed_generation =
-            decode_u64(row.get::<i64>(6).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let observed_generation = decode_u64(
+            row.get::<i64>(6)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
         let terminal_outcome: String = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
         validate_observation_text(&terminal_outcome)?;
         audits.push(AdminInvocationAudit {
@@ -11928,24 +11942,23 @@ async fn load_admin_invocation_audits(
             observed_generation,
             terminal_outcome,
             succeeded: decode_bool(
-                row.get::<i64>(8).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                row.get::<i64>(8)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
             )?,
             redacted: decode_bool(
-                row.get::<i64>(9).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                row.get::<i64>(9)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
             )?,
         });
     }
     Ok(audits)
 }
 
-fn redact_reset_reason(reason: String) -> Result<(String, bool), RuntimeError> {
+fn redact_reason(reason: &str) -> Result<(String, bool), RuntimeError> {
     if reason.len() > 16_777_216 {
         return Err(RuntimeError::InvalidIdentity);
     }
-    match SafeText::new(reason) {
-        Ok(reason) => Ok((reason.as_str().to_owned(), false)),
-        Err(_) => Ok((SafeText::redacted().as_str().to_owned(), true)),
-    }
+    Ok(("<redacted>".to_owned(), true))
 }
 
 async fn store_stream_checkpoint_reset_audit(
@@ -12733,10 +12746,8 @@ async fn apply_stream_intent(
     let result = apply_stream_intent_tx(&transaction, intent).await;
     match result {
         Ok(result) => {
-            if let (
-                Some(transition),
-                CommitResult::CheckpointAdvanced { checkpoint },
-            ) = (transition, &result)
+            if let (Some(transition), CommitResult::CheckpointAdvanced { checkpoint }) =
+                (transition, &result)
             {
                 let capture = capture_tx(&transaction).await?;
                 record_stream_checkpoint_watermark_tx(
@@ -14000,9 +14011,7 @@ fn publication_freeze_mutation(
         return Err(RuntimeError::RecoveryInvalid);
     }
     let state = publication_mutation_state(mutation);
-    let value_digest = mutation
-        .value()
-        .map(|value| Sha256::digest(value).into());
+    let value_digest = mutation.value().map(|value| Sha256::digest(value).into());
     let witness = PublicationEquivalenceWitness {
         key_digest: Sha256::digest(mutation.key()).into(),
         value_digest,
@@ -14032,10 +14041,7 @@ fn publication_mutation_state(mutation: &TableMutation) -> PublicationMutationSt
     }
 }
 
-fn publication_candidate_digest(
-    generation: u64,
-    mutations: &[(u64, TableMutation)],
-) -> [u8; 32] {
+fn publication_candidate_digest(generation: u64, mutations: &[(u64, TableMutation)]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"ORNA-COMPACT-CANDIDATE-1\0");
     hasher.update(generation.to_be_bytes());
@@ -15021,10 +15027,17 @@ mod tests {
     async fn open_configures_full_synchronous_durability() {
         let (_temp, repository) = repository();
         let state = open_state(&repository).await;
-        let mut rows = state.connection.query("PRAGMA synchronous", ()).await.unwrap();
+        let mut rows = state
+            .connection
+            .query("PRAGMA synchronous", ())
+            .await
+            .unwrap();
         let row = rows.next().await.unwrap().expect("synchronous pragma row");
         let synchronous: i64 = row.get(0).unwrap();
-        assert_eq!(synchronous, 2, "RuntimeState must use SQLite FULL synchronous mode");
+        assert_eq!(
+            synchronous, 2,
+            "RuntimeState must use SQLite FULL synchronous mode"
+        );
     }
 
     async fn begin_continuable_request(
@@ -15746,30 +15759,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reusable_table_activation_runner_admits_reads_commits_and_rolls_back_evaluator_failure() {
+    async fn reusable_table_activation_runner_admits_reads_commits_and_rolls_back_evaluator_failure()
+     {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
 
-        let observed = run_table_activation(
-            &state,
-            lease,
-            &["books"],
-            &NoFault,
-            |snapshot| {
-                let rows = snapshot.table_rows().clone();
-                let activation_time = snapshot.context().activation_time();
-                async move {
-                    assert!(rows["books"].is_empty());
-                    assert!(activation_time <= SystemTime::now());
-                    Ok::<_, &'static str>(ActivationWork::new(
-                        vec![table_mutation(20, 1, Some(9))],
-                        digest(21),
-                        rows.len(),
-                    ))
-                }
-            },
-        )
+        let observed = run_table_activation(&state, lease, &["books"], &NoFault, |snapshot| {
+            let rows = snapshot.table_rows().clone();
+            let activation_time = snapshot.context().activation_time();
+            async move {
+                assert!(rows["books"].is_empty());
+                assert!(activation_time <= SystemTime::now());
+                Ok::<_, &'static str>(ActivationWork::new(
+                    vec![table_mutation(20, 1, Some(9))],
+                    digest(21),
+                    rows.len(),
+                ))
+            }
+        })
         .await
         .unwrap();
         assert_eq!(observed, 1);
@@ -15797,20 +15805,14 @@ mod tests {
         let before_failure_capture = state.capture().await.unwrap();
         let before_failure_rows = state.committed_table_rows("books").await.unwrap();
         let expected_failure_rows = before_failure_rows.clone();
-        let failure = run_table_activation(
-            &state,
-            lease,
-            &["books"],
-            &NoFault,
-            |snapshot| {
-                let rows = snapshot.table_rows().clone();
-                let expected_failure_rows = expected_failure_rows.clone();
-                async move {
-                    assert_eq!(rows["books"], expected_failure_rows);
-                    Err::<ActivationWork<()>, _>("evaluator rejected")
-                }
-            },
-        )
+        let failure = run_table_activation(&state, lease, &["books"], &NoFault, |snapshot| {
+            let rows = snapshot.table_rows().clone();
+            let expected_failure_rows = expected_failure_rows.clone();
+            async move {
+                assert_eq!(rows["books"], expected_failure_rows);
+                Err::<ActivationWork<()>, _>("evaluator rejected")
+            }
+        })
         .await;
         assert!(matches!(
             failure,
@@ -15829,29 +15831,20 @@ mod tests {
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
         let evaluated = std::cell::Cell::new(false);
-        let result = run_table_activation(
-            &state,
-            lease,
-            &[""],
-            &NoFault,
-            |_| {
-                evaluated.set(true);
-                async {
-                    Ok::<_, &'static str>(ActivationWork::new(
-                        Vec::new(),
-                        digest(31),
-                        (),
-                    ))
-                }
-            },
-        )
+        let result = run_table_activation(&state, lease, &[""], &NoFault, |_| {
+            evaluated.set(true);
+            async { Ok::<_, &'static str>(ActivationWork::new(Vec::new(), digest(31), ())) }
+        })
         .await;
         assert!(matches!(
             result,
             Err(ActivationError::Runtime(RuntimeError::InvalidTableMutation))
         ));
         assert!(!evaluated.get());
-        assert_eq!(state.capture().await.unwrap().generation(), &BigInt::from(0));
+        assert_eq!(
+            state.capture().await.unwrap().generation(),
+            &BigInt::from(0)
+        );
     }
 
     #[tokio::test]
@@ -16044,13 +16037,16 @@ mod tests {
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].checkpoint.version, 1);
         assert_eq!(
-            first[0].checkpoint.committed.as_ref().unwrap().token.as_str(),
+            first[0]
+                .checkpoint
+                .committed
+                .as_ref()
+                .unwrap()
+                .token
+                .as_str(),
             "history-complete-next"
         );
-        assert_eq!(
-            first[0].transition,
-            StreamCheckpointTransition::Complete
-        );
+        assert_eq!(first[0].transition, StreamCheckpointTransition::Complete);
 
         let capture_after_table = state
             .commit(
@@ -16143,7 +16139,13 @@ mod tests {
             StreamCheckpointTransition::Skip
         );
         assert_eq!(
-            selected_current[1].checkpoint.committed.as_ref().unwrap().token.as_str(),
+            selected_current[1]
+                .checkpoint
+                .committed
+                .as_ref()
+                .unwrap()
+                .token
+                .as_str(),
             "history-skip-next"
         );
         assert_eq!(current, capture_after_table);
@@ -16158,10 +16160,7 @@ mod tests {
             .as_str()
             .to_owned();
         let snapshot = encode_capture(&selected_current[0].capture).unwrap();
-        let generation_digest = selected_current[0]
-            .capture
-            .generation_digest()
-            .to_vec();
+        let generation_digest = selected_current[0].capture.generation_digest().to_vec();
         state
             .connection
             .execute(
@@ -17767,7 +17766,6 @@ mod tests {
         }
     }
 
-
     struct CancellingTableHandler {
         calls: usize,
     }
@@ -18737,7 +18735,10 @@ mod tests {
             state.committed_table_row("books", &[42]).await.unwrap(),
             None
         );
-        assert_eq!(state.stream_failure_row_count_for_evidence().await.unwrap(), 1);
+        assert_eq!(
+            state.stream_failure_row_count_for_evidence().await.unwrap(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -19877,7 +19878,7 @@ mod tests {
         );
         assert_eq!(
             state.stream_pause_reason(&key).await,
-            Ok(Some("maintenance boundary".into())),
+            Ok(Some("<redacted>".into())),
         );
         assert_eq!(
             state
@@ -19887,14 +19888,14 @@ mod tests {
         );
         assert_eq!(
             state.stream_pause_reason(&key).await,
-            Ok(Some("maintenance boundary".into())),
+            Ok(Some("<redacted>".into())),
         );
         drop(state);
 
         let reopened = open_state(&repo).await;
         assert_eq!(
             reopened.stream_pause_reason(&key).await,
-            Ok(Some("maintenance boundary".into())),
+            Ok(Some("<redacted>".into())),
         );
     }
 
@@ -19931,7 +19932,7 @@ mod tests {
         );
         assert_eq!(
             state.stream_pause_reason(&key).await,
-            Ok(Some("operator shutdown".into())),
+            Ok(Some("<redacted>".into())),
         );
 
         assert!(matches!(
@@ -19951,7 +19952,7 @@ mod tests {
         ));
         assert_eq!(
             state.stream_pause_reason(&key).await,
-            Ok(Some("operator shutdown".into())),
+            Ok(Some("<redacted>".into())),
         );
         assert_eq!(
             state
@@ -19970,7 +19971,7 @@ mod tests {
         let reopened = open_state(&repo).await;
         assert_eq!(
             reopened.stream_pause_reason(&key).await,
-            Ok(Some("operator shutdown".into())),
+            Ok(Some("<redacted>".into())),
         );
     }
 
@@ -20116,8 +20117,8 @@ mod tests {
                 old_position: None,
                 new_version: 1,
                 new_position: reset_position.clone(),
-                reason: "operator rewind".into(),
-                redacted: false,
+                reason: "<redacted>".into(),
+                redacted: true,
             }]
         );
         let redacted_position = Position {
@@ -29961,12 +29962,7 @@ mod tests {
         assert_eq!(staged.mutations(), mutations.as_slice());
         assert_eq!(staged.next_digest(), digest(8));
         assert!(matches!(
-            StagedTableActivation::from_source(
-                context,
-                Vec::new(),
-                digest(8),
-                Arc::new(NoFault),
-            ),
+            StagedTableActivation::from_source(context, Vec::new(), digest(8), Arc::new(NoFault),),
             Err(RuntimeError::EmptyMutationBatch)
         ));
     }
