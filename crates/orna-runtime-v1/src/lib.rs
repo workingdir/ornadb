@@ -23778,6 +23778,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_take_two_counts_filtered_rows_before_child_leaf_cap() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=10)
+            .map(|row_id| {
+                let title = if matches!(row_id, 7 | 9) {
+                    "later"
+                } else {
+                    "current"
+                };
+                let target = if row_id == 10 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(127), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The filter rejects row eight, so take(2) must continue to the
+        // second match at row nine. Once those two child rows are accepted,
+        // the later row's missing lookup and the right union sibling remain
+        // outside the required leaf prefix.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-project-filtered-left-take-two-hides-next-leaf-failure.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(2u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "take(2) scans through one rejection, then stops before the failing next leaf row"
+        );
+    }
+
+    #[tokio::test]
     async fn query_projection_failures_recover_at_the_outer_boundary() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
