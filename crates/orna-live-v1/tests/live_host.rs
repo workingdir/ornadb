@@ -15671,6 +15671,10 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
         status_query([101; 16], [92; 16], other_fingerprint);
     let mixed_retry_fresh_status_fingerprint =
         request_fingerprint(&mixed_retry_fresh_status_query, [1; 16]);
+    let fresh_mixed_terminal_status_query =
+        status_query([102; 16], [91; 16], terminal_fingerprint);
+    let fresh_mixed_terminal_status_fingerprint =
+        request_fingerprint(&fresh_mixed_terminal_status_query, [1; 16]);
     let first_unknown_status = block_on(host.dispatch_frame(
         [6; 16],
         2,
@@ -15971,6 +15975,26 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
         .expect("the second intermediate snapshot survives the retarget"),
         intermediate_unknown_status
     );
+    let fresh_mixed_terminal_status = block_on(host.dispatch_frame(
+        [6; 16],
+        11,
+        Frame::Binary(fresh_mixed_terminal_status_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a fresh identity after the mismatch retries snapshots the terminal target");
+    assert!(matches!(
+        &fresh_mixed_terminal_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *fingerprint == terminal_fingerprint
+            && result == &expected_first_terminal_body
+    ));
 
     // The reference leaves the two-snapshot cycle unspecified after both
     // targets become terminal; keep each accepted response isolated while
@@ -16153,6 +16177,18 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
             && *fingerprint == other_fingerprint
             && result == &expected_second_terminal_body
     ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            23,
+            Frame::Binary(fresh_mixed_terminal_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the fresh mixed-phase identity remains pinned after the second target fails"),
+        fresh_mixed_terminal_status
+    );
     assert_eq!(
         block_on(host.dispatch_frame(
             [6; 16],
@@ -16511,6 +16547,11 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
             [101; 16],
             mixed_retry_fresh_status_fingerprint,
             mixed_retry_fresh_unknown_status,
+        ),
+        (
+            [102; 16],
+            fresh_mixed_terminal_status_fingerprint,
+            fresh_mixed_terminal_status,
         ),
         ([97; 16], current_first_status_fingerprint, current_first_status),
         ([98; 16], current_second_status_fingerprint, current_second_status),
