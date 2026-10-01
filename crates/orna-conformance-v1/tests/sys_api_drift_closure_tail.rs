@@ -212,6 +212,26 @@ fn edge_interplay_fixture_projects_nullable_sibling_rows_through_flat_map() {
 }
 
 #[test]
+fn edge_interplay_fixture_keeps_nullable_sibling_after_outer_filter() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The frozen schema does not connect an outer Column's key_position to nullable fields on
+    // same-table siblings; keep the sibling computed_expression nullable through flat_map.
+    assert!(
+        analysis.is_ok(),
+        "outer nullable-field filters must preserve sibling nullable projections: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn runtime_publication_counters_do_not_leak_into_frozen_sys_types() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-internal-publication-metadata.orna",
