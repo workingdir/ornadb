@@ -1,0 +1,8 @@
+// sys-module: sys
+// sys-op: sys.start(Value)
+pub fn start(function: sys.FunctionRef, arguments: sys.ArgumentMap, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.separate, idempotency_key: Str? = null): sys.InvocationHandle<sys.Value> = error(code: "sys.binding.stub", message: "generated declaration stub");
+
+// sys-module: sys
+// sys-op: sys.start<T>
+// sys-parameter-alias: as=as_
+pub fn start<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap, as_: T, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.separate, idempotency_key: Str? = null): sys.InvocationHandle<T> = error(code: "sys.binding.stub", message: "generated declaration stub");
