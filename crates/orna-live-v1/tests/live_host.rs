@@ -5269,7 +5269,7 @@ fn durable_status_snapshots_keep_reserved_and_running_after_completion_and_recov
 
     let mut host = durable_host_with_owner(runtime, owner.owner_id);
     let mut issuer = Issuer(1, None);
-    let credential = create(&mut host, &mut issuer);
+    let credential = create_with_expiration(&mut host, &mut issuer, 10_000);
     block_on(host.resume(ResumeRequest {
         id: session,
         origin: &origin(),
@@ -5360,14 +5360,19 @@ fn durable_status_snapshots_keep_reserved_and_running_after_completion_and_recov
         .expect("the exact query replays its pre-completion snapshot");
         assert_eq!(&retry, expected);
     }
+    let mut snapshots = vec![
+        (reserved_query.clone(), reserved_snapshot.clone()),
+        (running_query.clone(), running_snapshot.clone()),
+    ];
     for (request, target, fingerprint, result) in [
-        ([85; 16], [81; 16], reserved_fingerprint, reserved_result),
-        ([86; 16], [82; 16], running_fingerprint, running_result),
+        ([85; 16], [81; 16], reserved_fingerprint, &reserved_result),
+        ([86; 16], [82; 16], running_fingerprint, &running_result),
     ] {
+        let query = status_query(request, target, fingerprint);
         let fresh = block_on(host.dispatch_frame(
             [5; 16],
             5,
-            Frame::Binary(status_query(request, target, fingerprint)),
+            Frame::Binary(query.clone()),
             &mut application,
         ))
         .unwrap()
@@ -5385,8 +5390,37 @@ fn durable_status_snapshots_keep_reserved_and_running_after_completion_and_recov
                 && *returned_fingerprint == fingerprint
                 && body == &expected_body
         ));
+        snapshots.push((query, fresh));
     }
     assert_eq!(application.calls, 0);
+
+    let mut current_attachment = [5; 16];
+    let mut sequence = 6;
+    for reconnect in 0..2 {
+        let next_attachment = [50 + reconnect; 16];
+        let outcome = block_on(host.resume(ResumeRequest {
+            id: session,
+            origin: &origin(),
+            credential: &credential,
+            attachment: next_attachment,
+            now: 6 + u64::from(reconnect),
+        }))
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            orna_security_v1::AttachOutcome::Replaced(previous)
+                if previous == orna_security_v1::AttachmentId::new(current_attachment)
+        ));
+        current_attachment = next_attachment;
+        replay_durable_status_snapshots(
+            &mut host,
+            current_attachment,
+            &snapshots,
+            &mut sequence,
+            &mut application,
+        );
+    }
+
     drop(host);
     drop(updater);
 
@@ -5399,7 +5433,8 @@ fn durable_status_snapshots_keep_reserved_and_running_after_completion_and_recov
         RequestOwner::from(owner),
     );
     let mut recovered_issuer = Issuer(2, None);
-    let recovered_credential = create(&mut recovered, &mut recovered_issuer);
+    let recovered_credential =
+        create_with_expiration(&mut recovered, &mut recovered_issuer, 10_000);
     block_on(recovered.resume(ResumeRequest {
         id: session,
         origin: &origin(),
@@ -5408,21 +5443,14 @@ fn durable_status_snapshots_keep_reserved_and_running_after_completion_and_recov
         now: 6,
     }))
     .unwrap();
-    for (query, expected) in [
-        (&reserved_query, &reserved_snapshot),
-        (&running_query, &running_snapshot),
-    ] {
-        let retry = block_on(recovered.dispatch_frame(
-            [6; 16],
-            7,
-            Frame::Binary(query.clone()),
-            &mut application,
-        ))
-        .unwrap()
-        .response
-        .expect("the exact snapshot survives host recovery");
-        assert_eq!(&retry, expected);
-    }
+    sequence += 1;
+    replay_durable_status_snapshots(
+        &mut recovered,
+        [6; 16],
+        &snapshots,
+        &mut sequence,
+        &mut application,
+    );
     for (request, target, fingerprint, result) in [
         (
             [87; 16],
@@ -5439,7 +5467,7 @@ fn durable_status_snapshots_keep_reserved_and_running_after_completion_and_recov
     ] {
         let fresh = block_on(recovered.dispatch_frame(
             [6; 16],
-            8,
+            sequence,
             Frame::Binary(status_query(request, target, fingerprint)),
             &mut application,
         ))
@@ -5458,6 +5486,7 @@ fn durable_status_snapshots_keep_reserved_and_running_after_completion_and_recov
                 && *returned_fingerprint == fingerprint
                 && body == &expected_body
         ));
+        sequence += 1;
     }
     assert_eq!(fence.owner_id, [76; 16]);
     assert_eq!(application.calls, 0);
