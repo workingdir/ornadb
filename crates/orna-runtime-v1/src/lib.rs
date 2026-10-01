@@ -20832,6 +20832,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_filter_assignment_tail() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(77), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on assignment inside the union-tail
+        // predicate. Its one matching row leaves take(2) short, so retain
+        // the following lookup failure after the predicate assigns the key.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-filter-assignment-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (23, 28),
+            "the union-tail assignment admits the missing id after the one match leaves take(2) short"
+        );
+    }
+
+    #[tokio::test]
     async fn query_take_four_reaches_lookup_failure_after_reject_after_seven_six_split() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
