@@ -358,3 +358,93 @@ fn nested_equal_oid_aliases_remain_distinct_through_the_public_resolver() {
     assert_eq!(root.database("archive").unwrap().pin().name(), "archive");
     assert_eq!(root.database("archive_copy").unwrap().pin().name(), "archive_copy");
 }
+
+#[test]
+fn nested_closure_module_routes_follow_exact_parent_aliases() {
+    let package_source = include_str!("fixtures/attach-package.orna");
+    let (shared_dir, shared_repository, base_commit) =
+        repository(&[("main.orna", package_source)]);
+    let short_source = package_source.replace("42", "43");
+    let short_manifest = format!(
+        "archive_copy {base_commit}\narchive_copy_archive {base_commit}\n"
+    );
+    let short_parent_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &short_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &short_manifest),
+        ],
+        "short alias closure routes",
+    );
+    let long_source = package_source.replace("42", "44");
+    let long_manifest = format!("archive {base_commit}\narchive_copy_archive {base_commit}\n");
+    let long_parent_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &long_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &long_manifest),
+        ],
+        "long alias closure routes",
+    );
+
+    let root_manifest = format!(
+        "archive {short_parent_commit}\narchive_copy {long_parent_commit}\n"
+    );
+    let (_root_dir, root_repository, root_commit) = repository(&[
+        ("main.orna", include_str!("fixtures/attach-primary.orna")),
+        (PACKAGE_PIN_MANIFEST_PATH, &root_manifest),
+    ]);
+    let loader = ProjectLoader::default();
+    let primary = PinnedDatabase::resolve("app", root_repository, &root_commit, loader).unwrap();
+    let resolver = PackageResolver::new(
+        [
+            ("archive".to_owned(), shared_repository.clone()),
+            ("archive_copy".to_owned(), shared_repository.clone()),
+            ("archive_copy_archive".to_owned(), shared_repository),
+        ],
+        loader,
+    )
+    .unwrap();
+
+    let root = resolver.resolve_for_parent(primary).unwrap();
+    assert_module_route(&root, "archive.orna", "= 43");
+    assert_module_route(&root, "archive_copy.orna", "= 44");
+
+    let short = root.database("archive").unwrap().clone();
+    let short_closure = resolver.resolve_for_parent(short).unwrap();
+    assert_eq!(short_closure.primary().pin().name(), "archive");
+    assert_eq!(short_closure.primary().pin().commit().as_str(), short_parent_commit);
+    assert_module_route(&short_closure, "main.orna", "= 43");
+    assert_module_route(&short_closure, "archive_copy.orna", "= 42");
+    assert_module_route(&short_closure, "archive_copy_archive.orna", "= 42");
+
+    let short_child = short_closure.database("archive_copy").unwrap().clone();
+    let short_leaf = resolver.resolve_for_parent(short_child).unwrap();
+    assert_eq!(short_leaf.primary().pin().name(), "archive_copy");
+    assert_eq!(short_leaf.primary().pin().commit().as_str(), base_commit);
+    assert_eq!(short_leaf.attached().count(), 0);
+
+    let long = root.database("archive_copy").unwrap().clone();
+    let long_closure = resolver.resolve_for_parent(long).unwrap();
+    assert_eq!(long_closure.primary().pin().name(), "archive_copy");
+    assert_eq!(long_closure.primary().pin().commit().as_str(), long_parent_commit);
+    assert_module_route(&long_closure, "main.orna", "= 44");
+    assert_module_route(&long_closure, "archive.orna", "= 42");
+    assert_module_route(&long_closure, "archive_copy_archive.orna", "= 42");
+
+    // The reference fixes each exact pin but does not specify prefix-related
+    // alias precedence between closure levels. V1 resolves the selected
+    // parent's complete alias before routing its direct child pins.
+    assert_eq!(root.database("archive").unwrap().pin().commit().as_str(), short_parent_commit);
+    assert_eq!(root.database("archive_copy").unwrap().pin().commit().as_str(), long_parent_commit);
+}
+
+fn assert_module_route(session: &AttachedDatabaseSession, path: &str, source_marker: &str) {
+    assert!(
+        session
+            .module_inputs()
+            .iter()
+            .any(|module| module.logical_path == path && module.source.contains(source_marker)),
+        "expected {path} to contain {source_marker}"
+    );
+}
