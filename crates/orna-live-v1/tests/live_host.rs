@@ -15663,6 +15663,10 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
     let intermediate_second_status_query = status_query([99; 16], [92; 16], other_fingerprint);
     let intermediate_second_status_fingerprint =
         request_fingerprint(&intermediate_second_status_query, [1; 16]);
+    let intermediate_first_status_query =
+        status_query([100; 16], [91; 16], terminal_fingerprint);
+    let intermediate_first_status_fingerprint =
+        request_fingerprint(&intermediate_first_status_query, [1; 16]);
     let first_unknown_status = block_on(host.dispatch_frame(
         [6; 16],
         2,
@@ -15719,6 +15723,8 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
     .unwrap()
     .response
     .expect("the first target remains a terminal fixture Eval");
+    let expected_first_terminal_body =
+        ResultBody::from_result(&terminal_eval_replay, Limits::default().protocol).unwrap();
 
     // The reference binds retries to each request fingerprint but leaves this
     // cross-target ordering open; keep the second identity's Unknown snapshot
@@ -15814,6 +15820,28 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
             fingerprint: None,
             result: None,
         } if *target == [92; 16]
+    ));
+    // Pin the mixed snapshot boundary while the first target is terminal and
+    // the second target is still Unknown.
+    let intermediate_terminal_status = block_on(host.dispatch_frame(
+        [6; 16],
+        11,
+        Frame::Binary(intermediate_first_status_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a fresh identity snapshots the first target as Terminal");
+    assert!(matches!(
+        &intermediate_terminal_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *fingerprint == terminal_fingerprint
+            && result == &expected_first_terminal_body
     ));
 
     // The reference leaves the two-snapshot cycle unspecified after both
@@ -15939,8 +15967,6 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
     let current_first_status_query = status_query([97; 16], [91; 16], terminal_fingerprint);
     let current_first_status_fingerprint =
         request_fingerprint(&current_first_status_query, [1; 16]);
-    let expected_first_terminal_body =
-        ResultBody::from_result(&terminal_eval_replay, Limits::default().protocol).unwrap();
     let current_first_status = block_on(host.dispatch_frame(
         [6; 16],
         21,
@@ -16010,6 +16036,18 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
         .response
         .expect("the intermediate second-target identity keeps its earlier Unknown snapshot"),
         intermediate_unknown_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            23,
+            Frame::Binary(intermediate_first_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the intermediate first-target identity keeps its Terminal snapshot"),
+        intermediate_terminal_status
     );
     assert_eq!(
         block_on(host.dispatch_frame(
@@ -16287,6 +16325,11 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
             [99; 16],
             intermediate_second_status_fingerprint,
             intermediate_unknown_status,
+        ),
+        (
+            [100; 16],
+            intermediate_first_status_fingerprint,
+            intermediate_terminal_status,
         ),
         ([97; 16], current_first_status_fingerprint, current_first_status),
         ([98; 16], current_second_status_fingerprint, current_second_status),
