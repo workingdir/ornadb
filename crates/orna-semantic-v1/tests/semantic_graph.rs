@@ -2602,6 +2602,54 @@ fn frozen_historical_program_resolves_through_authoritative_projection() {
 }
 
 #[test]
+fn historical_callable_context_survives_namespace_decomposition() {
+    let source = include_str!("fixtures/historical-closure-context-decomposed.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new("historical-closure-context.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn distinct_historical_callable_contexts_cannot_be_mixed() {
+    let source = include_str!("fixtures/historical-closure-context-mixed.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new("historical-closure-context-mixed.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(
+        !result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
