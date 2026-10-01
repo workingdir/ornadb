@@ -31,7 +31,18 @@ fn continue_after_thirteenth_handoff() {
         Note.rekey(2, 6);
         Note.rekey(3, 2);
         Note.rekey(6, 3);
-        Note.update(3, { quantity: 38 })
+        Note.update(3, { quantity: 38 });
+        continue_after_fourteenth_handoff()
+    })
+}
+
+fn continue_after_fourteenth_handoff() {
+    Note.rekey(3, 2) |? (owner_retries_after_fifteenth_handoff => {
+        Note.update(3, { quantity: 39 });
+        Note.rekey(2, 6);
+        Note.rekey(3, 2);
+        Note.rekey(6, 3);
+        Note.update(3, { quantity: 36 })
     })
 }
 
