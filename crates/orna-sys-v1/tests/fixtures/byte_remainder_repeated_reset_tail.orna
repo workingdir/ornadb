@@ -1,0 +1,5 @@
+pub table RepeatedResetSource(id: Int) { value: Int, }
+pub table RepeatedResetUnknown(id: Int) { value: Int, }
+pub table RepeatedResetScanTail(id: Int) { value: Int, }
+pub table RepeatedResetFirstTarget(id: Int) { value: Int, }
+pub table RepeatedResetLastTarget(id: Int) { value: Int, }
