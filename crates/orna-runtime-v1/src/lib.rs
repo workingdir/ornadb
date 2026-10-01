@@ -24543,6 +24543,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_leaf_chain_sustained_mixed_pressure_preserves_short_take_failure() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=32)
+            .map(|row_id| {
+                let title = if row_id == 7 { "later" } else { "current" };
+                let target = if matches!(row_id, 31 | 32) { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(144), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // All ten leaf-local rejects and thirteen outer rejects precede the
+        // failure at row thirty-one. Only row seven matched, so take(2) is
+        // short and the missing lookup inside the rightmost leaf cap remains
+        // observable.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-take-two-leaf-chain-sustained-mixed-pressure-failure.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (10, 47),
+            "the underfilled outer take preserves the late failure after mixed leaf pressure"
+        );
+    }
+
+    #[tokio::test]
     async fn query_projection_failures_recover_at_the_outer_boundary() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
