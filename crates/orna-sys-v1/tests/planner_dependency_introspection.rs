@@ -114,6 +114,8 @@ const KNOWN_BYTE_ROUNDING_THREE_RESET_TAIL: &str =
     include_str!("fixtures/known_byte_rounding_three_reset_tail.orna");
 const KNOWN_BYTE_WORK_THREE_SCAN_RESET_TAIL: &str =
     include_str!("fixtures/known_byte_work_three_scan_reset_tail.orna");
+const BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL: &str =
+    include_str!("fixtures/byte_work_three_scan_first_byte_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -10545,4 +10547,120 @@ fn explain_closes_known_byte_work_over_three_scans_and_resets() {
     assert_eq!(nodes[last_reset].estimated_work(), Some(3));
     assert_eq!(nodes[middle_reset].estimated_work(), Some(2));
     assert_eq!(nodes[first_reset].estimated_work(), Some(2));
+}
+
+#[test]
+fn explain_closes_first_byte_work_across_three_scans_at_max() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN does not define how byte costs combine across scan gaps.
+    // Keep per-scan 4-KiB rounding explicit: a known zero-byte scan contributes
+    // zero, while either one-byte scan contributes one full local unit. Three
+    // known scan costs must remain visible across the three unknown joins.
+    let explain = |source_rows, scan_bytes: [u64; 3]| {
+        let scan_stats = |bytes| {
+            Some(QuerySourceStatistics {
+                estimated_rows: Some(0),
+                estimated_bytes: Some(bytes),
+                mutable_branch: None,
+            })
+        };
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:byte-work-three-scan-first-byte"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanFirst"),
+                    statistics: scan_stats(scan_bytes[0]),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownSecond"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanMiddle"),
+                    statistics: scan_stats(scan_bytes[1]),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownThird"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanLast"),
+                    statistics: scan_stats(scan_bytes[2]),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: None,
+        })
+        .expect("known zero- and one-byte scans separated by unknown joins")
+    };
+
+    let exact = explain(u64::MAX - 2, [0, 1, 1]);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let nodes = exact.nodes();
+    let named_node = |name: &str| {
+        nodes
+            .iter()
+            .find(|node| node.object() == Some(&obj(name)))
+            .unwrap()
+    };
+    assert_eq!(
+        named_node("table:ByteWorkThreeScanSource").estimated_work(),
+        Some(u64::MAX - 2)
+    );
+    for (name, bytes, work) in [
+        ("table:ByteWorkThreeScanFirst", 0, 0),
+        ("table:ByteWorkThreeScanMiddle", 1, 1),
+        ("table:ByteWorkThreeScanLast", 1, 1),
+    ] {
+        let scan = named_node(name);
+        assert_eq!(scan.estimated_rows(), Some(0));
+        assert_eq!(scan.estimated_bytes(), Some(bytes));
+        assert_eq!(scan.estimated_work(), Some(work));
+    }
+    for name in [
+        "table:ByteWorkThreeScanUnknownFirst",
+        "table:ByteWorkThreeScanUnknownSecond",
+        "table:ByteWorkThreeScanUnknownThird",
+    ] {
+        assert_eq!(named_node(name).estimated_work(), None);
+    }
+
+    // Two one-byte scans are only two raw bytes and would round to one unit
+    // if combined. Each scan rounds locally, so moving the source one unit
+    // closer to MAX makes the known lower bound overflow regardless of which
+    // two of the three scan positions carry that first byte.
+    for scan_bytes in [[1, 1, 0], [1, 0, 1], [0, 1, 1]] {
+        let overflow = explain(u64::MAX - 1, scan_bytes);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "each one-byte scan contributes its own block across unknown gaps"
+        );
+    }
 }
