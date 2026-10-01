@@ -11994,3 +11994,94 @@ fn duplicate_closures_keep_same_deep_recovery_across_parent_replacements() {
     let decoded_causes = decoded["causes"].as_array().unwrap();
     assert_eq!(decoded_causes, causes);
 }
+
+
+#[test]
+fn duplicate_deep_recoveries_redact_local_snapshot_admission() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Warning,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    fn cause_shape(diagnostic: &serde_json::Value) -> Vec<usize> {
+        let causes = diagnostic["causes"].as_array().unwrap();
+        let mut shape = vec![causes.len()];
+        for cause in causes {
+            shape.extend(cause_shape(cause));
+        }
+        shape
+    }
+
+    let payload = "duplicate deep snapshot payload";
+    let terminal = admitted("ORNA-E-TAKE3-TERMINAL", payload)
+        .with_cause(admitted("ORNA-E-TAKE3-TAIL-A", "first deep tail secret"))
+        .with_cause(admitted("ORNA-E-TAKE3-TAIL-B", "second deep tail secret"));
+    let nested = admitted("ORNA-E-TAKE3-NESTED", payload).with_cause(terminal);
+    let parent = admitted("ORNA-E-TAKE3-PARENT", payload).with_cause(nested);
+    let branch = admitted("ORNA-E-TAKE3-BRANCH", payload).with_cause(parent);
+    let root = admitted("ORNA-E-TAKE3-ROOT", payload).with_cause(branch);
+    let wire = root.encode_ovb().unwrap();
+    let first_recovery = Diagnostic::decode_ovb(&wire).unwrap();
+    let duplicate_recovery = Diagnostic::decode_ovb(&wire).unwrap();
+    assert_eq!(first_recovery, duplicate_recovery);
+
+    // ORNA-SECRET-002 requires recursive cause redaction but does not specify
+    // how a locally re-admitted recovered snapshot behaves beside its duplicate.
+    let local_snapshot = first_recovery
+        .redacted_with_message(SafeText::new("local snapshot admission").unwrap());
+    assert_eq!(serde_json::to_value(&local_snapshot).unwrap()["message"], "local snapshot admission");
+    let outer = admitted("ORNA-E-TAKE3-OUTER", "outer snapshot admission")
+        .with_cause(local_snapshot)
+        .with_cause(duplicate_recovery);
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["message"], "outer snapshot admission");
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 2);
+    assert_eq!(causes[0], causes[1]);
+    assert_eq!(cause_shape(&causes[0]), [1, 1, 1, 1, 2, 0, 0]);
+    for cause in causes {
+        assert_redacted_tree(cause);
+        let terminal = &cause["causes"][0]["causes"][0]["causes"][0]["causes"][0];
+        assert_eq!(terminal["causes"][0]["code"], "ORNA-E-TAKE3-TAIL-A");
+        assert_eq!(terminal["causes"][1]["code"], "ORNA-E-TAKE3-TAIL-B");
+    }
+
+    let json = serde_json::to_vec(&outer).unwrap();
+    let encoded = outer.encode_ovb().unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            payload.as_bytes(),
+            b"first deep tail secret".as_slice(),
+            b"second deep tail secret".as_slice(),
+            b"local snapshot admission".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
+    assert_redacted_tree(&decoded);
+    assert_eq!(decoded["causes"], projection["causes"]);
+}
