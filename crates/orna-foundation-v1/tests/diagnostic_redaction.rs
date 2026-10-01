@@ -20866,3 +20866,102 @@ fn composed_deep_decoded_branches_keep_opposite_tails_contained() {
         }
     }
 }
+
+#[test]
+fn clone_from_decoded_opposite_tails_keeps_source_branch_order() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let diagnostic = |code: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let empty = diagnostic("ORNA-E-OPPOSITE-REPLACE-EMPTY");
+    let branch_ab = diagnostic("ORNA-E-OPPOSITE-REPLACE-BRANCH")
+        .with_cause(diagnostic("ORNA-E-OPPOSITE-REPLACE-A"))
+        .with_cause(diagnostic("ORNA-E-OPPOSITE-REPLACE-B"));
+    let branch_ba = diagnostic("ORNA-E-OPPOSITE-REPLACE-BRANCH")
+        .with_cause(diagnostic("ORNA-E-OPPOSITE-REPLACE-B"))
+        .with_cause(diagnostic("ORNA-E-OPPOSITE-REPLACE-A"));
+    let source = diagnostic("ORNA-E-OPPOSITE-REPLACE-ROOT")
+        .with_cause(branch_ba.clone())
+        .with_cause(empty.clone())
+        .with_cause(branch_ab.clone())
+        .redacted();
+    let decoded_source = Diagnostic::decode_ovb(&source.encode_ovb().unwrap()).unwrap();
+    let mut receiver = diagnostic("ORNA-E-OPPOSITE-REPLACE-ROOT")
+        .with_cause(branch_ab)
+        .with_cause(branch_ba)
+        .with_cause(diagnostic("ORNA-E-OPPOSITE-REPLACE-STALE"))
+        .redacted();
+
+    // Causes are ordered values; replacement adopts the decoded source branch sequence.
+    receiver.clone_from(&decoded_source);
+    let projection = serde_json::to_value(&receiver).unwrap();
+    assert_eq!(projection, serde_json::to_value(&decoded_source).unwrap());
+
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        assert!(diagnostic["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|note| note == "<redacted>"));
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    assert_redacted_tree(&projection);
+    let branches = projection["causes"].as_array().unwrap();
+    assert_eq!(branches.len(), 3);
+    assert_eq!(branches[0]["code"], "ORNA-E-OPPOSITE-REPLACE-BRANCH");
+    assert_eq!(branches[1]["code"], "ORNA-E-OPPOSITE-REPLACE-EMPTY");
+    assert!(branches[1]["causes"].as_array().unwrap().is_empty());
+    assert_eq!(branches[2]["code"], "ORNA-E-OPPOSITE-REPLACE-BRANCH");
+    assert_eq!(
+        branches[0]["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cause| cause["code"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["ORNA-E-OPPOSITE-REPLACE-B", "ORNA-E-OPPOSITE-REPLACE-A"]
+    );
+    assert_eq!(
+        branches[2]["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cause| cause["code"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["ORNA-E-OPPOSITE-REPLACE-A", "ORNA-E-OPPOSITE-REPLACE-B"]
+    );
+
+    let wire = receiver.encode_ovb().unwrap();
+    let replayed = Diagnostic::decode_ovb(&wire).unwrap();
+    let replayed_projection = serde_json::to_value(&replayed).unwrap();
+    assert_redacted_tree(&replayed_projection);
+    assert_eq!(replayed_projection, projection);
+    let json = serde_json::to_vec(&replayed_projection).unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([fixture.as_bytes()])
+    {
+        for bytes in [&json, &wire] {
+            assert!(!bytes
+                .windows(disclosure.len())
+                .any(|window| window == disclosure));
+        }
+    }
+}
