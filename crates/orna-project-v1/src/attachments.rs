@@ -8204,6 +8204,10 @@ mod tests {
                     shared_repository.clone(),
                 ),
                 (
+                    "nested_archive_copy_archive_copy_archive_copy_archive_copy".to_owned(),
+                    shared_repository.clone(),
+                ),
+                (
                     "archive_copy_archive_archive".to_owned(),
                     shared_repository.clone(),
                 ),
@@ -8560,11 +8564,18 @@ mod tests {
                 "nested_archive_copy_archive_copy_archive_copy {expanded_deepest_commit}\n"
             ),
         );
+        let expanded_final_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!(
+                "nested_archive_copy_archive_copy_archive_copy_archive {expanded_deeper_deepest_commit}\n"
+            ),
+        );
         let expanded_short_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
             &format!(
-                "nested_archive {short_revision_commit}\nnested_archive_copy {middle_revision_commit}\nnested_archive_copy_archive {long_revision_commit}\nnested_archive_copy_archive_copy {expanded_deep_commit}\nnested_archive_copy_archive_copy_archive {expanded_deeper_commit}\nnested_archive_copy_archive_copy_archive_copy {expanded_deepest_commit}\nnested_archive_copy_archive_copy_archive_copy_archive {expanded_deeper_deepest_commit}\n"
+                "nested_archive {short_revision_commit}\nnested_archive_copy {middle_revision_commit}\nnested_archive_copy_archive {long_revision_commit}\nnested_archive_copy_archive_copy {expanded_deep_commit}\nnested_archive_copy_archive_copy_archive {expanded_deeper_commit}\nnested_archive_copy_archive_copy_archive_copy {expanded_deepest_commit}\nnested_archive_copy_archive_copy_archive_copy_archive {expanded_deeper_deepest_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy {expanded_final_commit}\n"
             ),
         );
         let expanded_short_replacement = PinnedDatabase::resolve(
@@ -8858,6 +8869,39 @@ mod tests {
                 .unwrap()
                 .pin(),
             nested_archive_deepest_pin
+        );
+        // This additional repeated suffix is not specified by the reference;
+        // v1 keeps its alias name and carries the verified closure edge below it.
+        let nested_archive_final_pin = expanded_short_session
+            .database("nested_archive_copy_archive_copy_archive_copy_archive_copy")
+            .unwrap()
+            .pin();
+        assert_eq!(
+            nested_archive_final_pin.name(),
+            "nested_archive_copy_archive_copy_archive_copy_archive_copy"
+        );
+        assert_eq!(
+            nested_archive_final_pin.commit().as_str(),
+            expanded_final_commit
+        );
+        let expanded_final_child = resolver
+            .resolve_for_parent(
+                expanded_short_session
+                    .database("nested_archive_copy_archive_copy_archive_copy_archive_copy")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            expanded_final_child.primary().pin().name(),
+            "nested_archive_copy_archive_copy_archive_copy_archive_copy"
+        );
+        assert_eq!(
+            expanded_final_child
+                .database("nested_archive_copy_archive_copy_archive_copy_archive")
+                .unwrap()
+                .pin(),
+            nested_archive_deeper_deepest_pin
         );
         assert_eq!(
             root_session
