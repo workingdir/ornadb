@@ -1,0 +1,11 @@
+pub fn dynamic_nested_closures_from_distinct_pins_do_not_compose() {
+    let selector = "HEAD~10";
+    let before = sys.database.as_of(sys.snapshot(selector));
+    selector = "HEAD";
+    let current = sys.database.as_of(sys.snapshot(selector));
+    let before_product = before.energy.factory();
+    let current_product = current.energy.factory();
+    let before_continuation = before_product.read;
+    let current_continuation = current_product.read;
+    [before_continuation, current_continuation]
+}
