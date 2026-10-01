@@ -3862,3 +3862,37 @@ fn elapsed_duration_arithmetic_enforces_result_digit_limit() {
         "ORNA-EVAL-LIMIT"
     );
 }
+
+#[test]
+fn positive_factor_rescaled_tails_close_after_eighty_first_doubling() {
+    // The reference is silent at this next scale. Continue the symmetric edge
+    // correction by doubling the prior tail to 7,253,554,917,687,775,048,237,056 ns
+    // around 2,417,851,639,229,258,349,412,352 minutes, pinning 1679063638353651631536d 8h 32m.
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
+    ] {
+        assert_eq!(session.submit(source), Ok(None), "{source}");
+    }
+
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighty-first-doubling-from-below-qrtts.orna"),
+        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighty-first-doubling-from-above-qrtts.orna"),
+    ] {
+        let result = session.submit(source);
+        assert_eq!(
+            result,
+            Ok(Some(texts(&[
+                "1679063638353651631536d 8h 32m",
+                "40297527320487639156872:32:00",
+                "1679063638353651631536 days, 8 hours, 32 minutes",
+                "P1679063638353651631536DT8H32M",
+            ]))),
+            "{source}; diagnostic={}",
+            result.as_ref().err().map_or("none", |error| error.code())
+        );
+    }
+}
