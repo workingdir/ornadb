@@ -1,0 +1,29 @@
+pub fn bad(flag: Bool): Int { case flag {
+true: "one {first => { let saved_first = first; case first {
+true: saved_first,
+false: flag,
+};
+after_first => { case after_first { true: saved_first, false: "tail {flag}" } }
+}} two {second => { let saved_second = second; case second {
+true: saved_second,
+false: flag,
+};
+after_second => { case after_second { true: saved_second, false: "tail {flag}" } }
+}} three {third => { let saved_third = third; case third {
+true: saved_third,
+false: flag,
+};
+after_third => { case after_third { true: saved_third, false: "tail {flag}" } }
+}} four {fourth => { let saved_fourth = fourth; case fourth {
+true: saved_fourth,
+false: flag,
+};
+after_fourth => { case after_fourth { true: saved_fourth, false: "tail {flag}" } }
+}} five {fifth => { let saved_fifth = fifth; case fifth {
+true: saved_fifth,
+false 4 { value: 4 },
+};
+after_fifth => { case after_fifth { true: saved_fifth, false: "tail {flag}" } }
+}} tail",
+false: "fallback {flag}"
+}}
