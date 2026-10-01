@@ -10,6 +10,8 @@ const GENERIC_START_KEYWORD_OVERLOAD_FIXTURE: &str =
     include_str!("fixtures/sys-start-generic-keyword-overloads.orna");
 const GENERIC_INVOKE_KEYWORD_OVERLOAD_FIXTURE: &str =
     include_str!("fixtures/sys-invoke-generic-keyword-overloads.orna");
+const GENERIC_OPERATION_STUB_FIXTURE: &str =
+    include_str!("fixtures/sys-generic-operation-stubs.orna");
 
 fn resolve_type(ty: &TypeExpr) -> Result<AbiType, String> {
     match ty {
@@ -184,6 +186,103 @@ fn generated_sys_stubs_parse_resolve_to_registry_types_and_dispatch_one_to_one()
             operation.signature.result,
             "result type for {} resolves from the registry",
             operation.id.as_str()
+        );
+    }
+}
+
+#[test]
+fn generated_generic_stub_family_matches_registry_types_and_dispatch() {
+    let fixture = GENERIC_OPERATION_STUB_FIXTURE.trim_end();
+    let bundle = system_binding_stubs();
+    let parsed = parse_module(fixture);
+    assert!(
+        parsed.is_ok(),
+        "the generic operation fixture must parse in supported Orna grammar: {:?}",
+        parsed.diagnostics
+    );
+
+    let generic_operations = system_provider_abi()
+        .operations()
+        .filter(|operation| !operation.signature.type_parameters.is_empty())
+        .collect::<Vec<_>>();
+    let markers = fixture
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+    assert_eq!(markers.len(), generic_operations.len());
+    assert_eq!(parsed.value.items.len(), generic_operations.len());
+    assert_eq!(
+        markers,
+        generic_operations
+            .iter()
+            .map(|operation| operation.id.as_str())
+            .collect::<Vec<_>>(),
+        "fixture dispatch markers cover every generic operation in registry order"
+    );
+
+    for block in fixture.split("\n\n") {
+        assert!(
+            bundle.contains(block.trim_end()),
+            "generic stub block must be emitted from the registry: {block}"
+        );
+    }
+    for (item, operation) in parsed.value.items.iter().zip(generic_operations) {
+        let Declaration::Function { signature, .. } = &item.declaration else {
+            panic!("each generic stub must be a function declaration")
+        };
+        assert_eq!(signature.name, local_function_name(operation));
+        assert_eq!(
+            signature
+                .generics
+                .iter()
+                .map(|generic| generic.name.as_str())
+                .collect::<Vec<_>>(),
+            operation
+                .signature
+                .type_parameters
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            signature.parameters.len(),
+            operation.signature.parameters.len()
+        );
+        for (parsed_parameter, registered_parameter) in signature
+            .parameters
+            .iter()
+            .zip(&operation.signature.parameters)
+        {
+            let parameter_source = &fixture[parsed_parameter.span.start..parsed_parameter.span.end];
+            let (parameter_name, _) = parameter_source
+                .split_once(": ")
+                .expect("generic stub parameter has an explicit type");
+            let expected_name = if registered_parameter.name == "as" {
+                "as_"
+            } else {
+                registered_parameter.name.as_str()
+            };
+            assert_eq!(parameter_name, expected_name);
+            assert_eq!(
+                resolve_type(
+                    parsed_parameter
+                        .annotation
+                        .as_ref()
+                        .expect("typed generic parameter")
+                )
+                .expect("supported generic parameter type"),
+                registered_parameter.ty
+            );
+            let parsed_default = parsed_parameter
+                .default
+                .as_ref()
+                .map(|default| &fixture[default.span().start..default.span().end]);
+            assert_eq!(parsed_default, registered_parameter.default.as_deref());
+        }
+        assert_eq!(
+            resolve_type(signature.result.as_ref().expect("typed generic result"))
+                .expect("supported generic result type"),
+            operation.signature.result
         );
     }
 }
