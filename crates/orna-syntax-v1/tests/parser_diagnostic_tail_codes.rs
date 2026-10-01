@@ -6850,6 +6850,117 @@ fn interpolated_closure_prefix_survives_invalid_recovery() {
 }
 
 #[test]
+fn two_closure_prefixes_survive_invalid_recovery() {
+    let source = include_str!("fixtures/malformed-case-arm-two-closure-prefixes-before-invalid-run.orna");
+    let parsed = parse_module(source);
+
+    let malformed_patterns = [
+        source.find("false 0").expect("first malformed arm") + 6,
+        source.find("true 1").expect("second malformed arm") + 5,
+        source.find("false 2").expect("third malformed arm") + 6,
+        source.find("true 3").expect("fourth malformed arm") + 5,
+    ];
+    assert_eq!(parsed.diagnostics.len(), 4, "{:?}", parsed.diagnostics);
+    for (diagnostic, start) in parsed.diagnostics.iter().zip(malformed_patterns) {
+        assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+        assert_eq!(diagnostic.message, "expected `:` after case pattern");
+        assert_eq!(diagnostic.span.start, start);
+        assert_eq!(diagnostic.span.end, start + 1);
+    }
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block { tail: Some(root_tail), .. } = body else {
+        panic!("expected the root case tail");
+    };
+    let Expr::Control { arms: root_arms, .. } = root_tail.as_ref() else {
+        panic!("expected the root case expression");
+    };
+    assert_eq!(root_arms.len(), 2, "{root_arms:?}");
+    let Expr::InterpolatedString { segments, .. } = &root_arms[0].body else {
+        panic!("outer arm lost its closure string");
+    };
+    let StringSegment::Expression {
+        value: Expr::Lambda { body: outer_body, .. },
+        ..
+    } = &segments[1]
+    else {
+        panic!("outer interpolation lost its closure");
+    };
+
+    let Expr::Block {
+        statements,
+        tail: Some(finish_closure),
+        ..
+    } = outer_body.as_ref()
+    else {
+        panic!("invalid recovery consumed the enclosing closure tail");
+    };
+    let [
+        Statement::Let { .. },
+        Statement::Control {
+            value: Expr::Control { arms: recovered_arms, .. },
+            ..
+        },
+    ] = statements.as_slice()
+    else {
+        panic!("recovered case lost its statement boundary: {statements:?}");
+    };
+    assert_eq!(recovered_arms.len(), 2, "{recovered_arms:?}");
+
+    let Expr::Lambda { body: direct_body, .. } = &recovered_arms[0].body else {
+        panic!("first valid closure prefix was lost");
+    };
+    let Expr::Block {
+        tail: Some(direct_tail),
+        ..
+    } = direct_body.as_ref()
+    else {
+        panic!("first closure prefix lost its block tail");
+    };
+    let Expr::Control { arms: direct_arms, .. } = direct_tail.as_ref() else {
+        panic!("first closure prefix lost its case tail");
+    };
+    assert_eq!(direct_arms.len(), 2, "{direct_arms:?}");
+
+    let Expr::InterpolatedString { segments, .. } = &recovered_arms[1].body else {
+        panic!("second interpolated closure prefix was lost");
+    };
+    let [
+        StringSegment::Text { text: prefix, .. },
+        StringSegment::Expression {
+            value: Expr::Lambda { body: nested_body, .. },
+            ..
+        },
+        StringSegment::Text { text: suffix, .. },
+    ] = segments.as_slice()
+    else {
+        panic!("second closure prefix lost its interpolation boundaries: {segments:?}");
+    };
+    assert_eq!(prefix, "middle ");
+    assert_eq!(suffix, " suffix");
+    let Expr::Block { tail: Some(nested_tail), .. } = nested_body.as_ref() else {
+        panic!("second closure prefix lost its block tail");
+    };
+    let Expr::Control { arms: nested_arms, .. } = nested_tail.as_ref() else {
+        panic!("second closure prefix lost its case tail");
+    };
+    assert_eq!(nested_arms.len(), 2, "{nested_arms:?}");
+
+    let Expr::Lambda { body: finish_body, .. } = finish_closure.as_ref() else {
+        panic!("following enclosing closure was lost");
+    };
+    let Expr::Block { tail: Some(finish_tail), .. } = finish_body.as_ref() else {
+        panic!("following closure lost its block tail");
+    };
+    assert!(matches!(finish_tail.as_ref(), Expr::Control { .. }));
+
+    // The reference is silent on consecutive valid closure prefixes before a
+    // malformed run; preserve both nested case tails and the enclosing tail.
+}
+
+#[test]
 fn semicolon_keeps_control_expression_as_a_statement() {
     let parsed = parse_module(include_str!("fixtures/semicolon-control-block-item.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
