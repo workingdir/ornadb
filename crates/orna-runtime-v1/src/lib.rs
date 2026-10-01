@@ -20458,6 +20458,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_take_four_reaches_lookup_failure_after_reject_after_seven_six_split() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 || row_id == 15 || row_id == 20 {
+                    "later"
+                } else {
+                    "current"
+                };
+                let target = if row_id == 22 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(67), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this one-match-short boundary. A reject
+        // does not satisfy take(4), so continue into the following missing
+        // lookup and preserve its failure after the seven/six reject split.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-four-seven-six-third-match-reject-then-lookup-failure-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (22, 22),
+            "take(4) visits the rejected candidate then fails at the following missing lookup"
+        );
+    }
+
+    #[tokio::test]
     async fn query_take_two_closes_after_thirteen_split_rejects_before_four_tail_rejects() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
