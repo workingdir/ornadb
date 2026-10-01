@@ -582,6 +582,13 @@ pub fn system_dispatch_table() -> &'static SystemDispatchTable {
     &TABLE
 }
 
+/// Generated provider-registry JSON embedded by this crate's build script.
+/// This exposes the exact bytes for the registry parity regression proof.
+#[doc(hidden)]
+pub fn system_provider_abi_json() -> &'static str {
+    GENERATED_PROVIDER_ABI
+}
+
 /// Source-compatible name for consumers that only need provider-role metadata.
 pub fn system_provider_abi() -> &'static SystemProviderAbi {
     system_dispatch_table()
