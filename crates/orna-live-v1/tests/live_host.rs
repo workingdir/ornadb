@@ -12146,9 +12146,96 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
     assert_eq!(exact_second_failure_query_retry, failure_after_reused_eval);
     assert_eq!(application.calls, 1);
 
-    let exact_failure_query_retry = block_on(host.dispatch_frame(
+    // The reference binds each request ID to its fingerprint and status reads
+    // never execute their target, but leaves a further fresh read followed by
+    // cross-kind reuse of that read's ID unspecified. Keep the terminal
+    // failure snapshot stable across both mismatch retries and status replays.
+    let third_failure_query = Envelope {
+        request: Some([96; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let third_failure_query_fingerprint = request_fingerprint(&third_failure_query, [1; 16]);
+    let third_failure_status = block_on(host.dispatch_frame(
         [6; 16],
         29,
+        Frame::Binary(third_failure_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("another fresh status identity observes the retained failure");
+    assert!(matches!(
+        &third_failure_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(returned),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *returned == fingerprint
+            && result == &expected_failure
+    ));
+
+    let eval_reusing_third_failure_query = eval_with_context([1; 16], [96; 16], [4; 16], None);
+    assert!(matches!(
+        Envelope::decode(&eval_reusing_third_failure_query, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            30,
+            Frame::Binary(eval_reusing_third_failure_query.clone()),
+            &mut application,
+        )),
+        Err(Error::RequestMismatch)
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            31,
+            Frame::Binary(third_failure_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the fresh status identity replays between cross-kind mismatches"),
+        third_failure_status
+    );
+    assert_eq!(application.calls, 1);
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            32,
+            Frame::Binary(eval_reusing_third_failure_query),
+            &mut application,
+        )),
+        Err(Error::RequestMismatch)
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            33,
+            Frame::Binary(third_failure_query),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the fresh status identity replays after cross-kind mismatches"),
+        third_failure_status
+    );
+    let exact_failure_query_retry = block_on(host.dispatch_frame(
+        [6; 16],
+        34,
         Frame::Binary(failure_status_query),
         &mut application,
     ))
@@ -12185,6 +12272,16 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
         Some(status)
             if status.state == orna_runtime_v1::RequestState::Completed
                 && status.fingerprint == failure_query_after_reused_eval_fingerprint
+    ));
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [1; 16],
+            request_id: [96; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == third_failure_query_fingerprint
     ));
     assert_eq!(application.calls, 1);
 
