@@ -108,6 +108,8 @@ const BYTE_WORK_UNKNOWN_GAP_ROUNDING_EDGE_TAIL: &str =
     include_str!("fixtures/byte_work_unknown_gap_rounding_edge_tail.orna");
 const BYTE_ROUNDING_UNKNOWN_GAP_EDGE_TAIL: &str =
     include_str!("fixtures/byte_rounding_unknown_gap_edge_tail.orna");
+const KNOWN_BYTE_ROUNDING_RESET_TAIL: &str =
+    include_str!("fixtures/known_byte_rounding_reset_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -9977,4 +9979,182 @@ fn explain_keeps_full_byte_scan_rounding_across_unknown_gap_edges() {
             .get("estimated_cost_overflow"),
         Some(&PlanDetail::Boolean(true))
     );
+}
+
+#[test]
+fn explain_closes_known_scan_rounding_with_reset_materialization_after_unknowns() {
+    let parsed = orna_syntax_v1::parse_module(KNOWN_BYTE_ROUNDING_RESET_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 9);
+
+    // ORNA-PLAN does not prescribe how known byte work composes across
+    // unknown joins and later writes. Continue the pragmatic per-operator
+    // 4-KiB ceiling: three complete scan estimates, two update writes, and
+    // materialization each keep their local rounded byte contribution. The
+    // unknown joins leave the total unavailable but cannot erase this known
+    // lower bound. The source remainder closes it exactly at MAX.
+    let explain = |source_rows,
+                   first_scan_bytes,
+                   middle_scan_bytes,
+                   last_scan_bytes,
+                   first_write_bytes,
+                   last_write_bytes| {
+        let scan_stats = |bytes| {
+            Some(QuerySourceStatistics {
+                estimated_rows: Some(1),
+                estimated_bytes: Some(bytes),
+                mutable_branch: None,
+            })
+        };
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:known-byte-rounding-reset-tail"),
+            source: obj("table:KnownByteRoundingSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(4_096),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:KnownByteRoundingFirstUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:KnownByteRoundingFirstScan"),
+                    statistics: scan_stats(first_scan_bytes),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:KnownByteRoundingSecondUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:KnownByteRoundingMiddleScan"),
+                    statistics: scan_stats(middle_scan_bytes),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:KnownByteRoundingThirdUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:KnownByteRoundingLastScan"),
+                    statistics: scan_stats(last_scan_bytes),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:KnownByteRoundingFirstReset"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(first_write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:KnownByteRoundingLastReset"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(last_write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+            ],
+            materialize_into: Some(obj("materialization:known-byte-rounding-reset-tail")),
+        })
+        .expect("known scan byte rounding through unknowns and reset writes")
+    };
+
+    for exact in [
+        explain(u64::MAX - 13, 2_048, 2_048, 2_048, 2_048, 2_048),
+        explain(u64::MAX - 13, 4_095, 4_096, 1, 4_095, 4_096),
+    ] {
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let nodes = exact.nodes();
+        let named_node = |name: &str| {
+            nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap()
+        };
+        assert_eq!(
+            named_node("table:KnownByteRoundingSource").estimated_work(),
+            Some(u64::MAX - 12)
+        );
+        for name in [
+            "table:KnownByteRoundingFirstScan",
+            "table:KnownByteRoundingMiddleScan",
+            "table:KnownByteRoundingLastScan",
+        ] {
+            assert_eq!(named_node(name).estimated_work(), Some(2));
+        }
+        assert_eq!(
+            named_node("table:KnownByteRoundingFirstReset").estimated_work(),
+            Some(2)
+        );
+        assert_eq!(
+            named_node("table:KnownByteRoundingLastReset").estimated_work(),
+            Some(2)
+        );
+        assert_eq!(exact.root().estimated_work(), Some(2));
+    }
+
+    for overflow in [
+        explain(u64::MAX - 13, 4_097, 2_048, 2_048, 2_048, 2_048),
+        explain(u64::MAX - 13, 2_048, 4_097, 2_048, 2_048, 2_048),
+        explain(u64::MAX - 13, 2_048, 2_048, 4_097, 2_048, 2_048),
+        explain(u64::MAX - 13, 2_048, 2_048, 2_048, 4_097, 2_048),
+        explain(u64::MAX - 13, 2_048, 2_048, 2_048, 2_048, 4_097),
+    ] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "a scan, reset, or materialization byte edge exceeds the exact tail"
+        );
+        let nodes = overflow.nodes();
+        assert!(nodes.iter().all(|node| {
+            node.actual_rows().is_none() && node.actual_bytes().is_none()
+        }));
+    }
+
+    let overflow = explain(u64::MAX - 13, 2_048, 2_048, 2_048, 2_048, 4_097);
+    let nodes = overflow.nodes();
+    let position = |kind, name: &str| {
+        nodes
+            .iter()
+            .position(|node| node.kind() == kind && node.object() == Some(&obj(name)))
+            .expect("fixture-backed plan node appears")
+    };
+    let root = position(PlanNodeKind::Materialize, "materialization:known-byte-rounding-reset-tail");
+    let last_reset = position(PlanNodeKind::Invoke, "table:KnownByteRoundingLastReset");
+    let first_reset = position(PlanNodeKind::Invoke, "table:KnownByteRoundingFirstReset");
+    let source = position(PlanNodeKind::Scan, "table:KnownByteRoundingSource");
+    let first_unknown = position(PlanNodeKind::Scan, "table:KnownByteRoundingFirstUnknown");
+    let first_scan = position(PlanNodeKind::Scan, "table:KnownByteRoundingFirstScan");
+    let second_unknown = position(PlanNodeKind::Scan, "table:KnownByteRoundingSecondUnknown");
+    let middle_scan = position(PlanNodeKind::Scan, "table:KnownByteRoundingMiddleScan");
+    let third_unknown = position(PlanNodeKind::Scan, "table:KnownByteRoundingThirdUnknown");
+    let last_scan = position(PlanNodeKind::Scan, "table:KnownByteRoundingLastScan");
+    assert!(root < last_reset);
+    assert!(last_reset < first_reset);
+    assert!(first_reset < source);
+    assert!(source < first_unknown);
+    assert!(first_unknown < first_scan);
+    assert!(first_scan < second_unknown);
+    assert!(second_unknown < middle_scan);
+    assert!(middle_scan < third_unknown);
+    assert!(third_unknown < last_scan);
+    assert_eq!(nodes[root].estimated_work(), Some(3));
+    assert_eq!(nodes[last_reset].estimated_work(), Some(3));
+    assert_eq!(nodes[first_reset].estimated_work(), Some(2));
+    assert_eq!(nodes[last_scan].parent(), nodes[first_reset].inputs().first());
 }
