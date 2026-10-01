@@ -8181,6 +8181,8 @@ mod tests {
                 ("archive".to_owned(), shared_repository.clone()),
                 ("archive_copy".to_owned(), shared_repository.clone()),
                 ("archive_copy_archive".to_owned(), shared_repository.clone()),
+                ("nested_archive".to_owned(), shared_repository.clone()),
+                ("nested_archive_copy".to_owned(), shared_repository.clone()),
                 (
                     "archive_copy_archive_archive".to_owned(),
                     shared_repository.clone(),
@@ -8493,6 +8495,111 @@ mod tests {
                 .commit()
                 .as_str(),
             short_revision_commit
+        );
+
+        let mut expanded_nested_child = resolver
+            .resolve_for_parent(
+                historical_sibling
+                    .database("archive_copy")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            expanded_nested_child
+                .database("archive")
+                .unwrap()
+                .pin(),
+            short_pin.pin()
+        );
+        let expanded_short_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!(
+                "nested_archive {short_revision_commit}\nnested_archive_copy {middle_revision_commit}\n"
+            ),
+        );
+        let expanded_short_replacement = PinnedDatabase::resolve(
+            "archive",
+            shared_repository.clone(),
+            &expanded_short_commit,
+            loader,
+        )
+        .unwrap();
+
+        // The reference leaves replacement of a nested short pin with a
+        // multi-alias historical closure unspecified. V1 keeps its child
+        // aliases local while preserving equal short pins in sibling scopes.
+        expanded_nested_child.detach_database("archive").unwrap();
+        expanded_nested_child
+            .attach_database(expanded_short_replacement.clone())
+            .unwrap();
+        assert_eq!(
+            expanded_nested_child.primary().pin(),
+            middle_pin.pin()
+        );
+        assert_eq!(
+            expanded_nested_child
+                .database("archive")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            expanded_short_commit
+        );
+        assert_eq!(
+            historical_sibling.database("archive").unwrap().pin(),
+            short_pin.pin()
+        );
+        assert_eq!(
+            nested_child_sibling
+                .database("archive")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            short_revision_commit
+        );
+
+        let expanded_short_session = resolver
+            .resolve_for_parent(expanded_short_replacement)
+            .unwrap();
+        assert_eq!(expanded_short_session.primary().pin().name(), "archive");
+        assert_eq!(
+            expanded_short_session.primary().pin().commit().as_str(),
+            expanded_short_commit
+        );
+        let nested_archive_pin = expanded_short_session
+            .database("nested_archive")
+            .unwrap()
+            .pin();
+        assert_eq!(nested_archive_pin.name(), "nested_archive");
+        assert_eq!(nested_archive_pin.commit().as_str(), short_revision_commit);
+        assert_ne!(nested_archive_pin, short_pin.pin());
+        let nested_archive_copy_pin = expanded_short_session
+            .database("nested_archive_copy")
+            .unwrap()
+            .pin();
+        assert_eq!(nested_archive_copy_pin.name(), "nested_archive_copy");
+        assert_eq!(
+            nested_archive_copy_pin.commit().as_str(),
+            middle_revision_commit
+        );
+        assert_ne!(nested_archive_copy_pin, middle_pin.pin());
+        let expanded_short_child = resolver
+            .resolve_for_parent(
+                expanded_short_session
+                    .database("nested_archive_copy")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            expanded_short_child
+                .database("archive")
+                .unwrap()
+                .pin(),
+            short_pin.pin()
         );
         assert_eq!(
             root_session
