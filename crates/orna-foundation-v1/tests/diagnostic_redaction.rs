@@ -16403,3 +16403,202 @@ fn shorthand_redacted_terminals_keep_duplicate_sibling_tail_shapes() {
         reverse_projection["causes"]
     );
 }
+
+#[test]
+fn shorthand_after_clone_replacement_keeps_duplicate_sibling_tails() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let diagnostic = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(message).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let make_tree = |payload: &str, replacement: bool| {
+        let layout: Vec<(&str, Vec<(&str, usize)>)> = if replacement {
+            vec![
+                ("RIGHT", vec![("A", 0), ("B", 2), ("C", 1)]),
+                ("LEFT", vec![("D", 1)]),
+            ]
+        } else {
+            vec![("LEFT", vec![("A", 0), ("B", 2)]), ("RIGHT", vec![("C", 1)])]
+        };
+        layout
+            .into_iter()
+            .map(|(side, tail_specs)| {
+                let terminal = tail_specs.into_iter().fold(
+                    diagnostic("ORNA-E-SHORTHAND-CLONE-DUP-TERMINAL", payload),
+                    |terminal, (slot, child_count)| {
+                        let tail = (0..child_count).fold(
+                            diagnostic(
+                                "ORNA-E-SHORTHAND-CLONE-DUP-TAIL",
+                                &format!("{payload} {side} {slot} duplicate tail secret"),
+                            ),
+                            |tail, child| {
+                                tail.with_cause(diagnostic(
+                                    &format!(
+                                        "ORNA-E-SHORTHAND-CLONE-{side}-{slot}-CHILD-{child}"
+                                    ),
+                                    &format!("{payload} {side} {slot} child {child} secret"),
+                                ))
+                            },
+                        );
+                        terminal.with_cause(tail)
+                    },
+                );
+                diagnostic(
+                    "ORNA-E-SHORTHAND-CLONE-DUP-BRANCH",
+                    &format!("{payload} {side} sibling secret"),
+                )
+                .with_cause(terminal)
+            })
+            .fold(
+                diagnostic("ORNA-E-SHORTHAND-CLONE-DUP-ROOT", payload),
+                |root, sibling| root.with_cause(sibling),
+            )
+    };
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        for note in diagnostic["notes"].as_array().unwrap() {
+            assert_eq!(note, "<redacted>");
+        }
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    fn duplicate_tail_shapes(diagnostic: &serde_json::Value) -> Vec<Vec<Vec<String>>> {
+        let siblings = diagnostic["causes"].as_array().unwrap();
+        assert_eq!(siblings.len(), 2);
+        siblings
+            .iter()
+            .map(|sibling| {
+                assert_eq!(sibling["code"], "ORNA-E-SHORTHAND-CLONE-DUP-BRANCH");
+                let terminal = &sibling["causes"][0];
+                assert_eq!(
+                    terminal["code"],
+                    "ORNA-E-SHORTHAND-CLONE-DUP-TERMINAL"
+                );
+                terminal["causes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|tail| {
+                        assert_eq!(tail["code"], "ORNA-E-SHORTHAND-CLONE-DUP-TAIL");
+                        tail["causes"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|child| {
+                                assert!(child["causes"].as_array().unwrap().is_empty());
+                                child["code"].as_str().unwrap().to_owned()
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    let forward = make_tree("forward clone shorthand payload", false);
+    let replacement = make_tree("replacement clone shorthand payload", true);
+    let mut receiver = forward.clone();
+    receiver.clone_from(&replacement);
+    let replaced = receiver.clone().redacted();
+    let replaced_projection = serde_json::to_value(&replaced).unwrap();
+    assert_redacted_tree(&replaced_projection);
+
+    // ORNA-SECRET-002 leaves equal-code sibling/tail order unspecified; preserve
+    // insertion order while shorthand redaction follows a nested clone replacement.
+    let forward_shapes = vec![
+        vec![
+            vec![],
+            vec![
+                "ORNA-E-SHORTHAND-CLONE-LEFT-B-CHILD-0".to_owned(),
+                "ORNA-E-SHORTHAND-CLONE-LEFT-B-CHILD-1".to_owned(),
+            ],
+        ],
+        vec![vec!["ORNA-E-SHORTHAND-CLONE-RIGHT-C-CHILD-0".to_owned()]],
+    ];
+    let replacement_shapes = vec![
+        vec![
+            vec![],
+            vec![
+                "ORNA-E-SHORTHAND-CLONE-RIGHT-B-CHILD-0".to_owned(),
+                "ORNA-E-SHORTHAND-CLONE-RIGHT-B-CHILD-1".to_owned(),
+            ],
+            vec!["ORNA-E-SHORTHAND-CLONE-RIGHT-C-CHILD-0".to_owned()],
+        ],
+        vec![vec!["ORNA-E-SHORTHAND-CLONE-LEFT-D-CHILD-0".to_owned()]],
+    ];
+    assert_eq!(
+        duplicate_tail_shapes(&replaced_projection),
+        replacement_shapes
+    );
+    let replaced_wire = replaced.encode_ovb().unwrap();
+    let replaced_round_trip =
+        serde_json::to_value(Diagnostic::decode_ovb(&replaced_wire).unwrap()).unwrap();
+    assert_redacted_tree(&replaced_round_trip);
+    assert_eq!(
+        duplicate_tail_shapes(&replaced_round_trip),
+        replacement_shapes
+    );
+
+    receiver.clone_from(&forward);
+    assert_eq!(receiver, forward);
+    let restored = receiver.redacted();
+    let restored_projection = serde_json::to_value(&restored).unwrap();
+    assert_redacted_tree(&restored_projection);
+    assert_eq!(duplicate_tail_shapes(&restored_projection), forward_shapes);
+    let restored_wire = restored.encode_ovb().unwrap();
+    assert_eq!(
+        duplicate_tail_shapes(
+            &serde_json::to_value(Diagnostic::decode_ovb(&restored_wire).unwrap()).unwrap()
+        ),
+        forward_shapes
+    );
+
+    let disclosures = fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"forward clone shorthand payload".as_slice(),
+            b"replacement clone shorthand payload".as_slice(),
+            b"LEFT A duplicate tail secret".as_slice(),
+            b"LEFT B duplicate tail secret".as_slice(),
+            b"RIGHT C duplicate tail secret".as_slice(),
+            b"RIGHT A duplicate tail secret".as_slice(),
+            b"RIGHT B duplicate tail secret".as_slice(),
+            b"RIGHT C duplicate tail secret".as_slice(),
+            b"LEFT D duplicate tail secret".as_slice(),
+            b"LEFT B child 0 secret".as_slice(),
+            b"LEFT B child 1 secret".as_slice(),
+            b"RIGHT C child 0 secret".as_slice(),
+            b"RIGHT B child 0 secret".as_slice(),
+            b"RIGHT B child 1 secret".as_slice(),
+            b"LEFT D child 0 secret".as_slice(),
+            b"LEFT sibling secret".as_slice(),
+            b"RIGHT sibling secret".as_slice(),
+        ]);
+    for bytes in [
+        serde_json::to_vec(&replaced).unwrap(),
+        replaced_wire,
+        serde_json::to_vec(&restored).unwrap(),
+        restored_wire,
+    ] {
+        for disclosure in disclosures.clone() {
+            assert!(!bytes
+                .windows(disclosure.len())
+                .any(|window| window == disclosure));
+        }
+    }
+}
