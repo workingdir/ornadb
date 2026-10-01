@@ -20033,6 +20033,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_four_trailing_rejects_follow_thirteen_interleaved_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=31)
+            .map(|row_id| {
+                let title = if row_id <= 27 && row_id % 2 == 1 {
+                    "later"
+                } else {
+                    "current"
+                };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, 99)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(71), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference leaves this longer interleaving implicit. The
+        // thirteenth rejection is followed by the four-row trailing reject
+        // run; filling take(14) must stop before either that run or union's
+        // failing right source is traversed.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-fourteen-thirteen-interleaved-rejects-four-trailing.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(27u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (27, 27),
+            "take(14) traverses thirteen interleaved rejects, then leaves the four-reject tail and failing union source unopened"
+        );
+    }
+
+    #[tokio::test]
     async fn query_projection_failures_recover_at_the_outer_boundary() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
