@@ -15485,6 +15485,94 @@ fn second_status_identity_keeps_pinned_unknown_snapshot_through_terminal_eval_re
         .expect("the changed same-target query replays its separate diagnostic"),
         second_status_mismatch
     );
+
+    // The reference leaves the cross-identity ordering unspecified when the
+    // first status ID is also retried with a conflicting target fingerprint;
+    // keep that diagnostic separate while replaying the second ID's snapshot.
+    let first_status_mismatch_query = Envelope {
+        request: Some([93; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint: request_fingerprint(&different_target_eval, [1; 16]),
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let first_status_mismatch = block_on(host.dispatch_frame(
+        [6; 16],
+        11,
+        Frame::Binary(first_status_mismatch_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the first status identity rejects its changed same-target fingerprint");
+    assert!(matches!(
+        &first_status_mismatch.message,
+        Message::Diagnostic { .. }
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            12,
+            Frame::Binary(second_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the second identity snapshot stays pinned across the first ID mismatch"),
+        second_unknown_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            13,
+            Frame::Binary(terminal_eval.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the terminal failure remains stable between identity snapshots"),
+        terminal_eval_replay
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            14,
+            Frame::Binary(first_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the first identity keeps its own Unknown response after mismatch"),
+        first_unknown_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            15,
+            Frame::Binary(first_status_mismatch_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the first identity mismatch keeps its independent retry snapshot"),
+        first_status_mismatch
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            16,
+            Frame::Binary(second_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the second identity remains replayable after both mismatches"),
+        second_unknown_status
+    );
     assert_eq!(application.calls, 1);
 
     for (request_id, fingerprint, expected) in [
