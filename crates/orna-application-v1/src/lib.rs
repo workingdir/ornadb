@@ -8692,6 +8692,34 @@ mod tests {
             "the competitor takes the released destination after blocker deletion"
         );
 
+        let owner_after_update = row(1, "owner", 11);
+        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        assert_eq!(mutations.len(), 4, "the two failed rekeys add no mutations");
+        let expected = [
+            (1, None, false, Some(owner_after_update)),
+            (3, None, false, None),
+            (2, Some(3), false, Some(competitor_after_retry)),
+            (1, Some(2), false, Some(owner_after_retry)),
+        ];
+        for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in
+            mutations.iter().zip(expected).enumerate()
+        {
+            assert_eq!(mutation.key(), key(old_key), "mutation {index} source key");
+            assert_eq!(
+                mutation.rekey_to(),
+                new_key.map(key).as_deref(),
+                "mutation {index} destination"
+            );
+            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            match expected_row {
+                Some(expected_row) => assert_eq!(
+                    CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
+                    expected_row,
+                    "mutation {index} row value"
+                ),
+                None => assert_eq!(mutation.value(), None, "mutation {index} deletion value"),
+            }
+        }
     }
 
     #[test]
