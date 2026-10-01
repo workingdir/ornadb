@@ -9312,6 +9312,60 @@ fn final_sibling_closure_tail_preserves_adjacent_interpolation_and_text() {
 }
 
 #[test]
+fn final_sibling_closure_tail_preserves_adjacent_closure_and_text() {
+    let source = include_str!("fixtures/malformed-final-sibling-closure-before-adjacent-closure-tail.orna");
+    let parsed = parse_module(source);
+
+    assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+    let diagnostic = &parsed.diagnostics[0];
+    let start = source.find("false 4").expect("malformed final arm") + "false ".len();
+    assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+    assert_eq!(diagnostic.message, "expected `:` after case pattern");
+    assert_eq!(diagnostic.span.start, start, "{diagnostic:?}");
+    assert_eq!(diagnostic.span.end, start + 1, "{diagnostic:?}");
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block { tail: Some(root_tail), .. } = body else {
+        panic!("expected the root case tail");
+    };
+    let Expr::Control { arms: root_arms, .. } = root_tail.as_ref() else {
+        panic!("expected the root case expression");
+    };
+    assert_eq!(root_arms.len(), 2, "{root_arms:?}");
+    let Expr::InterpolatedString { segments, .. } = &root_arms[0].body else {
+        panic!("root arm lost its interpolated string");
+    };
+    assert_eq!(segments.len(), 12, "{segments:?}");
+    assert!(matches!(&segments[0], StringSegment::Text { text, .. } if text == "one "));
+    assert!(matches!(&segments[2], StringSegment::Text { text, .. } if text == " two "));
+    assert!(matches!(&segments[4], StringSegment::Text { text, .. } if text == " three "));
+    assert!(matches!(&segments[6], StringSegment::Text { text, .. } if text == " four "));
+    assert!(matches!(&segments[8], StringSegment::Text { text, .. } if text == " five "));
+    for (index, segment) in segments.iter().enumerate().skip(1).step_by(2).take(5) {
+        let StringSegment::Expression { value: Expr::Lambda { body, .. }, .. } = segment else {
+            panic!("closure interpolation {index} was lost: {segments:?}");
+        };
+        let Expr::Block { tail: Some(closure_tail), .. } = body.as_ref() else {
+            panic!("closure interpolation {index} lost its tail");
+        };
+        assert!(matches!(closure_tail.as_ref(), Expr::Lambda { .. }));
+    }
+    let StringSegment::Expression { value: Expr::Lambda { body: adjacent_body, .. }, .. } = &segments[10] else {
+        panic!("adjacent closure interpolation was lost: {segments:?}");
+    };
+    let Expr::Block { tail: Some(adjacent_tail), .. } = adjacent_body.as_ref() else {
+        panic!("adjacent closure lost its case tail");
+    };
+    assert!(matches!(adjacent_tail.as_ref(), Expr::Control { .. }));
+    assert!(matches!(&segments[11], StringSegment::Text { text, .. } if text == " tail"));
+
+    // The reference is silent on an adjacent closure interpolation after final-sibling
+    // recovery; preserve the recovered sibling and both following tail segments.
+}
+
+#[test]
 fn semicolon_keeps_control_expression_as_a_statement() {
     let parsed = parse_module(include_str!("fixtures/semicolon-control-block-item.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
