@@ -19385,3 +19385,186 @@ fn zero_cause_five_level_aliases_preserve_distinct_leaf_tail_order() {
         }
     }
 }
+
+#[test]
+fn clone_from_preserves_ordered_distinct_zero_cause_five_level_aliases() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let diagnostic = |code: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let alias = || diagnostic("ORNA-E-ZERO-ALIAS-REPLACEMENT");
+    let empty_leaf = alias();
+    let tail_a = diagnostic("ORNA-E-ZERO-ALIAS-REPLACEMENT-A");
+    let tail_b = diagnostic("ORNA-E-ZERO-ALIAS-REPLACEMENT-B");
+    let leaf_ab = empty_leaf
+        .clone()
+        .with_cause(tail_a.clone())
+        .with_cause(tail_b.clone());
+    let leaf_ba = empty_leaf
+        .clone()
+        .with_cause(tail_b)
+        .with_cause(tail_a);
+
+    let shared_level_two = alias()
+        .with_cause(empty_leaf.clone())
+        .with_cause(empty_leaf.clone());
+    let shared_level_three = alias()
+        .with_cause(shared_level_two.clone())
+        .with_cause(shared_level_two.clone());
+    let shared_level_four = alias()
+        .with_cause(shared_level_three.clone())
+        .with_cause(shared_level_three.clone());
+    let shared_level_five = alias()
+        .with_cause(shared_level_four.clone())
+        .with_cause(shared_level_four.clone());
+    let make_variant = |first_leaf: Diagnostic, second_leaf: Diagnostic| {
+        let distinct_level_two = alias()
+            .with_cause(first_leaf)
+            .with_cause(second_leaf);
+        let distinct_level_three = alias()
+            .with_cause(shared_level_two.clone())
+            .with_cause(distinct_level_two);
+        let distinct_level_four = alias()
+            .with_cause(shared_level_three.clone())
+            .with_cause(distinct_level_three);
+        alias()
+            .with_cause(shared_level_four.clone())
+            .with_cause(distinct_level_four)
+    };
+    let ab_ba_variant = make_variant(leaf_ab.clone(), leaf_ba.clone());
+    let ba_ab_variant = make_variant(leaf_ba, leaf_ab);
+    let make_root = |causes: Vec<Diagnostic>| {
+        causes
+            .into_iter()
+            .fold(alias(), |root, cause| root.with_cause(cause))
+            .redacted()
+    };
+
+    fn collect_leaf_tail_codes(
+        alias: &serde_json::Value,
+        remaining_levels: usize,
+        paths: &mut Vec<Vec<String>>,
+    ) {
+        assert_eq!(alias["code"], "ORNA-E-ZERO-ALIAS-REPLACEMENT");
+        let causes = alias["causes"].as_array().unwrap();
+        if remaining_levels == 0 {
+            paths.push(
+                causes
+                    .iter()
+                    .map(|tail| {
+                        assert!(tail["causes"].as_array().unwrap().is_empty());
+                        tail["code"].as_str().unwrap().to_owned()
+                    })
+                    .collect(),
+            );
+        } else {
+            assert_eq!(causes.len(), 2);
+            for cause in causes {
+                collect_leaf_tail_codes(cause, remaining_levels - 1, paths);
+            }
+        }
+    }
+    fn root_tail_shapes(diagnostic: &serde_json::Value) -> Vec<Vec<Vec<String>>> {
+        diagnostic["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|alias| {
+                let mut paths = Vec::new();
+                collect_leaf_tail_codes(alias, 4, &mut paths);
+                paths
+            })
+            .collect()
+    }
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        assert!(diagnostic["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|note| note == "<redacted>"));
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+
+    let mut ab_ba_shape = vec![Vec::<String>::new(); 14];
+    ab_ba_shape.extend([
+        vec![
+            "ORNA-E-ZERO-ALIAS-REPLACEMENT-A".to_owned(),
+            "ORNA-E-ZERO-ALIAS-REPLACEMENT-B".to_owned(),
+        ],
+        vec![
+            "ORNA-E-ZERO-ALIAS-REPLACEMENT-B".to_owned(),
+            "ORNA-E-ZERO-ALIAS-REPLACEMENT-A".to_owned(),
+        ],
+    ]);
+    let mut ba_ab_shape = vec![Vec::<String>::new(); 14];
+    ba_ab_shape.extend([
+        vec![
+            "ORNA-E-ZERO-ALIAS-REPLACEMENT-B".to_owned(),
+            "ORNA-E-ZERO-ALIAS-REPLACEMENT-A".to_owned(),
+        ],
+        vec![
+            "ORNA-E-ZERO-ALIAS-REPLACEMENT-A".to_owned(),
+            "ORNA-E-ZERO-ALIAS-REPLACEMENT-B".to_owned(),
+        ],
+    ]);
+    let empty_shape = vec![Vec::<String>::new(); 16];
+    let replacement = make_root(vec![
+        ab_ba_variant.clone(),
+        shared_level_five.clone(),
+        ba_ab_variant.clone(),
+    ]);
+    let mut receiver = make_root(vec![
+        ba_ab_variant,
+        ab_ba_variant,
+        shared_level_five,
+    ]);
+    assert_eq!(
+        root_tail_shapes(&serde_json::to_value(&receiver).unwrap()),
+        vec![ba_ab_shape.clone(), ab_ba_shape.clone(), empty_shape.clone()]
+    );
+
+    // Error causes are ordered values; same-length replacement must retain the source sequence.
+    receiver.clone_from(&replacement);
+    let replaced_projection = serde_json::to_value(&receiver).unwrap();
+    assert_redacted_tree(&replaced_projection);
+    let expected_shapes = vec![ab_ba_shape, empty_shape, ba_ab_shape];
+    assert_eq!(root_tail_shapes(&replaced_projection), expected_shapes);
+    assert_eq!(
+        root_tail_shapes(&serde_json::to_value(&replacement).unwrap()),
+        expected_shapes
+    );
+
+    let wire = receiver.encode_ovb().unwrap();
+    let decoded = Diagnostic::decode_ovb(&wire).unwrap();
+    let decoded_projection = serde_json::to_value(&decoded).unwrap();
+    assert_redacted_tree(&decoded_projection);
+    assert_eq!(root_tail_shapes(&decoded_projection), expected_shapes);
+    let json = serde_json::to_vec(&decoded).unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([fixture.as_bytes()])
+    {
+        for bytes in [&json, &wire] {
+            assert!(!bytes
+                .windows(disclosure.len())
+                .any(|window| window == disclosure));
+        }
+    }
+}
