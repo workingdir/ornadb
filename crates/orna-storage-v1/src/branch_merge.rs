@@ -127,7 +127,9 @@ pub trait BranchRowSource {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BranchMergeBudget {
+    /// Per-invocation cap; concurrent merge plans do not share row counters.
     pub max_rows_examined: usize,
+    /// Per-invocation cap; concurrent merge plans do not share conflict counts.
     pub max_conflicts: usize,
 }
 
@@ -413,6 +415,12 @@ fn merge_table<R: BranchRowSource>(
                     }
                 }
             } else {
+                // With different segment layouts there is no common split
+                // walk to define output order. Read one complete logical
+                // range, then let `merge_range_rows` sort exact keys by the
+                // canonical primary-key comparator. This makes tombstones
+                // and conflict details independent of source visitation and
+                // of other concurrently planned merges.
                 let range = KeyRange::all();
                 let base_rows = read_segment(rows, MergeSide::Base, table, None, &range, budget, report)?;
                 let left_rows = read_segment(rows, MergeSide::Left, table, None, &range, budget, report)?;
