@@ -231,6 +231,10 @@ impl PackageResolver {
     /// all-or-nothing: a failed pin never returns a partially attached session.
     /// Nested closure is one parent manifest per call; pass a selected attached
     /// database back to this method to resolve the next edge from its own pin.
+    /// Each manifest alias is a complete lookup key, so prefix-related aliases
+    /// and aliases sharing a repository remain independent. The reference does
+    /// not define host mapping precedence for those aliases; v1 uses exact-key
+    /// lookup for every selected parent's historical manifest.
     /// The reference requires each historical parent's exact pins but does not
     /// require flattening a recursive closure into one session.
     pub fn resolve_for_parent(
