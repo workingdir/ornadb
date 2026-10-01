@@ -1,2 +1,2 @@
-use archive;
+use archive as child_archive;
 pub fn package_value(): Int = 42;
