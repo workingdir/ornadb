@@ -21329,3 +21329,132 @@ fn decoded_three_cause_opposite_tails_keep_their_order() {
         }
     }
 }
+
+#[test]
+fn decoded_three_tail_replacements_preserve_each_opposite_order() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let diagnostic = |code: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let branch = |generation: &str, side: &str, order: [&str; 3]| {
+        let branch_code = format!("ORNA-E-THREE-REPLACE-{generation}-{side}-BRANCH");
+        let mut branch = diagnostic(&branch_code);
+        for tail in order {
+            branch = branch.with_cause(diagnostic(&format!(
+                "ORNA-E-THREE-REPLACE-{generation}-{side}-{tail}"
+            )));
+        }
+        branch
+    };
+    let decoded_root = |generation: &str, left: [&str; 3], right: [&str; 3]| {
+        let source = diagnostic(&format!("ORNA-E-THREE-REPLACE-{generation}-ROOT"))
+            .with_cause(branch(generation, "LEFT", left))
+            .with_cause(diagnostic("ORNA-E-THREE-REPLACE-EMPTY"))
+            .with_cause(branch(generation, "RIGHT", right))
+            .redacted();
+        Diagnostic::decode_ovb(&source.encode_ovb().unwrap()).unwrap()
+    };
+    let generations = [
+        (
+            decoded_root("ONE", ["C", "B", "A"], ["A", "B", "C"]),
+            "ONE",
+            ["C", "B", "A"],
+            ["A", "B", "C"],
+        ),
+        (
+            decoded_root("TWO", ["B", "C", "A"], ["A", "C", "B"]),
+            "TWO",
+            ["B", "C", "A"],
+            ["A", "C", "B"],
+        ),
+    ];
+    let mut receiver = diagnostic("ORNA-E-THREE-REPLACE-STALE-ROOT")
+        .with_cause(branch("STALE", "LEFT", ["A", "B", "C"]))
+        .redacted();
+
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        assert!(diagnostic["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|note| note == "<redacted>"));
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    fn assert_branch_order(
+        branch: &serde_json::Value,
+        generation: &str,
+        side: &str,
+        expected: [&str; 3],
+    ) {
+        let branch_code = format!("ORNA-E-THREE-REPLACE-{generation}-{side}-BRANCH");
+        assert_eq!(branch["code"].as_str(), Some(branch_code.as_str()));
+        assert_eq!(
+            branch["causes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|cause| cause["code"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>(),
+            expected
+                .map(|tail| format!("ORNA-E-THREE-REPLACE-{generation}-{side}-{tail}"))
+                .to_vec()
+        );
+    }
+    fn assert_generation(
+        projection: &serde_json::Value,
+        generation: &str,
+        left: [&str; 3],
+        right: [&str; 3],
+    ) {
+        let root_code = format!("ORNA-E-THREE-REPLACE-{generation}-ROOT");
+        assert_eq!(projection["code"].as_str(), Some(root_code.as_str()));
+        let branches = projection["causes"].as_array().unwrap();
+        assert_eq!(branches.len(), 3);
+        assert_branch_order(&branches[0], generation, "LEFT", left);
+        assert_eq!(branches[1]["code"], "ORNA-E-THREE-REPLACE-EMPTY");
+        assert!(branches[1]["causes"].as_array().unwrap().is_empty());
+        assert_branch_order(&branches[2], generation, "RIGHT", right);
+    }
+
+    // Each decoded parent replaces the prior generation and carries its own tail order.
+    for (source, generation, left, right) in generations {
+        receiver.clone_from(&source);
+        let projection = serde_json::to_value(&receiver).unwrap();
+        assert_redacted_tree(&projection);
+        assert_generation(&projection, generation, left, right);
+    }
+
+    let wire = receiver.encode_ovb().unwrap();
+    let replayed = Diagnostic::decode_ovb(&wire).unwrap();
+    let projection = serde_json::to_value(&replayed).unwrap();
+    assert_redacted_tree(&projection);
+    assert_generation(&projection, "TWO", ["B", "C", "A"], ["A", "C", "B"]);
+    let json = serde_json::to_vec(&projection).unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([fixture.as_bytes()])
+    {
+        for bytes in [&json, &wire] {
+            assert!(!bytes
+                .windows(disclosure.len())
+                .any(|window| window == disclosure));
+        }
+    }
+}
