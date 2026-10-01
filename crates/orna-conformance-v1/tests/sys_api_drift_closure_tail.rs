@@ -353,6 +353,26 @@ fn edge_interplay_fixture_projects_nullable_table_field_through_columns() {
 }
 
 #[test]
+fn edge_interplay_fixture_keeps_nullable_target_count_after_handoff() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The frozen schema makes row_count nullable and does not say row_count_exact guarantees a
+    // value; preserve row_count's nullable type after resolving Reference target handles.
+    assert!(
+        analysis.is_ok(),
+        "target Table handoff must retain nullable row_count: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn runtime_publication_counters_do_not_leak_into_frozen_sys_types() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-internal-publication-metadata.orna",
