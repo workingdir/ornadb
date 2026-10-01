@@ -15003,9 +15003,114 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
         ),
         (
             Frame::Binary(repeated_same_target_query.clone()),
-            repeated_same_target_mismatch,
+            repeated_same_target_mismatch.clone(),
             "the second mismatch closes the repeated fresh-status interleave",
             67,
+        ),
+    ] {
+        assert_eq!(
+            block_on(host.dispatch_frame([6; 16], now, frame, &mut application))
+                .unwrap()
+                .response
+                .expect(label),
+            expected
+        );
+    }
+    assert_eq!(application.calls, 1);
+
+    let second_fresh_status_query = Envelope {
+        request: Some([95; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint: terminal_fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let second_fresh_status_fingerprint = request_fingerprint(&second_fresh_status_query, [1; 16]);
+    let second_fresh_status = block_on(host.dispatch_frame(
+        [6; 16],
+        68,
+        Frame::Binary(second_fresh_status_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a second fresh identity observes the same terminal Eval");
+    assert!(matches!(
+        &second_fresh_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(returned),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *returned == terminal_fingerprint
+            && result == &expected_failure
+    ));
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [1; 16],
+            request_id: [95; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == second_fresh_status_fingerprint
+    ));
+
+    // The reference is silent on a second fresh identity within the same
+    // reverse-phase retry cycle; retain both status snapshots independently.
+    for (frame, expected, label, now) in [
+        (
+            Frame::Binary(repeated_same_target_query.clone()),
+            repeated_same_target_mismatch.clone(),
+            "the second mismatch starts the second fresh-status cycle",
+            69,
+        ),
+        (
+            Frame::Binary(terminal_eval.clone()),
+            terminal_eval_replay.clone(),
+            "the terminal failure replays before the second fresh status retry",
+            70,
+        ),
+        (
+            Frame::Binary(second_fresh_status_query.clone()),
+            second_fresh_status.clone(),
+            "the second fresh status identity replays after terminal failure",
+            71,
+        ),
+        (
+            Frame::Binary(same_target_wrong_fingerprint_query.clone()),
+            same_target_fingerprint_mismatch.clone(),
+            "the first mismatch follows the second fresh status replay",
+            72,
+        ),
+        (
+            Frame::Binary(terminal_eval.clone()),
+            terminal_eval_replay.clone(),
+            "the terminal failure remains stable after the first mismatch",
+            73,
+        ),
+        (
+            Frame::Binary(repeated_same_target_query.clone()),
+            repeated_same_target_mismatch.clone(),
+            "the second mismatch remains independent through the status replay",
+            74,
+        ),
+        (
+            Frame::Binary(second_fresh_status_query.clone()),
+            second_fresh_status.clone(),
+            "the second fresh status response stays replayable at cycle end",
+            75,
+        ),
+        (
+            Frame::Binary(fresh_status_query.clone()),
+            fresh_status.clone(),
+            "the first fresh status identity remains distinct from the second",
+            76,
         ),
     ] {
         assert_eq!(
