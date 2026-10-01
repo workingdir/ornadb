@@ -4032,3 +4032,37 @@ fn positive_factor_rescaled_tails_close_after_eighty_sixth_doubling() {
         );
     }
 }
+
+#[test]
+fn positive_factor_rescaled_tails_close_after_eighty_seventh_doubling() {
+    // The reference is silent at this next scale. Continue the symmetric edge
+    // correction by doubling the prior tail to 464,227,514,732,017,603,087,171,584 ns
+    // around 154,742,504,910,672,534,362,390,528 minutes, pinning 107460072854633704418326d 18h 8m.
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
+    ] {
+        assert_eq!(session.submit(source), Ok(None), "{source}");
+    }
+
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighty-seventh-doubling-from-below-hui4r.orna"),
+        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighty-seventh-doubling-from-above-hui4r.orna"),
+    ] {
+        let result = session.submit(source);
+        assert_eq!(
+            result,
+            Ok(Some(texts(&[
+                "107460072854633704418326d 18h 8m",
+                "2579041748511208906039842:08:00",
+                "107460072854633704418326 days, 18 hours, 8 minutes",
+                "P107460072854633704418326DT18H8M",
+            ]))),
+            "{source}; diagnostic={}",
+            result.as_ref().err().map_or("none", |error| error.code())
+        );
+    }
+}
