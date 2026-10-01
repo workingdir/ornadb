@@ -6611,6 +6611,199 @@ mod tests {
     }
 
     #[test]
+    fn nested_pin_reverse_prefix_distinct_skipped_dissolve_preserves_middle_alias() {
+        let app_source = include_str!("../tests/fixtures/attached-incompatible-main.orna");
+        let shared_source = include_str!("../tests/fixtures/attached-equivalent-main.orna");
+        let (app_dir, app_repository, _) = repository(app_source);
+        let (shared_dir, shared_repository, _shared_base_commit) = repository(shared_source);
+
+        let short_revision_commit = write_commit(
+            shared_dir.path(),
+            "main.orna",
+            &shared_source.replace("42", "7"),
+        );
+        let middle_revision_commit = write_commit(
+            shared_dir.path(),
+            "main.orna",
+            &shared_source.replace("42", "8"),
+        );
+        let long_revision_commit = write_commit(
+            shared_dir.path(),
+            "main.orna",
+            &shared_source.replace("42", "9"),
+        );
+        let historical_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!(
+                "archive {short_revision_commit}\narchive_copy {middle_revision_commit}\narchive_copy_archive {long_revision_commit}\n"
+            ),
+        );
+        let current_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive_copy_archive_archive {historical_commit}\n"),
+        );
+        let app_commit = write_commit(
+            app_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!("archive_copy_archive {current_commit}\n"),
+        );
+
+        let loader = ProjectLoader::default();
+        let app = PinnedDatabase::resolve(
+            "app",
+            app_repository.clone(),
+            &app_commit,
+            loader,
+        )
+        .unwrap();
+        let resolver = PackageResolver::new(
+            [
+                ("app".to_owned(), app_repository),
+                ("archive".to_owned(), shared_repository.clone()),
+                ("archive_copy".to_owned(), shared_repository.clone()),
+                ("archive_copy_archive".to_owned(), shared_repository.clone()),
+                (
+                    "archive_copy_archive_archive".to_owned(),
+                    shared_repository,
+                ),
+            ],
+            loader,
+        )
+        .unwrap();
+
+        let root_session = resolver.resolve_for_parent(app).unwrap();
+        let current_pin = root_session
+            .database("archive_copy_archive")
+            .unwrap()
+            .clone();
+        let current_closure = resolver.resolve_for_parent(current_pin).unwrap();
+        assert_eq!(
+            current_closure.primary().pin().commit().as_str(),
+            current_commit
+        );
+        let historical_pin = current_closure
+            .database("archive_copy_archive_archive")
+            .unwrap()
+            .clone();
+        let mut short_first = resolver
+            .resolve_for_parent(historical_pin.clone())
+            .unwrap();
+        let mut long_first = resolver
+            .resolve_for_parent(historical_pin.clone())
+            .unwrap();
+        let untouched_sibling = resolver
+            .resolve_for_parent(historical_pin)
+            .unwrap();
+        let short_alias = short_first.database("archive").unwrap().clone();
+        let middle_alias = short_first.database("archive_copy").unwrap().clone();
+        let long_alias = short_first
+            .database("archive_copy_archive")
+            .unwrap()
+            .clone();
+
+        assert_eq!(
+            short_first.primary().pin().name(),
+            "archive_copy_archive_archive"
+        );
+        assert_eq!(
+            short_first.primary().pin().commit().as_str(),
+            historical_commit
+        );
+        assert_eq!(short_alias.pin().commit().as_str(), short_revision_commit);
+        assert_eq!(middle_alias.pin().commit().as_str(), middle_revision_commit);
+        assert_eq!(long_alias.pin().commit().as_str(), long_revision_commit);
+        assert_ne!(short_alias.pin().commit(), middle_alias.pin().commit());
+        assert_ne!(middle_alias.pin().commit(), long_alias.pin().commit());
+        assert_ne!(short_alias.pin().commit(), long_alias.pin().commit());
+
+        // The reference fixes these OIDs but is silent on dissolving skipped
+        // endpoints around the middle alias. V1 removes each full name in
+        // either order and keeps the operation local to each closure.
+        short_first.detach_database("archive").unwrap();
+        assert!(short_first.database("archive").is_none());
+        assert_eq!(
+            short_first.database("archive_copy").unwrap().pin(),
+            middle_alias.pin()
+        );
+        assert_eq!(
+            short_first
+                .database("archive_copy_archive")
+                .unwrap()
+                .pin(),
+            long_alias.pin()
+        );
+        short_first
+            .detach_database("archive_copy_archive")
+            .unwrap();
+        assert!(short_first.database("archive_copy_archive").is_none());
+        assert_eq!(
+            short_first.database("archive_copy").unwrap().pin(),
+            middle_alias.pin()
+        );
+        short_first.detach_database("archive_copy").unwrap();
+        assert!(short_first.database("archive_copy").is_none());
+
+        long_first
+            .detach_database("archive_copy_archive")
+            .unwrap();
+        assert!(long_first.database("archive_copy_archive").is_none());
+        assert_eq!(
+            long_first.database("archive").unwrap().pin(),
+            short_alias.pin()
+        );
+        assert_eq!(
+            long_first.database("archive_copy").unwrap().pin(),
+            middle_alias.pin()
+        );
+        long_first.detach_database("archive").unwrap();
+        assert!(long_first.database("archive").is_none());
+        assert_eq!(
+            long_first.database("archive_copy").unwrap().pin(),
+            middle_alias.pin()
+        );
+        long_first.detach_database("archive_copy").unwrap();
+        assert!(long_first.database("archive_copy").is_none());
+
+        assert_eq!(untouched_sibling.attached().count(), 3);
+        assert_eq!(
+            untouched_sibling.database("archive").unwrap().pin(),
+            short_alias.pin()
+        );
+        assert_eq!(
+            untouched_sibling.database("archive_copy").unwrap().pin(),
+            middle_alias.pin()
+        );
+        assert_eq!(
+            untouched_sibling
+                .database("archive_copy_archive")
+                .unwrap()
+                .pin(),
+            long_alias.pin()
+        );
+        for (pin, expected_name, expected_commit) in [
+            (&short_alias, "archive", short_revision_commit.as_str()),
+            (&middle_alias, "archive_copy", middle_revision_commit.as_str()),
+            (&long_alias, "archive_copy_archive", long_revision_commit.as_str()),
+        ] {
+            let terminal = resolver.resolve_for_parent(pin.clone()).unwrap();
+            assert_eq!(terminal.primary().pin().name(), expected_name);
+            assert_eq!(terminal.primary().pin().commit().as_str(), expected_commit);
+            assert_eq!(terminal.attached().count(), 0);
+        }
+        assert_eq!(
+            root_session
+                .database("archive_copy_archive")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            current_commit
+        );
+    }
+
+    #[test]
     fn equivalent_units_interoperate_across_attachments_but_name_match_is_not_enough() {
         let primary_source = include_str!("fixtures/attached-primary-main.orna");
         let (_primary_dir, primary_repository, primary_commit) = repository(&primary_source);
