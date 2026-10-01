@@ -2863,6 +2863,39 @@ fn dynamic_helper_literal_head_context_matches_symbolic_head() {
 }
 
 #[test]
+fn resolved_snapshot_identity_survives_specialized_pinned_closure_chains() {
+    let source = include_str!("fixtures/historical-pinned-closure-chain-same.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-same.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
+fn different_resolved_snapshots_stay_separate_across_pinned_closure_chains() {
+    let source = include_str!("fixtures/historical-pinned-closure-chain-distinct.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-distinct.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "distinct pins should not compose: {:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
