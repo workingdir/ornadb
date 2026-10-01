@@ -2666,13 +2666,19 @@ fn reassigned_dynamic_selector_does_not_reuse_a_historical_pin() {
         &[ModuleInput::new("historical-dynamic-pin-reassignment.orna", source)],
         &Catalogue::authoritative_fixture(),
     );
+    let codes = result
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code())
+        .collect::<Vec<_>>();
+    let messages = result
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message())
+        .collect::<Vec<_>>();
     assert!(
-        result
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
-        "{:?}",
-        result.diagnostics
+        codes.contains(&DIAG_TYPE),
+        "unexpected diagnostics: {codes:?} {messages:?}"
     );
 }
 
@@ -2684,6 +2690,22 @@ fn reused_dynamic_snapshot_ref_preserves_its_historical_pin() {
         &Catalogue::authoritative_fixture(),
     );
     assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
+fn dynamic_selector_occurrences_from_distinct_modules_do_not_alias() {
+    let module_source = include_str!("fixtures/historical-dynamic-module-pin.orna");
+    let result = analyze_with_catalogue(
+        &[
+            ModuleInput::new("left.orna", module_source),
+            ModuleInput::new("right.orna", module_source),
+        ],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let left = &result.modules[&Namespace(vec!["left".into()])].symbols["pin"].ty;
+    let right = &result.modules[&Namespace(vec!["right".into()])].symbols["pin"].ty;
+    assert_ne!(left, right, "source-local dynamic pins must remain distinct");
 }
 
 fn historical_nested_callable_catalogue() -> Catalogue {

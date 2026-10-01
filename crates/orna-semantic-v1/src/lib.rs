@@ -16011,7 +16011,7 @@ fn is_contextual_snapshot_ref(ty: &Type) -> bool {
 /// Gives a selected history root a type-level context key so decomposing its
 /// namespace or callable path does not erase which selected snapshot it came
 /// from. Literal selectors use their decoded value; dynamic selectors use
-/// their source expression identity because this semantic slice does not
+/// their file and source expression identity because this semantic slice does not
 /// execute or constant-fold selector expressions. Reusing one `SnapshotRef`
 /// binding retains its identity; separate dynamic selector calls are not
 /// assumed to resolve to the same pin.
@@ -16024,7 +16024,12 @@ fn snapshot_selector_context(expression: &Expr) -> Type {
         } => serde_json::from_str::<String>(text)
             .unwrap_or_else(|_| text.trim_matches('"').to_owned()),
         Expr::Name { text, .. } if matches!(text.as_str(), "CWD" | "HEAD") => text.clone(),
-        Expr::Name { text, span } => format!("dynamic:{text}@{}..{}", span.start, span.end),
+        Expr::Name { text, span } => format!(
+            "dynamic:{}:{text}@{}..{}",
+            span.file.as_deref().unwrap_or("<unknown>"),
+            span.start,
+            span.end
+        ),
         Expr::Group { inner, .. } => {
             return snapshot_selector_context(inner);
         }
