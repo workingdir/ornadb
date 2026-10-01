@@ -8172,6 +8172,11 @@ mod tests {
             &format!("archive_copy_archive {current_commit}\n"),
         );
 
+        let nested_archive_extended_closure_tail_alias =
+            "nested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive"
+                .to_owned();
+        let nested_archive_final_extended_closure_tail_alias =
+            format!("{nested_archive_extended_closure_tail_alias}_archive");
         let loader = ProjectLoader::default();
         let app = PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader)
             .unwrap();
@@ -8265,6 +8270,10 @@ mod tests {
                 ),
                 (
                     "nested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive".to_owned(),
+                    shared_repository.clone(),
+                ),
+                (
+                    nested_archive_final_extended_closure_tail_alias.clone(),
                     shared_repository.clone(),
                 ),
                 (
@@ -8736,11 +8745,18 @@ mod tests {
                 "nested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_closure_tail_commit}\n"
             ),
         );
+        let expanded_final_extended_closure_tail_commit = write_commit(
+            shared_dir.path(),
+            PACKAGE_PIN_MANIFEST_PATH,
+            &format!(
+                "{nested_archive_extended_closure_tail_alias} {expanded_extended_closure_tail_commit}\n"
+            ),
+        );
         let expanded_short_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
             &format!(
-                "nested_archive {short_revision_commit}\nnested_archive_copy {middle_revision_commit}\nnested_archive_copy_archive {long_revision_commit}\nnested_archive_copy_archive_copy {expanded_deep_commit}\nnested_archive_copy_archive_copy_archive {expanded_deeper_commit}\nnested_archive_copy_archive_copy_archive_copy {expanded_deepest_commit}\nnested_archive_copy_archive_copy_archive_copy_archive {expanded_deeper_deepest_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy {expanded_final_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_next_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_further_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_extreme_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_extreme_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_supreme_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_ultimate_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_penultimate_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_last_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_final_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_final_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_closure_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_extended_closure_tail_commit}\n"
+                "nested_archive {short_revision_commit}\nnested_archive_copy {middle_revision_commit}\nnested_archive_copy_archive {long_revision_commit}\nnested_archive_copy_archive_copy {expanded_deep_commit}\nnested_archive_copy_archive_copy_archive {expanded_deeper_commit}\nnested_archive_copy_archive_copy_archive_copy {expanded_deepest_commit}\nnested_archive_copy_archive_copy_archive_copy_archive {expanded_deeper_deepest_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy {expanded_final_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_next_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_further_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_extreme_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_extreme_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_supreme_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_ultimate_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_penultimate_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_last_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_final_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_terminal_final_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy {expanded_closure_tail_commit}\nnested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive {expanded_extended_closure_tail_commit}\n{nested_archive_final_extended_closure_tail_alias} {expanded_final_extended_closure_tail_commit}\n"
             ),
         );
         let expanded_short_replacement = PinnedDatabase::resolve(
@@ -9562,6 +9578,39 @@ mod tests {
                 .unwrap()
                 .pin(),
             nested_archive_closure_tail_pin
+        );
+        // The reference is silent on this further suffix; v1 retains its
+        // alias identity and links it to the previous terminal pin.
+        let nested_archive_final_extended_closure_tail_pin = expanded_short_session
+            .database(&nested_archive_final_extended_closure_tail_alias)
+            .unwrap()
+            .pin();
+        assert_eq!(
+            nested_archive_final_extended_closure_tail_pin.name(),
+            nested_archive_final_extended_closure_tail_alias.as_str()
+        );
+        assert_eq!(
+            nested_archive_final_extended_closure_tail_pin.commit().as_str(),
+            expanded_final_extended_closure_tail_commit
+        );
+        let expanded_final_extended_closure_tail_child = resolver
+            .resolve_for_parent(
+                expanded_short_session
+                    .database(&nested_archive_final_extended_closure_tail_alias)
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            expanded_final_extended_closure_tail_child.primary().pin().name(),
+            nested_archive_final_extended_closure_tail_alias.as_str()
+        );
+        assert_eq!(
+            expanded_final_extended_closure_tail_child
+                .database(&nested_archive_extended_closure_tail_alias)
+                .unwrap()
+                .pin(),
+            nested_archive_extended_closure_tail_pin
         );
         assert_eq!(
             root_session
