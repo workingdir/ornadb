@@ -10,6 +10,17 @@ fn continue_after_eleventh_handoff() {
         Note.rekey(3, 2);
         Note.rekey(6, 3);
         Note.update(3, { quantity: 36 })
+    });
+    continue_after_twelfth_handoff()
+}
+
+fn continue_after_twelfth_handoff() {
+    Note.rekey(3, 2) |? (owner_retries_after_thirteenth_handoff => {
+        Note.update(3, { quantity: 37 });
+        Note.rekey(2, 6);
+        Note.rekey(3, 2);
+        Note.rekey(6, 3);
+        Note.update(3, { quantity: 34 })
     })
 }
 
@@ -98,9 +109,9 @@ fn main() {
                                                                 Note.rekey(2, 6);
                                                                 Note.rekey(3, 2);
                                                                 Note.rekey(6, 3);
-                                                            Note.update(3, { quantity: 33 });
-                                                            continue_after_eleventh_handoff()
-                                                        })
+                                                                Note.update(3, { quantity: 33 });
+                                                                continue_after_eleventh_handoff()
+                                                            })
                                                         })
                                                     })
                                                 })
