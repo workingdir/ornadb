@@ -393,6 +393,26 @@ fn edge_interplay_fixture_composes_unknown_target_count_with_exactness() {
 }
 
 #[test]
+fn edge_interplay_fixture_projects_unknown_exact_target_count_through_columns() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Exactness is independent in the published schema; projecting a null count through the
+    // target's Columns callback must therefore keep row_count nullable.
+    assert!(
+        analysis.is_ok(),
+        "unknown exact target count must survive the Column chain as nullable: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_composes_unknown_target_count_with_inexactness() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
