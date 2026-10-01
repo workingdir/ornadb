@@ -13068,3 +13068,131 @@ fn replayed_error_snapshots_keep_repeated_tail_order() {
     assert_redacted_tree(&decoded);
     assert_eq!(decoded["causes"], projection["causes"]);
 }
+
+#[test]
+fn error_tail_order_survives_crossed_snapshot_replay() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let make_wire = |payload: &str, tail_codes: [&str; 2]| {
+        let terminal = admitted("ORNA-E-ORDER-TERMINAL", payload)
+            .with_cause(admitted(tail_codes[0], &format!("{payload} first tail secret")))
+            .with_cause(admitted(tail_codes[1], &format!("{payload} second tail secret")));
+        let nested = admitted("ORNA-E-ORDER-NESTED", payload).with_cause(terminal);
+        let parent = admitted("ORNA-E-ORDER-PARENT", payload).with_cause(nested);
+        let branch = admitted("ORNA-E-ORDER-BRANCH", payload).with_cause(parent);
+        admitted("ORNA-E-ORDER-ROOT", payload)
+            .with_cause(branch)
+            .encode_ovb()
+            .unwrap()
+    };
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    fn tail_codes(diagnostic: &serde_json::Value) -> Vec<String> {
+        let mut terminal = diagnostic;
+        for _ in 0..4 {
+            terminal = &terminal["causes"][0];
+        }
+        terminal["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tail| tail["code"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    let ab_wire = make_wire(
+        "forward order recovery payload",
+        ["ORNA-E-ORDER-TAIL-A", "ORNA-E-ORDER-TAIL-B"],
+    );
+    let ba_wire = make_wire(
+        "reverse order recovery payload",
+        ["ORNA-E-ORDER-TAIL-B", "ORNA-E-ORDER-TAIL-A"],
+    );
+    let replay_ab = || Diagnostic::decode_ovb(&ab_wire).unwrap();
+    let replay_ba = || Diagnostic::decode_ovb(&ba_wire).unwrap();
+    let snapshot_ab = replay_ab();
+    let snapshot_ba = replay_ba();
+    let capture = |snapshot: Diagnostic| move || snapshot.clone();
+    let mut receiver = snapshot_ab.clone();
+    let capture_ab = capture(receiver.clone());
+    receiver.clone_from(&snapshot_ba);
+    let capture_ba = capture(receiver.clone());
+    receiver.clone_from(&replay_ab());
+    let capture_replayed_ab = capture(receiver.clone());
+    assert_eq!(capture_ab(), snapshot_ab);
+    assert_eq!(capture_ba(), snapshot_ba);
+    assert_eq!(capture_replayed_ab(), replay_ab());
+
+    // ORNA-SECRET-002 requires diagnostic redaction but is silent on retaining
+    // source order when error-tail snapshots with reversed entries are replayed.
+    let outer = admitted("ORNA-E-ORDER-OUTER", "outer error order admission")
+        .with_cause(capture_ab())
+        .with_cause(capture_ba())
+        .with_cause(capture_replayed_ab());
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["severity"], "error");
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 3);
+    for cause in causes {
+        assert_redacted_tree(cause);
+        assert_eq!(cause["severity"], "error");
+    }
+    assert_eq!(causes[0], causes[2]);
+    assert_eq!(
+        causes.iter().map(tail_codes).collect::<Vec<_>>(),
+        vec![
+            vec!["ORNA-E-ORDER-TAIL-A".to_owned(), "ORNA-E-ORDER-TAIL-B".to_owned()],
+            vec!["ORNA-E-ORDER-TAIL-B".to_owned(), "ORNA-E-ORDER-TAIL-A".to_owned()],
+            vec!["ORNA-E-ORDER-TAIL-A".to_owned(), "ORNA-E-ORDER-TAIL-B".to_owned()],
+        ],
+    );
+    let mut terminal = &causes[0];
+    for _ in 0..4 {
+        terminal = &terminal["causes"][0];
+    }
+    let tails = terminal["causes"].as_array().unwrap();
+    assert_eq!(tails[0]["severity"], "error");
+    assert_eq!(tails[1]["severity"], "error");
+
+    let json = serde_json::to_vec(&outer).unwrap();
+    let encoded = outer.encode_ovb().unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"forward order recovery payload".as_slice(),
+            b"reverse order recovery payload".as_slice(),
+            b"forward order recovery payload first tail secret".as_slice(),
+            b"forward order recovery payload second tail secret".as_slice(),
+            b"reverse order recovery payload first tail secret".as_slice(),
+            b"reverse order recovery payload second tail secret".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
+    assert_redacted_tree(&decoded);
+    assert_eq!(decoded["causes"], projection["causes"]);
+}
