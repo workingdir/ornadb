@@ -1,0 +1,7 @@
+pub table ByteRoundingGapSource(id: Int) { value: Int, }
+pub table ByteRoundingGapFirstUnknown(id: Int) { value: Int, }
+pub table ByteRoundingGapBefore(id: Int) { value: Int, }
+pub table ByteRoundingGapSecondUnknown(id: Int) { value: Int, }
+pub table ByteRoundingGapBetween(id: Int) { value: Int, }
+pub table ByteRoundingGapThirdUnknown(id: Int) { value: Int, }
+pub table ByteRoundingGapAfter(id: Int) { value: Int, }
