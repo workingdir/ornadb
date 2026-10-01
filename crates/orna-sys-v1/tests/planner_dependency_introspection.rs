@@ -98,6 +98,8 @@ const BYTE_WORK_REPEATED_RESET_EDGE_TAIL: &str =
     include_str!("fixtures/byte_work_repeated_reset_edge_tail.orna");
 const SPLIT_BYTE_REMAINDER_REPEATED_RESET_TAIL: &str =
     include_str!("fixtures/split_byte_remainder_repeated_reset_tail.orna");
+const MULTISCAN_SPLIT_BYTE_RESET_TAIL: &str =
+    include_str!("fixtures/multiscan_split_byte_reset_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -9128,6 +9130,175 @@ fn explain_rounds_split_byte_work_at_each_repeated_reset() {
     }));
 
     let surface = serde_json::to_value(&overflow).expect("split reset byte overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_rounds_split_bytes_per_scan_and_reset_after_unknown() {
+    let parsed = orna_syntax_v1::parse_module(MULTISCAN_SPLIT_BYTE_RESET_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 6);
+
+    // ORNA-PLAN leaves byte-cost units and accumulation details unspecified.
+    // Continue the pragmatic local 4-KiB block model: after an unknown join,
+    // each byte-only scan and each update write rounds independently, then
+    // materialization prices the last reset's output again. The source starts
+    // at MAX-8. Two scan remainders and two one-block writes plus the final
+    // materialization close exactly; splitting a block across stages cannot
+    // collapse their lower bounds. A 4097-byte estimate on any one stage adds
+    // a block and overflows, even if a later update resets cardinality.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let source_rows = u64::MAX - MAX_BYTE_BLOCKS - 8;
+    let explain = |first_scan_bytes, second_scan_bytes, first_write_bytes, last_write_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:multiscan-split-byte-reset"),
+            source: obj("table:MultiScanResetSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:MultiScanResetUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:MultiScanResetFirstByteScan"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(first_scan_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:MultiScanResetSecondByteScan"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(second_scan_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:MultiScanResetFirstTarget"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(first_write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:MultiScanResetLastTarget"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(last_write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+            ],
+            materialize_into: Some(obj("materialization:multiscan-split-byte-reset")),
+        })
+        .expect("multiple scan byte remainders and repeated reset writes")
+    };
+
+    let below = explain(0, 2_048, 2_048, 2_048);
+    assert_eq!(below.plan().estimated_cost(), None);
+    assert_eq!(below.root().details().get("estimated_cost_overflow"), None);
+
+    for exact in [
+        explain(2_047, 2_049, 2_047, 2_049),
+        explain(2_048, 2_048, 2_048, 2_048),
+    ] {
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(
+            exact.root().details().get("estimated_cost_overflow"),
+            None,
+            "each sub-block scan and reset write closes independently at MAX"
+        );
+    }
+
+    for overflow in [
+        explain(4_097, 2_048, 2_048, 2_048),
+        explain(2_048, 4_097, 2_048, 2_048),
+        explain(2_048, 2_048, 4_097, 2_048),
+        explain(2_048, 2_048, 2_048, 4_097),
+    ] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "a later rounded stage crosses MAX without clearing prior work"
+        );
+    }
+
+    let overflow = explain(2_048, 2_048, 2_048, 4_097);
+    let nodes = overflow.nodes();
+    let position = |kind, name: &str| {
+        nodes
+            .iter()
+            .position(|node| node.kind() == kind && node.object() == Some(&obj(name)))
+            .expect("fixture-backed plan node appears")
+    };
+    let source_position = position(PlanNodeKind::Scan, "table:MultiScanResetSource");
+    let unknown_position = position(PlanNodeKind::Scan, "table:MultiScanResetUnknown");
+    let first_scan_position =
+        position(PlanNodeKind::Scan, "table:MultiScanResetFirstByteScan");
+    let second_scan_position =
+        position(PlanNodeKind::Scan, "table:MultiScanResetSecondByteScan");
+    let first_reset_position =
+        position(PlanNodeKind::Invoke, "table:MultiScanResetFirstTarget");
+    let last_reset_position =
+        position(PlanNodeKind::Invoke, "table:MultiScanResetLastTarget");
+    assert!(source_position < unknown_position);
+    assert!(unknown_position < first_scan_position);
+    assert!(first_scan_position < second_scan_position);
+    assert!(last_reset_position < first_reset_position);
+    assert!(first_reset_position < source_position);
+    assert_eq!(
+        overflow.root().inputs(),
+        &[nodes[last_reset_position].reference().clone()]
+    );
+    assert_eq!(
+        nodes[last_reset_position].inputs(),
+        &[nodes[first_reset_position].reference().clone()]
+    );
+    assert_eq!(
+        nodes[second_scan_position].parent(),
+        nodes[first_reset_position].inputs().first()
+    );
+    assert_eq!(nodes[source_position].estimated_work(), Some(u64::MAX - 8));
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+    assert_eq!(nodes[first_scan_position].estimated_bytes(), Some(2_048));
+    assert_eq!(nodes[first_scan_position].estimated_work(), None);
+    assert_eq!(nodes[second_scan_position].estimated_bytes(), Some(2_048));
+    assert_eq!(nodes[second_scan_position].estimated_work(), None);
+    assert_eq!(nodes[first_reset_position].estimated_bytes(), Some(2_048));
+    assert_eq!(nodes[first_reset_position].estimated_work(), Some(2));
+    assert_eq!(nodes[last_reset_position].estimated_bytes(), Some(4_097));
+    assert_eq!(nodes[last_reset_position].estimated_work(), Some(3));
+    assert_eq!(overflow.root().estimated_rows(), Some(1));
+    assert_eq!(overflow.root().estimated_bytes(), Some(4_097));
+    assert_eq!(overflow.root().estimated_work(), Some(3));
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow).expect("multi-scan reset overflow surface");
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
