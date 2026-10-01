@@ -15879,6 +15879,42 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
         block_on(host.dispatch_frame(
             [6; 16],
             11,
+            Frame::Binary(terminal_eval.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the first terminal Eval replays between mixed-state mismatch retries"),
+        terminal_eval_replay
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            11,
+            Frame::Binary(intermediate_first_retarget_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the first mixed-state mismatch diagnostic survives terminal replay"),
+        intermediate_first_retarget
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            11,
+            Frame::Binary(intermediate_second_retarget_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the second mixed-state mismatch diagnostic survives terminal replay"),
+        intermediate_second_retarget
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            11,
             Frame::Binary(intermediate_first_status_query.clone()),
             &mut application,
         ))
@@ -16116,6 +16152,18 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
         .response
         .expect("the first intermediate retarget diagnostic keeps its retry snapshot"),
         intermediate_first_retarget
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            23,
+            Frame::Binary(terminal_eval.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("terminal Eval replay between mismatch retries leaves the mix unchanged"),
+        terminal_eval_replay
     );
     assert_eq!(
         block_on(host.dispatch_frame(
