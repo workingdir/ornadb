@@ -15683,6 +15683,10 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
         status_query([104; 16], [91; 16], terminal_fingerprint);
     let next_fresh_terminal_first_fingerprint =
         request_fingerprint(&next_fresh_terminal_first_query, [1; 16]);
+    let replayed_eval_fresh_terminal_query =
+        status_query([105; 16], [91; 16], terminal_fingerprint);
+    let replayed_eval_fresh_terminal_fingerprint =
+        request_fingerprint(&replayed_eval_fresh_terminal_query, [1; 16]);
     let first_unknown_status = block_on(host.dispatch_frame(
         [6; 16],
         2,
@@ -16313,6 +16317,64 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
             && *fingerprint == terminal_fingerprint
             && result == &expected_first_terminal_body
     ));
+    // The reference does not define consecutive fresh identities separated
+    // by terminal Eval replay; retain both accepted terminal snapshots.
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(terminal_eval.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("terminal Eval replay separates the sequential fresh status reads"),
+        terminal_eval_replay
+    );
+    let replayed_eval_fresh_terminal = block_on(host.dispatch_frame(
+        [6; 16],
+        24,
+        Frame::Binary(replayed_eval_fresh_terminal_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a fresh identity after Eval replay reads the first target as Terminal");
+    assert!(matches!(
+        &replayed_eval_fresh_terminal.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *fingerprint == terminal_fingerprint
+            && result == &expected_first_terminal_body
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(next_fresh_terminal_first_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the prior fresh first-target snapshot remains pinned after Eval replay"),
+        next_fresh_terminal_first
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(replayed_eval_fresh_terminal_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the later fresh terminal snapshot has its own stable retry"),
+        replayed_eval_fresh_terminal
+    );
     assert_eq!(
         block_on(host.dispatch_frame(
             [6; 16],
@@ -16638,6 +16700,11 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
             [104; 16],
             next_fresh_terminal_first_fingerprint,
             next_fresh_terminal_first,
+        ),
+        (
+            [105; 16],
+            replayed_eval_fresh_terminal_fingerprint,
+            replayed_eval_fresh_terminal,
         ),
         ([97; 16], current_first_status_fingerprint, current_first_status),
         ([98; 16], current_second_status_fingerprint, current_second_status),
