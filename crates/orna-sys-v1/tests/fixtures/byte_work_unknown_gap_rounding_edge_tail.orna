@@ -1,0 +1,6 @@
+pub table ByteWorkUnknownGapSource(id: Int) { value: Int, }
+pub table ByteWorkUnknownGapBefore(id: Int) { value: Int, }
+pub table ByteWorkUnknownGapFirstUnknown(id: Int) { value: Int, }
+pub table ByteWorkUnknownGapBetween(id: Int) { value: Int, }
+pub table ByteWorkUnknownGapLastUnknown(id: Int) { value: Int, }
+pub table ByteWorkUnknownGapAfter(id: Int) { value: Int, }
