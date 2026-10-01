@@ -40,6 +40,9 @@ pub use introspection::{
     explain_query,
 };
 
+mod provider;
+pub use provider::*;
+
 pub const CANONICAL_VALUE_CODEC_V1: &str = "OVB-1";
 
 macro_rules! identity {
@@ -585,7 +588,7 @@ pub struct SystemFunctionDescriptor {
     pub purpose: &'static str,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]
 pub enum SystemEffect {
     Read,
     Invoke,

@@ -57,6 +57,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0109 | Deferred: `orna-artifact` owns no PUB-1 immutable publication-object consumer | Keep executable plan codecs separate from compact segments, manifests, Git objects, and durability barriers; continue at the accepted runtime/storage/repository publication boundary. |
 | 0110 | Source-document and object-description contracts as specified by Orna 1.0.0 | A separate bounded function-declaration metadata value and `sys.source.function` API remain gated on a canonical contract; this ADR does not add identities or runtime behavior. |
 | 0111 | Design for `sys` as a baked typed module ABI with one provider protocol for built-ins and extensions. | Typed provider dispatch, semantic-role linkage, capability negotiation, Wasm loading, and adapters are phased follow-on slices; 1.0.0 `sys` semantics and `api/sys.json` remain frozen. |
+| 0112 | Phase 1 typed `sys` provider protocol implementation and 1.0 compatibility choices. | Build-time typed registry and role linkage are consumed by semantic/runtime crates; Wasm/WIT loading remains deferred. |
 | 0101 | OrnaDB 1.0 CLIENT VM trust boundary | Host-side remote source evaluation remains normative; production CLIENT bytecode VM, artifact trust, and CLIENT sandbox contracts are deferred. |
 
 ## Current work ADRs
