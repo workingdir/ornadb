@@ -15296,6 +15296,229 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
 }
 
 #[test]
+fn second_status_identity_keeps_pinned_unknown_snapshot_through_terminal_eval_retry() {
+    const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
+
+    let (root, repository) = durable_repository();
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [6; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication {
+        reject: true,
+        ..UnitApplication::default()
+    };
+
+    let terminal_eval = eval_with_context([1; 16], [91; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&terminal_eval, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    let terminal_fingerprint = request_fingerprint(&terminal_eval, [1; 16]);
+    let status_query = |request_id| {
+        Envelope {
+            request: Some(request_id),
+            watch: None,
+            message: Message::RequestStatus {
+                target: [91; 16],
+                fingerprint: terminal_fingerprint,
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap()
+    };
+    let first_status_query = status_query([93; 16]);
+    let first_status_fingerprint = request_fingerprint(&first_status_query, [1; 16]);
+    let first_unknown_status = block_on(host.dispatch_frame(
+        [6; 16],
+        2,
+        Frame::Binary(first_status_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the first status identity records an unknown target snapshot");
+    assert!(matches!(
+        &first_unknown_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Unknown,
+            fingerprint: None,
+            result: None,
+        } if *target == [91; 16]
+    ));
+
+    let second_status_query = status_query([95; 16]);
+    let second_status_fingerprint = request_fingerprint(&second_status_query, [1; 16]);
+    let second_unknown_status = block_on(host.dispatch_frame(
+        [6; 16],
+        3,
+        Frame::Binary(second_status_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a second identity pins its own unknown target snapshot");
+    assert!(matches!(
+        &second_unknown_status.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Unknown,
+            fingerprint: None,
+            result: None,
+        } if *target == [91; 16]
+    ));
+    assert_eq!(application.calls, 0);
+
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            4,
+            Frame::Binary(terminal_eval.clone()),
+            &mut application,
+        )),
+        Err(Error::ApplicationRejected)
+    );
+    assert_eq!(application.calls, 1);
+    let terminal_eval_replay = block_on(host.dispatch_frame(
+        [6; 16],
+        5,
+        Frame::Binary(terminal_eval.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the fixture-backed terminal failure remains replayable");
+    assert!(matches!(
+        &terminal_eval_replay.message,
+        Message::Result {
+            status: ResultStatus::Failure,
+            fingerprint,
+            ..
+        } if *fingerprint == terminal_fingerprint
+    ));
+
+    // The reference pins completed IDs by fingerprint, but does not spell out
+    // this ordering when the target becomes terminal between status retries
+    // and a conflicting same-target query; retain the second identity's first
+    // Unknown snapshot and the conflicting query's separate diagnostic.
+    let different_target_eval = eval_with_context([1; 16], [91; 16], [3; 16], None);
+    let second_status_mismatch_query = Envelope {
+        request: Some([95; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint: request_fingerprint(&different_target_eval, [1; 16]),
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let second_status_mismatch = block_on(host.dispatch_frame(
+        [6; 16],
+        6,
+        Frame::Binary(second_status_mismatch_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the second identity rejects a changed same-target fingerprint");
+    assert!(matches!(
+        &second_status_mismatch.message,
+        Message::Diagnostic { .. }
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            7,
+            Frame::Binary(terminal_eval.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the terminal Eval replays between the status identity retries"),
+        terminal_eval_replay
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            8,
+            Frame::Binary(second_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the second identity keeps its pinned Unknown response after Eval failure"),
+        second_unknown_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            9,
+            Frame::Binary(first_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the first status identity keeps its independent Unknown snapshot"),
+        first_unknown_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            10,
+            Frame::Binary(second_status_mismatch_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the changed same-target query replays its separate diagnostic"),
+        second_status_mismatch
+    );
+    assert_eq!(application.calls, 1);
+
+    for (request_id, fingerprint, expected) in [
+        ([93; 16], first_status_fingerprint, first_unknown_status),
+        ([95; 16], second_status_fingerprint, second_unknown_status),
+    ] {
+        let status = block_on(open_durable_state(&repository).request_status_for_identity(
+            RequestIdentity {
+                session_id: [1; 16],
+                request_id,
+            },
+        ))
+        .unwrap()
+        .expect("each status query retains its own durable request identity");
+        assert_eq!(status.state, orna_runtime_v1::RequestState::Completed);
+        assert_eq!(status.fingerprint, fingerprint);
+        assert_eq!(
+            Envelope::decode(
+                status
+                    .terminal_outcome
+                    .as_ref()
+                    .expect("the status response is retained for exact retries")
+                    .as_bytes(),
+                Limits::default().protocol,
+            )
+            .unwrap(),
+            expected
+        );
+    }
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn delete_enumerates_reserved_durable_work_before_joining_children() {
     let (root, repository) = durable_repository();
     let runtime = open_durable_state(&repository);
