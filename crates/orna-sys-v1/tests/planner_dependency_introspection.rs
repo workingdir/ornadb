@@ -112,6 +112,8 @@ const KNOWN_BYTE_ROUNDING_RESET_TAIL: &str =
     include_str!("fixtures/known_byte_rounding_reset_tail.orna");
 const KNOWN_BYTE_ROUNDING_THREE_RESET_TAIL: &str =
     include_str!("fixtures/known_byte_rounding_three_reset_tail.orna");
+const KNOWN_BYTE_WORK_THREE_SCAN_RESET_TAIL: &str =
+    include_str!("fixtures/known_byte_work_three_scan_reset_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -10324,6 +10326,221 @@ fn explain_closes_known_byte_work_across_three_resets_after_unknown() {
     assert!(last_reset < middle_reset);
     assert!(middle_reset < first_reset);
     assert!(first_reset < source);
+    assert_eq!(nodes[root].estimated_work(), Some(3));
+    assert_eq!(nodes[last_reset].estimated_work(), Some(3));
+    assert_eq!(nodes[middle_reset].estimated_work(), Some(2));
+    assert_eq!(nodes[first_reset].estimated_work(), Some(2));
+}
+
+#[test]
+fn explain_closes_known_byte_work_over_three_scans_and_resets() {
+    let parsed = orna_syntax_v1::parse_module(KNOWN_BYTE_WORK_THREE_SCAN_RESET_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 10);
+
+    // ORNA-PLAN is silent on accumulating known byte work across unknown
+    // gaps and repeated resets. Follow the pragmatic local 4-KiB ceiling:
+    // three complete scans, three update writes, and the final materialize
+    // each round their own bytes. Unknown joins hide the exact total but do
+    // not erase these known contributions. The chosen source remainder closes
+    // all seven local scan/write stages at MAX.
+    let explain = |scan_bytes: [u64; 3], write_bytes: [u64; 3]| {
+        let scan_stats = |bytes| {
+            Some(QuerySourceStatistics {
+                estimated_rows: Some(1),
+                estimated_bytes: Some(bytes),
+                mutable_branch: None,
+            })
+        };
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:known-byte-work-three-scan-reset"),
+            source: obj("table:KnownByteWorkThreeTailSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 15),
+                estimated_bytes: Some(4_096),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:KnownByteWorkThreeTailUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:KnownByteWorkThreeTailScanFirst"),
+                    statistics: scan_stats(scan_bytes[0]),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:KnownByteWorkThreeTailUnknownSecond"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:KnownByteWorkThreeTailScanMiddle"),
+                    statistics: scan_stats(scan_bytes[1]),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:KnownByteWorkThreeTailUnknownThird"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:KnownByteWorkThreeTailScanLast"),
+                    statistics: scan_stats(scan_bytes[2]),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: [
+                "table:KnownByteWorkThreeTailResetFirst",
+                "table:KnownByteWorkThreeTailResetMiddle",
+                "table:KnownByteWorkThreeTailResetLast",
+            ]
+            .into_iter()
+            .zip(write_bytes)
+            .map(|(table, bytes)| QueryMutationDescription {
+                table: obj(table),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(1),
+                estimated_write_bytes: Some(bytes),
+                estimated_table_rows_before: Some(1),
+            })
+            .collect(),
+            materialize_into: Some(obj("materialization:known-byte-work-three-scan-reset")),
+        })
+        .expect("three known byte scans and three reset writes over unknown gaps")
+    };
+
+    for (scan_bytes, write_bytes) in [
+        ([2_048; 3], [2_048; 3]),
+        ([4_095, 4_096, 1], [4_095, 4_096, 1]),
+    ] {
+        let exact = explain(scan_bytes, write_bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let nodes = exact.nodes();
+        let named_node = |name: &str| {
+            nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap()
+        };
+        assert_eq!(
+            named_node("table:KnownByteWorkThreeTailSource").estimated_work(),
+            Some(u64::MAX - 14)
+        );
+        for name in [
+            "table:KnownByteWorkThreeTailScanFirst",
+            "table:KnownByteWorkThreeTailScanMiddle",
+            "table:KnownByteWorkThreeTailScanLast",
+            "table:KnownByteWorkThreeTailResetFirst",
+            "table:KnownByteWorkThreeTailResetMiddle",
+            "table:KnownByteWorkThreeTailResetLast",
+        ] {
+            assert_eq!(named_node(name).estimated_work(), Some(2));
+        }
+        assert_eq!(exact.root().estimated_work(), Some(2));
+        for name in [
+            "table:KnownByteWorkThreeTailUnknownFirst",
+            "table:KnownByteWorkThreeTailUnknownSecond",
+            "table:KnownByteWorkThreeTailUnknownThird",
+        ] {
+            assert_eq!(named_node(name).estimated_work(), None);
+        }
+    }
+
+    for index in 0..3 {
+        let mut scan_bytes = [2_048; 3];
+        scan_bytes[index] = 4_097;
+        let overflow = explain(scan_bytes, [2_048; 3]);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "each rounded scan edge remains visible through all resets"
+        );
+    }
+
+    for index in 0..3 {
+        let mut write_bytes = [2_048; 3];
+        write_bytes[index] = 4_097;
+        let overflow = explain([2_048; 3], write_bytes);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "each rounded reset edge remains visible through later resets"
+        );
+    }
+
+    let overflow = explain([2_048; 3], [2_048, 2_048, 4_097]);
+    let nodes = overflow.nodes();
+    let position = |kind, name: &str| {
+        nodes
+            .iter()
+            .position(|node| node.kind() == kind && node.object() == Some(&obj(name)))
+            .expect("fixture-backed plan node appears")
+    };
+    let root = position(
+        PlanNodeKind::Materialize,
+        "materialization:known-byte-work-three-scan-reset",
+    );
+    let last_reset = position(
+        PlanNodeKind::Invoke,
+        "table:KnownByteWorkThreeTailResetLast",
+    );
+    let middle_reset = position(
+        PlanNodeKind::Invoke,
+        "table:KnownByteWorkThreeTailResetMiddle",
+    );
+    let first_reset = position(
+        PlanNodeKind::Invoke,
+        "table:KnownByteWorkThreeTailResetFirst",
+    );
+    let source = position(
+        PlanNodeKind::Scan,
+        "table:KnownByteWorkThreeTailSource",
+    );
+    let first_unknown = position(
+        PlanNodeKind::Scan,
+        "table:KnownByteWorkThreeTailUnknownFirst",
+    );
+    let first_scan = position(
+        PlanNodeKind::Scan,
+        "table:KnownByteWorkThreeTailScanFirst",
+    );
+    let second_unknown = position(
+        PlanNodeKind::Scan,
+        "table:KnownByteWorkThreeTailUnknownSecond",
+    );
+    let middle_scan = position(
+        PlanNodeKind::Scan,
+        "table:KnownByteWorkThreeTailScanMiddle",
+    );
+    let third_unknown = position(
+        PlanNodeKind::Scan,
+        "table:KnownByteWorkThreeTailUnknownThird",
+    );
+    let last_scan = position(
+        PlanNodeKind::Scan,
+        "table:KnownByteWorkThreeTailScanLast",
+    );
+    assert!(root < last_reset);
+    assert!(last_reset < middle_reset);
+    assert!(middle_reset < first_reset);
+    assert!(first_reset < source);
+    assert!(source < first_unknown);
+    assert!(first_unknown < first_scan);
+    assert!(first_scan < second_unknown);
+    assert!(second_unknown < middle_scan);
+    assert!(middle_scan < third_unknown);
+    assert!(third_unknown < last_scan);
     assert_eq!(nodes[root].estimated_work(), Some(3));
     assert_eq!(nodes[last_reset].estimated_work(), Some(3));
     assert_eq!(nodes[middle_reset].estimated_work(), Some(2));
