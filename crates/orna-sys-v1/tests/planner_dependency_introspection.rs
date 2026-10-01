@@ -12776,3 +12776,74 @@ fn explain_closes_complete_half_block_scan_through_unknown_join_tail() {
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
 }
+
+#[test]
+fn explain_closes_complete_half_block_scan_at_materialization_cost_edge() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Preserve the existing
+    // 4-KiB model for a complete scan and its materialization independently:
+    // each charges rows plus one block for 2 KiB. Their equal local costs
+    // close the aggregate at MAX-1; adding one source row leaves both local
+    // costs representable but overflows their total.
+    const HALF_COST: u64 = (u64::MAX - 1) / 2;
+    let explain = |source_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:complete-half-block-scan-materialize-edge"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:complete-half-block-scan-edge")),
+        })
+        .expect("complete half-block source scan with output materialization")
+    };
+
+    let exact = explain(HALF_COST - 1);
+    let exact_cost = (u64::MAX - 1).to_string();
+    assert_eq!(exact.plan().estimated_cost(), Some(exact_cost.as_str()));
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_rows(), Some(HALF_COST - 1));
+    assert_eq!(exact.root().estimated_bytes(), Some(2_048));
+    assert_eq!(exact.root().estimated_work(), Some(HALF_COST));
+    let source = exact
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan)
+        .expect("complete half-block source scan");
+    assert_eq!(source.estimated_rows(), Some(HALF_COST - 1));
+    assert_eq!(source.estimated_bytes(), Some(2_048));
+    assert_eq!(source.estimated_work(), Some(HALF_COST));
+
+    let overflow = explain(HALF_COST);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the scan and materialization each remain representable while their sum exceeds MAX"
+    );
+    assert_eq!(overflow.root().estimated_rows(), Some(HALF_COST));
+    assert_eq!(overflow.root().estimated_bytes(), Some(2_048));
+    assert_eq!(overflow.root().estimated_work(), Some(HALF_COST + 1));
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("complete half-block materialization aggregate overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
