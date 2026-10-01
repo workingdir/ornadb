@@ -20127,6 +20127,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_take_three_continues_after_seven_six_split_through_four_tail_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=20)
+            .map(|row_id| {
+                let title = if row_id == 8 || row_id == 15 || row_id == 20 {
+                    "later"
+                } else {
+                    "current"
+                };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, 99)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(60), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference leaves this continuation implicit: unlike take(2),
+        // take(3) must traverse the four rejects after the second match to
+        // reach the third match after the seven/six reject split.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-three-thirteen-rejects-split-seven-six-four-intermatch-tail.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(20u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (20, 20),
+            "take(3) continues after seven leading and six inter-match rejects, crosses the four-reject tail to match three, and leaves the union source unopened"
+        );
+    }
+
+    #[tokio::test]
     async fn query_take_two_closes_after_thirteen_split_rejects_before_four_tail_rejects() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
