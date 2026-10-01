@@ -407,14 +407,28 @@ impl AttachedDatabaseSession {
         Err(AttachmentError::DatabaseUnavailable)
     }
 
-    /// Source modules for typed session admission. Attached module namespaces
-    /// use each full exact alias, so prefix-related aliases stay independent.
+    /// Source modules for typed session admission. An attachment alias is the
+    /// exact first namespace component for its modules; prefix-related aliases
+    /// therefore stay independent. Package-local import targets are rebased
+    /// under that component while retaining their authored import tails, so
+    /// ordinary binding-conflict and import-precedence rules still apply. A
+    /// root `main` attachment uses
+    /// `main/main.orna` because the primary database already owns `main.orna`.
+    /// The reference defines source namespace and import precedence, but does
+    /// not prescribe attachment alias decoding; v1 keeps the full alias as one
+    /// namespace component and does not use prefix matching.
     pub fn module_inputs(&self) -> Vec<ModuleInput> {
         let mut modules = self.primary.project.modules().to_vec();
         for (name, database) in &self.attached {
             if name == "std" {
                 continue;
             }
+            let local_namespaces = database
+                .project
+                .identities()
+                .iter()
+                .map(|identity| identity.namespace().join("."))
+                .collect::<BTreeSet<_>>();
             modules.extend(database.project.modules().iter().map(|module| {
                 let logical_path = if module.logical_path == "main.orna" {
                     if name == "main" {
@@ -427,7 +441,8 @@ impl AttachedDatabaseSession {
                 } else {
                     format!("{name}/{}", module.logical_path)
                 };
-                ModuleInput::new(logical_path, module.source.clone())
+                let source = prefix_attached_local_imports(name, &module.source, &local_namespaces);
+                ModuleInput::new(logical_path, source)
             }));
         }
         modules
@@ -515,6 +530,44 @@ impl AttachedDatabaseSession {
         };
         left == right
     }
+}
+
+fn prefix_attached_local_imports(
+    alias: &str,
+    source: &str,
+    local_namespaces: &BTreeSet<String>,
+) -> String {
+    let parsed = parse_module(source);
+    if !parsed.is_ok() {
+        return source.to_owned();
+    }
+    let mut starts = parsed
+        .value
+        .items
+        .iter()
+        .filter_map(|item| {
+            let Declaration::Use { path, .. } = &item.declaration else {
+                return None;
+            };
+            if path.is_empty() || matches!(path[0].name.as_str(), "sys" | "std") {
+                return None;
+            }
+            let target = path
+                .iter()
+                .map(|segment| segment.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            local_namespaces
+                .contains(&target)
+                .then_some(path[0].span.start)
+        })
+        .collect::<Vec<_>>();
+    starts.sort_unstable_by(|left, right| right.cmp(left));
+    let mut rebased = source.to_owned();
+    for start in starts {
+        rebased.insert_str(start, &format!("{alias}."));
+    }
+    rebased
 }
 
 fn captured_standard_gitlink(

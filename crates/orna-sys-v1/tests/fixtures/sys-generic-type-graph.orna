@@ -4,3 +4,5 @@ pub fn metadata_list<T>(values: [sys.ValueMetadata<T>?]): [sys.ValueMetadata<T>?
 pub fn await_result<T>(invocation: sys.InvocationHandle<T>): sys.InvocationResult<T> = sys.await(invocation);
 pub fn attribution_rows<T>(target: sys.RowRef<T>): Relation<sys.Attribution> = sys.blame(target);
 pub fn query_plan<T>(query: Query<T>): sys.Plan = sys.explain(query);
+pub fn metadata_query<T>(query: Query<sys.ValueMetadata<T>>): Query<sys.ValueMetadata<T>> = query;
+pub fn nested_metadata_rows<T>(rows: Relation<sys.ValueMetadata<[T?]>>): Relation<sys.ValueMetadata<[T?]>> = rows;

@@ -1,0 +1,23 @@
+// Both as-of selectors receive closures with stable captured values.
+// Each test row has one unambiguous eligible match so selector capture is isolated.
+if true {
+    let pivot = 4;
+    let selected_time = (value: Int) => if value == 1 { pivot } else { value };
+    pivot = 100;
+    let one_key = (value: Int) => 0;
+
+    let divisor = 10;
+    let group_key = (value: Int) => value % divisor;
+    divisor = 100;
+    let identity_time = (value: Int) => value;
+
+    [
+        collection_ops.asof_join([5], [1, 8], selected_time, one_key),
+        collection_ops.asof_join([11], [1, 9], identity_time, group_key)
+    ]
+} else {
+    [
+        collection_ops.asof_join([5], [1, 8], value => value, value => 0),
+        collection_ops.asof_join([11], [1, 9], value => value, value => value % 100)
+    ]
+}
