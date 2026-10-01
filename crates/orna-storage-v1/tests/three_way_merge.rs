@@ -15670,6 +15670,53 @@ fn concurrent_split_loads_keep_tombstones_ordered_across_depth_boundaries() {
 }
 
 #[test]
+fn concurrent_split_and_whole_loads_keep_the_same_tombstone_order() {
+    let (split_base, split_left, split_right, split_source) =
+        split_cross_depth_load_inputs(true);
+    let (whole_base, whole_left, whole_right, whole_source) = cross_depth_load_inputs();
+    let start = Arc::new(Barrier::new(2));
+    let split_start = Arc::clone(&start);
+    let split_load = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: split_source,
+            first_load: Some(split_start),
+        };
+        merge_three_way_snapshots(
+            &split_base,
+            &split_left,
+            &split_right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 5, max_conflicts: 0 },
+        )
+        .expect("split layout load completes")
+    });
+    let whole_load = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: whole_source,
+            first_load: Some(start),
+        };
+        merge_three_way_snapshots(
+            &whole_base,
+            &whole_left,
+            &whole_right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 5, max_conflicts: 0 },
+        )
+        .expect("whole-table layout load completes")
+    });
+
+    let split_plan = split_load.join().expect("split layout worker completes");
+    let whole_plan = whole_load.join().expect("whole layout worker completes");
+    let expected = vec![string("root"), string("root/child"), string("root/child/deep")];
+    assert_eq!(flattened_row_tombstones(&split_plan), expected);
+    assert_eq!(flattened_row_tombstones(&whole_plan), expected);
+    assert_eq!(split_plan.report.rows_examined, 5);
+    assert_eq!(whole_plan.report.rows_examined, 5);
+    assert_eq!(split_plan.tables[&id(1)].segments.len(), 3);
+    assert_eq!(whole_plan.tables[&id(1)].segments.len(), 1);
+}
+
+#[test]
 fn fixture_cross_depth_load_budget_stops_without_partial_plan() {
     let (base, left, right, mut source) = cross_depth_load_inputs();
     let error = merge_three_way_snapshots(
