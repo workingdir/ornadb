@@ -14679,13 +14679,13 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     for (query, expected, label, now) in [
         (
             repeated_same_target_query.clone(),
-            repeated_same_target_mismatch,
+            repeated_same_target_mismatch.clone(),
             "the second same-target mismatch replays after the terminal failure",
             34,
         ),
         (
             same_target_wrong_fingerprint_query.clone(),
-            same_target_fingerprint_mismatch,
+            same_target_fingerprint_mismatch.clone(),
             "the first same-target mismatch replays after the retry order reverses",
             35,
         ),
@@ -14705,6 +14705,56 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     }
     assert_eq!(application.calls, 1);
 
+    // The reference is silent on multiple alternating retry cycles; keep both
+    // mismatch snapshots stable across each terminal failure replay.
+    for (frame, expected, label, now) in [
+        (
+            Frame::Binary(same_target_wrong_fingerprint_query.clone()),
+            same_target_fingerprint_mismatch.clone(),
+            "the first mismatch replays at the start of the second cycle",
+            36,
+        ),
+        (
+            Frame::Binary(terminal_eval.clone()),
+            terminal_eval_replay.clone(),
+            "the terminal failure replays after the first same-target retry",
+            37,
+        ),
+        (
+            Frame::Binary(repeated_same_target_query.clone()),
+            repeated_same_target_mismatch.clone(),
+            "the second mismatch replays between terminal failure replays",
+            38,
+        ),
+        (
+            Frame::Binary(terminal_eval.clone()),
+            terminal_eval_replay.clone(),
+            "the terminal failure remains stable before the retry order rotates",
+            39,
+        ),
+        (
+            Frame::Binary(same_target_wrong_fingerprint_query.clone()),
+            same_target_fingerprint_mismatch.clone(),
+            "the first mismatch replays after the second terminal replay",
+            40,
+        ),
+        (
+            Frame::Binary(repeated_same_target_query.clone()),
+            repeated_same_target_mismatch.clone(),
+            "the second mismatch closes the alternating retry cycle",
+            41,
+        ),
+    ] {
+        assert_eq!(
+            block_on(host.dispatch_frame([6; 16], now, frame, &mut application))
+                .unwrap()
+                .response
+                .expect(label),
+            expected
+        );
+    }
+    assert_eq!(application.calls, 1);
+
     let fresh_status_query = Envelope {
         request: Some([94; 16]),
         watch: None,
@@ -14719,7 +14769,7 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     let fresh_status_fingerprint = request_fingerprint(&fresh_status_query, [1; 16]);
     let fresh_status = block_on(host.dispatch_frame(
         [6; 16],
-        36,
+        42,
         Frame::Binary(fresh_status_query),
         &mut application,
     ))
