@@ -5891,43 +5891,59 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
         }))
         .unwrap();
 
-        for (query, expected) in &snapshots {
-            let replay = block_on(host.dispatch_frame(
-                attachment,
+        let mut current_attachment = attachment;
+        for reconnect in 0..=2 {
+            if reconnect > 0 {
+                let next_attachment = [40 + handoff * 2 + reconnect - 1; 16];
+                let outcome = block_on(host.resume(ResumeRequest {
+                    id: session,
+                    origin: &origin(),
+                    credential: &credential,
+                    attachment: next_attachment,
+                    now: sequence,
+                }))
+                .unwrap();
+                assert!(matches!(
+                    outcome,
+                    orna_security_v1::AttachOutcome::Replaced(previous)
+                        if previous == orna_security_v1::AttachmentId::new(current_attachment)
+                ));
+                current_attachment = next_attachment;
+            }
+
+            replay_durable_status_snapshots(
+                &mut host,
+                current_attachment,
+                &snapshots,
+                &mut sequence,
+                &mut application,
+            );
+
+            let fresh_request = status_request([83 + handoff * 3 + reconnect; 16]);
+            let fresh = block_on(host.dispatch_frame(
+                current_attachment,
                 sequence,
-                Frame::Binary(query.clone()),
+                Frame::Binary(fresh_request.clone()),
                 &mut application,
             ))
             .unwrap()
             .response
-            .expect("each prior terminal query remains replayable after takeover");
-            assert_eq!(&replay, expected);
+            .expect("a fresh query still observes the terminal result");
+            assert!(matches!(
+                &fresh.message,
+                Message::RequestStatusResult {
+                    target,
+                    state: orna_protocol_v1::RequestState::Terminal,
+                    fingerprint: Some(fingerprint),
+                    result: Some(result),
+                } if *target == [81; 16]
+                    && *fingerprint == target_fingerprint
+                    && result == &expected_result
+            ));
+            snapshots.push((fresh_request, fresh));
             sequence += 1;
         }
 
-        let fresh_request = status_request([83 + handoff; 16]);
-        let fresh = block_on(host.dispatch_frame(
-            attachment,
-            sequence,
-            Frame::Binary(fresh_request.clone()),
-            &mut application,
-        ))
-        .unwrap()
-        .response
-        .expect("a fresh query still observes the terminal result");
-        assert!(matches!(
-            &fresh.message,
-            Message::RequestStatusResult {
-                target,
-                state: orna_protocol_v1::RequestState::Terminal,
-                fingerprint: Some(fingerprint),
-                result: Some(result),
-            } if *target == [81; 16]
-                && *fingerprint == target_fingerprint
-                && result == &expected_result
-        ));
-        snapshots.push((fresh_request, fresh));
-        sequence += 1;
         current_owner = replacement;
         drop(host);
     }
