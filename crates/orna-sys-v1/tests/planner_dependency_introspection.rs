@@ -14631,3 +14631,88 @@ fn explain_keeps_join_scan_overflow_at_max_limit_tail() {
         node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
     }));
 }
+
+#[test]
+fn explain_keeps_join_scan_overflow_through_predicate_max_limit_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN leaves local joined-scan overflow through predicate selectivity
+    // and a MAX limit unspecified. Keep scan work overflow local while the
+    // established 10% fallback lowers the join and limit row estimate.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:join-scan-predicate-max-limit-tail"),
+        source: obj("table:ByteWorkThreeScanSource"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(1),
+            estimated_bytes: Some(0),
+            mutable_branch: None,
+        }),
+        joins: vec![QueryJoinDescription {
+            source: obj("table:ByteWorkThreeScanLast"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            predicate: Some(orna_sys_v1::ExpressionRef::descriptive(
+                "expr:ByteWorkThreeScanSource.id=ByteWorkThreeScanLast.id",
+            )),
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: Some(u64::MAX),
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("joined scan overflow through selective join and MAX limit");
+
+    let selected_rows = u64::try_from(u128::from(u64::MAX).div_ceil(10))
+        .expect("10% selectivity fits the row estimate");
+    assert_eq!(explained.nodes().len(), 4);
+    assert_eq!(explained.root().kind(), PlanNodeKind::Limit);
+    assert_eq!(explained.root().estimated_rows(), Some(selected_rows));
+    assert_eq!(explained.root().estimated_bytes(), Some(selected_rows));
+    assert_eq!(explained.root().estimated_work(), Some(selected_rows));
+    assert_eq!(explained.plan().estimated_cost(), None);
+    assert_eq!(explained.root().details().get("estimated_cost_overflow"), None);
+
+    let scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("joined scan with a local overflow marker");
+    assert_eq!(scan.estimated_rows(), Some(u64::MAX));
+    assert_eq!(scan.estimated_bytes(), Some(2_048));
+    assert_eq!(scan.estimated_work(), None);
+    assert_eq!(
+        scan.details().get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let join = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("predicate join with reduced output cardinality");
+    assert_eq!(join.estimated_rows(), Some(selected_rows));
+    assert_eq!(join.estimated_bytes(), Some(selected_rows));
+    assert_eq!(
+        join.details().get("selectivity_assumption"),
+        Some(&PlanDetail::Text("0.1_no_histogram".to_owned()))
+    );
+    let surface = serde_json::to_value(&explained)
+        .expect("predicate joined-scan overflow at MAX limit surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert!(surface["nodes"].as_array().unwrap().iter().any(|node| {
+        node["details"]["estimated_work_overflow"] == true
+    }));
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
