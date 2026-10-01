@@ -1,0 +1,2 @@
+pub table PlannerDisjunctLimitOverflow(id: Int) { active: Bool, verified: Bool, }
+pub fn is_eligible(active: Bool, verified: Bool) = active || verified;

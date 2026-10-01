@@ -331,3 +331,189 @@ fn provider_diagnostic_codes_stay_outside_the_public_failure_catalog() {
         "provider linkage diagnostics are not portable 1.0 operation failures"
     );
 }
+
+#[test]
+fn dispatch_enforces_the_full_failure_set_for_every_operation() {
+    let api: Value = serde_json::from_str(&system_api_json()).unwrap();
+    let mut candidate_failures = api["failure_codes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|code| FailureCode::new(code.as_str().unwrap()).unwrap())
+        .collect::<BTreeSet<_>>();
+    candidate_failures.extend(
+        SHARED_PROVIDER_FAILURES
+            .into_iter()
+            .map(|code| FailureCode::new(code).unwrap()),
+    );
+    let arbitrary = FailureCode::new("vendor.unregistered.failure").unwrap();
+    candidate_failures.insert(arbitrary);
+
+    let table = system_dispatch_table();
+    for contract in table.operations() {
+        for code in &candidate_failures {
+            let mut handler_called = false;
+            let result = table.dispatch(
+                contract.id.as_str(),
+                |_| Ok(()),
+                |selected| -> Result<(), FailureCode> {
+                    handler_called = true;
+                    assert_eq!(selected.id, contract.id);
+                    Err(code.clone())
+                },
+            );
+            if contract.declares_failure(code) {
+                assert_eq!(
+                    result,
+                    Ok(orna_sys_v1::SystemDispatchResult::<()>::Failed(code.clone())),
+                    "declared failure should cross dispatch for `{}`",
+                    contract.id.as_str()
+                );
+                assert!(handler_called);
+            } else {
+                assert_eq!(
+                    result,
+                    Err(ProviderDiagnostic::UndeclaredFailure {
+                        operation: contract.id.clone(),
+                        code: code.clone(),
+                    }),
+                    "undeclared failure must be rejected for `{}`",
+                    contract.id.as_str()
+                );
+                assert!(handler_called);
+            }
+        }
+    }
+
+    let missing_operation = "sys.fixture.missing";
+    let mut missing_precondition_called = false;
+    let mut missing_handler_called = false;
+    assert_eq!(
+        table.dispatch(
+            missing_operation,
+            |_| {
+                missing_precondition_called = true;
+                Ok(())
+            },
+            |_| {
+                missing_handler_called = true;
+                Ok::<(), FailureCode>(())
+            }
+        ),
+        Err(ProviderDiagnostic::UnknownOperation(
+            orna_sys_v1::OperationId::new(missing_operation).unwrap()
+        ))
+    );
+    assert!(!missing_precondition_called);
+    assert!(!missing_handler_called);
+}
+
+#[test]
+fn dispatch_checks_each_precondition_and_stops_at_the_failing_position() {
+    let api: Value = serde_json::from_str(&system_api_json()).unwrap();
+    let mut candidate_failures = api["failure_codes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|code| FailureCode::new(code.as_str().unwrap()).unwrap())
+        .collect::<BTreeSet<_>>();
+    candidate_failures.extend(
+        SHARED_PROVIDER_FAILURES
+            .into_iter()
+            .map(|code| FailureCode::new(code).unwrap()),
+    );
+    candidate_failures.insert(FailureCode::new("vendor.unregistered.failure").unwrap());
+
+    let table = system_dispatch_table();
+    for contract in table.operations() {
+        let mut checked = 0;
+        let mut invoked = 0;
+        let successful = table.dispatch(
+            contract.id.as_str(),
+            |_| {
+                checked += 1;
+                Ok(())
+            },
+            |_| {
+                invoked += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(successful, Ok(orna_sys_v1::SystemDispatchResult::Returned(())));
+        assert_eq!(checked, contract.preconditions.len());
+        assert_eq!(invoked, 1);
+
+        if contract.preconditions.is_empty() {
+            continue;
+        }
+        for failure_index in 0..contract.preconditions.len() {
+            for code in &candidate_failures {
+                let mut checks_before_failure = 0;
+                let precondition_result = table.check_preconditions(contract.id.as_str(), |_| {
+                    let current_index = checks_before_failure;
+                    checks_before_failure += 1;
+                    if current_index == failure_index {
+                        Err(code.clone())
+                    } else {
+                        Ok(())
+                    }
+                });
+                assert_eq!(checks_before_failure, failure_index + 1);
+
+                let mut dispatch_checks = 0;
+                let mut handler_called = false;
+                let dispatch_result = table.dispatch(
+                    contract.id.as_str(),
+                    |_| {
+                        let current_index = dispatch_checks;
+                        dispatch_checks += 1;
+                        if current_index == failure_index {
+                            Err(code.clone())
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    |_| {
+                        handler_called = true;
+                        Ok(())
+                    },
+                );
+                assert_eq!(dispatch_checks, failure_index + 1);
+
+                if contract.declares_failure(code) {
+                    assert_eq!(
+                        precondition_result,
+                        Err(ProviderDiagnostic::PreconditionFailed {
+                            operation: contract.id.clone(),
+                            code: code.clone(),
+                        })
+                    );
+                    assert_eq!(
+                        dispatch_result,
+                        Ok(orna_sys_v1::SystemDispatchResult::Failed(code.clone()))
+                    );
+                } else {
+                    assert_eq!(
+                        precondition_result,
+                        Err(ProviderDiagnostic::UndeclaredFailure {
+                            operation: contract.id.clone(),
+                            code: code.clone(),
+                        })
+                    );
+                    assert_eq!(
+                        dispatch_result,
+                        Err(ProviderDiagnostic::UndeclaredFailure {
+                            operation: contract.id.clone(),
+                            code: code.clone(),
+                        })
+                    );
+                }
+                assert!(
+                    !handler_called,
+                    "failed preconditions block `{}`",
+                    contract.id.as_str()
+                );
+            }
+        }
+    }
+}

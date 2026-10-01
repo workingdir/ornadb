@@ -2659,6 +2659,55 @@ fn equivalent_head_selectors_share_historical_callable_context() {
     assert!(result.is_ok(), "{:?}", result.diagnostics);
 }
 
+#[test]
+fn reassigned_dynamic_selector_does_not_reuse_a_historical_pin() {
+    let source = include_str!("fixtures/historical-dynamic-pin-reassignment.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new("historical-dynamic-pin-reassignment.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
+    let codes = result
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code())
+        .collect::<Vec<_>>();
+    let messages = result
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message())
+        .collect::<Vec<_>>();
+    assert!(
+        codes.contains(&DIAG_TYPE),
+        "unexpected diagnostics: {codes:?} {messages:?}"
+    );
+}
+
+#[test]
+fn reused_dynamic_snapshot_ref_preserves_its_historical_pin() {
+    let source = include_str!("fixtures/historical-dynamic-pin-reused.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new("historical-dynamic-pin-reused.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
+fn dynamic_selector_occurrences_from_distinct_modules_do_not_alias() {
+    let module_source = include_str!("fixtures/historical-dynamic-module-pin.orna");
+    let result = analyze_with_catalogue(
+        &[
+            ModuleInput::new("left.orna", module_source),
+            ModuleInput::new("right.orna", module_source),
+        ],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let left = &result.modules[&Namespace(vec!["left".into()])].symbols["pin"].ty;
+    let right = &result.modules[&Namespace(vec!["right".into()])].symbols["pin"].ty;
+    assert_ne!(left, right, "source-local dynamic pins must remain distinct");
+}
+
 fn historical_nested_callable_catalogue() -> Catalogue {
     let continuation = Type::Function {
         parameters: Vec::new(),

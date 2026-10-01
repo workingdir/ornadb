@@ -1,7 +1,6 @@
 use orna_semantic_v1::{analyze, ModuleInput};
 use serde_json::Value;
 
-const PUBLISHED_SYS_API: &str = include_str!("../../../api/sys.json");
 const FROZEN_SYS_API: &str = include_str!("fixtures/reference/api/sys.json");
 const PUBLICATION_SURFACE: &str = include_str!("fixtures/sys-api-drift-publication-surface.orna");
 const INTERNAL_PUBLICATION_METADATA: &str =
@@ -11,7 +10,8 @@ const EDGE_INTERPLAY: &str = include_str!("fixtures/sys-api-drift-edge-interplay
 
 #[test]
 fn published_api_matches_the_frozen_schema_and_keeps_local_provenance() {
-    let mut published: Value = serde_json::from_str(PUBLISHED_SYS_API).expect("published sys API");
+    let mut published: Value =
+        serde_json::from_str(&orna_sys_v1::system_api_json()).expect("generated sys API");
     let frozen: Value = serde_json::from_str(FROZEN_SYS_API).expect("frozen sys API fixture");
 
     assert_ne!(

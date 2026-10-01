@@ -7,6 +7,17 @@ license = "Apache-2.0"
 description = "Bounded pre-effect admission for Orna 1.0 reflective invocation"
 build = "build.rs"
 
+[features]
+default = []
+dev-sys-export = []
+
+[[bin]]
+name = "sys-api-export"
+path = "src/bin/sys-api-export.rs"
+required-features = ["dev-sys-export"]
+test = false
+bench = false
+
 [dependencies]
 orna-security-v1 = { path = "../orna-security-v1" }
 orna-sys-macros = { path = "../orna-sys-macros" }

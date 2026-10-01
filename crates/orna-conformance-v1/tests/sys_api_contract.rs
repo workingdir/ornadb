@@ -12,7 +12,9 @@ use orna_sys_v1::{
 };
 use serde_json::Value;
 
-const SYS_API: &str = include_str!("../../../api/sys.json");
+fn sys_api_document() -> Value {
+    serde_json::from_str(&orna_sys_v1::system_api_json()).expect("generated portable sys API JSON")
+}
 
 fn array_len(document: &Value, name: &str) -> usize {
     document
@@ -110,7 +112,7 @@ fn sys_tokens(text: &str) -> impl Iterator<Item = &str> {
 
 #[test]
 fn portable_sys_api_has_exact_declared_counts_and_surface() {
-    let document: Value = serde_json::from_str(SYS_API).expect("portable sys API JSON");
+    let document = sys_api_document();
     assert_eq!(document["language_version"], "1.0.0");
     assert_eq!(document["sys_version"], "1.0");
     assert_eq!(document["status"], "specification");
@@ -249,7 +251,7 @@ fn portable_sys_api_has_exact_declared_counts_and_surface() {
 
 #[test]
 fn sys_admin_effects_match_the_administration_contract() {
-    let document: Value = serde_json::from_str(SYS_API).expect("portable sys API JSON");
+    let document = sys_api_document();
     let functions = document["functions"]
         .as_array()
         .expect("sys API functions");
@@ -290,7 +292,7 @@ fn sys_admin_effects_match_the_administration_contract() {
 
 #[test]
 fn sys_session_schema_binds_the_live_runtime_relation_without_runtime_claims() {
-    let document: Value = serde_json::from_str(SYS_API).expect("portable sys API JSON");
+    let document = sys_api_document();
     let relation = document["relations"]
         .as_array()
         .expect("relations")
@@ -356,7 +358,7 @@ fn sys_session_schema_binds_the_live_runtime_relation_without_runtime_claims() {
 
 #[test]
 fn sys_context_view_schemas_match_the_published_contract() {
-    let document: Value = serde_json::from_str(SYS_API).expect("portable sys API JSON");
+    let document = sys_api_document();
 
     for (name, expected_fields) in [
         (
@@ -434,7 +436,7 @@ fn sys_context_view_schemas_match_the_published_contract() {
 
 #[test]
 fn foundation_typed_reference_aliases_match_published_targets() {
-    let document: Value = serde_json::from_str(SYS_API).expect("portable sys API JSON");
+    let document = sys_api_document();
     let aliases = document["reference_aliases"]
         .as_array()
         .expect("reference aliases");
@@ -470,7 +472,7 @@ fn foundation_typed_reference_aliases_match_published_targets() {
 
 #[test]
 fn sys_runtime_info_schema_matches_the_published_compatibility_contract() {
-    let document: Value = serde_json::from_str(SYS_API).expect("portable sys API JSON");
+    let document = sys_api_document();
     let runtime = document["value_types"]
         .as_array()
         .expect("value types")
@@ -522,7 +524,7 @@ fn sys_runtime_info_schema_matches_the_published_compatibility_contract() {
 
 #[test]
 fn sys_client_lease_listener_schemas_match_the_published_contract() {
-    let document: Value = serde_json::from_str(SYS_API).expect("portable sys API JSON");
+    let document = sys_api_document();
 
     let assert_relation = |name: &str,
                            grouped_handle: &str,
@@ -674,7 +676,7 @@ fn sys_client_lease_listener_schemas_match_the_published_contract() {
 
 #[test]
 fn sys_source_span_schema_matches_the_published_contract() {
-    let document: Value = serde_json::from_str(SYS_API).expect("portable sys API JSON");
+    let document = sys_api_document();
     let source_span = document["value_types"]
         .as_array()
         .expect("value types")
