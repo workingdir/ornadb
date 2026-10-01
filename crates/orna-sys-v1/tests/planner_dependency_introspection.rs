@@ -14193,3 +14193,110 @@ fn explain_preserves_join_scan_overflow_across_materialization_tail() {
         node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
     }));
 }
+
+#[test]
+fn explain_preserves_two_join_scan_overflows_across_unknown_materialized_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN does not specify whether independent scan-local overflows on
+    // both sides of an unknown join survive later operators. Keep each
+    // half-block-rounded marker on its scan through the limit/write tail.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:two-join-scan-overflows-unknown-tail"),
+        source: obj("table:ByteWorkThreeScanSource"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(0),
+            estimated_bytes: Some(0),
+            mutable_branch: None,
+        }),
+        joins: vec![
+            QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanFirst"),
+                statistics: Some(QuerySourceStatistics {
+                    estimated_rows: Some(u64::MAX),
+                    estimated_bytes: Some(2_048),
+                    mutable_branch: None,
+                }),
+                predicate: None,
+            },
+            QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanUnknownSecond"),
+                statistics: None,
+                predicate: None,
+            },
+            QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanLast"),
+                statistics: Some(QuerySourceStatistics {
+                    estimated_rows: Some(u64::MAX),
+                    estimated_bytes: Some(2_048),
+                    mutable_branch: None,
+                }),
+                predicate: None,
+            },
+        ],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: Some(10),
+        mutations: Vec::new(),
+        materialize_into: Some(obj("materialization:two-join-scan-overflows")),
+    })
+    .expect("two joined scan overflows across unknown, limit, and write tails");
+
+    assert_eq!(explained.nodes().len(), 9);
+    assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(explained.root().estimated_rows(), None);
+    assert_eq!(explained.root().estimated_work(), None);
+    assert_eq!(explained.root().details().get("estimated_work_overflow"), None);
+    assert_eq!(explained.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(explained.plan().estimated_cost(), None);
+    for table in [
+        "table:ByteWorkThreeScanFirst",
+        "table:ByteWorkThreeScanLast",
+    ] {
+        let scan = explained
+            .nodes()
+            .iter()
+            .find(|node| {
+                node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table))
+            })
+            .expect("joined scan with a local overflow");
+        assert_eq!(scan.estimated_rows(), Some(u64::MAX));
+        assert_eq!(scan.estimated_bytes(), Some(2_048));
+        assert_eq!(scan.estimated_work(), None);
+        assert_eq!(
+            scan.details().get("estimated_work_overflow"),
+            Some(&PlanDetail::Boolean(true))
+        );
+    }
+    assert!(explained.nodes().iter().any(|node| {
+        node.kind() == PlanNodeKind::Scan
+            && node.object() == Some(&obj("table:ByteWorkThreeScanUnknownSecond"))
+    }));
+    let limit = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Limit)
+        .expect("limit before materialization");
+    assert_eq!(limit.estimated_rows(), None);
+    assert_eq!(limit.estimated_work(), None);
+    let surface = serde_json::to_value(&explained)
+        .expect("both joined scan overflows remain visible in materialized surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(
+        surface["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|node| node["details"]["estimated_work_overflow"] == true)
+            .count(),
+        2,
+        "both joined scans retain their independent local overflow markers"
+    );
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
