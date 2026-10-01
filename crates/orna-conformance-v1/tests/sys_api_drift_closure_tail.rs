@@ -373,6 +373,26 @@ fn edge_interplay_fixture_keeps_nullable_target_count_after_handoff() {
 }
 
 #[test]
+fn edge_interplay_fixture_composes_unknown_target_count_with_exactness() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The frozen schema leaves row_count and row_count_exact independently specified; checking
+    // both the null branch and exactness must retain the nullable target-count projection.
+    assert!(
+        analysis.is_ok(),
+        "nullable target-count and exactness predicates must compose: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn runtime_publication_counters_do_not_leak_into_frozen_sys_types() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-internal-publication-metadata.orna",
