@@ -11989,9 +11989,46 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
         Err(Error::RequestMismatch)
     );
 
-    let exact_failure_query_retry = block_on(host.dispatch_frame(
+    // The reference is silent on another fresh status query after replayed
+    // cross-kind Eval mismatches; it must still expose the retained failure.
+    let failure_query_after_reused_eval = Envelope {
+        request: Some([95; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [91; 16],
+            fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let failure_query_after_reused_eval_fingerprint =
+        request_fingerprint(&failure_query_after_reused_eval, [1; 16]);
+    let failure_after_reused_eval = block_on(host.dispatch_frame(
         [6; 16],
         19,
+        Frame::Binary(failure_query_after_reused_eval),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a fresh query still observes failure after cross-kind Eval mismatches");
+    assert!(matches!(
+        &failure_after_reused_eval.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(returned),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *returned == fingerprint
+            && result == &expected_failure
+    ));
+    assert_eq!(application.calls, 1);
+
+    let exact_failure_query_retry = block_on(host.dispatch_frame(
+        [6; 16],
+        20,
         Frame::Binary(failure_status_query),
         &mut application,
     ))
@@ -12018,6 +12055,16 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
         Some(status)
             if status.state == orna_runtime_v1::RequestState::Completed
                 && status.fingerprint == failure_query_after_eval_replay_fingerprint
+    ));
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+            session_id: [1; 16],
+            request_id: [95; 16],
+        }))
+        .unwrap(),
+        Some(status)
+            if status.state == orna_runtime_v1::RequestState::Completed
+                && status.fingerprint == failure_query_after_reused_eval_fingerprint
     ));
     assert_eq!(application.calls, 1);
 
