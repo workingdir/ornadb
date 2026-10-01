@@ -8410,9 +8410,9 @@ mod tests {
 
     #[test]
     fn owner_retry_after_nested_competitor_handoff_reclaims_released_key() {
-        // The reference requires failed rekeys to be atomic but leaves nested retry ordering open;
-        // pin the local handoff behavior by asserting every mutation in source order. The final
-        // retries alternate owner and competitor moves through reused keys.
+        // The reference requires failed rekeys to be atomic but leaves nested retry ordering open.
+        // Local policy: each retry reads the latest activation overlay, and recovery bodies run
+        // in source order. Pin that choice through alternating owner and competitor moves.
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
         let application = authority
@@ -8455,6 +8455,27 @@ mod tests {
             &mut handler,
         )
         .expect("owner retries after the competitor's nested handoff");
+
+        assert_eq!(
+            handler.current_row("Note", &key(2)).unwrap(),
+            Some(row(2, "competitor", 39)),
+            "the final competitor retry should occupy the reclaimed owner key"
+        );
+        assert_eq!(
+            handler.current_row("Note", &key(3)).unwrap(),
+            Some(row(3, "owner", 42)),
+            "the final owner retry should retain its latest row update"
+        );
+        assert_eq!(
+            handler.current_row("Note", &key(1)).unwrap(),
+            None,
+            "the original owner key should stay released after handoff"
+        );
+        assert_eq!(
+            handler.current_row("Note", &key(6)).unwrap(),
+            None,
+            "the temporary move target should be released after handoff"
+        );
 
         let mutations = handler.into_mutations().expect("valid ordered mutation log");
         let expected = [
@@ -8548,6 +8569,21 @@ mod tests {
             (3, Some(2), false, Some(row(2, "owner", 39))),
             (6, Some(3), false, Some(row(3, "competitor", 35))),
             (3, None, false, Some(row(3, "competitor", 36))),
+            (3, None, false, Some(row(3, "competitor", 37))),
+            (2, Some(6), false, Some(row(6, "owner", 39))),
+            (3, Some(2), false, Some(row(2, "competitor", 37))),
+            (6, Some(3), false, Some(row(3, "owner", 39))),
+            (3, None, false, Some(row(3, "owner", 40))),
+            (3, None, false, Some(row(3, "owner", 41))),
+            (2, Some(6), false, Some(row(6, "competitor", 37))),
+            (3, Some(2), false, Some(row(2, "owner", 41))),
+            (6, Some(3), false, Some(row(3, "competitor", 37))),
+            (3, None, false, Some(row(3, "competitor", 38))),
+            (3, None, false, Some(row(3, "competitor", 39))),
+            (2, Some(6), false, Some(row(6, "owner", 41))),
+            (3, Some(2), false, Some(row(2, "competitor", 39))),
+            (6, Some(3), false, Some(row(3, "owner", 41))),
+            (3, None, false, Some(row(3, "owner", 42))),
         ];
         assert_eq!(mutations.len(), expected.len());
         for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in
