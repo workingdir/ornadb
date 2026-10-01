@@ -473,6 +473,26 @@ fn edge_interplay_fixture_retains_unknown_inexact_count_through_references() {
 }
 
 #[test]
+fn edge_interplay_fixture_retains_unknown_inexact_target_across_reference_handoff() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Keep the whole unknown/inexact target across its References callback, then project
+    // row_count separately to prove the nullable field is retained on the captured record.
+    assert!(
+        analysis.is_ok(),
+        "unknown/inexact target and nullable row_count must survive the Reference handoff: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_chains_unknown_inexact_target_filters() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
