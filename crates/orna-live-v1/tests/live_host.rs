@@ -14634,6 +14634,77 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     );
     assert_eq!(application.calls, 1);
 
+    // The reference is silent on alternating retries of both same-target
+    // mismatches around one terminal replay; preserve each diagnostic as the
+    // retry order reverses.
+    for (query, expected, label, now) in [
+        (
+            same_target_wrong_fingerprint_query.clone(),
+            same_target_fingerprint_mismatch.clone(),
+            "the first same-target mismatch replays before alternating retries",
+            31,
+        ),
+        (
+            repeated_same_target_query.clone(),
+            repeated_same_target_mismatch.clone(),
+            "the second same-target mismatch replays before alternating retries",
+            32,
+        ),
+    ] {
+        assert_eq!(
+            block_on(host.dispatch_frame(
+                [6; 16],
+                now,
+                Frame::Binary(query),
+                &mut application,
+            ))
+            .unwrap()
+            .response
+            .expect(label),
+            expected
+        );
+    }
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            33,
+            Frame::Binary(terminal_eval.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the terminal failure replays between alternating same-target retries"),
+        terminal_eval_replay
+    );
+    for (query, expected, label, now) in [
+        (
+            repeated_same_target_query.clone(),
+            repeated_same_target_mismatch,
+            "the second same-target mismatch replays after the terminal failure",
+            34,
+        ),
+        (
+            same_target_wrong_fingerprint_query.clone(),
+            same_target_fingerprint_mismatch,
+            "the first same-target mismatch replays after the retry order reverses",
+            35,
+        ),
+    ] {
+        assert_eq!(
+            block_on(host.dispatch_frame(
+                [6; 16],
+                now,
+                Frame::Binary(query),
+                &mut application,
+            ))
+            .unwrap()
+            .response
+            .expect(label),
+            expected
+        );
+    }
+    assert_eq!(application.calls, 1);
+
     let fresh_status_query = Envelope {
         request: Some([94; 16]),
         watch: None,
@@ -14648,7 +14719,7 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     let fresh_status_fingerprint = request_fingerprint(&fresh_status_query, [1; 16]);
     let fresh_status = block_on(host.dispatch_frame(
         [6; 16],
-        31,
+        36,
         Frame::Binary(fresh_status_query),
         &mut application,
     ))
