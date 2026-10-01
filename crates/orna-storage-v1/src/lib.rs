@@ -1267,6 +1267,7 @@ fn map_compact_runtime_error(error: RuntimeError) -> Error {
     match error {
         RuntimeError::StorageUnavailable => Error::RuntimeUnavailable,
         RuntimeError::InvalidIdentity
+        | RuntimeError::SystemProviderAbiInvalid
         | RuntimeError::InvalidDigest
         | RuntimeError::InvalidObservationReference
         | RuntimeError::ObservationCoordinateMismatch
