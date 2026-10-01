@@ -716,6 +716,26 @@ fn edge_interplay_fixture_returns_present_count_after_filtered_callback_handoff_
 }
 
 #[test]
+fn edge_interplay_fixture_returns_present_count_after_filter_callback_tail() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Return the filtered value from one callback, then return it again from a later callback.
+    // The reference documents row_count as nullable but does not define this callback chain.
+    assert!(
+        analysis.is_ok(),
+        "the present exact count must survive the post-filter callback tail: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_projects_unknown_exact_target_count_through_columns() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
