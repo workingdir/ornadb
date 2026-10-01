@@ -69,6 +69,18 @@ async fn commit(
         .expect("commit table generation");
 }
 
+async fn historical_rows(
+    state: &RuntimeState,
+    snapshot: &orna_runtime_v1::HistoricalSnapshot,
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+    state
+        .read_table_at(snapshot, "records")
+        .await
+        .expect("read case-closure table at historical pin")
+        .rows()
+        .to_vec()
+}
+
 #[tokio::test]
 async fn historical_reads_are_pinned_to_checkpoint_generations_and_cover_deletes() {
     let (_directory, repository) = repository();
@@ -897,6 +909,82 @@ async fn stable_prefix_neighbor_survives_extension_pin_tails() {
             expected_rows.as_slice()
         );
     }
+}
+
+#[tokio::test]
+async fn case_closure_matrix_preserves_each_transition_pin() {
+    let (_directory, repository) = repository();
+    let identity = RuntimeIdentity {
+        database_id: [71; 16],
+        repository_id: [72; 16],
+    };
+    let state = RuntimeState::open(&repository, identity, [73; 32])
+        .await
+        .expect("open case-closure runtime");
+    let writer = state.acquire_lease([74; 16]).await.expect("acquire writer");
+    let prefix = include_str!("fixtures/case_closure_matrix_prefix.orna")
+        .as_bytes()
+        .to_vec();
+    let tail = include_str!("fixtures/case_closure_matrix_tail.orna")
+        .as_bytes()
+        .to_vec();
+
+    // A closure removes only the addressed key: the edge row remains readable
+    // as a tail-only image, and restoring the same prefix creates a new pin.
+    commit(
+        &state,
+        writer,
+        &[
+            TableMutation::new([75; 16], "records", vec![5], Some(prefix.clone()))
+                .expect("valid prefix fixture mutation"),
+            TableMutation::new([76; 16], "records", vec![5, 0], Some(tail.clone()))
+                .expect("valid tail fixture mutation"),
+        ],
+        77,
+    )
+    .await;
+    let both = state
+        .select_historical_snapshot(1)
+        .await
+        .expect("select both-row image");
+
+    commit(
+        &state,
+        writer,
+        &[TableMutation::new([78; 16], "records", vec![5], None)
+            .expect("valid prefix closure mutation")],
+        77,
+    )
+    .await;
+    let tail_only = state
+        .select_historical_snapshot(2)
+        .await
+        .expect("select tail-only image after prefix closure");
+
+    commit(
+        &state,
+        writer,
+        &[TableMutation::new(
+            [79; 16],
+            "records",
+            vec![5],
+            Some(prefix.clone()),
+        )
+        .expect("valid prefix restoration mutation")],
+        77,
+    )
+    .await;
+    let restored = state
+        .select_historical_snapshot(3)
+        .await
+        .expect("select restored both-row image");
+
+    let both_rows = vec![(vec![5], prefix), (vec![5, 0], tail.clone())];
+    assert_eq!(historical_rows(&state, &both).await, both_rows);
+    assert_eq!(historical_rows(&state, &tail_only).await, vec![(vec![5, 0], tail)]);
+    assert_eq!(historical_rows(&state, &restored).await, both_rows);
+    assert_eq!(both.capture().generation_digest(), restored.capture().generation_digest());
+    assert_ne!(both.snapshot_id(), restored.snapshot_id());
 }
 
 #[tokio::test]
