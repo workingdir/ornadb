@@ -22273,3 +22273,174 @@ fn diagnostic_concurrent_reloads_follow_serialized_alias_rebind_order() {
         &rounds[last_generation],
     );
 }
+
+#[test]
+fn diagnostic_alias_storms_keep_each_synchronized_reload_snapshot_ordered() {
+    const WORKERS_PER_WAVE: usize = 8;
+    const WAVES: usize = 4;
+
+    fn diagnostic(code: &str, fixture: &str) -> Diagnostic {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn aliases_for(generation: usize) -> Vec<Option<u8>> {
+        match generation % 6 {
+            0 => vec![Some(0x11), Some(0x22), Some(0x11)],
+            1 => vec![Some(0x22), Some(0x11), Some(0x22), None],
+            2 => vec![None, Some(0x11), Some(0x22), Some(0x11)],
+            3 => vec![Some(0x22), None, Some(0x22)],
+            4 => vec![Some(0x11), Some(0x11), None, Some(0x22)],
+            _ => vec![Some(0x22), Some(0x11), Some(0x22), None],
+        }
+    }
+
+    fn reference_uuid(byte: u8) -> String {
+        let pair = format!("{byte:02x}");
+        format!(
+            "{pair}{pair}{pair}{pair}-{pair}{pair}-{pair}{pair}-{pair}{pair}-{pair}{pair}{pair}{pair}{pair}{pair}"
+        )
+    }
+
+    fn assert_generation(
+        projection: &serde_json::Value,
+        generation: usize,
+        aliases: &[Option<u8>],
+    ) {
+        assert_eq!(projection["code"], format!("ORNA-E-ALIAS-STORM-ROOT-{generation}"));
+        assert_eq!(projection["message"], "<redacted>");
+        let causes = projection["causes"].as_array().unwrap();
+        assert_eq!(causes.len(), aliases.len());
+        assert_eq!(
+            causes
+                .iter()
+                .map(|cause| cause["code"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>(),
+            (0..aliases.len())
+                .map(|slot| format!("ORNA-E-ALIAS-STORM-{generation}-SLOT-{slot}"))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            causes
+                .iter()
+                .map(|cause| cause["reference"].as_str().map(str::to_owned))
+                .collect::<Vec<_>>(),
+            aliases
+                .iter()
+                .map(|alias| (*alias).map(reference_uuid))
+                .collect::<Vec<_>>()
+        );
+
+        for (slot, (cause, alias)) in causes.iter().zip(aliases).enumerate() {
+            assert_eq!(cause["message"], "<redacted>");
+            let nested = cause["causes"].as_array().unwrap();
+            if alias.is_some() {
+                let children = if generation % 2 == 0 {
+                    ["LEFT", "RIGHT"]
+                } else {
+                    ["RIGHT", "LEFT"]
+                }
+                .map(|side| format!("ORNA-E-ALIAS-STORM-{generation}-SLOT-{slot}-{side}"));
+                assert_eq!(
+                    nested
+                        .iter()
+                        .map(|child| child["code"].as_str().unwrap().to_owned())
+                        .collect::<Vec<_>>(),
+                    children
+                );
+            } else {
+                assert!(nested.is_empty());
+            }
+        }
+    }
+
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_markers = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"').to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_markers.len(), 2);
+
+    let mut wires = Vec::with_capacity(WORKERS_PER_WAVE * WAVES);
+    let mut aliases_by_generation = Vec::with_capacity(WORKERS_PER_WAVE * WAVES);
+    for generation in 0..WORKERS_PER_WAVE * WAVES {
+        let aliases = aliases_for(generation);
+        let mut root = diagnostic(&format!("ORNA-E-ALIAS-STORM-ROOT-{generation}"), fixture);
+        for (slot, alias) in aliases.iter().enumerate() {
+            let mut cause = diagnostic(
+                &format!("ORNA-E-ALIAS-STORM-{generation}-SLOT-{slot}"),
+                fixture,
+            );
+            if let Some(alias) = alias {
+                cause = cause.with_reference([*alias; 16]);
+                let children = if generation % 2 == 0 {
+                    ["LEFT", "RIGHT"]
+                } else {
+                    ["RIGHT", "LEFT"]
+                };
+                for side in children {
+                    cause = cause.with_cause(diagnostic(
+                        &format!("ORNA-E-ALIAS-STORM-{generation}-SLOT-{slot}-{side}"),
+                        fixture,
+                    ));
+                }
+            }
+            root = root.with_cause(cause);
+        }
+        wires.push(root.encode_ovb().unwrap());
+        aliases_by_generation.push(aliases);
+    }
+
+    for wire in &wires {
+        assert!(!wire.windows(fixture.len()).any(|window| window == fixture.as_bytes()));
+        for marker in &fixture_markers {
+            assert!(!wire
+                .windows(marker.len())
+                .any(|window| window == marker.as_bytes()));
+        }
+    }
+
+    let initial = diagnostic("ORNA-E-ALIAS-STORM-INITIAL", fixture);
+    let shared = std::sync::Arc::new(std::sync::Mutex::new((initial, Vec::new())));
+    for wave in 0..WAVES {
+        let first_generation = wave * WORKERS_PER_WAVE;
+        let start = std::sync::Arc::new(std::sync::Barrier::new(WORKERS_PER_WAVE));
+        std::thread::scope(|scope| {
+            for worker in 0..WORKERS_PER_WAVE {
+                let generation = first_generation + worker;
+                let shared = std::sync::Arc::clone(&shared);
+                let start = std::sync::Arc::clone(&start);
+                let wire = wires[generation].clone();
+                let aliases = &aliases_by_generation[generation];
+                scope.spawn(move || {
+                    start.wait();
+                    let mut state = shared.lock().unwrap();
+                    state.0.reload_ovb(&wire).unwrap();
+                    let projection = serde_json::to_value(&state.0).unwrap();
+                    assert_generation(&projection, generation, aliases);
+                    state.1.push(generation);
+                });
+            }
+        });
+
+        let state = shared.lock().unwrap();
+        let wave_order = &state.1[first_generation..first_generation + WORKERS_PER_WAVE];
+        let mut observed = wave_order.to_vec();
+        observed.sort_unstable();
+        assert_eq!(
+            observed,
+            (first_generation..first_generation + WORKERS_PER_WAVE).collect::<Vec<_>>()
+        );
+        let last_generation = *wave_order.last().unwrap();
+        assert_generation(
+            &serde_json::to_value(&state.0).unwrap(),
+            last_generation,
+            &aliases_by_generation[last_generation],
+        );
+    }
+}
