@@ -314,3 +314,47 @@ fn nested_short_and_long_alias_routes_keep_each_historical_parent_pin() {
         long_parent_commit
     );
 }
+
+#[test]
+fn nested_equal_oid_aliases_remain_distinct_through_the_public_resolver() {
+    let (_shared_dir, shared_repository, package_commit) = repository(&[(
+        "main.orna",
+        include_str!("fixtures/attach-package.orna"),
+    )]);
+    let root_manifest = format!(
+        "archive {package_commit}\narchive_copy {package_commit}\n"
+    );
+    let (_root_dir, root_repository, root_commit) = repository(&[
+        ("main.orna", include_str!("fixtures/attach-primary.orna")),
+        (PACKAGE_PIN_MANIFEST_PATH, &root_manifest),
+    ]);
+    let loader = ProjectLoader::default();
+    let primary = PinnedDatabase::resolve("app", root_repository, &root_commit, loader).unwrap();
+    let resolver = PackageResolver::new(
+        [
+            ("archive".to_owned(), shared_repository.clone()),
+            ("archive_copy".to_owned(), shared_repository),
+        ],
+        loader,
+    )
+    .unwrap();
+
+    let root = resolver.resolve_for_parent(primary).unwrap();
+    let short = root.database("archive").unwrap().clone();
+    let long = root.database("archive_copy").unwrap().clone();
+    assert_eq!(short.pin().commit(), long.pin().commit());
+    assert_eq!(short.pin().commit().as_str(), package_commit);
+    assert_eq!(short.pin().name(), "archive");
+    assert_eq!(long.pin().name(), "archive_copy");
+    assert_ne!(short.pin(), long.pin());
+    assert_eq!(root.attached().count(), 2);
+
+    let short_closure = resolver.resolve_for_parent(short).unwrap();
+    let long_closure = resolver.resolve_for_parent(long).unwrap();
+    assert_eq!(short_closure.primary().pin().name(), "archive");
+    assert_eq!(long_closure.primary().pin().name(), "archive_copy");
+    assert_eq!(short_closure.attached().count(), 0);
+    assert_eq!(long_closure.attached().count(), 0);
+    assert_eq!(root.database("archive").unwrap().pin().name(), "archive");
+    assert_eq!(root.database("archive_copy").unwrap().pin().name(), "archive_copy");
+}
