@@ -1,6 +1,6 @@
 # External reference record: sys binding architecture addendum
 
-**Status:** Documentation slice complete in the reference tree; this file records provenance and verification only.
+**Status:** Reference addendum complete; this file records its provenance and follow-on implementation decisions.
 
 **Beads issue:** `ornadb-btcjc`; GitHub issue [#5487](https://github.com/workingdir/ornadb/issues/5487).
 
@@ -44,3 +44,9 @@ Command: `sha256sum --check --quiet SHA256SUMS`, run from the reference root. Ca
 The same manifest check confirmed `api/sys.json` at its existing SHA-256, `318b6d54f51d44e8117ffc91520dfd2dc2722cc023fdad51bd4dba601dd9abcb`. Its bytes and schema were not edited. The addendum is outside the existing release inventory; no checksum drift occurred among the existing release artifacts.
 
 No Rust tests were run; this slice changes documentation only.
+
+## Follow-on implementation note: registry emission (issue #5479)
+
+The build generator treats `api/sys.json` only as the published compatibility artifact. Its input is the sys crate's internal type-graph inventory plus operation descriptors collected from annotated implementation methods. The inventory contains no function rows or counts; the method registry supplies all function rows, and the generator derives counts. The same collected operation registry feeds provider ABI and `.orna` stub generation.
+
+The generator validates the completed document with the existing ORNA-SYS-129/138 type-graph checks and verifies that the unchanged published JSON Schema covers its exact root shape. Canonically ordered output remains byte-compared against the checked-in `api/sys.json`; this generation-flow change does not change the artifact path, schema, or 1.0.0 semantics.

@@ -32,7 +32,7 @@ fn assert_canonical_object_key_order(value: &Value) {
 }
 
 #[test]
-fn published_schema_is_the_deterministic_annotated_method_projection() {
+fn published_artifact_is_the_deterministic_registry_projection() {
     assert_eq!(
         system_api_json(),
         PUBLISHED_SYS_API,
@@ -59,6 +59,8 @@ fn published_json_schema_covers_the_generated_artifact_and_closed_type_graph() {
     assert_eq!(schema["type"], "object");
     assert_eq!(schema["additionalProperties"], false);
     assert_eq!(property_names, required_names);
+    build_support::validate_published_schema_shape(&api, &schema)
+        .expect("published schema exactly covers generated artifact fields");
     assert_canonical_object_key_order(&api);
     assert_eq!(
         build_support::canonical_pretty_json(&api).expect("canonical artifact serialization"),

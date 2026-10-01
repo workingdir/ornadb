@@ -7,8 +7,8 @@ use std::{
 mod build_support;
 
 use build_support::{
-    Collector, canonical_pretty_json, generate_binding_stubs, parse_role_version,
-    validate_api_document, validate_collection,
+    Collector, canonical_pretty_json, generate_binding_stubs, generate_system_api_document,
+    parse_role_version, validate_collection, validate_published_schema_shape,
 };
 use serde_json::{Value, json};
 
@@ -33,11 +33,11 @@ fn main() {
         .and_then(Path::parent)
         .expect("orna-sys-v1 must be two levels below the workspace root");
     let source_root = manifest.join("src");
-    let api_path = workspace.join("api/sys.json");
     let schema_path = workspace.join("api/sys.schema.json");
+    let registry_path = source_root.join("system_api_inventory.json");
     let build_support_path = manifest.join("build_support.rs");
-    println!("cargo:rerun-if-changed={}", api_path.display());
     println!("cargo:rerun-if-changed={}", schema_path.display());
+    println!("cargo:rerun-if-changed={}", registry_path.display());
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", build_support_path.display());
     // Watch the directory recursively so adding a new annotated module also
@@ -75,23 +75,22 @@ fn main() {
     );
     assert_eq!(schema["type"].as_str(), Some("object"));
 
-    // The normative API artifact owns the non-function type/relation graph;
-    // function declarations are replaced by the build-time method collection.
-    let base_text = fs::read_to_string(&api_path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", api_path.display()));
-    let mut api: Value = serde_json::from_str(&base_text).expect("valid normative system API JSON");
+    // One registry combines the checked-in non-operation type graph with
+    // operation descriptors collected directly from annotated implementations.
+    // api/sys.json is an emitted compatibility artifact, never generator input.
+    let registry_text = fs::read_to_string(&registry_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", registry_path.display()));
+    let registry: Value = serde_json::from_str(&registry_text)
+        .expect("valid system API type-graph registry inventory");
     let functions = collector
         .functions
         .iter()
         .map(|function| function.metadata.clone())
         .collect::<Vec<_>>();
-    api["functions"] = Value::Array(functions);
-    api["counts"]["functions"] = json!(collector.functions.len());
-    api["source_of_truth"] = json!(
-        "crates/orna-sys-v1/src/system_api.rs #[ornasys] descriptor methods; normative semantics in source chapters and generated system reference"
-    );
-
-    validate_api_document(&api).expect("generated system API schema is internally consistent");
+    let api = generate_system_api_document(registry, functions)
+        .expect("registry-generated system API is internally consistent");
+    validate_published_schema_shape(&api, &schema)
+        .expect("published JSON Schema covers the generated system API artifact");
 
     let mut generated_json = canonical_pretty_json(&api).expect("serialize system API canonically");
     generated_json.push('\n');
