@@ -16,6 +16,28 @@ fn texts(values: &[&str]) -> CanonicalValue {
     .unwrap()
 }
 
+fn assert_rescaled_factor_tail_closes(below: &str, above: &str, expected: &[&str]) {
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    for source in [
+        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
+        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
+    ] {
+        assert_eq!(session.submit(source), Ok(None), "{source}");
+    }
+
+    for source in [below, above] {
+        let result = session.submit(source);
+        assert_eq!(
+            result,
+            Ok(Some(texts(expected))),
+            "{source}; diagnostic={}",
+            result.as_ref().err().map_or("none", |error| error.code())
+        );
+    }
+}
+
 fn boolean(value: bool) -> CanonicalValue {
     CanonicalValue::new(Raw::Bool(value)).unwrap()
 }
@@ -974,28 +996,16 @@ fn positive_factor_subnanosecond_tails_rescale_across_the_second_minute_edge() {
 fn positive_factor_subnanosecond_rescaled_tails_close_at_two_minutes() {
     // The reference is silent on closing a rescaled subnanosecond-derived
     // minute tail. Pin the exact 6 ns correction from either side of 2m.
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
-    for source in [
-        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
-    ] {
-        assert_eq!(session.submit(source), Ok(None), "{source}");
-    }
-
-    for source in [
+    assert_rescaled_factor_tail_closes(
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-from-below-f55yc.orna"),
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-from-above-f55yc.orna"),
-    ] {
-        let result = session.submit(source);
-        assert_eq!(
-            result,
-            Ok(Some(texts(&["2m", "00:02:00", "2 minutes", "PT2M"]))),
-            "{source}; diagnostic={}",
-            result.as_ref().err().map_or("none", |error| error.code())
-        );
-    }
+        &[
+            "2m",
+            "00:02:00",
+            "2 minutes",
+            "PT2M",
+        ],
+    );
 }
 
 #[test]
@@ -1003,28 +1013,16 @@ fn positive_factor_rescaled_tails_close_after_second_doubling() {
     // The reference is silent on closing a factor tail after repeated
     // rescaling. Two doublings carry the 3 ns tail to 12 ns around four
     // minutes; an exact 12 ns correction closes both sides at 4m.
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
-    for source in [
-        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
-    ] {
-        assert_eq!(session.submit(source), Ok(None), "{source}");
-    }
-
-    for source in [
+    assert_rescaled_factor_tail_closes(
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-second-doubling-from-below-3ohyv.orna"),
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-second-doubling-from-above-3ohyv.orna"),
-    ] {
-        let result = session.submit(source);
-        assert_eq!(
-            result,
-            Ok(Some(texts(&["4m", "00:04:00", "4 minutes", "PT4M"]))),
-            "{source}; diagnostic={}",
-            result.as_ref().err().map_or("none", |error| error.code())
-        );
-    }
+        &[
+            "4m",
+            "00:04:00",
+            "4 minutes",
+            "PT4M",
+        ],
+    );
 }
 
 #[test]
@@ -1032,28 +1030,16 @@ fn positive_factor_rescaled_tails_close_after_third_doubling() {
     // The reference is silent on closing subnanosecond-derived tails after
     // another rescaling step. Three doublings carry the 3 ns tail to 24 ns
     // around eight minutes; correcting by 24 ns closes both sides at 8m.
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
-    for source in [
-        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
-    ] {
-        assert_eq!(session.submit(source), Ok(None), "{source}");
-    }
-
-    for source in [
+    assert_rescaled_factor_tail_closes(
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-third-doubling-from-below-9ymm6.orna"),
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-third-doubling-from-above-9ymm6.orna"),
-    ] {
-        let result = session.submit(source);
-        assert_eq!(
-            result,
-            Ok(Some(texts(&["8m", "00:08:00", "8 minutes", "PT8M"]))),
-            "{source}; diagnostic={}",
-            result.as_ref().err().map_or("none", |error| error.code())
-        );
-    }
+        &[
+            "8m",
+            "00:08:00",
+            "8 minutes",
+            "PT8M",
+        ],
+    );
 }
 
 #[test]
@@ -1061,28 +1047,16 @@ fn positive_factor_rescaled_tails_close_after_fourth_doubling() {
     // The reference is silent on closing the tail after one further scaling
     // step. Four doublings carry the 3 ns tail to 48 ns around sixteen
     // minutes; correcting by 48 ns closes both sides at 16m.
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
-    for source in [
-        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
-    ] {
-        assert_eq!(session.submit(source), Ok(None), "{source}");
-    }
-
-    for source in [
+    assert_rescaled_factor_tail_closes(
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fourth-doubling-from-below-ghs9x.orna"),
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fourth-doubling-from-above-ghs9x.orna"),
-    ] {
-        let result = session.submit(source);
-        assert_eq!(
-            result,
-            Ok(Some(texts(&["16m", "00:16:00", "16 minutes", "PT16M"]))),
-            "{source}; diagnostic={}",
-            result.as_ref().err().map_or("none", |error| error.code())
-        );
-    }
+        &[
+            "16m",
+            "00:16:00",
+            "16 minutes",
+            "PT16M",
+        ],
+    );
 }
 
 #[test]
@@ -1090,28 +1064,16 @@ fn positive_factor_rescaled_tails_close_after_fifth_doubling() {
     // The reference is silent on closing the tail after another scaling
     // step. Five doublings carry the 3 ns tail to 96 ns around thirty-two
     // minutes; correcting by 96 ns closes both sides at 32m.
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
-    for source in [
-        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
-    ] {
-        assert_eq!(session.submit(source), Ok(None), "{source}");
-    }
-
-    for source in [
+    assert_rescaled_factor_tail_closes(
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifth-doubling-from-below-9tosd.orna"),
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifth-doubling-from-above-9tosd.orna"),
-    ] {
-        let result = session.submit(source);
-        assert_eq!(
-            result,
-            Ok(Some(texts(&["32m", "00:32:00", "32 minutes", "PT32M"]))),
-            "{source}; diagnostic={}",
-            result.as_ref().err().map_or("none", |error| error.code())
-        );
-    }
+        &[
+            "32m",
+            "00:32:00",
+            "32 minutes",
+            "PT32M",
+        ],
+    );
 }
 
 #[test]
@@ -1119,33 +1081,16 @@ fn positive_factor_rescaled_tails_close_after_sixth_doubling() {
     // The reference is silent on closing the tail after another scaling
     // step. Six doublings carry the 3 ns tail to 192 ns around sixty-four
     // minutes; correcting by 192 ns closes both sides at 64m.
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
-    for source in [
-        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
-    ] {
-        assert_eq!(session.submit(source), Ok(None), "{source}");
-    }
-
-    for source in [
+    assert_rescaled_factor_tail_closes(
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixth-doubling-from-below-sx8m7.orna"),
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixth-doubling-from-above-sx8m7.orna"),
-    ] {
-        let result = session.submit(source);
-        assert_eq!(
-            result,
-            Ok(Some(texts(&[
-                "1h 4m",
-                "01:04:00",
-                "1 hour, 4 minutes",
-                "PT1H4M",
-            ]))),
-            "{source}; diagnostic={}",
-            result.as_ref().err().map_or("none", |error| error.code())
-        );
-    }
+        &[
+            "1h 4m",
+            "01:04:00",
+            "1 hour, 4 minutes",
+            "PT1H4M",
+        ],
+    );
 }
 
 #[test]
@@ -1153,33 +1098,16 @@ fn positive_factor_rescaled_tails_close_after_seventh_doubling() {
     // The reference is silent on closing the tail after another scaling
     // step. Seven doublings carry the 3 ns tail to 384 ns around two hours;
     // correcting by 384 ns closes both sides at 128m.
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
-    for source in [
-        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
-    ] {
-        assert_eq!(session.submit(source), Ok(None), "{source}");
-    }
-
-    for source in [
+    assert_rescaled_factor_tail_closes(
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventh-doubling-from-below-81ori.orna"),
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventh-doubling-from-above-81ori.orna"),
-    ] {
-        let result = session.submit(source);
-        assert_eq!(
-            result,
-            Ok(Some(texts(&[
-                "2h 8m",
-                "02:08:00",
-                "2 hours, 8 minutes",
-                "PT2H8M",
-            ]))),
-            "{source}; diagnostic={}",
-            result.as_ref().err().map_or("none", |error| error.code())
-        );
-    }
+        &[
+            "2h 8m",
+            "02:08:00",
+            "2 hours, 8 minutes",
+            "PT2H8M",
+        ],
+    );
 }
 
 #[test]
@@ -1187,33 +1115,16 @@ fn positive_factor_rescaled_tails_close_after_eighth_doubling() {
     // The reference is silent on closing the tail after another scaling
     // step. Eight doublings carry the 3 ns tail to 768 ns around 256 minutes;
     // correcting by 768 ns closes both sides at 4h 16m.
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
-    for source in [
-        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
-    ] {
-        assert_eq!(session.submit(source), Ok(None), "{source}");
-    }
-
-    for source in [
+    assert_rescaled_factor_tail_closes(
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighth-doubling-from-below-g7ako.orna"),
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighth-doubling-from-above-g7ako.orna"),
-    ] {
-        let result = session.submit(source);
-        assert_eq!(
-            result,
-            Ok(Some(texts(&[
-                "4h 16m",
-                "04:16:00",
-                "4 hours, 16 minutes",
-                "PT4H16M",
-            ]))),
-            "{source}; diagnostic={}",
-            result.as_ref().err().map_or("none", |error| error.code())
-        );
-    }
+        &[
+            "4h 16m",
+            "04:16:00",
+            "4 hours, 16 minutes",
+            "PT4H16M",
+        ],
+    );
 }
 
 #[test]
@@ -1221,33 +1132,16 @@ fn positive_factor_rescaled_tails_close_after_ninth_doubling() {
     // The reference is silent on closing the tail after another scaling
     // step. Nine doublings carry the 3 ns tail to 1,536 ns around 512 minutes;
     // correcting by 1,536 ns closes both sides at 8h 32m.
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
-    for source in [
-        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
-    ] {
-        assert_eq!(session.submit(source), Ok(None), "{source}");
-    }
-
-    for source in [
+    assert_rescaled_factor_tail_closes(
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninth-doubling-from-below-ty93h.orna"),
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninth-doubling-from-above-ty93h.orna"),
-    ] {
-        let result = session.submit(source);
-        assert_eq!(
-            result,
-            Ok(Some(texts(&[
-                "8h 32m",
-                "08:32:00",
-                "8 hours, 32 minutes",
-                "PT8H32M",
-            ]))),
-            "{source}; diagnostic={}",
-            result.as_ref().err().map_or("none", |error| error.code())
-        );
-    }
+        &[
+            "8h 32m",
+            "08:32:00",
+            "8 hours, 32 minutes",
+            "PT8H32M",
+        ],
+    );
 }
 
 #[test]
@@ -1255,33 +1149,16 @@ fn positive_factor_rescaled_tails_close_after_tenth_doubling() {
     // The reference is silent on closing the tail after another scaling
     // step. Ten doublings carry the 3 ns tail to 3,072 ns around 1,024
     // minutes; correcting by 3,072 ns closes both sides at 17h 4m.
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
-    for source in [
-        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
-    ] {
-        assert_eq!(session.submit(source), Ok(None), "{source}");
-    }
-
-    for source in [
+    assert_rescaled_factor_tail_closes(
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-tenth-doubling-from-below-huqsy.orna"),
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-tenth-doubling-from-above-huqsy.orna"),
-    ] {
-        let result = session.submit(source);
-        assert_eq!(
-            result,
-            Ok(Some(texts(&[
-                "17h 4m",
-                "17:04:00",
-                "17 hours, 4 minutes",
-                "PT17H4M",
-            ]))),
-            "{source}; diagnostic={}",
-            result.as_ref().err().map_or("none", |error| error.code())
-        );
-    }
+        &[
+            "17h 4m",
+            "17:04:00",
+            "17 hours, 4 minutes",
+            "PT17H4M",
+        ],
+    );
 }
 
 #[test]
@@ -1289,33 +1166,16 @@ fn positive_factor_rescaled_tails_close_after_eleventh_doubling() {
     // The reference is silent on closing the tail after another scaling
     // step. Eleven doublings carry the 3 ns tail to 6,144 ns around 2,048
     // minutes; correcting by 6,144 ns closes both sides at 1d 10h 8m.
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
-    for source in [
-        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
-    ] {
-        assert_eq!(session.submit(source), Ok(None), "{source}");
-    }
-
-    for source in [
+    assert_rescaled_factor_tail_closes(
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eleventh-doubling-from-below-ek7bo.orna"),
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eleventh-doubling-from-above-ek7bo.orna"),
-    ] {
-        let result = session.submit(source);
-        assert_eq!(
-            result,
-            Ok(Some(texts(&[
-                "1d 10h 8m",
-                "34:08:00",
-                "1 day, 10 hours, 8 minutes",
-                "P1DT10H8M",
-            ]))),
-            "{source}; diagnostic={}",
-            result.as_ref().err().map_or("none", |error| error.code())
-        );
-    }
+        &[
+            "1d 10h 8m",
+            "34:08:00",
+            "1 day, 10 hours, 8 minutes",
+            "P1DT10H8M",
+        ],
+    );
 }
 
 #[test]
@@ -1323,33 +1183,16 @@ fn positive_factor_rescaled_tails_close_after_twelfth_doubling() {
     // The reference is silent on closing the tail after another scaling
     // step. Twelve doublings carry the 3 ns tail to 12,288 ns around 4,096
     // minutes; correcting by 12,288 ns closes both sides at 2d 20h 16m.
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
-    for source in [
-        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
-    ] {
-        assert_eq!(session.submit(source), Ok(None), "{source}");
-    }
-
-    for source in [
+    assert_rescaled_factor_tail_closes(
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twelfth-doubling-from-below-mav32.orna"),
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twelfth-doubling-from-above-mav32.orna"),
-    ] {
-        let result = session.submit(source);
-        assert_eq!(
-            result,
-            Ok(Some(texts(&[
-                "2d 20h 16m",
-                "68:16:00",
-                "2 days, 20 hours, 16 minutes",
-                "P2DT20H16M",
-            ]))),
-            "{source}; diagnostic={}",
-            result.as_ref().err().map_or("none", |error| error.code())
-        );
-    }
+        &[
+            "2d 20h 16m",
+            "68:16:00",
+            "2 days, 20 hours, 16 minutes",
+            "P2DT20H16M",
+        ],
+    );
 }
 
 #[test]
@@ -1357,33 +1200,16 @@ fn positive_factor_rescaled_tails_close_after_thirteenth_doubling() {
     // The reference is silent on closing the tail after another scaling
     // step. Thirteen doublings carry the 3 ns tail to 24,576 ns around 8,192
     // minutes; correcting by 24,576 ns closes both sides at 5d 16h 32m.
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
-    for source in [
-        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
-    ] {
-        assert_eq!(session.submit(source), Ok(None), "{source}");
-    }
-
-    for source in [
+    assert_rescaled_factor_tail_closes(
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirteenth-doubling-from-below-2tfji.orna"),
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirteenth-doubling-from-above-2tfji.orna"),
-    ] {
-        let result = session.submit(source);
-        assert_eq!(
-            result,
-            Ok(Some(texts(&[
-                "5d 16h 32m",
-                "136:32:00",
-                "5 days, 16 hours, 32 minutes",
-                "P5DT16H32M",
-            ]))),
-            "{source}; diagnostic={}",
-            result.as_ref().err().map_or("none", |error| error.code())
-        );
-    }
+        &[
+            "5d 16h 32m",
+            "136:32:00",
+            "5 days, 16 hours, 32 minutes",
+            "P5DT16H32M",
+        ],
+    );
 }
 
 #[test]
@@ -1391,33 +1217,16 @@ fn positive_factor_rescaled_tails_close_after_fourteenth_doubling() {
     // The reference is silent on closing the tail after another scaling
     // step. Fourteen doublings carry the 3 ns tail to 49,152 ns around
     // 16,384 minutes; correcting by 49,152 ns closes both sides at 11d 9h 4m.
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
-    for source in [
-        include_str!("fixtures/stdlib-time-duration-use-compact-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-words-b1e0.orna"),
-        include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna"),
-    ] {
-        assert_eq!(session.submit(source), Ok(None), "{source}");
-    }
-
-    for source in [
+    assert_rescaled_factor_tail_closes(
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fourteenth-doubling-from-below-cz3dj.orna"),
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fourteenth-doubling-from-above-cz3dj.orna"),
-    ] {
-        let result = session.submit(source);
-        assert_eq!(
-            result,
-            Ok(Some(texts(&[
-                "11d 9h 4m",
-                "273:04:00",
-                "11 days, 9 hours, 4 minutes",
-                "P11DT9H4M",
-            ]))),
-            "{source}; diagnostic={}",
-            result.as_ref().err().map_or("none", |error| error.code())
-        );
-    }
+        &[
+            "11d 9h 4m",
+            "273:04:00",
+            "11 days, 9 hours, 4 minutes",
+            "P11DT9H4M",
+        ],
+    );
 }
 
 #[test]
