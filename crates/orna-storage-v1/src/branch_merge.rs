@@ -386,6 +386,11 @@ fn merge_table<R: BranchRowSource>(
             let aligned = aligned_layouts(b, l, r);
             let mut segments = Vec::new();
             if aligned {
+                // `valid_manifest` checks boundaries by canonical primary-key
+                // order. Preserve that segment order while consuming the
+                // shared conflict budget: clean tombstones in an earlier
+                // depth range are entries in the walk, not conflict slots,
+                // even when encoded boundary bytes sort differently.
                 for index in 0..b.segments.len() {
                     let (bs, ls, rs) = (&b.segments[index], &l.segments[index], &r.segments[index]);
                     if ls.digest == rs.digest {
