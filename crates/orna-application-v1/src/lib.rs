@@ -8624,6 +8624,105 @@ mod tests {
     }
 
     #[test]
+    fn rekey_handoff_survives_failure_across_recovery_splits() {
+        // PIPE-011 makes these handlers left-associative: the second boundary
+        // catches the failure from the first handler. The mutation savepoint
+        // contract keeps the first handler's completed update in the activation.
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "table-rekey-handoff-across-recovery-splits.orna",
+                include_str!("../tests/fixtures/table-rekey-handoff-across-recovery-splits.orna"),
+                "main",
+            )
+            .expect("checked-in split-recovery handoff fixture should be admitted");
+
+        let int = |value: i64| {
+            CanonicalValue::new(OvbRaw::Int(value.into())).expect("integer is canonical")
+        };
+        let row = |id: i64, text: &str, quantity: i64| {
+            CanonicalValue::new(OvbRaw::Map(vec![
+                (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
+                (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
+                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+            ]))
+            .expect("row is canonical")
+        };
+        let key = |value: i64| int(value).encode().expect("key is canonical");
+        let owner = row(1, "owner", 10);
+        let competitor = row(2, "competitor", 20);
+        let competitor_after_retry = row(3, "competitor", 20);
+        let blocker = row(3, "blocker", 30);
+        let rows = BTreeMap::from([(
+            "Note".to_owned(),
+            vec![
+                (key(1), owner.encode().unwrap()),
+                (key(2), competitor.encode().unwrap()),
+                (key(3), blocker.encode().unwrap()),
+            ],
+        )]);
+        let tables = admitted_table_schemas(&application.module_header);
+        let mut handler =
+            SourceMutationEffectHandler::with_table_rows(tables, rows).expect("valid snapshot");
+
+        invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            &Environment::new(),
+            application.limits,
+            &mut handler,
+        )
+        .expect("the outer recovery retries both rows after the inner handler fails");
+
+        let owner_after_retry = row(2, "owner", 11);
+        assert_eq!(
+            handler.current_row("Note", &key(1)).unwrap(),
+            None,
+            "the moved owner source key is released"
+        );
+        assert_eq!(
+            handler.current_row("Note", &key(2)).unwrap(),
+            Some(owner_after_retry.clone()),
+            "the first handler's successful update follows the owner handoff"
+        );
+        assert_eq!(
+            handler.current_row("Note", &key(3)).unwrap(),
+            Some(competitor_after_retry.clone()),
+            "the competitor takes the released destination after blocker deletion"
+        );
+
+        let owner_after_update = row(1, "owner", 11);
+        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        assert_eq!(mutations.len(), 4, "the two failed rekeys add no mutations");
+        let expected = [
+            (1, None, false, Some(owner_after_update)),
+            (3, None, false, None),
+            (2, Some(3), false, Some(competitor_after_retry)),
+            (1, Some(2), false, Some(owner_after_retry)),
+        ];
+        for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in
+            mutations.iter().zip(expected).enumerate()
+        {
+            assert_eq!(mutation.key(), key(old_key), "mutation {index} source key");
+            assert_eq!(
+                mutation.rekey_to(),
+                new_key.map(key).as_deref(),
+                "mutation {index} destination"
+            );
+            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            match expected_row {
+                Some(expected_row) => assert_eq!(
+                    CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
+                    expected_row,
+                    "mutation {index} row value"
+                ),
+                None => assert_eq!(mutation.value(), None, "mutation {index} deletion value"),
+            }
+        }
+    }
+
+    #[test]
     fn competitor_retry_survives_successive_inserted_target_moves() {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
