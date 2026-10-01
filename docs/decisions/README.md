@@ -267,3 +267,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Source Introspection Reference Gate](0110-source-introspection-reference-gate.md)
 * **work ADR 0111:**
   [`sys` Baked Module ABI and Extensible Provider Protocol](0111-sys-baked-module-abi.md)
+
+## External reference records
+
+* [Sys binding architecture addendum](0113-reference-sys-bindings-addendum.md) — records the standalone Orna 1.0.0 reference-tree addendum and its checksum verification.
