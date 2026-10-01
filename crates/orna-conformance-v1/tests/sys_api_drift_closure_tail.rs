@@ -413,6 +413,26 @@ fn edge_interplay_fixture_composes_unknown_target_count_with_inexactness() {
 }
 
 #[test]
+fn edge_interplay_fixture_chains_unknown_inexact_target_filters() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The frozen schema specifies count nullability and exactness independently; retaining the
+    // count through separate exactness and null filters avoids inventing a coupling invariant.
+    assert!(
+        analysis.is_ok(),
+        "chained unknown/inexact target filters must retain nullable row_count: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_filters_unknown_inexact_count_after_closure_handoff() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
