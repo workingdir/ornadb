@@ -28,11 +28,7 @@ fn option_decimal(coefficient: i64, exponent10: i64) -> CanonicalValue {
 fn pinned_collection_session() -> AdmittedReplSession {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-use-collection-2213.orna")),
-        Ok(None)
-    );
-    assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-use-query-2213.orna")),
+        session.submit(include_str!("fixtures/stdlib-use-collection-alias-yfifu.orna")),
         Ok(None)
     );
     session
