@@ -11349,3 +11349,75 @@ fn explain_keeps_partial_half_block_scan_fallback_through_filter() {
         node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
     }));
 }
+
+#[test]
+fn explain_keeps_partial_half_block_filter_fallback_through_materialization() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN requires the source scan fallback and exposes materialization
+    // only when requested. With rows still unknown after the filter, preserve
+    // the partial byte bound through the write-through tail without inventing
+    // local or aggregate exact work.
+    let explain = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:partial-half-block-filter-materialize"),
+        source: obj("table:ByteWorkThreeScanSource"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: None,
+            estimated_bytes: Some(2_048),
+            mutable_branch: None,
+        }),
+        joins: Vec::new(),
+        predicate: Some(orna_sys_v1::ExpressionRef::descriptive(
+            "expr:ByteWorkThreeScanSource.value > 0",
+        )),
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: Vec::new(),
+        materialize_into: Some(obj("materialization:partial-half-block-filter")),
+    })
+    .expect("partial half-block source fallback through filter and materialization");
+
+    assert_eq!(explain.nodes().len(), 3);
+    assert_eq!(explain.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(
+        explain.root().object(),
+        Some(&obj("materialization:partial-half-block-filter"))
+    );
+    assert_eq!(explain.root().estimated_rows(), None);
+    assert_eq!(explain.root().estimated_bytes(), Some(1_024));
+    assert_eq!(explain.root().estimated_work(), None);
+    assert_eq!(
+        explain.root().details().get("fallback"),
+        Some(&PlanDetail::Text("evaluate_query".to_owned()))
+    );
+
+    let filter = explain
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Filter)
+        .expect("filter before materialization");
+    assert_eq!(filter.estimated_rows(), None);
+    assert_eq!(filter.estimated_bytes(), Some(1_024));
+    assert_eq!(filter.estimated_work(), None);
+
+    let scan = explain
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan)
+        .expect("fallback source scan");
+    assert_eq!(scan.object(), Some(&obj("table:ByteWorkThreeScanSource")));
+    assert_eq!(scan.estimated_rows(), None);
+    assert_eq!(scan.estimated_bytes(), Some(2_048));
+    assert_eq!(scan.estimated_work(), None);
+    assert_eq!(explain.plan().estimated_cost(), None);
+
+    let surface = serde_json::to_value(&explain).expect("partial materialization surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
