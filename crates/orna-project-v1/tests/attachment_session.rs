@@ -948,6 +948,223 @@ fn rebound_alias_precedence_survives_multiple_closure_depths() {
 }
 
 #[test]
+fn repeated_rebinds_preserve_exact_alias_precedence_at_each_closure_depth() {
+    let package_source = include_str!("fixtures/attach-package.orna");
+    let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
+
+    let old_short_source = package_source.replace("42", "40");
+    let old_short_commit = write_commit(
+        shared_dir.path(),
+        &[("main.orna", &old_short_source)],
+        "original short route",
+    );
+    let stable_long_source = package_source.replace("42", "42");
+    let stable_long_commit = write_commit(
+        shared_dir.path(),
+        &[("main.orna", &stable_long_source)],
+        "stable long sibling route",
+    );
+
+    let replacement_terminal_tail_source = package_source.replace("42", "62");
+    let replacement_terminal_tail_commit = write_commit(
+        shared_dir.path(),
+        &[("main.orna", &replacement_terminal_tail_source)],
+        "terminal child after the second rebind",
+    );
+    let replacement_terminal_source = package_source.replace("42", "61");
+    let replacement_terminal_manifest = format!(
+        "archive_copy_archive_archive {replacement_terminal_tail_commit}\n"
+    );
+    let replacement_terminal_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &replacement_terminal_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &replacement_terminal_manifest),
+        ],
+        "terminal route after the second rebind",
+    );
+
+    let second_rebound_source = package_source.replace("42", "60");
+    let second_rebound_manifest =
+        format!("archive_copy_archive {replacement_terminal_commit}\n");
+    let second_rebound_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &second_rebound_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &second_rebound_manifest),
+        ],
+        "second rebound alias with its own nested closure",
+    );
+
+    let first_middle_source = package_source.replace("42", "51");
+    let first_middle_commit = write_commit(
+        shared_dir.path(),
+        &[("main.orna", &first_middle_source)],
+        "first rebound middle route",
+    );
+    let first_long_source = package_source.replace("42", "52");
+    let first_long_commit = write_commit(
+        shared_dir.path(),
+        &[("main.orna", &first_long_source)],
+        "first rebound longer sibling route",
+    );
+    let first_rebound_source = package_source.replace("42", "50");
+    let first_rebound_manifest = format!(
+        "archive_copy {first_middle_commit}\narchive_copy_archive {first_long_commit}\n"
+    );
+    let first_rebound_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &first_rebound_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &first_rebound_manifest),
+        ],
+        "first rebound alias with prefix-related child routes",
+    );
+
+    let selected_parent_source = package_source.replace("42", "43");
+    let selected_parent_manifest = format!(
+        "archive {old_short_commit}\narchive_copy_archive {stable_long_commit}\n"
+    );
+    let selected_parent_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &selected_parent_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &selected_parent_manifest),
+        ],
+        "selected nested parent before either rebind",
+    );
+    let outer_parent_source = package_source.replace("42", "44");
+    let outer_parent_manifest = format!("archive_copy {selected_parent_commit}\n");
+    let outer_parent_commit = write_commit(
+        shared_dir.path(),
+        &[
+            ("main.orna", &outer_parent_source),
+            (PACKAGE_PIN_MANIFEST_PATH, &outer_parent_manifest),
+        ],
+        "outer closure leading to the selected nested parent",
+    );
+
+    let root_manifest = format!("archive_copy_archive_archive {outer_parent_commit}\n");
+    let (_root_dir, root_repository, root_commit) = repository(&[
+        ("main.orna", include_str!("fixtures/attach-primary.orna")),
+        (PACKAGE_PIN_MANIFEST_PATH, &root_manifest),
+    ]);
+    let loader = ProjectLoader::default();
+    let primary = PinnedDatabase::resolve("app", root_repository, &root_commit, loader).unwrap();
+    let resolver = PackageResolver::new(
+        [
+            ("archive".to_owned(), shared_repository.clone()),
+            ("archive_copy".to_owned(), shared_repository.clone()),
+            ("archive_copy_archive".to_owned(), shared_repository.clone()),
+            (
+                "archive_copy_archive_archive".to_owned(),
+                shared_repository.clone(),
+            ),
+        ],
+        loader,
+    )
+    .unwrap();
+
+    let root = resolver.resolve_for_parent(primary).unwrap();
+    let outer = root
+        .database("archive_copy_archive_archive")
+        .unwrap()
+        .clone();
+    let outer_closure = resolver.resolve_for_parent(outer).unwrap();
+    let selected_parent = outer_closure.database("archive_copy").unwrap().clone();
+    assert_eq!(
+        selected_parent.pin().commit().as_str(),
+        selected_parent_commit
+    );
+    let mut selected_closure = resolver.resolve_for_parent(selected_parent).unwrap();
+
+    let first_rebound = PinnedDatabase::resolve(
+        "archive",
+        shared_repository.clone(),
+        &first_rebound_commit,
+        loader,
+    )
+    .unwrap();
+    selected_closure.detach_database("archive").unwrap();
+    selected_closure
+        .attach_database(first_rebound.clone())
+        .unwrap();
+    assert_module_route(&selected_closure, "archive.orna", "= 50");
+    assert_module_route(&selected_closure, "archive_copy_archive.orna", "= 42");
+
+    let mut first_rebound_closure = resolver.resolve_for_parent(first_rebound).unwrap();
+    assert_module_route(&first_rebound_closure, "main.orna", "= 50");
+    assert_module_route(&first_rebound_closure, "archive_copy.orna", "= 51");
+    assert_module_route(&first_rebound_closure, "archive_copy_archive.orna", "= 52");
+
+    let second_rebound = PinnedDatabase::resolve(
+        "archive_copy",
+        shared_repository,
+        &second_rebound_commit,
+        loader,
+    )
+    .unwrap();
+    first_rebound_closure
+        .detach_database("archive_copy")
+        .unwrap();
+    first_rebound_closure
+        .attach_database(second_rebound.clone())
+        .unwrap();
+    assert_module_route(&first_rebound_closure, "archive_copy.orna", "= 60");
+    assert_module_route(
+        &first_rebound_closure,
+        "archive_copy_archive.orna",
+        "= 52",
+    );
+    assert_eq!(
+        first_rebound_closure
+            .database("archive_copy")
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        second_rebound_commit
+    );
+    assert_eq!(
+        first_rebound_closure
+            .database("archive_copy_archive")
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        first_long_commit
+    );
+
+    let second_rebound_closure = resolver.resolve_for_parent(second_rebound).unwrap();
+    assert_module_route(&second_rebound_closure, "main.orna", "= 60");
+    assert_module_route(
+        &second_rebound_closure,
+        "archive_copy_archive.orna",
+        "= 61",
+    );
+    let terminal = second_rebound_closure
+        .database("archive_copy_archive")
+        .unwrap()
+        .clone();
+    let terminal_closure = resolver.resolve_for_parent(terminal).unwrap();
+    assert_module_route(&terminal_closure, "main.orna", "= 61");
+    assert_module_route(
+        &terminal_closure,
+        "archive_copy_archive_archive.orna",
+        "= 62",
+    );
+    assert_eq!(
+        terminal_closure
+            .database("archive_copy_archive_archive")
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        replacement_terminal_tail_commit
+    );
+}
+
+#[test]
 fn short_alias_rebound_to_long_pin_keeps_longer_nested_routes() {
     let package_source = include_str!("fixtures/attach-package.orna");
     let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
