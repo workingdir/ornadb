@@ -19826,3 +19826,91 @@ fn growing_clone_from_keeps_ordered_zero_cause_five_level_tails() {
         }
     }
 }
+
+#[test]
+fn decoded_clone_from_keeps_ordered_zero_cause_tail_siblings() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let diagnostic = |code: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let empty = diagnostic("ORNA-E-ZERO-ALIAS-DECODED-EMPTY");
+    let ordered_ab = diagnostic("ORNA-E-ZERO-ALIAS-DECODED-AB")
+        .with_cause(diagnostic("ORNA-E-ZERO-ALIAS-DECODED-A"))
+        .with_cause(diagnostic("ORNA-E-ZERO-ALIAS-DECODED-B"));
+    let ordered_ba = diagnostic("ORNA-E-ZERO-ALIAS-DECODED-BA")
+        .with_cause(diagnostic("ORNA-E-ZERO-ALIAS-DECODED-B"))
+        .with_cause(diagnostic("ORNA-E-ZERO-ALIAS-DECODED-A"));
+    let source = diagnostic("ORNA-E-ZERO-ALIAS-DECODED-ROOT")
+        .with_cause(empty)
+        .with_cause(ordered_ab)
+        .with_cause(ordered_ba)
+        .redacted();
+    let decoded_source = Diagnostic::decode_ovb(&source.encode_ovb().unwrap()).unwrap();
+    let mut receiver = diagnostic("ORNA-E-ZERO-ALIAS-DECODED-ROOT")
+        .with_cause(diagnostic("ORNA-E-ZERO-ALIAS-DECODED-STALE"))
+        .redacted();
+
+    // Causes are ordered in the format; for a decoded replacement, retain the source sequence.
+    receiver.clone_from(&decoded_source);
+    let projection = serde_json::to_value(&receiver).unwrap();
+    assert_eq!(projection, serde_json::to_value(&decoded_source).unwrap());
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(
+        causes
+            .iter()
+            .map(|cause| cause["code"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "ORNA-E-ZERO-ALIAS-DECODED-EMPTY",
+            "ORNA-E-ZERO-ALIAS-DECODED-AB",
+            "ORNA-E-ZERO-ALIAS-DECODED-BA",
+        ]
+    );
+    assert!(causes[0]["causes"].as_array().unwrap().is_empty());
+    assert_eq!(
+        causes[1]["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cause| cause["code"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["ORNA-E-ZERO-ALIAS-DECODED-A", "ORNA-E-ZERO-ALIAS-DECODED-B"]
+    );
+    assert_eq!(
+        causes[2]["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cause| cause["code"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["ORNA-E-ZERO-ALIAS-DECODED-B", "ORNA-E-ZERO-ALIAS-DECODED-A"]
+    );
+
+    let wire = receiver.encode_ovb().unwrap();
+    let replayed = Diagnostic::decode_ovb(&wire).unwrap();
+    let replayed_json = serde_json::to_vec(&replayed).unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([fixture.as_bytes()])
+    {
+        for bytes in [&replayed_json, &wire] {
+            assert!(!bytes
+                .windows(disclosure.len())
+                .any(|window| window == disclosure));
+        }
+    }
+}
