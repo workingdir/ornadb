@@ -13695,3 +13695,194 @@ fn replayed_duplicate_error_tail_order_keeps_nested_shapes() {
     assert_redacted_tree(&decoded);
     assert_eq!(decoded["causes"], projection["causes"]);
 }
+
+#[test]
+fn replayed_duplicate_error_tails_keep_nested_child_order() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let admitted = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let make_wire = |payload: &str, reverse: bool| {
+        let tail = |label: &str, child_codes: [&str; 2]| {
+            admitted(
+                "ORNA-E-REPLAY-NESTED-DUPLICATE-TAIL",
+                &format!("{payload} tail {label} secret"),
+            )
+            .with_cause(admitted(
+                child_codes[0],
+                &format!("{payload} {} secret", child_codes[0]),
+            ))
+            .with_cause(admitted(
+                child_codes[1],
+                &format!("{payload} {} secret", child_codes[1]),
+            ))
+        };
+        let tails = if reverse {
+            vec![
+                tail("B", ["ORNA-E-REPLAY-CHILD-B2", "ORNA-E-REPLAY-CHILD-B1"]),
+                tail("A", ["ORNA-E-REPLAY-CHILD-A2", "ORNA-E-REPLAY-CHILD-A1"]),
+            ]
+        } else {
+            vec![
+                tail("A", ["ORNA-E-REPLAY-CHILD-A1", "ORNA-E-REPLAY-CHILD-A2"]),
+                tail("B", ["ORNA-E-REPLAY-CHILD-B1", "ORNA-E-REPLAY-CHILD-B2"]),
+            ]
+        };
+        let terminal = tails.into_iter().fold(
+            admitted("ORNA-E-REPLAY-NESTED-DUPLICATE-TERMINAL", payload),
+            |terminal, tail| terminal.with_cause(tail),
+        );
+        let nested = admitted("ORNA-E-REPLAY-NESTED-DUPLICATE-NESTED", payload)
+            .with_cause(terminal);
+        let parent = admitted("ORNA-E-REPLAY-NESTED-DUPLICATE-PARENT", payload)
+            .with_cause(nested);
+        let branch = admitted("ORNA-E-REPLAY-NESTED-DUPLICATE-BRANCH", payload)
+            .with_cause(parent);
+        admitted("ORNA-E-REPLAY-NESTED-DUPLICATE-ROOT", payload)
+            .with_cause(branch)
+            .encode_ovb()
+            .unwrap()
+    };
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    fn tail_contents(diagnostic: &serde_json::Value) -> Vec<(String, String, Vec<String>)> {
+        let mut terminal = diagnostic;
+        for _ in 0..4 {
+            terminal = &terminal["causes"][0];
+        }
+        terminal["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tail| {
+                (
+                    tail["code"].as_str().unwrap().to_owned(),
+                    tail["severity"].as_str().unwrap().to_owned(),
+                    tail["causes"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|child| child["code"].as_str().unwrap().to_owned())
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    let forward_wire = make_wire("forward nested duplicate replay payload", false);
+    let reverse_wire = make_wire("reverse nested duplicate replay payload", true);
+    let replay_forward = || Diagnostic::decode_ovb(&forward_wire).unwrap();
+    let replay_reverse = || Diagnostic::decode_ovb(&reverse_wire).unwrap();
+    let mut receiver = replay_forward();
+    let forward = receiver.clone();
+    receiver.clone_from(&replay_reverse());
+    let reverse = receiver.clone();
+    receiver.clone_from(&replay_forward());
+    let restored_forward = receiver.clone();
+    assert_eq!(restored_forward, forward);
+
+    // ORNA-SECRET-002 requires redaction but does not specify order for
+    // duplicate same-code Error tails; preserve their nested insertion order.
+    let outer = admitted(
+        "ORNA-E-REPLAY-NESTED-DUPLICATE-OUTER",
+        "public duplicate replay order admission",
+    )
+    .with_cause(forward)
+    .with_cause(reverse)
+    .with_cause(restored_forward);
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["severity"], "error");
+    assert_eq!(projection["message"], "public duplicate replay order admission");
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 3);
+    for cause in causes {
+        assert_redacted_tree(cause);
+    }
+    let duplicate_tail = "ORNA-E-REPLAY-NESTED-DUPLICATE-TAIL".to_owned();
+    let forward_contents = vec![
+        (
+            duplicate_tail.clone(),
+            "error".to_owned(),
+            vec![
+                "ORNA-E-REPLAY-CHILD-A1".to_owned(),
+                "ORNA-E-REPLAY-CHILD-A2".to_owned(),
+            ],
+        ),
+        (
+            duplicate_tail.clone(),
+            "error".to_owned(),
+            vec![
+                "ORNA-E-REPLAY-CHILD-B1".to_owned(),
+                "ORNA-E-REPLAY-CHILD-B2".to_owned(),
+            ],
+        ),
+    ];
+    let reverse_contents = vec![
+        (
+            duplicate_tail.clone(),
+            "error".to_owned(),
+            vec![
+                "ORNA-E-REPLAY-CHILD-B2".to_owned(),
+                "ORNA-E-REPLAY-CHILD-B1".to_owned(),
+            ],
+        ),
+        (
+            duplicate_tail.clone(),
+            "error".to_owned(),
+            vec![
+                "ORNA-E-REPLAY-CHILD-A2".to_owned(),
+                "ORNA-E-REPLAY-CHILD-A1".to_owned(),
+            ],
+        ),
+    ];
+    assert_eq!(
+        causes.iter().map(tail_contents).collect::<Vec<_>>(),
+        vec![
+            forward_contents.clone(),
+            reverse_contents,
+            forward_contents,
+        ],
+    );
+
+    let json = serde_json::to_vec(&outer).unwrap();
+    let encoded = outer.encode_ovb().unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"forward nested duplicate replay payload".as_slice(),
+            b"reverse nested duplicate replay payload".as_slice(),
+            b"tail A secret".as_slice(),
+            b"tail B secret".as_slice(),
+            b"ORNA-E-REPLAY-CHILD-A1 secret".as_slice(),
+            b"ORNA-E-REPLAY-CHILD-A2 secret".as_slice(),
+            b"ORNA-E-REPLAY-CHILD-B1 secret".as_slice(),
+            b"ORNA-E-REPLAY-CHILD-B2 secret".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
+    assert_redacted_tree(&decoded);
+    assert_eq!(decoded["causes"], projection["causes"]);
+}
