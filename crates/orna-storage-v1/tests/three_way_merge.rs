@@ -9056,6 +9056,8 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
         b"consumer/zzzz-one-sided-full-base-reset-tail/tombstone/child/leaf/tail/child/leaf/tail/child/leaf/tail/child/leaf/tail".to_vec();
     let same_side_full_base_delete_reset_id_extension_deep_tail_child_leaf_tail_child_leaf_tail_child_leaf_tail_child =
         b"consumer/zzzz-one-sided-full-base-reset-tail/tombstone/child/leaf/tail/child/leaf/tail/child/leaf/tail/child/leaf/tail/child".to_vec();
+    let same_side_full_base_delete_reset_id_extension_deep_tail_child_leaf_tail_child_leaf_tail_child_leaf_tail_child_leaf =
+        b"consumer/zzzz-one-sided-full-base-reset-tail/tombstone/child/leaf/tail/child/leaf/tail/child/leaf/tail/child/leaf/tail/child/leaf".to_vec();
     let opposite_full_base_delete_before_reset_id =
         b"consumer/zzzy-opposite-full-base-delete-before-reset".to_vec();
     let same_side_full_base_delete_before_reset_id =
@@ -9087,7 +9089,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
     // the existing deeper extension, a leaf beneath that tail, further tail
     // extensions, a child beneath the latest tail, its leaf, and one more
     // tail after that leaf, a child below that tail, its leaf, and another
-    // tail after the leaf, and a child beneath that tail.
+    // tail after the leaf, a child beneath that tail, and its leaf.
     let build_inputs = |
         row_delete_left: bool,
         checkpoint_delete_left: bool,
@@ -9446,6 +9448,23 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
             );
         }
         base.checkpoints.insert(
+            same_side_full_base_delete_reset_id_extension_deep_tail_child_leaf_tail_child_leaf_tail_child_leaf_tail_child_leaf.clone(),
+            full_checkpoint.clone(),
+        );
+        // Continue the tombstone extension with a leaf beneath the latest
+        // child while retaining the opposite full-position base value.
+        if tail_reset_left {
+            right.checkpoints.insert(
+                same_side_full_base_delete_reset_id_extension_deep_tail_child_leaf_tail_child_leaf_tail_child_leaf_tail_child_leaf.clone(),
+                full_checkpoint.clone(),
+            );
+        } else {
+            left.checkpoints.insert(
+                same_side_full_base_delete_reset_id_extension_deep_tail_child_leaf_tail_child_leaf_tail_child_leaf_tail_child_leaf.clone(),
+                full_checkpoint.clone(),
+            );
+        }
+        base.checkpoints.insert(
             opposite_full_base_delete_before_reset_id.clone(),
             full_checkpoint.clone(),
         );
@@ -9634,6 +9653,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
                     assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_reset_id_extension_deep_tail_child_leaf_tail_child_leaf_tail_child_leaf.as_slice()));
                     assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_reset_id_extension_deep_tail_child_leaf_tail_child_leaf_tail_child_leaf_tail.as_slice()));
                     assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_reset_id_extension_deep_tail_child_leaf_tail_child_leaf_tail_child_leaf_tail_child.as_slice()));
+                    assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_reset_id_extension_deep_tail_child_leaf_tail_child_leaf_tail_child_leaf_tail_child_leaf.as_slice()));
                     assert!(!report.affected_checkpoints.contains(opposite_full_base_delete_before_reset_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_before_reset_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_before_first_checkpoint_conflict_id.as_slice()));
@@ -9696,6 +9716,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
                 assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_reset_id_extension_deep_tail_child_leaf_tail_child_leaf_tail_child_leaf.as_slice()));
                 assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_reset_id_extension_deep_tail_child_leaf_tail_child_leaf_tail_child_leaf_tail.as_slice()));
                 assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_reset_id_extension_deep_tail_child_leaf_tail_child_leaf_tail_child_leaf_tail_child.as_slice()));
+                assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_reset_id_extension_deep_tail_child_leaf_tail_child_leaf_tail_child_leaf_tail_child_leaf.as_slice()));
                 assert!(!report.affected_checkpoints.contains(opposite_full_base_delete_before_reset_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_before_reset_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_before_first_checkpoint_conflict_id.as_slice()));
