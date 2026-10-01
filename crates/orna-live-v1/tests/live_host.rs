@@ -15759,6 +15759,10 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion_bo
         status_query([121; 16], [91; 16], terminal_fingerprint);
     let eighth_retry_edge_snapshot_fingerprint =
         request_fingerprint(&eighth_retry_edge_snapshot_query, [1; 16]);
+    let ninth_retry_edge_snapshot_query =
+        status_query([122; 16], [91; 16], terminal_fingerprint);
+    let ninth_retry_edge_snapshot_fingerprint =
+        request_fingerprint(&ninth_retry_edge_snapshot_query, [1; 16]);
     let first_unknown_status = block_on(host.dispatch_frame(
         [6; 16],
         2,
@@ -17971,6 +17975,82 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion_bo
         .expect("the eighth fresh terminal snapshot has its own stable retry"),
         eighth_retry_edge_snapshot
     );
+    // The reference leaves the next repeated-identity conflict unspecified;
+    // retain its diagnostic and the next fresh snapshot as separate retries.
+    let ninth_retry_edge_mismatch_query = status_query(
+        [121; 16],
+        [91; 16],
+        request_fingerprint(&sequential_changed_first_eval, [1; 16]),
+    );
+    let ninth_retry_edge_mismatch = block_on(host.dispatch_frame(
+        [6; 16],
+        24,
+        Frame::Binary(ninth_retry_edge_mismatch_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the eighth retry-edge snapshot rejects a changed same-target fingerprint");
+    assert!(matches!(
+        &ninth_retry_edge_mismatch.message,
+        Message::Diagnostic { .. }
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(eighth_retry_edge_snapshot_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the eighth accepted snapshot survives one more retry conflict"),
+        eighth_retry_edge_snapshot
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(ninth_retry_edge_mismatch_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the ninth retry-edge mismatch has its own stable retry"),
+        ninth_retry_edge_mismatch
+    );
+    let ninth_retry_edge_snapshot = block_on(host.dispatch_frame(
+        [6; 16],
+        24,
+        Frame::Binary(ninth_retry_edge_snapshot_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a fresh identity after the ninth retry conflict reads the terminal result");
+    assert!(matches!(
+        &ninth_retry_edge_snapshot.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [91; 16]
+            && *fingerprint == terminal_fingerprint
+            && result == &expected_first_terminal_body
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            24,
+            Frame::Binary(ninth_retry_edge_snapshot_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the ninth fresh terminal snapshot has its own stable retry"),
+        ninth_retry_edge_snapshot
+    );
     assert_eq!(
         block_on(host.dispatch_frame(
             [6; 16],
@@ -18381,6 +18461,11 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion_bo
             [121; 16],
             eighth_retry_edge_snapshot_fingerprint,
             eighth_retry_edge_snapshot,
+        ),
+        (
+            [122; 16],
+            ninth_retry_edge_snapshot_fingerprint,
+            ninth_retry_edge_snapshot,
         ),
         ([97; 16], current_first_status_fingerprint, current_first_status),
         ([98; 16], current_second_status_fingerprint, current_second_status),
