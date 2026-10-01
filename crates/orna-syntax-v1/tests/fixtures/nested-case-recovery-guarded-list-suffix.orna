@@ -1,0 +1,11 @@
+pub fn nested(flag: Bool): String {
+    "λ before {case flag {
+        true: {
+            case flag {
+                true 0
+                [false, true] if flag: "winner"
+            }
+        },
+        false: "fallback"
+    }} after"
+}
