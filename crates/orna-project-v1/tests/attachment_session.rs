@@ -54,6 +54,27 @@ fn write_commit(directory: &Path, files: &[(&str, &str)], message: &str) -> Stri
     git(directory, &["rev-parse", "HEAD"])
 }
 
+fn write_package_snapshot(
+    directory: &Path,
+    package_source: &str,
+    marker: &str,
+    manifest: Option<&str>,
+    message: &str,
+) -> String {
+    let source = package_source.replace("42", marker);
+    match manifest {
+        Some(manifest) => write_commit(
+            directory,
+            &[
+                ("main.orna", &source),
+                (PACKAGE_PIN_MANIFEST_PATH, manifest),
+            ],
+            message,
+        ),
+        None => write_commit(directory, &[("main.orna", &source)], message),
+    }
+}
+
 #[test]
 fn attach_and_detach_refusals_preserve_the_primary_and_optional_std() {
     let (_primary_dir, primary_repository, primary_commit) = repository(&[(
