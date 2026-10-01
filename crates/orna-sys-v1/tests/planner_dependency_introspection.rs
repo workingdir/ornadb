@@ -11185,3 +11185,59 @@ fn explain_closes_first_byte_work_across_three_scans_at_max() {
         );
     }
 }
+
+#[test]
+fn explain_keeps_half_block_source_on_scan_fallback_at_max() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN-003 requires a scan/reference fallback but does not prescribe
+    // its cost estimate. Keep the fallback as one scan with source-local
+    // 4-KiB rounding for the half-block source.
+    let explain = |source_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:half-block-source-scan-fallback"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: None,
+        })
+        .expect("scan fallback with half-block source statistics")
+    };
+
+    let exact = explain(u64::MAX - 1);
+    assert_eq!(exact.nodes().len(), 1);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Scan);
+    assert_eq!(
+        exact.root().object(),
+        Some(&obj("table:ByteWorkThreeScanSource"))
+    );
+    assert_eq!(exact.root().estimated_rows(), Some(u64::MAX - 1));
+    assert_eq!(exact.root().estimated_bytes(), Some(2_048));
+    assert_eq!(exact.root().estimated_work(), Some(u64::MAX));
+    let max_cost = u64::MAX.to_string();
+    assert_eq!(exact.plan().estimated_cost(), Some(max_cost.as_str()));
+
+    let overflow = explain(u64::MAX);
+    assert_eq!(overflow.root().kind(), PlanNodeKind::Scan);
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert_eq!(
+        overflow
+            .root()
+            .details()
+            .get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    assert_eq!(overflow.plan().estimated_cost(), None);
+}
