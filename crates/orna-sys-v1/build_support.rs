@@ -22,11 +22,18 @@ pub struct Function {
 pub struct Collector {
     pub functions: Vec<Function>,
     pub errors: Vec<String>,
+    /// Non-operation type graph and schema contract explicitly attached to
+    /// the annotated implementation registry.
+    pub type_graph: Option<Value>,
+    pub schema: Option<Value>,
+    pub registry_assets: Vec<PathBuf>,
+    current_source_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GeneratedSysArtifacts {
     pub api_json: String,
+    pub schema_json: String,
     pub provider_abi_json: String,
     pub binding_modules: BTreeMap<String, String>,
     pub binding_bundle: String,
@@ -66,6 +73,11 @@ pub fn collect_rust_sources(root: &Path) -> Result<Collector, String> {
     if collector.functions.is_empty() {
         return Err("no #[ornasys] trait or implementation methods were collected".to_owned());
     }
+    if collector.type_graph.is_none() || collector.schema.is_none() {
+        return Err(
+            "annotated sys registry must attach one type_graph and schema source".to_owned(),
+        );
+    }
     validate_collection(&collector.functions)?;
     Ok(collector)
 }
@@ -88,6 +100,9 @@ pub fn generate_sys_artifacts(
     let mut api_json = canonical_pretty_json(&api).map_err(|error| error.to_string())?;
     api_json.push('\n');
 
+    let mut schema_json = canonical_pretty_json(schema).map_err(|error| error.to_string())?;
+    schema_json.push('\n');
+
     let provider_abi = generate_provider_abi(functions, &api)?;
     let mut provider_abi_json =
         canonical_pretty_json(&provider_abi).map_err(|error| error.to_string())?;
@@ -99,6 +114,7 @@ pub fn generate_sys_artifacts(
 
     Ok(GeneratedSysArtifacts {
         api_json,
+        schema_json,
         provider_abi_json,
         binding_modules,
         binding_bundle,
@@ -476,12 +492,17 @@ fn grammar_identifier(identifier: &str) -> String {
 
 impl Collector {
     pub fn collect_source(&mut self, source_name: &str, source: &str) {
+        let previous_source_dir = std::mem::replace(
+            &mut self.current_source_dir,
+            Path::new(source_name).parent().map(Path::to_path_buf),
+        );
         match syn::parse_file(source) {
             Ok(syntax) => self.visit_file(&syntax),
             Err(error) => self
                 .errors
                 .push(format!("{source_name}: invalid Rust source: {error}")),
         }
+        self.current_source_dir = previous_source_dir;
     }
 
     fn collect_method(&mut self, method: &syn::Signature, attrs: &[syn::Attribute]) {
@@ -498,13 +519,64 @@ impl Collector {
         }
         if let Some(attribute) = annotations.first() {
             match parse_function_attributes(attribute) {
-                Ok((metadata, role)) => self.functions.push(Function {
-                    method: method.ident.to_string(),
-                    metadata,
-                    role,
-                }),
+                Ok((metadata, role, type_graph, schema)) => {
+                    self.load_registry_json(type_graph, "type_graph");
+                    self.load_registry_json(schema, "schema");
+                    self.functions.push(Function {
+                        method: method.ident.to_string(),
+                        metadata,
+                        role,
+                    });
+                }
                 Err(error) => self.errors.push(format!("{}: {error}", method.ident)),
             }
+        }
+    }
+
+    fn load_registry_json(&mut self, relative_path: Option<String>, kind: &str) {
+        let Some(relative_path) = relative_path else {
+            return;
+        };
+        let Some(source_dir) = &self.current_source_dir else {
+            self.errors
+                .push(format!("#[ornasys] {kind} source has no Rust source directory"));
+            return;
+        };
+        let path = source_dir.join(relative_path);
+        if match kind {
+            "type_graph" => self.type_graph.is_some(),
+            "schema" => self.schema.is_some(),
+            _ => unreachable!("only registry asset fields are loaded"),
+        } {
+            self.errors
+                .push(format!("annotated sys registry has multiple {kind} sources"));
+            return;
+        }
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) => {
+                self.errors.push(format!(
+                    "read annotated sys registry {kind} {}: {error}",
+                    path.display()
+                ));
+                return;
+            }
+        };
+        let value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(error) => {
+                self.errors.push(format!(
+                    "parse annotated sys registry {kind} {}: {error}",
+                    path.display()
+                ));
+                return;
+            }
+        };
+        self.registry_assets.push(path);
+        match kind {
+            "type_graph" => self.type_graph = Some(value),
+            "schema" => self.schema = Some(value),
+            _ => unreachable!("only registry asset fields are loaded"),
         }
     }
 
@@ -568,9 +640,11 @@ pub fn is_ornasys(attribute: &syn::Attribute) -> bool {
 
 fn parse_function_attributes(
     attribute: &syn::Attribute,
-) -> Result<(Value, Option<String>), String> {
+) -> Result<(Value, Option<String>, Option<String>, Option<String>), String> {
     let mut function_json = None;
     let mut role = None;
+    let mut type_graph = None;
+    let mut schema = None;
     attribute
         .parse_nested_meta(|meta| {
             let value = meta.value()?;
@@ -589,9 +663,17 @@ fn parse_function_attributes(
                 if role.replace(value.value()).is_some() {
                     return Err(meta.error("only one semantic role may be declared"));
                 }
+            } else if meta.path.is_ident("type_graph") {
+                if type_graph.replace(value.value()).is_some() {
+                    return Err(meta.error("only one type_graph source may be declared"));
+                }
+            } else if meta.path.is_ident("schema") {
+                if schema.replace(value.value()).is_some() {
+                    return Err(meta.error("only one schema source may be declared"));
+                }
             } else {
                 return Err(meta.error(
-                    "expected `function = \"<JSON>\"` or `role = \"<id>@<major>.<minor>\"`",
+                    "expected function, role, type_graph, or schema metadata",
                 ));
             }
             Ok(())
@@ -604,7 +686,7 @@ fn parse_function_attributes(
     if let Some(role) = &role {
         parse_role_version(role)?;
     }
-    Ok((metadata, role))
+    Ok((metadata, role, type_graph, schema))
 }
 
 pub fn parse_role_version(value: &str) -> Result<(&str, u16, u16), String> {

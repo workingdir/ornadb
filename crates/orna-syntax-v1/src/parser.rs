@@ -1341,19 +1341,31 @@ fn annotate_expr(expr: &mut Expr, source: &str, file: &str) {
             }
             annotate_span(span, source, file)
         }
-        Expr::Call { callee, span, .. } => {
+        Expr::Call {
+            callee,
+            arguments,
+            span,
+        } => {
             annotate_expr(callee, source, file);
+            for argument in arguments {
+                annotate_expr(&mut argument.value, source, file);
+                annotate_span(&mut argument.span, source, file);
+            }
             annotate_span(span, source, file)
         }
         Expr::GenericCall {
             callee,
             type_arguments,
+            arguments,
             span,
-            ..
         } => {
             annotate_expr(callee, source, file);
             for type_argument in type_arguments {
                 annotate_type(type_argument, source, file)
+            }
+            for argument in arguments {
+                annotate_expr(&mut argument.value, source, file);
+                annotate_span(&mut argument.span, source, file);
             }
             annotate_span(span, source, file)
         }
@@ -1537,6 +1549,7 @@ impl NominalBraceMode {
     }
 }
 
+#[derive(Clone)]
 struct Parser {
     tokens: Vec<Token>,
     at: usize,
@@ -5068,6 +5081,12 @@ impl Parser {
                     self.bump();
                     return true;
                 }
+                // Commas are optional between case arms. Preserve an
+                // adjacent suffix only when its parsed pattern and optional
+                // guard reach the arm colon without diagnostics.
+                if self.case_arm_header_ahead() {
+                    return true;
+                }
             }
             // Interpolation boundaries are dedicated tokens, not braces.
             match &self.current().kind {
@@ -5095,6 +5114,81 @@ impl Parser {
             self.bump();
         }
         false
+    }
+    fn simple_case_arm_header_ahead(&self) -> bool {
+        let starts_simple_pattern = matches!(
+            &self.current().kind,
+            TokenKind::Identifier { .. }
+                | TokenKind::Keyword(
+                    Keyword::SelfValue | Keyword::True | Keyword::False | Keyword::Null
+                )
+                | TokenKind::Integer
+                | TokenKind::Decimal
+                | TokenKind::Float
+                | TokenKind::Date
+                | TokenKind::Instant
+                | TokenKind::String
+                | TokenKind::Punct("_")
+        );
+        starts_simple_pattern
+            && matches!(
+                self.tokens.get(self.at + 1).map(|token| &token.kind),
+                Some(TokenKind::Punct(":"))
+            )
+    }
+    fn case_arm_header_ahead(&self) -> bool {
+        if self.simple_case_arm_header_ahead() {
+            return true;
+        }
+
+        let next = self.tokens.get(self.at + 1).map(|token| &token.kind);
+        let may_start_compound_or_guarded_pattern = match &self.current().kind {
+            TokenKind::Punct("(" | "{" | "[") => true,
+            TokenKind::Identifier { .. } | TokenKind::Keyword(Keyword::SelfValue) => matches!(
+                next,
+                Some(TokenKind::Punct("." | "(" | "{"))
+                    | Some(TokenKind::Keyword(Keyword::If))
+            ),
+            TokenKind::Keyword(Keyword::True | Keyword::False | Keyword::Null)
+            | TokenKind::Integer
+            | TokenKind::Decimal
+            | TokenKind::Float
+            | TokenKind::Date
+            | TokenKind::Instant
+            | TokenKind::String
+            | TokenKind::Punct("_") => matches!(next, Some(TokenKind::Keyword(Keyword::If))),
+            _ => false,
+        };
+        if !may_start_compound_or_guarded_pattern {
+            return false;
+        }
+
+        // A local parser probe uses the same pattern and guard grammar as the
+        // real case parser, so nested delimiters and guard expressions cannot
+        // be mistaken for an implicit arm boundary.
+        let mut probe = self.clone();
+        let start = probe.at;
+        let errors = probe.errors.len();
+        let incomplete_errors = probe.incomplete_errors;
+        probe.parse_pattern();
+        if probe.at == start
+            || probe.errors.len() != errors
+            || probe.incomplete_errors != incomplete_errors
+        {
+            return false;
+        }
+        if probe.keyword() == Some(Keyword::If) {
+            probe.bump();
+            if probe.expr().is_none()
+                || probe.errors.len() != errors
+                || probe.incomplete_errors != incomplete_errors
+            {
+                return false;
+            }
+        }
+        probe.is_punct(":")
+            && probe.errors.len() == errors
+            && probe.incomplete_errors == incomplete_errors
     }
     fn contextual(&self) -> bool {
         matches!(
