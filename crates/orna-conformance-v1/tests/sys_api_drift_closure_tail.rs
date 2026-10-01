@@ -453,6 +453,26 @@ fn edge_interplay_fixture_splits_exact_then_null_region_filters() {
 }
 
 #[test]
+fn edge_interplay_fixture_null_filters_exact_region_count_after_row_handoff() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // First select exact rows from the caller's region, then hand each table into a nested
+    // relation callback that tests null row_count and projects it without refining its type.
+    assert!(
+        analysis.is_ok(),
+        "exact-then-null region handoff must preserve nullable row_count: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_projects_unknown_exact_target_count_through_columns() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
