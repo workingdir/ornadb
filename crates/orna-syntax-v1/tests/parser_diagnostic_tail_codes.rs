@@ -6754,6 +6754,102 @@ fn valid_closure_prefix_survives_following_invalid_recovery() {
 }
 
 #[test]
+fn interpolated_closure_prefix_survives_invalid_recovery() {
+    let source = include_str!("fixtures/malformed-case-arm-interpolated-closure-prefix-before-invalid-run.orna");
+    let parsed = parse_module(source);
+
+    let malformed_patterns = [
+        source.find("false 0").expect("first malformed arm") + 6,
+        source.find("false 1").expect("second malformed arm") + 6,
+        source.find("false 2").expect("third malformed arm") + 6,
+        source.find("false 3").expect("fourth malformed arm") + 6,
+    ];
+    assert_eq!(parsed.diagnostics.len(), 4, "{:?}", parsed.diagnostics);
+    for (diagnostic, start) in parsed.diagnostics.iter().zip(malformed_patterns) {
+        assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+        assert_eq!(diagnostic.message, "expected `:` after case pattern");
+        assert_eq!(diagnostic.span.start, start);
+        assert_eq!(diagnostic.span.end, start + 1);
+    }
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block { tail: Some(root_tail), .. } = body else {
+        panic!("expected the root case tail");
+    };
+    let Expr::Control { arms: root_arms, .. } = root_tail.as_ref() else {
+        panic!("expected the root case expression");
+    };
+    assert_eq!(root_arms.len(), 2, "{root_arms:?}");
+    let Expr::InterpolatedString { segments, .. } = &root_arms[0].body else {
+        panic!("outer arm lost its closure string");
+    };
+    let StringSegment::Expression {
+        value: Expr::Lambda { body: outer_body, .. },
+        ..
+    } = &segments[1]
+    else {
+        panic!("outer interpolation lost its closure");
+    };
+
+    let Expr::Block {
+        statements,
+        tail: Some(finish_closure),
+        ..
+    } = outer_body.as_ref()
+    else {
+        panic!("invalid recovery consumed the enclosing closure tail");
+    };
+    let [
+        Statement::Let { .. },
+        Statement::Control {
+            value: Expr::Control { arms: recovered_arms, .. },
+            ..
+        },
+    ] = statements.as_slice()
+    else {
+        panic!("recovered case lost its statement boundary: {statements:?}");
+    };
+    assert_eq!(recovered_arms.len(), 2, "{recovered_arms:?}");
+    assert!(matches!(
+        &recovered_arms[0].body,
+        Expr::Name { text, .. } if text == "saved"
+    ));
+    let Expr::InterpolatedString { segments, .. } = &recovered_arms[1].body else {
+        panic!("valid interpolated closure prefix was lost");
+    };
+    let [
+        StringSegment::Text { text: prefix, .. },
+        StringSegment::Expression {
+            value: Expr::Lambda { body: prefix_body, .. },
+            ..
+        },
+        StringSegment::Text { text: suffix, .. },
+    ] = segments.as_slice()
+    else {
+        panic!("closure interpolation prefix lost its suffix boundary: {segments:?}");
+    };
+    assert_eq!(prefix, "prefix ");
+    assert_eq!(suffix, " suffix");
+    let Expr::Block { tail: Some(prefix_tail), .. } = prefix_body.as_ref() else {
+        panic!("valid closure prefix lost its own block tail");
+    };
+    assert!(matches!(prefix_tail.as_ref(), Expr::Control { .. }));
+
+    let Expr::Lambda { body: finish_body, .. } = finish_closure.as_ref() else {
+        panic!("following enclosing closure was lost");
+    };
+    let Expr::Block { tail: Some(finish_tail), .. } = finish_body.as_ref() else {
+        panic!("following closure lost its block tail");
+    };
+    assert!(matches!(finish_tail.as_ref(), Expr::Control { .. }));
+
+    // The reference is silent on a valid interpolated closure prefix before a
+    // malformed run; preserve both its own tail and the enclosing closure tail.
+}
+
+#[test]
 fn semicolon_keeps_control_expression_as_a_statement() {
     let parsed = parse_module(include_str!("fixtures/semicolon-control-block-item.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
