@@ -56,6 +56,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0105 | Deferred: Studio security/DBA page reference and authority boundary | A production page, CLIENT-to-administration authority path, and its interaction contract are not defined by the frozen reference; existing security implementation and CLI are unchanged. |
 | 0109 | Deferred: `orna-artifact` owns no PUB-1 immutable publication-object consumer | Keep executable plan codecs separate from compact segments, manifests, Git objects, and durability barriers; continue at the accepted runtime/storage/repository publication boundary. |
 | 0110 | Source-document and object-description contracts as specified by Orna 1.0.0 | A separate bounded function-declaration metadata value and `sys.source.function` API remain gated on a canonical contract; this ADR does not add identities or runtime behavior. |
+| 0111 | Design for `sys` as a baked typed module ABI with one provider protocol for built-ins and extensions. | Typed provider dispatch, semantic-role linkage, capability negotiation, Wasm loading, and adapters are phased follow-on slices; 1.0.0 `sys` semantics and `api/sys.json` remain frozen. |
 | 0101 | OrnaDB 1.0 CLIENT VM trust boundary | Host-side remote source evaluation remains normative; production CLIENT bytecode VM, artifact trust, and CLIENT sandbox contracts are deferred. |
 
 ## Current work ADRs
@@ -263,3 +264,5 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Publication Object Encoding in `orna-artifact`](0109-publication-artifact-completeness-boundary.md)
 * **work ADR 0110 (deferred):**
   [Source Introspection Reference Gate](0110-source-introspection-reference-gate.md)
+* **work ADR 0111:**
+  [`sys` Baked Module ABI and Extensible Provider Protocol](0111-sys-baked-module-abi.md)
