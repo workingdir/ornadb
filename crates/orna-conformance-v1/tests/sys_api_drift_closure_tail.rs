@@ -232,6 +232,27 @@ fn edge_interplay_fixture_keeps_nullable_sibling_after_outer_filter() {
 }
 
 #[test]
+fn edge_interplay_fixture_captures_nullable_outer_field_for_sibling_filter() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The frozen schema does not relate an anchor's default_expression to sibling docs or
+    // computed_expression; check the two nullable inputs inside the nested closure and retain
+    // the sibling's nullable projection.
+    assert!(
+        analysis.is_ok(),
+        "captured nullable Column fields must preserve the sibling expression type: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn runtime_publication_counters_do_not_leak_into_frozen_sys_types() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-internal-publication-metadata.orna",
