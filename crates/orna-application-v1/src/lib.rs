@@ -8919,9 +8919,9 @@ mod tests {
     #[test]
     fn nested_rekey_handoff_survives_overlapping_recovery_splits() {
         // The reference defines re-key atomicity and left-associative recovery,
-        // but is silent on a failed re-key caught by an inner handler followed
-        // by another source re-key in the enclosing recovery. Local policy:
-        // successful inner effects remain visible to that enclosing retry.
+        // but is silent on a successful nested handoff followed by a later
+        // failure that reaches an outer split. Local policy: earlier effects
+        // remain visible and retries resolve the latest row at each key.
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
         let application = authority
@@ -8968,26 +8968,29 @@ mod tests {
         assert_eq!(handler.current_row("Note", &key(1)).unwrap(), None);
         assert_eq!(
             handler.current_row("Note", &key(2)).unwrap(),
-            Some(row(2, "owner", 10))
+            Some(row(2, "competitor", 21))
         );
-        assert_eq!(
-            handler.current_row("Note", &key(3)).unwrap(),
-            Some(row(3, "competitor", 21))
-        );
+        assert_eq!(handler.current_row("Note", &key(3)).unwrap(), None);
         assert_eq!(
             handler.current_row("Note", &key(4)).unwrap(),
             Some(row(4, "blocker", 31))
         );
-        assert_eq!(handler.current_row("Note", &key(5)).unwrap(), None);
+        assert_eq!(
+            handler.current_row("Note", &key(5)).unwrap(),
+            Some(row(5, "owner", 12))
+        );
 
         let mutations = handler.into_mutations().expect("valid ordered mutation log");
-        assert_eq!(mutations.len(), 5, "failed attempts do not add mutations");
+        assert_eq!(mutations.len(), 8, "failed attempts do not add mutations");
         let expected = [
             (3, Some(4), Some(row(4, "blocker", 30))),
             (4, None, Some(row(4, "blocker", 31))),
             (2, Some(3), Some(row(3, "competitor", 20))),
             (3, None, Some(row(3, "competitor", 21))),
             (1, Some(2), Some(row(2, "owner", 10))),
+            (2, Some(5), Some(row(5, "owner", 10))),
+            (3, Some(2), Some(row(2, "competitor", 21))),
+            (5, None, Some(row(5, "owner", 12))),
         ];
         for (index, (mutation, (old_key, new_key, expected_row))) in
             mutations.iter().zip(expected).enumerate()
