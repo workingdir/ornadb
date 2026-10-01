@@ -8393,6 +8393,271 @@ fn recovery_preserves_two_sibling_interpolated_closure_tails() {
 }
 
 #[test]
+fn single_recovery_preserves_sibling_closure_before_text_tail() {
+    let source = include_str!("fixtures/malformed-first-sibling-closure-before-text-tail.orna");
+    let parsed = parse_module(source);
+
+    assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+    let diagnostic = &parsed.diagnostics[0];
+    let start = source.find("false 0").expect("malformed first arm") + "false ".len();
+    assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+    assert_eq!(diagnostic.message, "expected `:` after case pattern");
+    assert_eq!(diagnostic.span.start, start, "{diagnostic:?}");
+    assert_eq!(diagnostic.span.end, start + 1, "{diagnostic:?}");
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block { tail: Some(root_tail), .. } = body else {
+        panic!("expected the root case tail");
+    };
+    let Expr::Control { arms: root_arms, .. } = root_tail.as_ref() else {
+        panic!("expected the root case expression");
+    };
+    let Expr::InterpolatedString { segments, .. } = &root_arms[0].body else {
+        panic!("root arm lost its interpolated string");
+    };
+    let [
+        StringSegment::Text { text: prefix, .. },
+        StringSegment::Expression { value: Expr::Lambda { body: first, .. }, .. },
+        StringSegment::Text { text: middle, .. },
+        StringSegment::Expression { value: Expr::Lambda { body: second, .. }, .. },
+        StringSegment::Text { text: suffix, .. },
+    ] = segments.as_slice()
+    else {
+        panic!("a sibling closure or text tail was lost: {segments:?}");
+    };
+    assert_eq!(prefix, "left ");
+    assert_eq!(middle, " right ");
+    assert_eq!(suffix, " end");
+
+    let Expr::Block { statements, tail: Some(first_tail), .. } = first.as_ref() else {
+        panic!("first closure lost its recovered case or following tail");
+    };
+    let [Statement::Let { .. }, Statement::Control { value: Expr::Control { arms, .. }, .. }] =
+        statements.as_slice()
+    else {
+        panic!("first closure lost its statement boundary: {statements:?}");
+    };
+    assert_eq!(arms.len(), 1, "{arms:?}");
+    let Expr::Lambda { body: first_suffix_body, .. } = first_tail.as_ref() else {
+        panic!("first closure lost its following closure tail");
+    };
+    let Expr::Block { tail: Some(first_suffix_tail), .. } = first_suffix_body.as_ref() else {
+        panic!("following closure lost its case tail");
+    };
+    assert!(matches!(first_suffix_tail.as_ref(), Expr::Control { .. }));
+
+    let Expr::Block { statements, tail: Some(second_tail), .. } = second.as_ref() else {
+        panic!("second sibling closure lost its case or closure tail");
+    };
+    let [Statement::Let { .. }, Statement::Control { value: Expr::Control { arms, .. }, .. }] =
+        statements.as_slice()
+    else {
+        panic!("second closure lost its statement boundary: {statements:?}");
+    };
+    assert_eq!(arms.len(), 2, "{arms:?}");
+    assert!(matches!(second_tail.as_ref(), Expr::Lambda { .. }));
+
+    // The reference is silent on text after a recovered sibling closure and its
+    // following sibling; retain both case tails and the final string segment.
+}
+
+#[test]
+fn second_sibling_recovery_preserves_closure_before_text_tail() {
+    let source = include_str!("fixtures/malformed-second-sibling-closure-before-text-tail.orna");
+    let parsed = parse_module(source);
+
+    assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+    let diagnostic = &parsed.diagnostics[0];
+    let start = source.find("false 1").expect("malformed second arm") + "false ".len();
+    assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+    assert_eq!(diagnostic.message, "expected `:` after case pattern");
+    assert_eq!(diagnostic.span.start, start, "{diagnostic:?}");
+    assert_eq!(diagnostic.span.end, start + 1, "{diagnostic:?}");
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block { tail: Some(root_tail), .. } = body else {
+        panic!("expected the root case tail");
+    };
+    let Expr::Control { arms: root_arms, .. } = root_tail.as_ref() else {
+        panic!("expected the root case expression");
+    };
+    let Expr::InterpolatedString { segments, .. } = &root_arms[0].body else {
+        panic!("root arm lost its interpolated string");
+    };
+    let [
+        StringSegment::Text { text: prefix, .. },
+        StringSegment::Expression { value: Expr::Lambda { body: first, .. }, .. },
+        StringSegment::Text { text: middle, .. },
+        StringSegment::Expression { value: Expr::Lambda { body: second, .. }, .. },
+        StringSegment::Text { text: suffix, .. },
+    ] = segments.as_slice()
+    else {
+        panic!("a sibling closure or text tail was lost: {segments:?}");
+    };
+    assert_eq!(prefix, "left ");
+    assert_eq!(middle, " right ");
+    assert_eq!(suffix, " end");
+
+    for (label, closure_body, expected_arms) in [("first", first, 2), ("second", second, 1)] {
+        let Expr::Block { statements, tail: Some(closure_tail), .. } = closure_body.as_ref() else {
+            panic!("{label} sibling closure lost its case or following tail");
+        };
+        let [Statement::Let { .. }, Statement::Control { value: Expr::Control { arms, .. }, .. }] =
+            statements.as_slice()
+        else {
+            panic!("{label} closure lost its statement boundary: {statements:?}");
+        };
+        assert_eq!(arms.len(), expected_arms, "{label} case: {arms:?}");
+        let Expr::Lambda { body: suffix_body, .. } = closure_tail.as_ref() else {
+            panic!("{label} closure tail was lost");
+        };
+        let Expr::Block { tail: Some(suffix_tail), .. } = suffix_body.as_ref() else {
+            panic!("{label} following closure lost its case tail");
+        };
+        assert!(matches!(suffix_tail.as_ref(), Expr::Control { .. }));
+    }
+
+    // The reference is silent on recovery in the final sibling before literal
+    // text; preserve its following closure case and the complete string suffix.
+}
+
+#[test]
+fn middle_sibling_recovery_preserves_closures_before_text_tail() {
+    let source = include_str!("fixtures/malformed-middle-sibling-closure-before-text-tail.orna");
+    let parsed = parse_module(source);
+
+    assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+    let diagnostic = &parsed.diagnostics[0];
+    let start = source.find("false 2").expect("malformed middle arm") + "false ".len();
+    assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+    assert_eq!(diagnostic.message, "expected `:` after case pattern");
+    assert_eq!(diagnostic.span.start, start, "{diagnostic:?}");
+    assert_eq!(diagnostic.span.end, start + 1, "{diagnostic:?}");
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block { tail: Some(root_tail), .. } = body else {
+        panic!("expected the root case tail");
+    };
+    let Expr::Control { arms: root_arms, .. } = root_tail.as_ref() else {
+        panic!("expected the root case expression");
+    };
+    assert_eq!(root_arms.len(), 2, "{root_arms:?}");
+    let Expr::InterpolatedString { segments, .. } = &root_arms[0].body else {
+        panic!("root arm lost its interpolated string");
+    };
+    let [
+        StringSegment::Text { text: prefix, .. },
+        StringSegment::Expression { value: Expr::Lambda { body: first, .. }, .. },
+        StringSegment::Text { text: middle, .. },
+        StringSegment::Expression { value: Expr::Lambda { body: second, .. }, .. },
+        StringSegment::Text { text: conjunction, .. },
+        StringSegment::Expression { value: Expr::Lambda { body: third, .. }, .. },
+        StringSegment::Text { text: suffix, .. },
+    ] = segments.as_slice()
+    else {
+        panic!("a sibling closure or trailing text was lost: {segments:?}");
+    };
+    assert_eq!(prefix, "left ");
+    assert_eq!(middle, " middle ");
+    assert_eq!(conjunction, " right ");
+    assert_eq!(suffix, " end");
+
+    for (label, closure_body, expected_arms) in
+        [("first", first, 2), ("middle", second, 1), ("last", third, 2)]
+    {
+        let Expr::Block { statements, tail: Some(closure_tail), .. } = closure_body.as_ref() else {
+            panic!("{label} sibling closure lost its case or following tail");
+        };
+        let [Statement::Let { .. }, Statement::Control { value: Expr::Control { arms, .. }, .. }] =
+            statements.as_slice()
+        else {
+            panic!("{label} closure lost its statement boundary: {statements:?}");
+        };
+        assert_eq!(arms.len(), expected_arms, "{label} case: {arms:?}");
+        let Expr::Lambda { body: suffix_body, .. } = closure_tail.as_ref() else {
+            panic!("{label} closure tail was lost");
+        };
+        let Expr::Block { tail: Some(suffix_tail), .. } = suffix_body.as_ref() else {
+            panic!("{label} following closure lost its case tail");
+        };
+        assert!(matches!(suffix_tail.as_ref(), Expr::Control { .. }));
+    }
+
+    // The reference is silent on recovery in a middle sibling before literal
+    // text; preserve both neighboring closures and the final string segment.
+}
+
+#[test]
+fn two_sibling_recoveries_preserve_closures_before_text_tail() {
+    let source = include_str!("fixtures/malformed-two-sibling-closures-before-text-tail.orna");
+    let parsed = parse_module(source);
+
+    let malformed_patterns = [("false 0", 6), ("false 1", 6)];
+    assert_eq!(parsed.diagnostics.len(), malformed_patterns.len(), "{:?}", parsed.diagnostics);
+    for (diagnostic, (pattern, offset)) in parsed.diagnostics.iter().zip(malformed_patterns) {
+        let start = source.find(pattern).expect("malformed sibling arm") + offset;
+        assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+        assert_eq!(diagnostic.message, "expected `:` after case pattern");
+        assert_eq!(diagnostic.span.start, start, "{diagnostic:?}");
+        assert_eq!(diagnostic.span.end, start + 1, "{diagnostic:?}");
+    }
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block { tail: Some(root_tail), .. } = body else {
+        panic!("expected the root case tail");
+    };
+    let Expr::Control { arms: root_arms, .. } = root_tail.as_ref() else {
+        panic!("expected the root case expression");
+    };
+    let Expr::InterpolatedString { segments, .. } = &root_arms[0].body else {
+        panic!("root arm lost its interpolated string");
+    };
+    let [
+        StringSegment::Text { text: prefix, .. },
+        StringSegment::Expression { value: Expr::Lambda { body: first, .. }, .. },
+        StringSegment::Text { text: middle, .. },
+        StringSegment::Expression { value: Expr::Lambda { body: second, .. }, .. },
+        StringSegment::Text { text: suffix, .. },
+    ] = segments.as_slice()
+    else {
+        panic!("a recovered sibling closure or trailing text was lost: {segments:?}");
+    };
+    assert_eq!(prefix, "left ");
+    assert_eq!(middle, " right ");
+    assert_eq!(suffix, " end");
+
+    for (label, closure_body) in [("first", first), ("second", second)] {
+        let Expr::Block { statements, tail: Some(closure_tail), .. } = closure_body.as_ref() else {
+            panic!("{label} closure lost its recovered case or following tail");
+        };
+        let [Statement::Let { .. }, Statement::Control { value: Expr::Control { arms, .. }, .. }] =
+            statements.as_slice()
+        else {
+            panic!("{label} closure lost its statement boundary: {statements:?}");
+        };
+        assert_eq!(arms.len(), 1, "{label} recovered case: {arms:?}");
+        let Expr::Lambda { body: suffix_body, .. } = closure_tail.as_ref() else {
+            panic!("{label} closure tail was lost");
+        };
+        let Expr::Block { tail: Some(suffix_tail), .. } = suffix_body.as_ref() else {
+            panic!("{label} following closure lost its case tail");
+        };
+        assert!(matches!(suffix_tail.as_ref(), Expr::Control { .. }));
+    }
+
+    // The reference is silent on adjacent sibling recoveries before literal
+    // text; preserve both recovered closure tails and the complete string suffix.
+}
+
+#[test]
 fn three_sibling_closure_tails_survive_independent_recoveries() {
     let source = include_str!("fixtures/malformed-recovery-with-three-sibling-closure-tails.orna");
 
