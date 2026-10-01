@@ -1501,6 +1501,7 @@ dependencies = [
  "orna-repository-v1",
  "orna-stream-v1",
  "orna-syntax-v1",
+ "orna-sys-v1",
  "orna-value-v1",
  "sha2 0.10.9",
  "tempfile",
@@ -1526,6 +1527,7 @@ version = "1.0.0"
 dependencies = [
  "orna-foundation-v1",
  "orna-syntax-v1",
+ "orna-sys-v1",
  "orna-value-v1",
  "serde_json",
  "sha2 0.10.9",

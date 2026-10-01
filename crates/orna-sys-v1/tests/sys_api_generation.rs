@@ -152,6 +152,50 @@ fn collector_covers_trait_methods_and_nested_impls_and_rejects_silent_skips() {
 }
 
 #[test]
+fn collector_registers_versioned_roles_and_rejects_incompatible_overloads() {
+    const SOURCE: &str = r####"
+        struct Binding;
+        impl Binding {
+            #[ornasys(
+                function = r###"{"effect":"read","name":"sys.fixture.first","purpose":"fixture","signature":"fn sys.fixture.first(value: Int): Int"}"###,
+                role = "langitem.fixture.invoke@1.0"
+            )]
+            fn first(&self) {}
+
+            #[ornasys(
+                function = r###"{"effect":"read","name":"sys.fixture.second","purpose":"fixture","signature":"fn sys.fixture.second(value: Str): Str"}"###,
+                role = "langitem.fixture.invoke@1.0"
+            )]
+            fn second(&self) {}
+        }
+    "####;
+    let mut collector = build_support::Collector::default();
+    collector.collect_source("fixture.rs", SOURCE);
+    assert!(collector.errors.is_empty(), "{:?}", collector.errors);
+    assert_eq!(collector.functions.len(), 2);
+    assert_eq!(
+        collector.functions[0].role.as_deref(),
+        Some("langitem.fixture.invoke@1.0")
+    );
+    build_support::validate_collection(&collector.functions).unwrap();
+
+    let mut incompatible = collector.functions.clone();
+    incompatible[1].metadata["name"] = Value::String("sys.admin.fixture".into());
+    incompatible[1].metadata["signature"] =
+        Value::String("fn sys.admin.fixture(value: Str): Str".into());
+    incompatible[1].metadata["contract"] =
+        Value::String("administrative-state-transitions".into());
+    incompatible[1].metadata["effect"] = Value::String("admin".into());
+    let error = build_support::validate_collection(&incompatible).unwrap_err();
+    assert!(error.contains("incompatible effects"), "{error}");
+
+    let mut mixed_versions = collector.functions;
+    mixed_versions[1].role = Some("langitem.fixture.invoke@2.0".into());
+    let error = build_support::validate_collection(&mixed_versions).unwrap_err();
+    assert!(error.contains("multiple versions"), "{error}");
+}
+
+#[test]
 fn annotation_metadata_and_generated_inventory_fail_closed() {
     let valid = serde_json::json!({
         "name": "sys.meta",
@@ -188,6 +232,7 @@ fn annotation_metadata_and_generated_inventory_fail_closed() {
                 "name": "sys.fixture", "effect": "read",
                 "signature": "fn sys.fixture(value: Int): Str", "purpose": "first label"
             }),
+            role: None,
         },
         build_support::Function {
             method: "second".into(),
@@ -195,6 +240,7 @@ fn annotation_metadata_and_generated_inventory_fail_closed() {
                 "name": "sys.fixture(Int)", "effect": "read",
                 "signature": "fn sys.fixture(value: Int): Bool", "purpose": "second label"
             }),
+            role: None,
         },
     ];
     let duplicate_error = build_support::validate_collection(&duplicate_callables).unwrap_err();
