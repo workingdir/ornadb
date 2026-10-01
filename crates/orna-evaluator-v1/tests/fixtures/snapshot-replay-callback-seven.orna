@@ -1,1 +1,8 @@
-std.collection.map([7], value => shift(value))
+if true {
+    let step = 3;
+    let callback = (value: Int) => shift(value + step);
+    step = 100;
+    std.collection.map([7], callback)
+} else {
+    std.collection.map([7], value => shift(value + 3))
+}
