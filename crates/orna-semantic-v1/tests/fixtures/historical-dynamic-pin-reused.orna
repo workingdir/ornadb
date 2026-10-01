@@ -1,0 +1,7 @@
+pub fn reusing_a_dynamic_snapshot_ref_keeps_its_pin() {
+    let selector = "HEAD~10";
+    let pin = sys.snapshot(selector);
+    let first = sys.database.as_of(pin);
+    let second = sys.database.as_of(pin);
+    [first.energy.daily, second.energy.daily]
+}
