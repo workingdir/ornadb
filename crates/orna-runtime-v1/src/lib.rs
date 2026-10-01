@@ -21411,6 +21411,26 @@ mod tests {
             "last() traverses two inter-match rejects, then leaves the four-reject tail unopened"
         );
 
+        // The reference leaves the same interleaving with a third accepted
+        // row implicit. Fill take(3), then prove four later rejects and the
+        // failing source remain unopened.
+        let (last_closes_before_four_reject_tail_after_three_matches, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-three-four-trailing-rejects-after-interleaved.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_before_four_reject_tail_after_three_matches.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (5, 10),
+            "last() fills take(3) across two inter-match rejects and leaves the four-reject tail unopened"
+        );
+
         // The reference is silent when the entire bracketed candidate tail
         // is rejected before take(2) naturally exhausts. The empty last()
         // result keeps its explicit coalesce fallback.
