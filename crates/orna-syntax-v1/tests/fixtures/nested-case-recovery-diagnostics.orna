@@ -1,0 +1,13 @@
+// λ 🐑 keeps diagnostic offsets byte-based after a multibyte prefix.
+pub fn nested(flag: Bool): Int { case flag {
+true: case flag {
+true 0,
+false: case flag {
+false 1,
+true: 2
+},
+true: 3
+},
+false 4,
+true: 5
+}}
