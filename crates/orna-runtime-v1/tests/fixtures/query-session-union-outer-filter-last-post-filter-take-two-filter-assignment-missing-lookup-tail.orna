@@ -1,0 +1,14 @@
+sys.Storage
+    | project(storage => storage.id)
+    | union(
+        sys.Storage
+            | project(storage => storage.target)
+            | filter(id => if id == 99 {
+                let lookup_id = 98;
+                lookup_id += 1;
+                id == lookup_id
+            } else { false })
+    )
+    | filter(id => sys.Storage.lookup(id).title == "later")
+    | take(2)
+    | last() ?? 0
