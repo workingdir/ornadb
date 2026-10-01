@@ -2079,6 +2079,7 @@ pub enum TableActivationError {
 pub struct RuntimeState {
     connection: Connection,
     compact_receipt_signing_key: SigningKey,
+    system_dispatch: &'static orna_sys_v1::SystemDispatchTable,
     system_provider_roles: orna_sys_v1::ProviderRoleRegistry,
 }
 
@@ -3917,9 +3918,9 @@ impl RuntimeState {
     ) -> Result<Self, RuntimeError> {
         validate_identity(identity)?;
         validate_digest(initial_digest)?;
-        let system_provider_roles =
-            orna_sys_v1::ProviderRoleRegistry::from_baked_abi(orna_sys_v1::system_provider_abi())
-                .map_err(|_| RuntimeError::SystemProviderAbiInvalid)?;
+        let system_dispatch = orna_sys_v1::system_dispatch_table();
+        let system_provider_roles = orna_sys_v1::ProviderRoleRegistry::from_baked_abi(system_dispatch)
+            .map_err(|_| RuntimeError::SystemProviderAbiInvalid)?;
         let database = Builder::new_local(path)
             .build()
             .await
@@ -3945,6 +3946,7 @@ impl RuntimeState {
         let state = Self {
             connection,
             compact_receipt_signing_key,
+            system_dispatch,
             system_provider_roles,
         };
         state.migrate_observation_projection_schema().await?;
@@ -3963,6 +3965,54 @@ impl RuntimeState {
     /// is not part of this 1.0 runtime surface.
     pub fn system_provider_roles(&self) -> &orna_sys_v1::ProviderRoleRegistry {
         &self.system_provider_roles
+    }
+
+    /// The generated operation table consumed by runtime call boundaries.
+    pub fn system_dispatch_table(&self) -> &'static orna_sys_v1::SystemDispatchTable {
+        self.system_dispatch
+    }
+
+    /// Resolves a typed system operation contract by its stable registry ID.
+    pub fn system_operation_contract(
+        &self,
+        operation: &str,
+    ) -> Option<&orna_sys_v1::OperationContract> {
+        self.system_dispatch.operation(operation)
+    }
+
+    /// Resolves, checks the registry-declared preconditions, and dispatches
+    /// one native operation through the generated system table. The selected
+    /// contract and failure vocabulary come from the same registry entry.
+    pub fn dispatch_system_operation<T>(
+        &self,
+        operation: &str,
+        check: impl FnMut(&orna_sys_v1::Precondition) -> Result<(), orna_sys_v1::FailureCode>,
+        invoke: impl FnOnce(
+            &orna_sys_v1::OperationContract,
+        ) -> Result<T, orna_sys_v1::FailureCode>,
+    ) -> Result<orna_sys_v1::SystemDispatchResult<T>, orna_sys_v1::ProviderDiagnostic> {
+        self.system_dispatch.dispatch(operation, check, invoke)
+    }
+
+    /// Runs the registry-declared preconditions before a native operation is
+    /// allowed to proceed. Any failure code returned by the checker is also
+    /// checked against that operation's declared vocabulary.
+    pub fn check_system_operation_preconditions(
+        &self,
+        operation: &str,
+        check: impl FnMut(&orna_sys_v1::Precondition) -> Result<(), orna_sys_v1::FailureCode>,
+    ) -> Result<&orna_sys_v1::OperationContract, orna_sys_v1::ProviderDiagnostic> {
+        self.system_dispatch.check_preconditions(operation, check)
+    }
+
+    /// Prevents a host or provider failure outside an operation's declared
+    /// vocabulary from crossing the runtime boundary.
+    pub fn validate_system_failure(
+        &self,
+        operation: &str,
+        code: &orna_sys_v1::FailureCode,
+    ) -> Result<(), orna_sys_v1::ProviderDiagnostic> {
+        self.system_dispatch.validate_failure(operation, code)
     }
 
     /// Creates a stream backend whose mutations are fenced by this writer lease.
@@ -18892,6 +18942,76 @@ mod tests {
             .resolve("langitem.sys.invoke")
             .unwrap();
         assert_eq!(invoke.provider.as_str(), "orna.sys.v1");
+
+        let checkout = state
+            .system_operation_contract("sys.admin.checkout(SnapshotRef)")
+            .expect("runtime resolves operations from the generated dispatch table");
+        assert!(!checkout.preconditions.is_empty());
+        let mut checked = Vec::new();
+        let admitted = state
+            .check_system_operation_preconditions(checkout.id.as_str(), |precondition| {
+                checked.push(precondition.declaration.clone());
+                Ok(())
+            })
+            .expect("native handler may run after every registered precondition passes");
+        assert_eq!(checked.len(), checkout.preconditions.len());
+        assert_eq!(admitted.id, checkout.id);
+
+        let precondition_failure = orna_sys_v1::FailureCode::new("sys.abi.precondition_failed")
+            .expect("shared precondition failure code is valid");
+        assert!(state
+            .validate_system_failure(checkout.id.as_str(), &precondition_failure)
+            .is_ok());
+
+        let dispatched = state
+            .dispatch_system_operation(
+                checkout.id.as_str(),
+                |_| Ok(()),
+                |contract| {
+                    assert_eq!(contract.id, checkout.id);
+                    Ok(7)
+                },
+            )
+            .expect("runtime dispatch uses the selected generated contract");
+        assert_eq!(dispatched, orna_sys_v1::SystemDispatchResult::Returned(7));
+
+        let mut native_handler_ran = false;
+        let rejected = state
+            .dispatch_system_operation(
+                checkout.id.as_str(),
+                |_| Err(precondition_failure.clone()),
+                |_| {
+                    native_handler_ran = true;
+                    Ok(())
+                },
+            )
+            .expect("a declared precondition failure is returned at the boundary");
+        assert_eq!(
+            rejected,
+            orna_sys_v1::SystemDispatchResult::Failed(precondition_failure.clone())
+        );
+        assert!(!native_handler_ran, "failed checks must stop native dispatch");
+
+        let undeclared_failure = orna_sys_v1::FailureCode::new("sys.storage.corrupt")
+            .expect("failure code syntax is valid");
+        assert!(matches!(
+            state.dispatch_system_operation(
+                checkout.id.as_str(),
+                |_| Ok(()),
+                |_| Err::<(), _>(undeclared_failure.clone()),
+            ),
+            Err(orna_sys_v1::ProviderDiagnostic::UndeclaredFailure { .. })
+        ));
+        assert!(matches!(
+            state.validate_system_failure(checkout.id.as_str(), &undeclared_failure),
+            Err(orna_sys_v1::ProviderDiagnostic::UndeclaredFailure { .. })
+        ));
+        assert!(matches!(
+            state.check_system_operation_preconditions(checkout.id.as_str(), |_| {
+                Err(precondition_failure.clone())
+            }),
+            Err(orna_sys_v1::ProviderDiagnostic::PreconditionFailed { .. })
+        ));
     }
 
     #[tokio::test]

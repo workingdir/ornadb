@@ -237,6 +237,14 @@ pub struct OperationContract {
     pub role_version: Option<AbiVersion>,
 }
 
+/// Result of a registry-mediated native operation call. Failures are returned
+/// only after the dispatch table confirms they belong to that operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SystemDispatchResult<T> {
+    Returned(T),
+    Failed(FailureCode),
+}
+
 impl OperationContract {
     pub fn declares_failure(&self, code: &FailureCode) -> bool {
         self.failures.contains(code)
@@ -300,6 +308,10 @@ pub enum ProviderAbiError {
 pub enum ProviderDiagnostic {
     UnknownRole(SemanticRoleId),
     UnknownOperation(OperationId),
+    PreconditionFailed {
+        operation: OperationId,
+        code: FailureCode,
+    },
     DuplicateRoleContract(SemanticRoleId),
     RoleUnavailable {
         role: SemanticRoleId,
@@ -324,6 +336,7 @@ impl ProviderDiagnostic {
         match self {
             Self::UnknownRole(_) => "sys.abi.unknown_role",
             Self::UnknownOperation(_) => "sys.abi.unknown_operation",
+            Self::PreconditionFailed { .. } => "sys.abi.precondition_failed",
             Self::DuplicateRoleContract(_) => "sys.abi.duplicate_role_contract",
             Self::RoleUnavailable { .. } => "sys.abi.role_unavailable",
             Self::DuplicateRoleProvider(_) => "sys.abi.duplicate_role_provider",
@@ -341,6 +354,11 @@ pub struct SystemProviderAbi {
     operations: BTreeMap<OperationId, OperationContract>,
     roles: BTreeMap<SemanticRoleId, SemanticRoleContract>,
 }
+
+/// The immutable typed operation table generated from the annotated sys
+/// registry. The provider ABI name remains as a source-compatible alias for
+/// role-linkage callers.
+pub type SystemDispatchTable = SystemProviderAbi;
 
 impl SystemProviderAbi {
     pub fn from_json(source: &str) -> Result<Self, ProviderAbiError> {
@@ -473,6 +491,57 @@ impl SystemProviderAbi {
         }
     }
 
+    /// Resolve one operation and evaluate each declared precondition before a
+    /// native handler runs. A failed check can escape only with a failure code
+    /// declared for that operation (including the shared ABI precondition code).
+    pub fn check_preconditions(
+        &self,
+        operation: &str,
+        mut check: impl FnMut(&Precondition) -> Result<(), FailureCode>,
+    ) -> Result<&OperationContract, ProviderDiagnostic> {
+        let id = OperationId::new(operation)
+            .map_err(|_| ProviderDiagnostic::UnknownOperation(OperationId(operation.to_owned())))?;
+        let contract = self
+            .operations
+            .get(&id)
+            .ok_or_else(|| ProviderDiagnostic::UnknownOperation(id.clone()))?;
+        for precondition in &contract.preconditions {
+            if let Err(code) = check(precondition) {
+                self.validate_failure(operation, &code)?;
+                return Err(ProviderDiagnostic::PreconditionFailed {
+                    operation: id,
+                    code,
+                });
+            }
+        }
+        Ok(contract)
+    }
+
+    /// Resolve, precondition-check, and invoke one native operation. The
+    /// handler receives the typed contract selected by registry ID; neither a
+    /// failed precondition nor an undeclared failure code crosses this boundary.
+    pub fn dispatch<T>(
+        &self,
+        operation: &str,
+        check: impl FnMut(&Precondition) -> Result<(), FailureCode>,
+        invoke: impl FnOnce(&OperationContract) -> Result<T, FailureCode>,
+    ) -> Result<SystemDispatchResult<T>, ProviderDiagnostic> {
+        let contract = match self.check_preconditions(operation, check) {
+            Ok(contract) => contract,
+            Err(ProviderDiagnostic::PreconditionFailed { code, .. }) => {
+                return Ok(SystemDispatchResult::Failed(code));
+            }
+            Err(diagnostic) => return Err(diagnostic),
+        };
+        match invoke(contract) {
+            Ok(value) => Ok(SystemDispatchResult::Returned(value)),
+            Err(code) => {
+                self.validate_failure(operation, &code)?;
+                Ok(SystemDispatchResult::Failed(code))
+            }
+        }
+    }
+
     pub fn roles(&self) -> impl Iterator<Item = &SemanticRoleContract> {
         self.roles.values()
     }
@@ -505,12 +574,17 @@ impl SystemProviderAbi {
     }
 }
 
-pub fn system_provider_abi() -> &'static SystemProviderAbi {
-    static ABI: std::sync::LazyLock<SystemProviderAbi> = std::sync::LazyLock::new(|| {
-        SystemProviderAbi::from_json(GENERATED_PROVIDER_ABI)
-            .expect("build-validated generated system provider ABI")
+pub fn system_dispatch_table() -> &'static SystemDispatchTable {
+    static TABLE: std::sync::LazyLock<SystemDispatchTable> = std::sync::LazyLock::new(|| {
+        SystemDispatchTable::from_json(GENERATED_PROVIDER_ABI)
+            .expect("build-validated generated system dispatch table")
     });
-    &ABI
+    &TABLE
+}
+
+/// Source-compatible name for consumers that only need provider-role metadata.
+pub fn system_provider_abi() -> &'static SystemProviderAbi {
+    system_dispatch_table()
 }
 
 /// Validates a provider claim against one semantic-role contract. Providers
