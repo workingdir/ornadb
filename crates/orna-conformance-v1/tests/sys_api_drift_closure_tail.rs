@@ -453,6 +453,26 @@ fn edge_interplay_fixture_retains_unknown_inexact_target_through_column_handoff(
 }
 
 #[test]
+fn edge_interplay_fixture_retains_unknown_inexact_count_through_references() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Retain the nullable parent count while a target's Reference rows are traversed; exactness
+    // remains independent, and the frozen schema gives no count guarantee for this callback.
+    assert!(
+        analysis.is_ok(),
+        "unknown/inexact target count must survive the Reference callback: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_chains_unknown_inexact_target_filters() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
