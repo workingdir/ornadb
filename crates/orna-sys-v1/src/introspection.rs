@@ -940,6 +940,10 @@ pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, Expl
         current_cardinality = cardinality;
     }
     if let Some(predicate) = &query.predicate {
+        // The typed expression reference is opaque here. Keep the stable
+        // one-filter/50% fallback even for a conjunctive expression: without
+        // term or row-value statistics, counting `&&` terms or inferring a
+        // short-circuit result would fabricate work and selectivity evidence.
         let cardinality = scale_cardinality(current_cardinality, 1, 2);
         let work = current_cardinality.rows;
         let details = BTreeMap::from([(
@@ -1607,8 +1611,8 @@ fn build_plan(
             known_work_overflow |= known_work_total.is_none();
         }
         // A local marker proves this nonnegative contribution exceeds
-        // u64::MAX, so the full plan cost overflows even across unknown tails
-        // or a LIMIT that lowers only output cardinality.
+        // u64::MAX, so the full plan cost overflows even across unknown tails,
+        // downstream conjuncts, or a LIMIT that lowers only output cardinality.
         known_work_overflow |= operator.details.contains_key("estimated_work_overflow");
         let mut details = operator.details.clone();
         if let Some(work) = operator.work {
