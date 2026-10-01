@@ -13,10 +13,10 @@ if true {
     divisor = 100;
 
     [
-        query_ops.map([1, 2], shift) == [11, 12],
-        query_ops.flat_map([1, 2], expand) == [1, 21, 2, 22],
-        query_ops.sort_by([22, 11, 23, 12], bucket) == [11, 22, 12, 23],
-        query_ops.group_by([22, 11, 23, 12], bucket) == [(1, [11]), (2, [22, 12]), (3, [23])],
-        query_ops.rank([22, 11, 23, 12], bucket) == [(11, 1), (22, 2), (12, 2), (23, 4)]
+        collection_ops.map([1, 2], shift) == [11, 12],
+        collection_ops.flat_map([1, 2], expand) == [1, 21, 2, 22],
+        collection_ops.sort_by([22, 11, 23, 12], bucket) == [11, 22, 12, 23],
+        collection_ops.group_by([22, 11, 23, 12], bucket) == [(1, [11]), (2, [22, 12]), (3, [23])],
+        collection_ops.rank([22, 11, 23, 12], bucket) == [(11, 1), (22, 2), (12, 2), (23, 4)]
     ]
 } else { [false, false, false, false, false] }
