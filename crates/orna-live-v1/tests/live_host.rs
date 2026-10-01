@@ -5224,7 +5224,7 @@ fn durable_status_retry_replays_unknown_after_target_completes_and_host_recovers
 }
 
 #[test]
-fn durable_status_snapshots_keep_reserved_and_running_after_completion_and_recovery() {
+fn durable_status_snapshots_keep_reserved_and_running_through_handoff_storm() {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
 
     let (root, repository) = durable_repository();
@@ -5424,73 +5424,116 @@ fn durable_status_snapshots_keep_reserved_and_running_after_completion_and_recov
     drop(host);
     drop(updater);
 
-    let recovery_runtime = open_durable_state(&repository);
-    let fence = block_on(recovery_runtime.recover_abandoned(owner.owner_id, [76; 16])).unwrap();
-    drop(recovery_runtime);
-    let mut recovered = durable_host_after_takeover(
-        open_durable_state(&repository),
-        [76; 16],
-        RequestOwner::from(owner),
-    );
-    let mut recovered_issuer = Issuer(2, None);
-    let recovered_credential =
-        create_with_expiration(&mut recovered, &mut recovered_issuer, 10_000);
-    block_on(recovered.resume(ResumeRequest {
-        id: session,
-        origin: &origin(),
-        credential: &recovered_credential,
-        attachment: [6; 16],
-        now: 6,
-    }))
-    .unwrap();
-    sequence += 1;
-    replay_durable_status_snapshots(
-        &mut recovered,
-        [6; 16],
-        &snapshots,
-        &mut sequence,
-        &mut application,
-    );
-    for (request, target, fingerprint, result) in [
-        (
-            [87; 16],
-            [81; 16],
-            reserved_fingerprint,
-            unit_result([81; 16], reserved_fingerprint),
-        ),
-        (
-            [88; 16],
-            [82; 16],
-            running_fingerprint,
-            semantic_failure_result([82; 16], running_fingerprint),
-        ),
-    ] {
-        let fresh = block_on(recovered.dispatch_frame(
-            [6; 16],
-            sequence,
-            Frame::Binary(status_query(request, target, fingerprint)),
+    const HANDOFFS: u8 = 8;
+    let mut current_owner = owner;
+    for handoff in 0..HANDOFFS {
+        let replacement_id = [76 + handoff; 16];
+        let recovery_runtime = open_durable_state(&repository);
+        let replacement = block_on(
+            recovery_runtime.recover_abandoned(current_owner.owner_id, replacement_id),
+        )
+        .unwrap();
+        drop(recovery_runtime);
+
+        let mut recovered = durable_host_after_takeover(
+            open_durable_state(&repository),
+            replacement.owner_id,
+            RequestOwner::from(current_owner),
+        );
+        let mut recovered_issuer = Issuer(2 + handoff, None);
+        let recovered_credential =
+            create_with_expiration(&mut recovered, &mut recovered_issuer, 10_000);
+        let mut current_attachment = [6 + handoff; 16];
+        block_on(recovered.resume(ResumeRequest {
+            id: session,
+            origin: &origin(),
+            credential: &recovered_credential,
+            attachment: current_attachment,
+            now: 6 + u64::from(handoff),
+        }))
+        .unwrap();
+
+        for reconnect in 0..=2 {
+            if reconnect > 0 {
+                let next_attachment = [60 + handoff * 2 + reconnect - 1; 16];
+                let outcome = block_on(recovered.resume(ResumeRequest {
+                    id: session,
+                    origin: &origin(),
+                    credential: &recovered_credential,
+                    attachment: next_attachment,
+                    now: sequence,
+                }))
+                .unwrap();
+                assert!(matches!(
+                    outcome,
+                    orna_security_v1::AttachOutcome::Replaced(previous)
+                        if previous == orna_security_v1::AttachmentId::new(current_attachment)
+                ));
+                current_attachment = next_attachment;
+            }
+
+            replay_durable_status_snapshots(
+                &mut recovered,
+                current_attachment,
+                &snapshots,
+                &mut sequence,
+                &mut application,
+            );
+
+            for (request, target, fingerprint, result) in [
+                (
+                    [100 + handoff * 6 + reconnect * 2; 16],
+                    [81; 16],
+                    reserved_fingerprint,
+                    unit_result([81; 16], reserved_fingerprint),
+                ),
+                (
+                    [101 + handoff * 6 + reconnect * 2; 16],
+                    [82; 16],
+                    running_fingerprint,
+                    semantic_failure_result([82; 16], running_fingerprint),
+                ),
+            ] {
+                let query = status_query(request, target, fingerprint);
+                let fresh = block_on(recovered.dispatch_frame(
+                    current_attachment,
+                    sequence,
+                    Frame::Binary(query.clone()),
+                    &mut application,
+                ))
+                .unwrap()
+                .response
+                .expect("a fresh query reads the terminal target during the handoff storm");
+                let expected_body =
+                    ResultBody::from_result(&result, Limits::default().protocol).unwrap();
+                assert!(matches!(
+                    &fresh.message,
+                    Message::RequestStatusResult {
+                        target: returned_target,
+                        state: orna_protocol_v1::RequestState::Terminal,
+                        fingerprint: Some(returned_fingerprint),
+                        result: Some(body),
+                    } if *returned_target == target
+                        && *returned_fingerprint == fingerprint
+                        && body == &expected_body
+                ));
+                snapshots.push((query, fresh));
+                sequence += 1;
+            }
+        }
+
+        replay_durable_status_snapshots(
+            &mut recovered,
+            current_attachment,
+            &snapshots,
+            &mut sequence,
             &mut application,
-        ))
-        .unwrap()
-        .response
-        .expect("a fresh post-recovery query reads the retained terminal target");
-        let expected_body = ResultBody::from_result(&result, Limits::default().protocol).unwrap();
-        assert!(matches!(
-            &fresh.message,
-            Message::RequestStatusResult {
-                target: returned_target,
-                state: orna_protocol_v1::RequestState::Terminal,
-                fingerprint: Some(returned_fingerprint),
-                result: Some(body),
-            } if *returned_target == target
-                && *returned_fingerprint == fingerprint
-                && body == &expected_body
-        ));
-        sequence += 1;
+        );
+        current_owner = replacement;
+        drop(recovered);
     }
-    assert_eq!(fence.owner_id, [76; 16]);
+    assert_eq!(current_owner.owner_id, [83; 16]);
     assert_eq!(application.calls, 0);
-    drop(recovered);
     remove_test_repository(&root);
 }
 
