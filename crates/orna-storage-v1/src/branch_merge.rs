@@ -233,13 +233,39 @@ pub fn merge_three_way_snapshots<R: BranchRowSource>(
         }
     }
 
-    // Storage treats checkpoint existence separately from its opaque
-    // generation: an absent entry is a deletion, while a present checkpoint
-    // with `position: None` is a valid reset. Merge the ID union in bytewise
-    // order after row/tombstone planning, so strict prefixes, extensions, and
-    // deeply nested IDs remain independent and deterministic. If the bounded
-    // row phase stops early, its report must not mix in checkpoint IDs from a
-    // merge whose row materialization was cut short.
+    // If the bounded row phase stops early, do not mix checkpoint impacts
+    // into a report whose row materialization was cut short.
+    let checkpoints = merge_checkpoint_phase(
+        base,
+        left,
+        right,
+        budget,
+        &mut conflicts,
+        &mut report,
+    )?;
+
+    if !conflicts.is_empty() {
+        // Intermediate table candidates are never observable when any later
+        // row or checkpoint conflict remains unresolved.
+        return Err(BranchMergeError::Conflicts { conflicts, report });
+    }
+    Ok(BranchMergePlan { schema, tables: merged_tables, checkpoints, report })
+}
+
+/// Resolves storage checkpoint state after row ranges have been planned.
+///
+/// A missing map entry is a checkpoint deletion; a present generation with
+/// `position: None` is a valid reset. The bytewise ordered ID union keeps
+/// strict-prefix, extension and deeply nested identities independent while
+/// giving checkpoint conflicts a stable order in the shared detail budget.
+fn merge_checkpoint_phase(
+    base: &ThreeWaySnapshot,
+    left: &ThreeWaySnapshot,
+    right: &ThreeWaySnapshot,
+    budget: BranchMergeBudget,
+    conflicts: &mut Vec<BranchMergeConflict>,
+    report: &mut BranchMergeReport,
+) -> Result<BTreeMap<CheckpointId, CheckpointGeneration>, BranchMergeError> {
     let checkpoint_ids: BTreeSet<_> = base.checkpoints.keys().chain(left.checkpoints.keys()).chain(right.checkpoints.keys()).cloned().collect();
     let mut checkpoints = BTreeMap::new();
     for id in checkpoint_ids {
@@ -256,22 +282,16 @@ pub fn merge_three_way_snapshots<R: BranchRowSource>(
                     BranchMergeConflict::CheckpointConflict { id, conflict },
                     None,
                     None,
-                    &mut conflicts,
-                    &mut report,
+                    conflicts,
+                    report,
                     budget,
                 ) {
-                    return Err(BranchMergeError::BudgetExceeded { report });
+                    return Err(BranchMergeError::BudgetExceeded { report: report.clone() });
                 }
             }
         }
     }
-
-    if !conflicts.is_empty() {
-        // Intermediate table candidates are never observable when any later
-        // row or checkpoint conflict remains unresolved.
-        return Err(BranchMergeError::Conflicts { conflicts, report });
-    }
-    Ok(BranchMergePlan { schema, tables: merged_tables, checkpoints, report })
+    Ok(checkpoints)
 }
 
 fn merge_table<R: BranchRowSource>(
