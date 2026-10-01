@@ -172,6 +172,26 @@ fn edge_interplay_fixture_composes_nullable_sibling_null_arms() {
 }
 
 #[test]
+fn edge_interplay_fixture_preserves_nullable_sibling_across_helpers() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The frozen schema does not say that documented Columns have a default expression;
+    // keep that nullable sibling after returning filtered Column rows from a helper.
+    assert!(
+        analysis.is_ok(),
+        "a helper-filtered Column row must retain its nullable sibling projection: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn runtime_publication_counters_do_not_leak_into_frozen_sys_types() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-internal-publication-metadata.orna",
