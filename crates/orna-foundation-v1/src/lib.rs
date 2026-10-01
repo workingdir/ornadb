@@ -1479,11 +1479,14 @@ impl Diagnostic {
     ///
     /// Decoding and recursive redaction complete before the receiver changes,
     /// so invalid input leaves the current diagnostic untouched. On success,
-    /// cause slots retain their encoded array order, including repeated stable
-    /// references; wire decoding does not restore local message admission.
+    /// each cause slot is rebound from the same encoded array position,
+    /// including repeated stable references; references do not coalesce or
+    /// reorder slots. Wire decoding does not restore local message admission.
     pub fn reload_ovb(&mut self, bytes: &[u8]) -> Result<(), FoundationError> {
         let replacement = Self::decode_ovb(bytes)?;
-        *self = replacement;
+        // Replace through Clone::clone_from so reused nested vectors are
+        // rebound slot by slot without changing their serialized order.
+        self.clone_from(&replacement);
         Ok(())
     }
     fn validate_redaction_consistency(&self) -> Result<(), FoundationError> {
