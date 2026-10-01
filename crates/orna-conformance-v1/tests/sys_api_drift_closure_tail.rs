@@ -493,6 +493,108 @@ fn edge_interplay_fixture_null_filters_exact_count_after_projection_handoff() {
 }
 
 #[test]
+fn edge_interplay_fixture_null_filters_projected_exact_region_count_before_handoff() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Filter the nullable count directly after projection, then hand the null result onward.
+    // Exactness on the original table does not refine the projected Int? value.
+    assert!(
+        analysis.is_ok(),
+        "projected exact counts must remain nullable through a direct filter and handoff: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn edge_interplay_fixture_filters_projected_exact_count_after_function_handoff() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Project exact-table counts in one function and apply the null predicate after that
+    // Relation<Int?> crosses the function boundary. The schema does not equate exactness with
+    // count presence.
+    assert!(
+        analysis.is_ok(),
+        "filtering a function's projected exact counts must retain nullable row_count: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn edge_interplay_fixture_filters_present_projected_exact_counts() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Check the present-value branch after exact-table counts cross the projection helper.
+    // Keep the declared result nullable because the SYS schema does not couple exactness and
+    // count presence.
+    assert!(
+        analysis.is_ok(),
+        "filtering present projected exact counts must accept the nullable result type: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn edge_interplay_fixture_hands_off_filtered_present_projected_exact_count() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // After filtering present projected counts, capture each nullable-typed value in a nested
+    // callback. Exactness itself still does not refine row_count's declared optional type.
+    assert!(
+        analysis.is_ok(),
+        "a present projected exact count must survive the callback handoff: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn edge_interplay_fixture_returns_filtered_present_count_from_inner_handoff() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The present-count filter runs before the callback; return the callback's handed-off
+    // value itself and keep the API's nullable result type through the nested relation.
+    assert!(
+        analysis.is_ok(),
+        "the filtered present projected count must survive its inner handoff: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_projects_unknown_exact_target_count_through_columns() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
