@@ -90,6 +90,8 @@ const SOURCE_REMAINDER_BYTES_THEN_ROWS_AFTER_UNKNOWN_TAIL: &str =
     include_str!("fixtures/source_remainder_bytes_then_rows_after_unknown_tail.orna");
 const SOURCE_REMAINDER_BYTES_THEN_RESET_TAIL: &str =
     include_str!("fixtures/source_remainder_bytes_then_reset_tail.orna");
+const BYTE_REMAINDER_RESET_EDGE_TAIL: &str =
+    include_str!("fixtures/byte_remainder_reset_edge_tail.orna");
 
 fn obj(name: &str) -> ObjectRef {
     ObjectRef::descriptive(name)
@@ -8545,6 +8547,134 @@ fn explain_preserves_byte_remainder_across_mutation_cardinality_reset() {
     }));
 
     let surface = serde_json::to_value(&overflow).expect("byte remainder reset overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_byte_remainders_across_reset_rounding_edges() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_REMAINDER_RESET_EDGE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 4);
+
+    // ORNA-PLAN exposes byte estimates but leaves their cost units and
+    // rounding unspecified. Continue the pragmatic 4-KiB block model for
+    // scans and writes. The source contributes MAX-4; an unknown join keeps
+    // the displayed total unknown; then a partial scan, update, and
+    // materialization close the known lower bound. Scan byte 4097 adds the
+    // second block and closes when reset-write bytes are zero. Conversely,
+    // reset-write byte 4096 closes with an empty scan tail, but byte 4097
+    // rounds up in both the update and materialize steps and overflows.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let source_rows = u64::MAX - MAX_BYTE_BLOCKS - 4;
+    let explain = |scan_bytes, reset_write_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:byte-remainder-reset-rounding-edges"),
+            source: obj("table:ByteResetEdgeSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteResetEdgeUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteResetEdgeScanTail"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(scan_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:ByteResetEdgeTarget"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(1),
+                estimated_write_bytes: Some(reset_write_bytes),
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: Some(obj("materialization:byte-reset-edge")),
+        })
+        .expect("byte rounding edges across update cardinality reset")
+    };
+
+    let below = explain(4_096, 0);
+    assert_eq!(below.plan().estimated_cost(), None);
+    assert_eq!(below.root().details().get("estimated_cost_overflow"), None);
+
+    for (scan_bytes, reset_write_bytes) in [(4_097, 0), (0, 4_096)] {
+        let exact = explain(scan_bytes, reset_write_bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(
+            exact.root().details().get("estimated_cost_overflow"),
+            None,
+            "either the scan remainder or reset write remainder closes at MAX"
+        );
+    }
+
+    for (scan_bytes, reset_write_bytes) in [(0, 4_097), (1, 4_096)] {
+        let overflow = explain(scan_bytes, reset_write_bytes);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "the rounded scan and reset-write contributions exceed MAX"
+        );
+    }
+
+    let overflow = explain(0, 4_097);
+    let nodes = overflow.nodes();
+    let node_position = |kind, name: &str| {
+        nodes
+            .iter()
+            .position(|node| node.kind() == kind && node.object() == Some(&obj(name)))
+            .expect("fixture-backed plan node appears")
+    };
+    let source_position = node_position(PlanNodeKind::Scan, "table:ByteResetEdgeSource");
+    let unknown_position = node_position(PlanNodeKind::Scan, "table:ByteResetEdgeUnknown");
+    let scan_tail_position =
+        node_position(PlanNodeKind::Scan, "table:ByteResetEdgeScanTail");
+    let update_position = node_position(PlanNodeKind::Invoke, "table:ByteResetEdgeTarget");
+    assert!(source_position < unknown_position);
+    assert!(unknown_position < scan_tail_position);
+    assert!(update_position < source_position);
+    assert_eq!(nodes[source_position].estimated_work(), Some(u64::MAX - 4));
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+    assert_eq!(nodes[scan_tail_position].estimated_bytes(), Some(0));
+    assert_eq!(nodes[scan_tail_position].estimated_work(), None);
+    assert_eq!(nodes[update_position].estimated_rows(), Some(1));
+    assert_eq!(nodes[update_position].estimated_bytes(), Some(4_097));
+    assert_eq!(nodes[update_position].estimated_work(), Some(3));
+    assert_eq!(overflow.root().estimated_rows(), Some(1));
+    assert_eq!(overflow.root().estimated_bytes(), Some(4_097));
+    assert_eq!(overflow.root().estimated_work(), Some(3));
+    assert_eq!(
+        nodes[scan_tail_position].parent(),
+        nodes[update_position].inputs().first(),
+        "the update consumes the join containing the scan-byte remainder"
+    );
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow).expect("byte reset edge overflow surface");
     assert!(surface["plan"].get("estimated_cost").is_none());
     assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
     assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {

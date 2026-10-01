@@ -1,0 +1,4 @@
+pub table ByteResetEdgeSource(id: Int) { value: Int, }
+pub table ByteResetEdgeUnknown(id: Int) { value: Int, }
+pub table ByteResetEdgeScanTail(id: Int) { value: Int, }
+pub table ByteResetEdgeTarget(id: Int) { value: Int, }
