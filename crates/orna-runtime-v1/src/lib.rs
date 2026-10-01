@@ -22426,6 +22426,170 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_split_distribution_eight_rejects_2_6() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 3 { "later" } else { "current" };
+                let target = if row_id == 10 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(120), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this 8-reject split. 2 rejects
+        // before and 6 after the sole match leave take(2) short, so
+        // preserve the following missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-one-match-split-eight-rejects-2-6-then-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (10, 10),
+            "take(2) remains short across the 2/6 reject split and reaches missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_split_distribution_eight_rejects_4_4() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 10 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(121), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this 8-reject split. 4 rejects
+        // before and 4 after the sole match leave take(2) short, so
+        // preserve the following missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-one-match-split-eight-rejects-4-4-then-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (10, 10),
+            "take(2) remains short across the 4/4 reject split and reaches missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_split_distribution_nine_rejects_2_7() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 3 { "later" } else { "current" };
+                let target = if row_id == 11 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(122), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this 9-reject split. 2 rejects
+        // before and 7 after the sole match leave take(2) short, so
+        // preserve the following missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-one-match-split-nine-rejects-2-7-then-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (11, 11),
+            "take(2) remains short across the 2/7 reject split and reaches missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_split_distribution_nine_rejects_7_2() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 11 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(123), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this 9-reject split. 7 rejects
+        // before and 2 after the sole match leave take(2) short, so
+        // preserve the following missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-one-match-split-nine-rejects-7-2-then-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (11, 11),
+            "take(2) remains short across the 7/2 reject split and reaches missing lookup"
+        );
+    }
+
+    #[tokio::test]
     async fn query_take_two_preserves_lookup_failure_across_assigned_union_tail() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
