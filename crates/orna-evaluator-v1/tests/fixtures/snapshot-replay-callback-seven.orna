@@ -1,0 +1,1 @@
+std.collection.map([7], value => std.math.increment(value))
