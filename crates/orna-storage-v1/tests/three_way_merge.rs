@@ -13243,6 +13243,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
     let reset_extension_tail_86 = [reset_extension_tail_85.as_slice(), b"/leaf".as_slice()].concat();
     let reset_extension_tail_87 = [reset_extension_tail_86.as_slice(), b"/tail".as_slice()].concat();
     let reset_extension_tail_88 = [reset_extension_tail_87.as_slice(), b"/child".as_slice()].concat();
+    let reset_extension_tail_89 = [reset_extension_tail_88.as_slice(), b"/leaf".as_slice()].concat();
     let opposite_full_base_delete_before_reset_id =
         b"consumer/zzzy-opposite-full-base-delete-before-reset".to_vec();
     let same_side_full_base_delete_before_reset_id =
@@ -14251,6 +14252,13 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
         } else {
             left.checkpoints.insert(reset_extension_tail_88.clone(), full_checkpoint.clone());
         }
+        base.checkpoints.insert(reset_extension_tail_89.clone(), full_checkpoint.clone());
+        // Continue the child with a same-side leaf tombstone at the deeper position.
+        if tail_reset_left {
+            right.checkpoints.insert(reset_extension_tail_89.clone(), full_checkpoint.clone());
+        } else {
+            left.checkpoints.insert(reset_extension_tail_89.clone(), full_checkpoint.clone());
+        }
         base.checkpoints.insert(
             opposite_full_base_delete_before_reset_id.clone(),
             full_checkpoint.clone(),
@@ -14517,6 +14525,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
                     assert!(!report.affected_checkpoints.contains(reset_extension_tail_86.as_slice()));
                     assert!(!report.affected_checkpoints.contains(reset_extension_tail_87.as_slice()));
                     assert!(!report.affected_checkpoints.contains(reset_extension_tail_88.as_slice()));
+                    assert!(!report.affected_checkpoints.contains(reset_extension_tail_89.as_slice()));
                     assert!(!report.affected_checkpoints.contains(opposite_full_base_delete_before_reset_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_before_reset_id.as_slice()));
                     assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_before_first_checkpoint_conflict_id.as_slice()));
@@ -14656,6 +14665,7 @@ fn row_delete_edit_delete_reset_then_reset_tail_closes_at_shared_budgets() {
                 assert!(!report.affected_checkpoints.contains(reset_extension_tail_86.as_slice()));
                 assert!(!report.affected_checkpoints.contains(reset_extension_tail_87.as_slice()));
                 assert!(!report.affected_checkpoints.contains(reset_extension_tail_88.as_slice()));
+                assert!(!report.affected_checkpoints.contains(reset_extension_tail_89.as_slice()));
                 assert!(!report.affected_checkpoints.contains(opposite_full_base_delete_before_reset_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_before_reset_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(same_side_full_base_delete_before_first_checkpoint_conflict_id.as_slice()));
