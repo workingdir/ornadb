@@ -18855,3 +18855,134 @@ fn zero_cause_five_level_aliases_isolate_two_independent_growth_tails() {
         reverse_projection["causes"]
     );
 }
+
+#[test]
+fn zero_cause_five_level_alias_growth_isolated_to_one_leaf_path() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let diagnostic = |message: &str| {
+        Diagnostic::new(
+            SafeText::new("ORNA-E-ZERO-ALIAS-ISOLATION").unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(message).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let empty_leaf = diagnostic("empty leaf isolation secret");
+    let grown_leaf = empty_leaf
+        .clone()
+        .with_cause(diagnostic("single isolated tail secret"));
+
+    let shared_level_two = diagnostic("shared level two isolation secret")
+        .with_cause(empty_leaf.clone())
+        .with_cause(empty_leaf.clone());
+    let grown_level_two = diagnostic("grown level two isolation secret")
+        .with_cause(grown_leaf)
+        .with_cause(empty_leaf);
+    let shared_level_three = diagnostic("shared level three isolation secret")
+        .with_cause(shared_level_two.clone())
+        .with_cause(shared_level_two.clone());
+    let grown_level_three = diagnostic("grown level three isolation secret")
+        .with_cause(shared_level_two)
+        .with_cause(grown_level_two);
+    let shared_level_four = diagnostic("shared level four isolation secret")
+        .with_cause(shared_level_three.clone())
+        .with_cause(shared_level_three.clone());
+    let grown_level_four = diagnostic("grown level four isolation secret")
+        .with_cause(shared_level_three)
+        .with_cause(grown_level_three);
+    let shared_level_five = diagnostic("shared level five isolation secret")
+        .with_cause(shared_level_four.clone())
+        .with_cause(shared_level_four.clone());
+    let grown_level_five = diagnostic("grown level five isolation secret")
+        .with_cause(shared_level_four)
+        .with_cause(grown_level_four);
+    let wire = diagnostic("root isolation secret")
+        .with_cause(shared_level_five)
+        .with_cause(grown_level_five)
+        .redacted()
+        .encode_ovb()
+        .unwrap();
+
+    fn collect_leaf_tail_counts(
+        alias: &serde_json::Value,
+        remaining_levels: usize,
+        counts: &mut Vec<usize>,
+    ) {
+        assert_eq!(alias["code"], "ORNA-E-ZERO-ALIAS-ISOLATION");
+        let causes = alias["causes"].as_array().unwrap();
+        if remaining_levels == 0 {
+            assert!(causes.iter().all(|tail| {
+                tail["code"] == "ORNA-E-ZERO-ALIAS-ISOLATION"
+                    && tail["causes"].as_array().unwrap().is_empty()
+            }));
+            counts.push(causes.len());
+        } else {
+            assert_eq!(causes.len(), 2);
+            for cause in causes {
+                collect_leaf_tail_counts(cause, remaining_levels - 1, counts);
+            }
+        }
+    }
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        assert!(diagnostic["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|note| note == "<redacted>"));
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+
+    let decoded = Diagnostic::decode_ovb(&wire).unwrap();
+    let projection = serde_json::to_value(&decoded).unwrap();
+    assert_redacted_tree(&projection);
+    let aliases = projection["causes"].as_array().unwrap();
+    assert_eq!(aliases.len(), 2);
+    let mut empty_shape = Vec::new();
+    collect_leaf_tail_counts(&aliases[0], 4, &mut empty_shape);
+    assert_eq!(empty_shape, vec![0; 16]);
+
+    let mut isolated_shape = Vec::new();
+    collect_leaf_tail_counts(&aliases[1], 4, &mut isolated_shape);
+    // The reference leaves equal-code cause order open; assert isolation without relying on it.
+    isolated_shape.sort_unstable();
+    let mut expected_isolated_shape = vec![0; 15];
+    expected_isolated_shape.push(1);
+    assert_eq!(isolated_shape, expected_isolated_shape);
+
+    let json = serde_json::to_vec(&decoded).unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"root isolation secret".as_slice(),
+            b"shared level two isolation secret".as_slice(),
+            b"grown level two isolation secret".as_slice(),
+            b"shared level three isolation secret".as_slice(),
+            b"grown level three isolation secret".as_slice(),
+            b"shared level four isolation secret".as_slice(),
+            b"grown level four isolation secret".as_slice(),
+            b"shared level five isolation secret".as_slice(),
+            b"grown level five isolation secret".as_slice(),
+            b"empty leaf isolation secret".as_slice(),
+            b"single isolated tail secret".as_slice(),
+        ])
+    {
+        for bytes in [&json, &wire] {
+            assert!(!bytes
+                .windows(disclosure.len())
+                .any(|window| window == disclosure));
+        }
+    }
+}
