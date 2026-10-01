@@ -1,0 +1,6 @@
+pub table KnownByteRoundingThreeResetSource(id: Int) { value: Int, }
+pub table KnownByteRoundingThreeResetUnknown(id: Int) { value: Int, }
+pub table KnownByteRoundingThreeResetScan(id: Int) { value: Int, }
+pub table KnownByteRoundingThreeResetFirst(id: Int) { value: Int, }
+pub table KnownByteRoundingThreeResetMiddle(id: Int) { value: Int, }
+pub table KnownByteRoundingThreeResetLast(id: Int) { value: Int, }
