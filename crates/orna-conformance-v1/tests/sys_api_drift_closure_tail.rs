@@ -413,6 +413,26 @@ fn edge_interplay_fixture_composes_unknown_target_count_with_inexactness() {
 }
 
 #[test]
+fn edge_interplay_fixture_projects_unknown_inexact_count_through_target_columns() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Keep the optional parent count nullable when the unknown/inexact target is expanded
+    // through its Columns relation and captured by the nested projection.
+    assert!(
+        analysis.is_ok(),
+        "unknown/inexact target count must survive the Column chain: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_chains_unknown_inexact_target_filters() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
