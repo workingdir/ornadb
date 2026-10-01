@@ -14419,12 +14419,6 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
             "the same-target fingerprint mismatch replays independently",
             14,
         ),
-        (
-            repeated_same_target_query.clone(),
-            repeated_same_target_mismatch.clone(),
-            "the repeated same-target fingerprint mismatch replays independently",
-            15,
-        ),
     ] {
         assert_eq!(
             block_on(host.dispatch_frame(
@@ -14439,10 +14433,39 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
             expected
         );
     }
+    // The reference is silent on replay between exact retries of different
+    // same-target mismatches; keep both stored diagnostics stable around it.
+    let terminal_replay_between_same_target_retries = block_on(host.dispatch_frame(
+        [6; 16],
+        15,
+        Frame::Binary(terminal_eval.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the terminal Eval replays between same-target mismatch retries");
+    assert_eq!(
+        terminal_replay_between_same_target_retries,
+        terminal_eval_replay
+    );
+    assert_eq!(application.calls, 1);
     assert_eq!(
         block_on(host.dispatch_frame(
             [6; 16],
             16,
+            Frame::Binary(repeated_same_target_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the repeated same-target fingerprint mismatch replays after terminal Eval"),
+        repeated_same_target_mismatch
+    );
+
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            17,
             Frame::Binary(accepted_status_query.clone()),
             &mut application,
         ))
@@ -14462,7 +14485,7 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     assert_eq!(
         block_on(host.dispatch_frame(
             [6; 16],
-            17,
+            18,
             Frame::Binary(eval_reusing_status_identity),
             &mut application,
         )),
@@ -14473,25 +14496,25 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
             retargeted_status_query,
             retarget_mismatch,
             "cross-kind ID reuse preserves the first mismatch replay",
-            18,
+            19,
         ),
         (
             alternate_retarget_query,
             alternate_retarget_mismatch,
             "cross-kind ID reuse preserves the alternate mismatch replay",
-            19,
+            20,
         ),
         (
             same_target_wrong_fingerprint_query,
             same_target_fingerprint_mismatch,
             "cross-kind ID reuse preserves the same-target fingerprint mismatch",
-            20,
+            21,
         ),
         (
             repeated_same_target_query,
             repeated_same_target_mismatch,
             "cross-kind ID reuse preserves the repeated same-target mismatch",
-            21,
+            22,
         ),
     ] {
         assert_eq!(
@@ -14510,7 +14533,7 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     assert_eq!(
         block_on(host.dispatch_frame(
             [6; 16],
-            22,
+            23,
             Frame::Binary(accepted_status_query.clone()),
             &mut application,
         ))
@@ -14521,7 +14544,7 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     );
     let final_terminal_replay = block_on(host.dispatch_frame(
         [6; 16],
-        23,
+        24,
         Frame::Binary(terminal_eval),
         &mut application,
     ))
@@ -14545,7 +14568,7 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     let fresh_status_fingerprint = request_fingerprint(&fresh_status_query, [1; 16]);
     let fresh_status = block_on(host.dispatch_frame(
         [6; 16],
-        24,
+        25,
         Frame::Binary(fresh_status_query),
         &mut application,
     ))
