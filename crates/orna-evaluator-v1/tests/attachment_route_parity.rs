@@ -48,11 +48,20 @@ fn commit_source(directory: &Path, source: &str) -> String {
     git(directory, &["rev-parse", "HEAD"])
 }
 
+fn commit_module_source(directory: &Path, logical_path: &str, source: &str) -> String {
+    fs::write(directory.join(logical_path), source).unwrap();
+    git(directory, &["add", logical_path]);
+    git(
+        directory,
+        &["commit", "--quiet", "-m", "advance nested module snapshot"],
+    );
+    git(directory, &["rev-parse", "HEAD"])
+}
+
 #[test]
 fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
-    let (_primary_dir, primary_repository, primary_commit) = repository(include_str!(
-        "fixtures/attachment-route-primary.orna"
-    ));
+    let (_primary_dir, primary_repository, primary_commit) =
+        repository(include_str!("fixtures/attachment-route-primary.orna"));
     let (package_dir, package_repository, main_alias_commit) = repository(include_str!(
         "fixtures/attachment-route-package.orna"
     ));
@@ -384,6 +393,206 @@ fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
         replacement_session.submit("main_archive.package_value()"),
         Ok(Some(Value::int(43.into())))
     );
+}
+
+#[test]
+fn overlapping_attachment_aliases_decode_nested_module_paths_exactly() {
+    let (primary_dir, primary_repository, _) = repository(include_str!(
+        "fixtures/attachment-alias-precedence-primary.orna"
+    ));
+    let primary_commit = commit_module_source(
+        primary_dir.path(),
+        "archive.orna",
+        include_str!("fixtures/attachment-alias-precedence-primary-archive.orna"),
+    );
+    let (package_dir, package_repository, _) = repository(include_str!(
+        "fixtures/attachment-route-package-with-archive.orna"
+    ));
+    let main_alias_commit = commit_module_source(
+        package_dir.path(),
+        "archive.orna",
+        include_str!("fixtures/attachment-route-package-archive.orna"),
+    );
+    let _longer_root_commit = commit_source(
+        package_dir.path(),
+        &include_str!("fixtures/attachment-route-package-with-archive.orna")
+            .replace("42", "43"),
+    );
+    let longer_alias_commit = commit_module_source(
+        package_dir.path(),
+        "archive.orna",
+        &include_str!("fixtures/attachment-route-package-archive.orna").replace("41", "44"),
+    );
+
+    let loader = ProjectLoader::default();
+    let primary =
+        PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader).unwrap();
+    let main_alias = PinnedDatabase::resolve(
+        "main",
+        package_repository.clone(),
+        &main_alias_commit,
+        loader,
+    )
+    .unwrap();
+    let longer_alias = PinnedDatabase::resolve(
+        "main_archive",
+        package_repository,
+        &longer_alias_commit,
+        loader,
+    )
+    .unwrap();
+    let mut databases = AttachedDatabaseSession::new(primary).unwrap();
+    databases.attach_database(main_alias).unwrap();
+    databases.attach_database(longer_alias).unwrap();
+
+    let modules = databases.module_inputs();
+    for (path, value) in [
+        ("archive.orna", "= 7"),
+        ("main/main.orna", "use main.archive as child_archive;"),
+        ("main/archive.orna", "41"),
+        (
+            "main_archive.orna",
+            "use main_archive.archive as child_archive;",
+        ),
+        ("main_archive/archive.orna", "44"),
+    ] {
+        assert!(
+            modules
+                .iter()
+                .any(|module| module.logical_path == path && module.source.contains(value)),
+            "missing {path} with {value}; routes: {:?}",
+            modules
+                .iter()
+                .map(|module| (&module.logical_path, &module.source))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    let mut session =
+        AdmittedReplSession::from_attached_database_session(&databases, Limits::default()).unwrap();
+    assert!(session.submit("use main_arch.archive;").is_err());
+    assert_eq!(session.submit("use main;"), Ok(None));
+    assert_eq!(
+        session.submit("main.package_value()"),
+        Ok(Some(Value::int(42.into())))
+    );
+    assert_eq!(session.submit("use main.archive as short_child;"), Ok(None));
+    assert_eq!(
+        session.submit("short_child.nested_value()"),
+        Ok(Some(Value::int(41.into())))
+    );
+    assert_eq!(session.submit("use main_archive;"), Ok(None));
+    assert_eq!(
+        session.submit("main_archive.package_value()"),
+        Ok(Some(Value::int(43.into())))
+    );
+    assert_eq!(
+        session.submit("use main_archive.archive as long_child;"),
+        Ok(None)
+    );
+    assert_eq!(
+        session.submit("long_child.nested_value()"),
+        Ok(Some(Value::int(44.into())))
+    );
+    assert_eq!(
+        session
+            .attached_databases()
+            .unwrap()
+            .database("main")
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        main_alias_commit
+    );
+    assert_eq!(
+        session
+            .attached_databases()
+            .unwrap()
+            .database("main_archive")
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        longer_alias_commit
+    );
+}
+
+#[test]
+fn attached_alias_imports_obey_local_explicit_and_wildcard_precedence() {
+    let (_primary_dir, primary_repository, primary_commit) =
+        repository(include_str!("fixtures/attachment-route-primary.orna"));
+    let (package_dir, package_repository, _) = repository(include_str!(
+        "fixtures/attachment-alias-precedence-package.orna"
+    ));
+    let short_alias_commit = git(package_dir.path(), &["rev-parse", "HEAD"]);
+    let long_alias_commit = commit_source(
+        package_dir.path(),
+        &include_str!("fixtures/attachment-alias-precedence-package.orna").replace("41", "42"),
+    );
+
+    let loader = ProjectLoader::default();
+    let primary =
+        PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader).unwrap();
+    let short_alias = PinnedDatabase::resolve(
+        "main",
+        package_repository.clone(),
+        &short_alias_commit,
+        loader,
+    )
+    .unwrap();
+    let long_alias = PinnedDatabase::resolve(
+        "main_archive",
+        package_repository,
+        &long_alias_commit,
+        loader,
+    )
+    .unwrap();
+    let mut databases = AttachedDatabaseSession::new(primary).unwrap();
+    databases.attach_database(short_alias).unwrap();
+    databases.attach_database(long_alias).unwrap();
+
+    let mut explicit = AdmittedReplSession::from_attached_database_session(
+        &databases,
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(explicit.submit("use main.*;"), Ok(None));
+    assert_eq!(explicit.submit("use main_archive.{choice};"), Ok(None));
+    assert_eq!(
+        explicit.submit("choice()"),
+        Ok(Some(Value::int(42.into())))
+    );
+
+    let mut local = AdmittedReplSession::from_attached_database_session(
+        &databases,
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(local.submit("let choice = 99;"), Ok(None));
+    assert_eq!(local.submit("use main.*;"), Ok(None));
+    assert_eq!(local.submit("use main_archive.*;"), Ok(None));
+    assert_eq!(local.submit("choice"), Ok(Some(Value::int(99.into()))));
+
+    let mut forward = AdmittedReplSession::from_attached_database_session(
+        &databases,
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(forward.submit("use main.*;"), Ok(None));
+    assert_eq!(forward.submit("use main_archive.*;"), Ok(None));
+    let forward_error = forward.submit("choice()").unwrap_err();
+
+    let mut reverse = AdmittedReplSession::from_attached_database_session(
+        &databases,
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(reverse.submit("use main_archive.*;"), Ok(None));
+    assert_eq!(reverse.submit("use main.*;"), Ok(None));
+    let reverse_error = reverse.submit("choice()").unwrap_err();
+    assert_eq!(forward_error.code(), reverse_error.code());
+    assert_eq!(forward_error.code(), "ORNA-S011-AMBIGUOUS");
 }
 
 #[test]
