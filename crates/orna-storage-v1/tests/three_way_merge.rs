@@ -5159,6 +5159,24 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
             id.extend_from_slice(b"-eighty-fifth-checkpoint-conflict");
             id
         };
+        let fifty_sixth_trailing_agreed_delete_id = {
+            let mut id = b"consumer/".to_vec();
+            id.extend_from_slice(&[b'z'; 1816]);
+            id.extend_from_slice(b"-fifty-sixth-trailing-agreed-delete");
+            id
+        };
+        let fifty_sixth_trailing_unchanged_delete_id = {
+            let mut id = b"consumer/".to_vec();
+            id.extend_from_slice(&[b'z'; 1824]);
+            id.extend_from_slice(b"-fifty-sixth-trailing-unchanged-delete");
+            id
+        };
+        let eighty_sixth_conflict_id = {
+            let mut id = b"consumer/".to_vec();
+            id.extend_from_slice(&[b'z'; 1840]);
+            id.extend_from_slice(b"-eighty-sixth-checkpoint-conflict");
+            id
+        };
         base.checkpoints.insert(final_tail_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_BASE));
         left.checkpoints.insert(final_tail_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_LEFT));
         right.checkpoints.insert(final_tail_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_RIGHT));
@@ -6290,6 +6308,25 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         base.checkpoints.insert(eighty_fifth_conflict_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_BASE));
         left.checkpoints.insert(eighty_fifth_conflict_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_LEFT));
         right.checkpoints.insert(eighty_fifth_conflict_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_RIGHT));
+        base.checkpoints.insert(
+            fifty_sixth_trailing_agreed_delete_id.clone(),
+            parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS),
+        );
+        let fifty_sixth_trailing_unchanged_checkpoint = parse_checkpoint_fixture(CHECKPOINT_TAIL_BASE);
+        base.checkpoints.insert(
+            fifty_sixth_trailing_unchanged_delete_id.clone(),
+            fifty_sixth_trailing_unchanged_checkpoint.clone(),
+        );
+        {
+            let fifty_sixth_trailing_retained_side = if checkpoint_delete_on_left { &mut right } else { &mut left };
+            fifty_sixth_trailing_retained_side.checkpoints.insert(
+                fifty_sixth_trailing_unchanged_delete_id.clone(),
+                fifty_sixth_trailing_unchanged_checkpoint,
+            );
+        }
+        base.checkpoints.insert(eighty_sixth_conflict_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_BASE));
+        left.checkpoints.insert(eighty_sixth_conflict_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_LEFT));
+        right.checkpoints.insert(eighty_sixth_conflict_id.clone(), parse_checkpoint_fixture(CHECKPOINT_TAIL_RIGHT));
         let error = merge_three_way_snapshots(
             &base,
             &left,
@@ -9432,7 +9469,7 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
             ]
         );
 
-        // The fifty-fifth clean pair leaves conflict 85 beyond an 84-detail cap,
+        // The fifty-sixth clean pair leaves conflict 86 beyond an 85-detail cap,
         // without charging another row-budget unit.
         source.visited.clear();
         let error = merge_three_way_snapshots(
@@ -9440,18 +9477,18 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
             &left,
             &right,
             &mut source,
-            BranchMergeBudget { max_rows_examined: 2, max_conflicts: 84 },
+            BranchMergeBudget { max_rows_examined: 2, max_conflicts: 85 },
         )
         .unwrap_err();
         let BranchMergeError::BudgetExceeded { report } = error else {
-            panic!("the eighty-fifth checkpoint conflict crosses the eighty-four-detail budget")
+            panic!("the eighty-sixth checkpoint conflict crosses the eighty-five-detail budget")
         };
         assert_eq!(report.rows_examined, 2);
-        assert_eq!(report.conflicts_lower_bound, 85);
+        assert_eq!(report.conflicts_lower_bound, 86);
         assert_eq!(report.affected_ranges.len(), 2);
         assert!(report.affected_ranges.contains(&(id(1), tombstone_range.clone())));
         assert!(report.affected_ranges.contains(&(id(1), suffix_range.clone())));
-        assert_eq!(report.affected_checkpoints.len(), 85);
+        assert_eq!(report.affected_checkpoints.len(), 86);
         assert!(report.affected_checkpoints.contains(seventy_ninth_conflict_id.as_slice()));
         assert!(report.affected_checkpoints.contains(eightieth_conflict_id.as_slice()));
         assert!(report.affected_checkpoints.contains(eighty_first_conflict_id.as_slice()));
@@ -9459,6 +9496,7 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         assert!(report.affected_checkpoints.contains(eighty_third_conflict_id.as_slice()));
         assert!(report.affected_checkpoints.contains(eighty_fourth_conflict_id.as_slice()));
         assert!(report.affected_checkpoints.contains(eighty_fifth_conflict_id.as_slice()));
+        assert!(report.affected_checkpoints.contains(eighty_sixth_conflict_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(fiftieth_trailing_agreed_delete_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(fiftieth_trailing_unchanged_delete_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(fifty_first_trailing_agreed_delete_id.as_slice()));
@@ -9471,6 +9509,8 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         assert!(!report.affected_checkpoints.contains(fifty_fourth_trailing_unchanged_delete_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(fifty_fifth_trailing_agreed_delete_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(fifty_fifth_trailing_unchanged_delete_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(fifty_sixth_trailing_agreed_delete_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(fifty_sixth_trailing_unchanged_delete_id.as_slice()));
         assert_eq!(source.visited.len(), 6);
         assert!(source.visited[..3].iter().all(|(_, locator)| locator.ends_with(b"upper")));
         assert_eq!(
@@ -9482,7 +9522,7 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
             ]
         );
 
-        // Exact capacity closes through conflict 85 after all fifty-five clean
+        // Exact capacity closes through conflict 86 after all fifty-six clean
         // tombstone pairs, without charging another row-budget unit.
         source.visited.clear();
         let error = merge_three_way_snapshots(
@@ -9490,11 +9530,11 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
             &left,
             &right,
             &mut source,
-            BranchMergeBudget { max_rows_examined: 2, max_conflicts: 85 },
+            BranchMergeBudget { max_rows_examined: 2, max_conflicts: 86 },
         )
         .unwrap_err();
         let BranchMergeError::Conflicts { conflicts, report } = error else {
-            panic!("exact conflict capacity closes through the eighty-fifth checkpoint")
+            panic!("exact conflict capacity closes through the eighty-sixth checkpoint")
         };
         let updated = parse_checkpoint_fixture(CHECKPOINT_EDITED);
         let expected_tail_conflict = orna_evolution_v1::CheckpointMergeConflict {
@@ -10045,14 +10085,22 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
                         right: Some(parse_checkpoint_fixture(CHECKPOINT_TAIL_RIGHT)),
                     },
                 },
+                BranchMergeConflict::CheckpointConflict {
+                    id: eighty_sixth_conflict_id.clone(),
+                    conflict: orna_evolution_v1::CheckpointMergeConflict {
+                        base: Some(parse_checkpoint_fixture(CHECKPOINT_TAIL_BASE)),
+                        left: Some(parse_checkpoint_fixture(CHECKPOINT_TAIL_LEFT)),
+                        right: Some(parse_checkpoint_fixture(CHECKPOINT_TAIL_RIGHT)),
+                    },
+                },
             ]
         );
         assert_eq!(report.rows_examined, 2);
-        assert_eq!(report.conflicts_lower_bound, 85);
+        assert_eq!(report.conflicts_lower_bound, 86);
         assert_eq!(report.affected_ranges.len(), 2);
         assert!(report.affected_ranges.contains(&(id(1), tombstone_range)));
         assert!(report.affected_ranges.contains(&(id(1), suffix_range)));
-        assert_eq!(report.affected_checkpoints.len(), 85);
+        assert_eq!(report.affected_checkpoints.len(), 86);
         assert!(report.affected_checkpoints.contains(checkpoint_id.as_slice()));
         assert!(report.affected_checkpoints.contains(tail_id.as_slice()));
         assert!(report.affected_checkpoints.contains(final_tail_id.as_slice()));
@@ -10138,6 +10186,7 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         assert!(report.affected_checkpoints.contains(eighty_third_conflict_id.as_slice()));
         assert!(report.affected_checkpoints.contains(eighty_fourth_conflict_id.as_slice()));
         assert!(report.affected_checkpoints.contains(eighty_fifth_conflict_id.as_slice()));
+        assert!(report.affected_checkpoints.contains(eighty_sixth_conflict_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(agreed_delete_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(unchanged_delete_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(trailing_agreed_delete_id.as_slice()));
@@ -10250,6 +10299,8 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
         assert!(!report.affected_checkpoints.contains(fifty_fourth_trailing_unchanged_delete_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(fifty_fifth_trailing_agreed_delete_id.as_slice()));
         assert!(!report.affected_checkpoints.contains(fifty_fifth_trailing_unchanged_delete_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(fifty_sixth_trailing_agreed_delete_id.as_slice()));
+        assert!(!report.affected_checkpoints.contains(fifty_sixth_trailing_unchanged_delete_id.as_slice()));
         assert_eq!(source.visited.len(), 6);
         assert!(source.visited[..3].iter().all(|(_, locator)| locator.ends_with(b"upper")));
         assert_eq!(
