@@ -1475,6 +1475,17 @@ impl Diagnostic {
         // disclosure grant. Generic decoding therefore redacts every payload.
         Ok(diagnostic.redacted())
     }
+    /// Reloads this diagnostic from one OVB value.
+    ///
+    /// Decoding and recursive redaction complete before the receiver changes,
+    /// so invalid input leaves the current diagnostic untouched. On success,
+    /// cause slots retain their encoded array order, including repeated stable
+    /// references; wire decoding does not restore local message admission.
+    pub fn reload_ovb(&mut self, bytes: &[u8]) -> Result<(), FoundationError> {
+        let replacement = Self::decode_ovb(bytes)?;
+        *self = replacement;
+        Ok(())
+    }
     fn validate_redaction_consistency(&self) -> Result<(), FoundationError> {
         // The explicit span marker is itself a redaction claim. Do not let a
         // producer retain that marker while asserting that the enclosing

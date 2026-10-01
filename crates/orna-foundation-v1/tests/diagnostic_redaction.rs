@@ -21690,3 +21690,129 @@ fn decoded_alias_replacement_keeps_sibling_snapshot_order() {
         }
     }
 }
+
+#[test]
+fn decoded_diagnostic_reload_preserves_alias_order_and_is_atomic() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let diagnostic = |code: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let alias = |code: &str, reference: [u8; 16], order: [&str; 2]| {
+        diagnostic(code)
+            .with_reference(reference)
+            .with_cause(diagnostic(order[0]))
+            .with_cause(diagnostic(order[1]))
+    };
+    let incoming = diagnostic("ORNA-E-RELOAD-ROOT")
+        .with_cause(alias(
+            "ORNA-E-RELOAD-B",
+            [0x22; 16],
+            ["ORNA-E-RELOAD-B1", "ORNA-E-RELOAD-B2"],
+        ))
+        .with_cause(diagnostic("ORNA-E-RELOAD-EMPTY"))
+        .with_cause(alias(
+            "ORNA-E-RELOAD-A",
+            [0x11; 16],
+            ["ORNA-E-RELOAD-A1", "ORNA-E-RELOAD-A2"],
+        ))
+        .with_cause(alias(
+            "ORNA-E-RELOAD-B",
+            [0x22; 16],
+            ["ORNA-E-RELOAD-B1", "ORNA-E-RELOAD-B2"],
+        ));
+    let wire = incoming.encode_ovb().unwrap();
+
+    let mut current = diagnostic("ORNA-E-RELOAD-STALE")
+        .with_reference([0x7f; 16])
+        .redacted_with_message(SafeText::new(fixture).unwrap());
+    current.reload_ovb(&wire).unwrap();
+
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        assert!(diagnostic["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|note| note == "<redacted>"));
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    fn assert_alias(
+        alias: &serde_json::Value,
+        code: &str,
+        reference: &str,
+        order: [&str; 2],
+    ) {
+        assert_eq!(alias["code"].as_str(), Some(code));
+        assert_eq!(alias["reference"].as_str(), Some(reference));
+        assert_eq!(
+            alias["causes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|cause| cause["code"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            order
+        );
+    }
+
+    let projection = serde_json::to_value(&current).unwrap();
+    assert_redacted_tree(&projection);
+    assert_eq!(projection["code"], "ORNA-E-RELOAD-ROOT");
+    let aliases = projection["causes"].as_array().unwrap();
+    assert_eq!(aliases.len(), 4);
+    assert_alias(
+        &aliases[0],
+        "ORNA-E-RELOAD-B",
+        "22222222-2222-2222-2222-222222222222",
+        ["ORNA-E-RELOAD-B1", "ORNA-E-RELOAD-B2"],
+    );
+    assert_eq!(aliases[1]["code"], "ORNA-E-RELOAD-EMPTY");
+    assert!(aliases[1]["causes"].as_array().unwrap().is_empty());
+    assert_alias(
+        &aliases[2],
+        "ORNA-E-RELOAD-A",
+        "11111111-1111-1111-1111-111111111111",
+        ["ORNA-E-RELOAD-A1", "ORNA-E-RELOAD-A2"],
+    );
+    assert_alias(
+        &aliases[3],
+        "ORNA-E-RELOAD-B",
+        "22222222-2222-2222-2222-222222222222",
+        ["ORNA-E-RELOAD-B1", "ORNA-E-RELOAD-B2"],
+    );
+    assert_eq!(aliases[0], aliases[3]);
+
+    let replayed = Diagnostic::decode_ovb(&current.encode_ovb().unwrap()).unwrap();
+    assert_eq!(serde_json::to_value(replayed).unwrap(), projection);
+    let before_invalid_reload = current.clone();
+    assert!(current.reload_ovb(&[0xff]).is_err());
+    assert_eq!(current, before_invalid_reload);
+
+    let json = serde_json::to_vec(&projection).unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([fixture.as_bytes()])
+    {
+        for bytes in [&json, &wire] {
+            assert!(!bytes
+                .windows(disclosure.len())
+                .any(|window| window == disclosure));
+        }
+    }
+}
