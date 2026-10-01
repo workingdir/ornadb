@@ -3935,6 +3935,212 @@ fn durable_status_retry_replays_unknown_after_target_completes_and_host_recovers
 }
 
 #[test]
+fn durable_status_snapshots_keep_reserved_and_running_after_completion_and_recovery() {
+    const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
+
+    let (root, repository) = durable_repository();
+    let runtime = open_durable_state(&repository);
+    let updater = open_durable_state(&repository);
+    let session = [1; 16];
+    let owner = block_on(runtime.acquire_lease([75; 16])).unwrap();
+    let reserved_request = eval_with_context(session, [81; 16], [2; 16], None);
+    let running_request = eval_with_context(session, [82; 16], [3; 16], None);
+    for request in [&reserved_request, &running_request] {
+        assert!(matches!(
+            Envelope::decode(request, Limits::default().protocol)
+                .unwrap()
+                .message,
+            Message::Eval { source, .. } if source == FIXTURE
+        ));
+    }
+    let reserved_fingerprint = request_fingerprint(&reserved_request, session);
+    let running_fingerprint = request_fingerprint(&running_request, session);
+    let reserved_identity = RequestIdentity {
+        session_id: session,
+        request_id: [81; 16],
+    };
+    let running_identity = RequestIdentity {
+        session_id: session,
+        request_id: [82; 16],
+    };
+    block_on(
+        runtime.reserve_request(reserved_identity, reserved_fingerprint),
+    )
+    .unwrap();
+    let (_, running_admission) =
+        block_on(runtime.reserve_request_with_admission(running_identity, running_fingerprint))
+            .unwrap();
+    block_on(runtime.start_request_with_owner_and_admission(
+        running_identity,
+        running_fingerprint,
+        owner,
+        running_admission.expect("the running Eval retains its owner admission"),
+    ))
+    .unwrap();
+
+    let mut host = durable_host_with_owner(runtime, owner.owner_id);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: session,
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let status_query = |request, target, fingerprint| {
+        Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::RequestStatus { target, fingerprint },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap()
+    };
+    let reserved_query = status_query([83; 16], [81; 16], reserved_fingerprint);
+    let running_query = status_query([84; 16], [82; 16], running_fingerprint);
+    let mut application = UnitApplication::default();
+    let reserved_snapshot = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(reserved_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the query retains the Reserved snapshot");
+    let running_snapshot = block_on(host.dispatch_frame(
+        [5; 16],
+        3,
+        Frame::Binary(running_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the query retains the Running snapshot");
+    assert!(matches!(
+        &reserved_snapshot.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Reserved,
+            fingerprint: Some(fingerprint),
+            result: None,
+        } if *target == [81; 16] && *fingerprint == reserved_fingerprint
+    ));
+    assert!(matches!(
+        &running_snapshot.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Running,
+            fingerprint: Some(fingerprint),
+            result: None,
+        } if *target == [82; 16] && *fingerprint == running_fingerprint
+    ));
+
+    let reserved_result = unit_result([81; 16], reserved_fingerprint);
+    let running_result = semantic_failure_result([82; 16], running_fingerprint);
+    block_on(updater.complete_request_with_owner(
+        reserved_identity,
+        reserved_fingerprint,
+        owner,
+        TerminalOutcome::new(reserved_result.encode(Limits::default().protocol).unwrap()).unwrap(),
+    ))
+    .unwrap();
+    block_on(updater.complete_request_with_owner(
+        running_identity,
+        running_fingerprint,
+        owner,
+        TerminalOutcome::new(running_result.encode(Limits::default().protocol).unwrap()).unwrap(),
+    ))
+    .unwrap();
+
+    for (query, expected) in [
+        (&reserved_query, &reserved_snapshot),
+        (&running_query, &running_snapshot),
+    ] {
+        let retry = block_on(host.dispatch_frame(
+            [5; 16],
+            4,
+            Frame::Binary(query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the exact query replays its pre-completion snapshot");
+        assert_eq!(&retry, expected);
+    }
+    for (request, target, fingerprint, result) in [
+        ([85; 16], [81; 16], reserved_fingerprint, reserved_result),
+        ([86; 16], [82; 16], running_fingerprint, running_result),
+    ] {
+        let fresh = block_on(host.dispatch_frame(
+            [5; 16],
+            5,
+            Frame::Binary(status_query(request, target, fingerprint)),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("a fresh query sees the completed target");
+        let expected_body = ResultBody::from_result(&result, Limits::default().protocol).unwrap();
+        assert!(matches!(
+            &fresh.message,
+            Message::RequestStatusResult {
+                target: returned_target,
+                state: orna_protocol_v1::RequestState::Terminal,
+                fingerprint: Some(returned_fingerprint),
+                result: Some(body),
+            } if *returned_target == target
+                && *returned_fingerprint == fingerprint
+                && body == &expected_body
+        ));
+    }
+    assert_eq!(application.calls, 0);
+    drop(host);
+    drop(updater);
+
+    let recovery_runtime = open_durable_state(&repository);
+    let fence = block_on(recovery_runtime.recover_abandoned(owner.owner_id, [76; 16])).unwrap();
+    drop(recovery_runtime);
+    let mut recovered = durable_host_after_takeover(
+        open_durable_state(&repository),
+        [76; 16],
+        RequestOwner::from(owner),
+    );
+    let mut recovered_issuer = Issuer(2, None);
+    let recovered_credential = create(&mut recovered, &mut recovered_issuer);
+    block_on(recovered.resume(ResumeRequest {
+        id: session,
+        origin: &origin(),
+        credential: &recovered_credential,
+        attachment: [6; 16],
+        now: 6,
+    }))
+    .unwrap();
+    for (query, expected) in [
+        (&reserved_query, &reserved_snapshot),
+        (&running_query, &running_snapshot),
+    ] {
+        let retry = block_on(recovered.dispatch_frame(
+            [6; 16],
+            7,
+            Frame::Binary(query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the exact snapshot survives host recovery");
+        assert_eq!(&retry, expected);
+    }
+    assert_eq!(fence.owner_id, [76; 16]);
+    assert_eq!(application.calls, 0);
+    drop(recovered);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn durable_request_status_identity_is_scoped_when_sessions_reuse_target_ids() {
     let (root, repository) = durable_repository();
     let mut host = durable_host(open_durable_state(&repository));
