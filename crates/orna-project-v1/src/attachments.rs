@@ -409,9 +409,10 @@ impl AttachedDatabaseSession {
 
     /// Source modules for typed session admission. An attachment alias is the
     /// exact first namespace component for its modules; prefix-related aliases
-    /// therefore stay independent. Package-local imports are rebased under
-    /// that exact component so an attached module keeps resolving its own
-    /// children after namespacing. A root `main` attachment uses
+    /// therefore stay independent. Package-local import targets are rebased
+    /// under that component while retaining their authored import tails, so
+    /// ordinary binding-conflict and import-precedence rules still apply. A
+    /// root `main` attachment uses
     /// `main/main.orna` because the primary database already owns `main.orna`.
     /// The reference defines source namespace and import precedence, but does
     /// not prescribe attachment alias decoding; v1 keeps the full alias as one
