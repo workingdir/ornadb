@@ -19716,3 +19716,113 @@ fn shrinking_clone_from_keeps_ordered_zero_cause_five_level_tails() {
         }
     }
 }
+
+#[test]
+fn growing_clone_from_keeps_ordered_zero_cause_five_level_tails() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    fn alias(fixture: &str, code: &str) -> Diagnostic {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    }
+    fn empty_tree(fixture: &str, code: &str, levels: usize) -> Diagnostic {
+        if levels == 0 {
+            alias(fixture, code)
+        } else {
+            alias(fixture, code)
+                .with_cause(empty_tree(fixture, code, levels - 1))
+                .with_cause(empty_tree(fixture, code, levels - 1))
+        }
+    }
+    fn ordered_tree(
+        fixture: &str,
+        code: &str,
+        ordered_leaf: Diagnostic,
+        levels: usize,
+    ) -> Diagnostic {
+        if levels == 0 {
+            ordered_leaf
+        } else {
+            alias(fixture, code)
+                .with_cause(empty_tree(fixture, code, levels - 1))
+                .with_cause(ordered_tree(fixture, code, ordered_leaf, levels - 1))
+        }
+    }
+    fn collect_leaf_tail_codes(
+        alias: &serde_json::Value,
+        remaining_levels: usize,
+        codes: &mut Vec<String>,
+    ) {
+        let causes = alias["causes"].as_array().unwrap();
+        if remaining_levels == 0 {
+            for tail in causes {
+                assert!(tail["causes"].as_array().unwrap().is_empty());
+                codes.push(tail["code"].as_str().unwrap().to_owned());
+            }
+        } else {
+            assert_eq!(causes.len(), 2);
+            for cause in causes {
+                collect_leaf_tail_codes(cause, remaining_levels - 1, codes);
+            }
+        }
+    }
+
+    let code = "ORNA-E-ZERO-ALIAS-GROW";
+    let leaf_ab = alias(fixture, code)
+        .with_cause(alias(fixture, "ORNA-E-ZERO-ALIAS-GROW-A"))
+        .with_cause(alias(fixture, "ORNA-E-ZERO-ALIAS-GROW-B"));
+    let leaf_ba = alias(fixture, code)
+        .with_cause(alias(fixture, "ORNA-E-ZERO-ALIAS-GROW-B"))
+        .with_cause(alias(fixture, "ORNA-E-ZERO-ALIAS-GROW-A"));
+    let replacement = alias(fixture, code)
+        .with_cause(ordered_tree(fixture, code, leaf_ba, 4))
+        .with_cause(empty_tree(fixture, code, 4))
+        .with_cause(ordered_tree(fixture, code, leaf_ab, 4))
+        .redacted();
+    let mut receiver = alias(fixture, code).redacted();
+
+    // The format defines causes as ordered values but leaves clone_from growth open;
+    // use source replacement so the zero-cause receiver adopts the source sequence.
+    receiver.clone_from(&replacement);
+    let projection = serde_json::to_value(&receiver).unwrap();
+    assert_eq!(projection, serde_json::to_value(&replacement).unwrap());
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 3);
+
+    let mut first_tail = Vec::new();
+    collect_leaf_tail_codes(&causes[0], 4, &mut first_tail);
+    assert_eq!(first_tail, ["ORNA-E-ZERO-ALIAS-GROW-B", "ORNA-E-ZERO-ALIAS-GROW-A"]);
+    let mut empty_tail = Vec::new();
+    collect_leaf_tail_codes(&causes[1], 4, &mut empty_tail);
+    assert!(empty_tail.is_empty());
+    let mut last_tail = Vec::new();
+    collect_leaf_tail_codes(&causes[2], 4, &mut last_tail);
+    assert_eq!(last_tail, ["ORNA-E-ZERO-ALIAS-GROW-A", "ORNA-E-ZERO-ALIAS-GROW-B"]);
+
+    let wire = receiver.encode_ovb().unwrap();
+    let decoded = Diagnostic::decode_ovb(&wire).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), projection);
+    let json = serde_json::to_vec(&projection).unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([fixture.as_bytes()])
+    {
+        for bytes in [&json, &wire] {
+            assert!(!bytes
+                .windows(disclosure.len())
+                .any(|window| window == disclosure));
+        }
+    }
+}
