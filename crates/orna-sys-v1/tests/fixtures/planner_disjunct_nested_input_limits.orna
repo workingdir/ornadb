@@ -1,0 +1,5 @@
+pub table PlannerDisjunctNestedInputLimits(id: Int) { first: Bool, second: Bool, }
+pub fn after_nested_caps() = PlannerDisjunctNestedInputLimits
+    | take(8)
+    | take(4)
+    | filter(row => row.first || row.second);

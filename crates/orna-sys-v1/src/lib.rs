@@ -39,7 +39,8 @@ pub use introspection::{
     PlanOrdering, PlanSortDirection, QueryPlanDescription, SnapshotRef, SourceSpan, explain_function,
     explain_query, explain_query_with_conjunct_disjunct_limit_chain,
     explain_query_with_disjunct_conjunct_limit_chain,
-    explain_query_with_disjunct_limit_chain, explain_query_with_limit_chain,
+    explain_query_with_disjunct_limit_chain, explain_query_with_input_limit_disjunct_chain,
+    explain_query_with_limit_chain,
 };
 
 mod provider;
