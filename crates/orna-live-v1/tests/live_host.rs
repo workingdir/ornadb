@@ -16059,6 +16059,189 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
         .expect("the first identity remains pinned after fresh terminal snapshots"),
         first_unknown_status
     );
+
+    // The reference does not specify this mix of conflicts on fresh terminal
+    // snapshots and retries of older pinned snapshots; preserve every
+    // identity's own accepted response and mismatch diagnostic.
+    let changed_first_target_eval = eval_with_context([1; 16], [91; 16], [4; 16], None);
+    let fresh_first_mismatch_query = status_query(
+        [97; 16],
+        [91; 16],
+        request_fingerprint(&changed_first_target_eval, [1; 16]),
+    );
+    let fresh_first_mismatch = block_on(host.dispatch_frame(
+        [6; 16],
+        31,
+        Frame::Binary(fresh_first_mismatch_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the fresh first-target identity rejects a changed same-target fingerprint");
+    assert!(matches!(
+        &fresh_first_mismatch.message,
+        Message::Diagnostic { .. }
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            32,
+            Frame::Binary(second_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("a fresh identity mismatch does not change the older second snapshot"),
+        second_unknown_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            33,
+            Frame::Binary(current_first_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the accepted fresh first-target snapshot survives its mismatch"),
+        current_first_status
+    );
+
+    let fresh_second_retarget_query =
+        status_query([98; 16], [91; 16], terminal_fingerprint);
+    let fresh_second_retarget = block_on(host.dispatch_frame(
+        [6; 16],
+        34,
+        Frame::Binary(fresh_second_retarget_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the fresh second-target identity rejects retargeting to the first target");
+    assert!(matches!(
+        &fresh_second_retarget.message,
+        Message::Diagnostic { .. }
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            35,
+            Frame::Binary(first_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the older first snapshot remains Unknown across fresh-ID conflicts"),
+        first_unknown_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            36,
+            Frame::Binary(current_second_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the accepted fresh second-target snapshot survives retarget rejection"),
+        current_second_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            37,
+            Frame::Binary(fresh_first_mismatch_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the fresh first-target mismatch keeps its retry snapshot"),
+        fresh_first_mismatch
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            38,
+            Frame::Binary(terminal_eval.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the first Eval failure replays between fresh identity conflicts"),
+        terminal_eval_replay
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            39,
+            Frame::Binary(fresh_second_retarget_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the fresh second-target retarget diagnostic keeps its retry snapshot"),
+        fresh_second_retarget
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            40,
+            Frame::Binary(second_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the second original Unknown response stays isolated"),
+        second_unknown_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            41,
+            Frame::Binary(other_eval.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the other terminal Eval stays replayable through fresh retries"),
+        other_eval_replay
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            42,
+            Frame::Binary(first_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the first original Unknown response stays isolated"),
+        first_unknown_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            43,
+            Frame::Binary(current_first_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the first fresh terminal response remains independently replayable"),
+        current_first_status
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [6; 16],
+            44,
+            Frame::Binary(current_second_status_query.clone()),
+            &mut application,
+        ))
+        .unwrap()
+        .response
+        .expect("the second fresh terminal response remains independently replayable"),
+        current_second_status
+    );
     assert_eq!(application.calls, 2);
 
     for (request_id, fingerprint, expected) in [
