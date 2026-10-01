@@ -553,6 +553,26 @@ fn edge_interplay_fixture_null_filters_unknown_exact_count_after_nested_handoff(
 }
 
 #[test]
+fn edge_interplay_fixture_retains_unknown_exact_count_through_reference_key_columns() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // The schema links References to target Keys and Keys to Columns, but does not say an
+    // exact row count must be present. Preserve the nullable target count through both hops.
+    assert!(
+        analysis.is_ok(),
+        "Reference target-Key and Key-column traversal must retain the unknown exact count: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_composes_unknown_target_count_with_inexactness() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
