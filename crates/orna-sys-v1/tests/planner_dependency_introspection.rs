@@ -14013,3 +14013,89 @@ fn explain_preserves_late_join_scan_overflow_through_unknown_join_and_limit() {
         node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
     }));
 }
+
+#[test]
+fn explain_preserves_join_scan_overflow_through_unknown_suffix_and_limit() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN leaves local scan overflow across later unknown joins and a
+    // limit unspecified. Keep the joined scan's byte-rounding overflow local
+    // when its unknown suffix makes final cardinality and limit work unknown.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:join-scan-overflow-unknown-suffix-limit"),
+        source: obj("table:ByteWorkThreeScanSource"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(0),
+            estimated_bytes: Some(0),
+            mutable_branch: None,
+        }),
+        joins: vec![
+            QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanLast"),
+                statistics: Some(QuerySourceStatistics {
+                    estimated_rows: Some(u64::MAX),
+                    estimated_bytes: Some(2_048),
+                    mutable_branch: None,
+                }),
+                predicate: None,
+            },
+            QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanUnknownThird"),
+                statistics: None,
+                predicate: None,
+            },
+        ],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: Some(10),
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("joined scan overflow before unknown join and limit tail");
+
+    assert_eq!(explained.nodes().len(), 6);
+    assert_eq!(explained.root().kind(), PlanNodeKind::Limit);
+    assert_eq!(explained.root().estimated_rows(), None);
+    assert_eq!(explained.root().estimated_work(), None);
+    assert_eq!(explained.root().details().get("estimated_work_overflow"), None);
+    assert_eq!(explained.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(explained.plan().estimated_cost(), None);
+    let scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("joined scan before the unknown suffix");
+    assert_eq!(scan.estimated_rows(), Some(u64::MAX));
+    assert_eq!(scan.estimated_bytes(), Some(2_048));
+    assert_eq!(scan.estimated_work(), None);
+    assert_eq!(
+        scan.details().get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let empty_join = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join && node.estimated_rows() == Some(0))
+        .expect("empty source keeps the first join work at MAX");
+    assert_eq!(empty_join.estimated_work(), Some(u64::MAX));
+    assert_eq!(empty_join.details().get("estimated_work_overflow"), None);
+    assert!(explained.nodes().iter().any(|node| {
+        node.kind() == PlanNodeKind::Scan
+            && node.object() == Some(&obj("table:ByteWorkThreeScanUnknownThird"))
+    }));
+    let surface = serde_json::to_value(&explained).expect("joined overflow preserved through tail");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert!(surface["nodes"].as_array().unwrap().iter().any(|node| {
+        node["details"]["estimated_work_overflow"] == true
+    }));
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
