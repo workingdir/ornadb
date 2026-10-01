@@ -20126,3 +20126,97 @@ fn composed_decoded_empty_roots_keep_ordered_tail_sibling() {
         }
     }
 }
+
+#[test]
+fn composed_decoded_clone_keeps_appended_zero_cause_tail_local() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let diagnostic = |code: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let source = diagnostic("ORNA-E-DECODED-APPEND-ROOT")
+        .with_cause(diagnostic("ORNA-E-DECODED-APPEND-EMPTY"))
+        .with_cause(
+            diagnostic("ORNA-E-DECODED-APPEND-ORDERED")
+                .with_cause(diagnostic("ORNA-E-DECODED-APPEND-A"))
+                .with_cause(diagnostic("ORNA-E-DECODED-APPEND-B")),
+        )
+        .redacted();
+    let decoded = Diagnostic::decode_ovb(&source.encode_ovb().unwrap()).unwrap();
+    // Appending to one decoded clone must leave its sibling copy unchanged.
+    let composed = diagnostic("ORNA-E-DECODED-APPEND-COMPOSED")
+        .with_cause(
+            decoded
+                .clone()
+                .with_cause(diagnostic("ORNA-E-DECODED-APPEND-TAIL"))
+                .redacted(),
+        )
+        .with_cause(decoded)
+        .redacted();
+
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        assert!(diagnostic["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|note| note == "<redacted>"));
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    let projection = serde_json::to_value(&composed).unwrap();
+    assert_redacted_tree(&projection);
+    let siblings = projection["causes"].as_array().unwrap();
+    assert_eq!(siblings.len(), 2);
+    let extended = siblings[0]["causes"].as_array().unwrap();
+    let original = siblings[1]["causes"].as_array().unwrap();
+    assert_eq!(extended.len(), 3);
+    assert_eq!(original.len(), 2);
+    assert_eq!(extended[0]["code"], "ORNA-E-DECODED-APPEND-EMPTY");
+    assert!(extended[0]["causes"].as_array().unwrap().is_empty());
+    assert_eq!(extended[1]["code"], "ORNA-E-DECODED-APPEND-ORDERED");
+    assert_eq!(
+        extended[1]["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cause| cause["code"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["ORNA-E-DECODED-APPEND-A", "ORNA-E-DECODED-APPEND-B"]
+    );
+    assert_eq!(extended[2]["code"], "ORNA-E-DECODED-APPEND-TAIL");
+    assert!(extended[2]["causes"].as_array().unwrap().is_empty());
+    assert_eq!(original[0], extended[0]);
+    assert_eq!(original[1], extended[1]);
+
+    let wire = composed.encode_ovb().unwrap();
+    let replayed = Diagnostic::decode_ovb(&wire).unwrap();
+    let replayed_projection = serde_json::to_value(&replayed).unwrap();
+    assert_redacted_tree(&replayed_projection);
+    assert_eq!(replayed_projection, projection);
+    let json = serde_json::to_vec(&replayed_projection).unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([fixture.as_bytes()])
+    {
+        for bytes in [&json, &wire] {
+            assert!(!bytes
+                .windows(disclosure.len())
+                .any(|window| window == disclosure));
+        }
+    }
+}
