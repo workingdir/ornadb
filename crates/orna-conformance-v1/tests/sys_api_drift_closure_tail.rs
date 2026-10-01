@@ -534,6 +534,27 @@ fn edge_interplay_fixture_filters_projected_exact_count_after_function_handoff()
 }
 
 #[test]
+fn edge_interplay_fixture_filters_present_projected_exact_counts() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Check the present-value branch after exact-table counts cross the projection helper.
+    // Keep the declared result nullable because the SYS schema does not couple exactness and
+    // count presence.
+    assert!(
+        analysis.is_ok(),
+        "filtering present projected exact counts must accept the nullable result type: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_projects_unknown_exact_target_count_through_columns() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
