@@ -76,3 +76,7 @@ An in-crate fixture now pins the erased `sys.start(Value)` and generic `sys.star
 ## Follow-on proof note: generic invoke overload alias parity (issue #5679)
 
 A matching in-crate fixture pins the erased `sys.invoke(Value)` and generic `sys.invoke<T>` declarations together. Its parse and registry lookup checks preserve the overload order, `as` to `as_` alias only on the generic operation, and the two distinct registered result types, without changing the generated API artifacts.
+
+## Follow-on proof note: invoke keyword parameter and default parity (issue #5775)
+
+The invoke overload fixture proof now compares each parsed parameter name, type, and default with its typed registry entry. This pins the argument layout around the generic `as_` alias, including the `at`, transaction, and idempotency defaults for both overloads; generated artifacts remain unchanged.
