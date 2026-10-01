@@ -928,6 +928,9 @@ async fn case_closure_matrix_preserves_each_transition_pin() {
     let tail = include_str!("fixtures/case_closure_matrix_tail.orna")
         .as_bytes()
         .to_vec();
+    let reopened_tail = include_str!("fixtures/case_closure_matrix_reopened_tail.orna")
+        .as_bytes()
+        .to_vec();
 
     // A closure removes only the addressed key: the edge row remains readable
     // as a tail-only image, and restoring the same prefix creates a new pin.
@@ -1020,6 +1023,110 @@ async fn case_closure_matrix_preserves_each_transition_pin() {
     assert_eq!(historical_rows(&state, &restored).await, both_rows);
     assert_eq!(historical_rows(&state, &prefix_only).await, prefix_only_rows);
     assert!(historical_rows(&state, &empty).await.is_empty());
+
+    // A fresh edge tail can be opened after the empty case. Reopening runtime
+    // state must still resolve every prior and new closure image independently.
+    commit(
+        &state,
+        writer,
+        &[TableMutation::new(
+            [82; 16],
+            "records",
+            vec![5, 0],
+            Some(reopened_tail.clone()),
+        )
+        .expect("valid reopened tail fixture mutation")],
+        77,
+    )
+    .await;
+    let reopened_tail_only = state
+        .select_historical_snapshot(6)
+        .await
+        .expect("select reopened tail-only image");
+    commit(
+        &state,
+        writer,
+        &[TableMutation::new(
+            [83; 16],
+            "records",
+            vec![5],
+            Some(prefix.clone()),
+        )
+        .expect("valid reopened prefix fixture mutation")],
+        77,
+    )
+    .await;
+    let reopened_both = state
+        .select_historical_snapshot(7)
+        .await
+        .expect("select reopened both-row image");
+    commit(
+        &state,
+        writer,
+        &[TableMutation::new([84; 16], "records", vec![5], None)
+            .expect("valid reopened prefix closure mutation")],
+        77,
+    )
+    .await;
+    let reopened_tail_after_closure = state
+        .select_historical_snapshot(8)
+        .await
+        .expect("select reopened tail after prefix closure");
+
+    let reopened_tail_rows = vec![(vec![5, 0], reopened_tail)];
+    let reopened_both_rows = vec![
+        (vec![5], prefix),
+        (vec![5, 0], reopened_tail_rows[0].1.clone()),
+    ];
+    assert_eq!(historical_rows(&state, &reopened_tail_only).await, reopened_tail_rows);
+    assert_eq!(historical_rows(&state, &reopened_both).await, reopened_both_rows);
+    assert_eq!(
+        historical_rows(&state, &reopened_tail_after_closure).await,
+        reopened_tail_rows
+    );
+
+    let pins = vec![
+        (1_u64, both.capture().snapshot().clone(), both_rows.clone()),
+        (2, tail_only.capture().snapshot().clone(), tail_only_rows),
+        (3, restored.capture().snapshot().clone(), both_rows),
+        (4, prefix_only.capture().snapshot().clone(), prefix_only_rows),
+        (5, empty.capture().snapshot().clone(), Vec::new()),
+        (
+            6,
+            reopened_tail_only.capture().snapshot().clone(),
+            reopened_tail_rows.clone(),
+        ),
+        (
+            7,
+            reopened_both.capture().snapshot().clone(),
+            reopened_both_rows,
+        ),
+        (
+            8,
+            reopened_tail_after_closure.capture().snapshot().clone(),
+            reopened_tail_rows,
+        ),
+    ];
+    drop(state);
+    let reopened = RuntimeState::open(&repository, identity, [73; 32])
+        .await
+        .expect("reopen case-closure runtime");
+    for (generation, descriptor, expected_rows) in pins {
+        let resolved = reopened
+            .resolve_historical_snapshot(&descriptor)
+            .await
+            .expect("resolve every case-closure pin after reopen");
+        assert_eq!(
+            resolved.capture().generation(),
+            &BigInt::from(generation),
+            "resolved pin keeps its exact closure generation"
+        );
+        assert_eq!(
+            historical_rows(&reopened, &resolved).await,
+            expected_rows,
+            "resolved pin keeps its case-closure row image"
+        );
+    }
 }
 
 #[tokio::test]
