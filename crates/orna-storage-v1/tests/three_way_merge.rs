@@ -15238,3 +15238,55 @@ fn nested_checkpoint_reset_conflicts_preserve_fixture_states_and_identity() {
         }
     }
 }
+
+#[test]
+fn unilateral_row_and_checkpoint_tombstones_resolve_in_both_orientations() {
+    let deleted_row = parse_fixture(BASE, RowKeyKind::Explicit);
+    let deleted_checkpoint_id = b"consumer/deleted-beside-row".to_vec();
+    let retained_checkpoint_id = b"consumer/retained-beside-row".to_vec();
+    let deleted_checkpoint = parse_checkpoint_fixture(CHECKPOINT_BASE);
+    let retained_checkpoint = parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS);
+
+    // A row deletion and an unrelated checkpoint deletion are independent
+    // changes. Cross their branch placement so the proof covers both deletes
+    // published together and deletes published on opposite sides.
+    for row_delete_on_left in [true, false] {
+        for checkpoint_delete_on_left in [true, false] {
+            let mut source = FixtureRows::default();
+            source.add(MergeSide::Base, b"base", vec![deleted_row.clone()]);
+            source.add(MergeSide::Left, b"left", if row_delete_on_left { Vec::new() } else { vec![deleted_row.clone()] });
+            source.add(MergeSide::Right, b"right", if row_delete_on_left { vec![deleted_row.clone()] } else { Vec::new() });
+
+            let mut base = snapshot(schema(true, FieldType::Str), manifest(1, 10, b"base"), None);
+            let mut left = snapshot(schema(true, FieldType::Str), manifest(2, 11, b"left"), None);
+            let mut right = snapshot(schema(true, FieldType::Str), manifest(3, 12, b"right"), None);
+            base.checkpoints.insert(deleted_checkpoint_id.clone(), deleted_checkpoint.clone());
+            let checkpoint_retained_side = if checkpoint_delete_on_left { &mut right } else { &mut left };
+            checkpoint_retained_side.checkpoints.insert(deleted_checkpoint_id.clone(), deleted_checkpoint.clone());
+            for snapshot in [&mut base, &mut left, &mut right] {
+                snapshot.checkpoints.insert(retained_checkpoint_id.clone(), retained_checkpoint.clone());
+            }
+
+            let plan = merge_three_way_snapshots(
+                &base,
+                &left,
+                &right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 100, max_conflicts: 0 },
+            ).unwrap();
+
+            assert_eq!(plan.report.conflicts_lower_bound, 0);
+            assert_eq!(plan.report.rows_examined, 2);
+            assert!(plan.report.affected_checkpoints.is_empty());
+            assert_eq!(source.visited.len(), 3);
+            assert!(!plan.checkpoints.contains_key(deleted_checkpoint_id.as_slice()));
+            assert_eq!(plan.checkpoints.get(retained_checkpoint_id.as_slice()), Some(&retained_checkpoint));
+
+            let MergedSegment::Rows { rows, tombstones, .. } = &plan.tables[&id(1)].segments[0] else {
+                panic!("the row deletion materializes beside the checkpoint deletion")
+            };
+            assert!(rows.is_empty());
+            assert_eq!(tombstones, &[deleted_row.key.clone()]);
+        }
+    }
+}
