@@ -151,3 +151,49 @@ fn nested_case_recovery_reports_each_unclosed_boundary_at_eof() {
     // The reference specifies case-arm syntax, not recovery diagnostics for
     // multiple open cases at EOF. Keep one diagnostic per open boundary.
 }
+
+#[test]
+fn nested_guard_recovery_does_not_cascade_to_the_enclosing_case_arm() {
+    let source = include_str!("fixtures/nested-case-recovery-in-guard.orna");
+    let parsed = parse_module(source);
+
+    assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+    let diagnostic = &parsed.diagnostics[0];
+    let start = source.find("true 0").expect("malformed nested guard arm") + "true ".len();
+    assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+    assert_eq!(diagnostic.message, "expected `:` after case pattern");
+    assert_eq!(diagnostic.span.start, start, "{diagnostic:?}");
+    assert_eq!(diagnostic.span.end, start + 1, "{diagnostic:?}");
+    assert!(parsed.is_malformed());
+    assert!(!parsed.is_incomplete());
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected the recovered guard function");
+    };
+    let Expr::Block {
+        tail: Some(root_tail),
+        ..
+    } = body
+    else {
+        panic!("root case was lost: {body:?}");
+    };
+    let Expr::Control {
+        arms: root_arms, ..
+    } = root_tail.as_ref()
+    else {
+        panic!("root tail is not a case: {root_tail:?}");
+    };
+    assert_eq!(root_arms.len(), 2, "{root_arms:?}");
+    let Some(Expr::Control {
+        arms: guard_arms, ..
+    }) = root_arms[0].guard.as_ref()
+    else {
+        panic!("nested case guard was lost: {:?}", root_arms[0].guard);
+    };
+    assert_eq!(guard_arms.len(), 1, "{guard_arms:?}");
+    assert!(matches!(&root_arms[0].body, Expr::Literal { text, .. } if text == "1"));
+    assert!(matches!(&root_arms[1].body, Expr::Literal { text, .. } if text == "2"));
+
+    // The reference specifies guard syntax, but not recovery inside a nested
+    // guard expression. Keep that local error from fabricating an outer one.
+}
