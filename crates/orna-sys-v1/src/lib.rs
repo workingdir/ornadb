@@ -19,25 +19,23 @@ use std::{
     time::{Duration, Instant},
 };
 
+use orna_security_v1::{SecretMetadata, SecretRef};
 use serde::{
     Serialize, Serializer,
     ser::{SerializeSeq, SerializeStruct},
 };
 use sha2::{Digest, Sha256};
-use orna_security_v1::{SecretMetadata, SecretRef};
 
 mod introspection;
 pub use introspection::{
-    Dependency, DependencyConfidence, DependencyGraph, DependencyGraphError, DependencyInput,
-    DependencyKind,
-    DefinitionRef, ExplainedPlan, ExplainError, ExpressionRef, FileRef, FunctionPlanDescription,
-    FunctionRef, MutableBranchSnapshot, QueryJoinDescription, QueryMutationDescription,
-    QueryMutationKind, QuerySourceStatistics,
-    MAX_DEPENDENCY_EDGES, MAX_DEPENDENCY_OBJECTS, MAX_PLAN_EXPRESSIONS,
-    MAX_PLAN_NODES, MAX_REFERENCE_BYTES, Plan, PlanDetail, PlanNode, PlanNodeKind, PlanNodeRef,
-    PlanNullOrder,
-    PlanOrdering, PlanSortDirection, QueryPlanDescription, SnapshotRef, SourceSpan, explain_function,
-    explain_query, explain_query_with_limit_chain,
+    DefinitionRef, Dependency, DependencyConfidence, DependencyGraph, DependencyGraphError,
+    DependencyInput, DependencyKind, ExplainError, ExplainedPlan, ExpressionRef, FileRef,
+    FunctionPlanDescription, FunctionRef, MAX_DEPENDENCY_EDGES, MAX_DEPENDENCY_OBJECTS,
+    MAX_PLAN_EXPRESSIONS, MAX_PLAN_NODES, MAX_REFERENCE_BYTES, MutableBranchSnapshot, Plan,
+    PlanDetail, PlanNode, PlanNodeKind, PlanNodeRef, PlanNullOrder, PlanOrdering,
+    PlanSortDirection, QueryJoinDescription, QueryMutationDescription, QueryMutationKind,
+    QueryPlanDescription, QuerySourceStatistics, SnapshotRef, SourceSpan, explain_function,
+    explain_query, explain_query_with_disjunct_limit_chain, explain_query_with_limit_chain,
 };
 
 mod provider;
@@ -164,8 +162,12 @@ impl ValueMetadataFacts {
         protocols: impl IntoIterator<Item = TypeId>,
         codecs: impl IntoIterator<Item = String>,
     ) -> Result<Self, ValueMetadataError> {
-        let protocols = protocols.into_iter().collect::<std::collections::BTreeSet<_>>();
-        let codecs = codecs.into_iter().collect::<std::collections::BTreeSet<_>>();
+        let protocols = protocols
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let codecs = codecs
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
         if nominal_type
             .iter()
             .chain(protocols.iter())
@@ -641,7 +643,6 @@ impl PlanRef {
         &self.0
     }
 }
-
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum InvocationMode {
@@ -1694,13 +1695,7 @@ struct SynchronousReservation {
 impl SynchronousReservation {
     fn begin(mut self) -> Result<SynchronousExecution, AdmissionError> {
         #[cfg(test)]
-        if let Some(hook) = self
-            .executions
-            .enter_hook
-            .lock()
-            .unwrap()
-            .clone()
-        {
+        if let Some(hook) = self.executions.enter_hook.lock().unwrap().clone() {
             let (state, wake) = &*hook;
             let mut state = state.lock().unwrap();
             state.0 = true;
@@ -1745,7 +1740,6 @@ impl Drop for SynchronousReservation {
         }
     }
 }
-
 
 struct SynchronousExecution {
     executions: Arc<SynchronousExecutions>,
@@ -2108,9 +2102,7 @@ impl RuntimeSupervisor {
                     None => None,
                     Some(result) => {
                         let worker = match self.workers.lock() {
-                            Ok(mut workers) => {
-                                workers.remove(handle.invocation().id())
-                            }
+                            Ok(mut workers) => workers.remove(handle.invocation().id()),
                             Err(poisoned) => {
                                 self.workers.clear_poison();
                                 let mut workers = poisoned.into_inner();
@@ -2635,7 +2627,6 @@ pub fn explain_diagnostic(
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2970,13 +2961,12 @@ mod tests {
         let mut rotated_secret = first;
         rotated_secret.arguments = args(vec![Argument {
             name: "a".into(),
-            value: TypedValue::protected_with_secret_ref(
-                ty("Int"),
-                "rotated-secret",
-                &reference,
-            ),
+            value: TypedValue::protected_with_secret_ref(ty("Int"), "rotated-secret", &reference),
         }]);
-        assert!(matches!(runtime.admit(rotated_secret), Ok(Admission::Active { .. })));
+        assert!(matches!(
+            runtime.admit(rotated_secret),
+            Ok(Admission::Active { .. })
+        ));
     }
 
     #[test]
@@ -3014,7 +3004,9 @@ mod tests {
                     name: "b".into(),
                     value: TypedValue::protected(
                         ty("Str"),
-                        include_str!("../tests/fixtures/secret-surface.orna").trim().as_bytes(),
+                        include_str!("../tests/fixtures/secret-surface.orna")
+                            .trim()
+                            .as_bytes(),
                     ),
                 },
                 Argument {
@@ -3935,10 +3927,7 @@ mod tests {
             InvocationStatus::Queued
         );
         let reason = diagnostic("queued-cancelled");
-        assert_eq!(
-            supervisor.cancel(&handle, Some(reason.clone())),
-            Ok(true)
-        );
+        assert_eq!(supervisor.cancel(&handle, Some(reason.clone())), Ok(true));
         supervisor.release_held_worker_start();
 
         let result = supervisor
@@ -4238,7 +4227,6 @@ mod tests {
         assert_eq!(result.status, InvocationStatus::Succeeded);
         assert!(supervisor.workers.lock().unwrap().is_empty());
     }
-
 
     #[test]
     fn public_handle_and_await_result_have_the_portable_terminal_shape() {
@@ -5033,9 +5021,9 @@ mod tests {
         };
         assert!(value.is_redacted());
         assert_eq!(value.canonical(), None);
-        assert!(!format!("{state:?}").contains(include_str!(
-            "../tests/fixtures/secret-surface.orna"
-        )));
+        assert!(
+            !format!("{state:?}").contains(include_str!("../tests/fixtures/secret-surface.orna"))
+        );
     }
     #[test]
     fn serialized_diagnostics_redact_secrets() {
