@@ -1,0 +1,5 @@
+pub fn different_pin_contexts_do_not_compose() {
+    let before = sys.database.as_of(sys.snapshot("HEAD~10"));
+    let current = sys.database.as_of(sys.snapshot("HEAD"));
+    [before.energy.daily, current.energy.daily]
+}
