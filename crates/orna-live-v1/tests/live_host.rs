@@ -4694,6 +4694,141 @@ fn durable_status_snapshots_keep_reserved_and_running_after_completion_and_recov
 }
 
 #[test]
+fn durable_running_status_snapshot_survives_session_handoff() {
+    const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
+
+    let (root, repository) = durable_repository();
+    let runtime = open_durable_state(&repository);
+    let session = [1; 16];
+    let owner = block_on(runtime.acquire_lease([75; 16])).unwrap();
+    let target_request = eval_with_context(session, [81; 16], [2; 16], None);
+    assert!(matches!(
+        Envelope::decode(&target_request, Limits::default().protocol)
+            .unwrap()
+            .message,
+        Message::Eval { source, .. } if source == FIXTURE
+    ));
+    let target_fingerprint = request_fingerprint(&target_request, session);
+    let target = RequestIdentity {
+        session_id: session,
+        request_id: [81; 16],
+    };
+    let (_, admission) =
+        block_on(runtime.reserve_request_with_admission(target, target_fingerprint)).unwrap();
+    block_on(runtime.start_request_with_owner_and_admission(
+        target,
+        target_fingerprint,
+        owner,
+        admission.expect("running target has owner admission"),
+    ))
+    .unwrap();
+    // Model a side effect that may have escaped before the old owner died.
+    block_on(runtime.record_external_effect(target, target_fingerprint, owner)).unwrap();
+
+    let mut host = durable_host_with_owner(runtime, owner.owner_id);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: session,
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let status_request = |request| {
+        Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::RequestStatus {
+                target: [81; 16],
+                fingerprint: target_fingerprint,
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap()
+    };
+    let pinned_query = status_request([82; 16]);
+    let mut application = UnitApplication::default();
+    let pinned_snapshot = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(pinned_query.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the status query pins the Running snapshot");
+    assert!(matches!(
+        &pinned_snapshot.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Running,
+            fingerprint: Some(fingerprint),
+            result: None,
+        } if *target == [81; 16] && *fingerprint == target_fingerprint
+    ));
+    drop(host);
+
+    let recovery_runtime = open_durable_state(&repository);
+    let fence = block_on(recovery_runtime.recover_abandoned(owner.owner_id, [76; 16])).unwrap();
+    assert_eq!(fence.owner_id, [76; 16]);
+    drop(recovery_runtime);
+    let mut handed_off = durable_host_after_takeover(
+        open_durable_state(&repository),
+        [76; 16],
+        RequestOwner::from(owner),
+    );
+    let mut handed_off_issuer = Issuer(2, None);
+    let handed_off_credential = create(&mut handed_off, &mut handed_off_issuer);
+    block_on(handed_off.resume(ResumeRequest {
+        id: session,
+        origin: &origin(),
+        credential: &handed_off_credential,
+        attachment: [6; 16],
+        now: 3,
+    }))
+    .unwrap();
+
+    // The reference requires session resumption to retain request outcomes but
+    // does not define whether a pinned status read is re-evaluated at lease
+    // handoff. Exact retries remain fixed observations; new IDs read Orphaned.
+    let replay = block_on(handed_off.dispatch_frame(
+        [6; 16],
+        4,
+        Frame::Binary(pinned_query),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the exact query replays its pre-handoff snapshot");
+    assert_eq!(replay, pinned_snapshot);
+
+    let fresh = block_on(handed_off.dispatch_frame(
+        [6; 16],
+        5,
+        Frame::Binary(status_request([83; 16])),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("a fresh query sees the post-handoff target state");
+    assert!(matches!(
+        &fresh.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Orphaned,
+            fingerprint: Some(fingerprint),
+            result: Some(_),
+        } if *target == [81; 16] && *fingerprint == target_fingerprint
+    ), "fresh status after handoff: {fresh:?}");
+    assert_eq!(application.calls, 0);
+    drop(handed_off);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn durable_request_status_identity_is_scoped_when_sessions_reuse_target_ids() {
     let (root, repository) = durable_repository();
     let mut host = durable_host(open_durable_state(&repository));
