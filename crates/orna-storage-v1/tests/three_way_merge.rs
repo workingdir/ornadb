@@ -15460,6 +15460,77 @@ fn fixture_depth_split_tombstones_follow_table_wide_primary_key_order() {
     assert_eq!(source.visited.len(), 9);
 }
 
+fn cross_depth_load_inputs() -> (
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    FixtureRows,
+) {
+    let shallow = parse_fixture(TOMBSTONE_DEPTH_SHALLOW, RowKeyKind::Explicit);
+    let middle = parse_fixture(TOMBSTONE_DEPTH_MIDDLE, RowKeyKind::Explicit);
+    let deep = parse_fixture(TOMBSTONE_DEPTH_DEEP, RowKeyKind::Explicit);
+    let mut source = FixtureRows::default();
+    // Physical visitation is deepest-first. The completed logical result
+    // must not inherit the row source's load order.
+    source.add(
+        MergeSide::Base,
+        b"load-base",
+        vec![deep.clone(), middle.clone(), shallow],
+    );
+    source.add(MergeSide::Left, b"load-left", vec![middle]);
+    source.add(MergeSide::Right, b"load-right", vec![deep]);
+    let base = snapshot(string_key_schema(), manifest(1, 1, b"load-base"), None);
+    let left = snapshot(string_key_schema(), manifest(2, 2, b"load-left"), None);
+    let right = snapshot(string_key_schema(), manifest(3, 3, b"load-right"), None);
+    (base, left, right, source)
+}
+
+#[test]
+fn fixture_cross_depth_tombstones_keep_order_at_exact_load_budget() {
+    // ORNA-MERGE-005 requires bounded work and an isolated complete result,
+    // but is silent on path-depth ordering. A complete load therefore emits
+    // tombstones in canonical key order.
+    let (base, left, right, mut source) = cross_depth_load_inputs();
+    let plan = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 5, max_conflicts: 0 },
+    )
+    .expect("the exact load budget produces a complete cross-depth merge");
+    assert_eq!(plan.report.rows_examined, 5);
+    let MergedSegment::Rows { rows, tombstones, .. } = &plan.tables[&id(1)].segments[0] else {
+        panic!("cross-depth changes materialize as one bounded segment")
+    };
+    assert!(rows.is_empty());
+    assert_eq!(
+        tombstones,
+        &[string("root"), string("root/child"), string("root/child/deep")],
+        "load visitation order does not change canonical cross-depth tombstone order",
+    );
+}
+
+#[test]
+fn fixture_cross_depth_load_budget_stops_without_partial_plan() {
+    let (base, left, right, mut source) = cross_depth_load_inputs();
+    let error = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 4, max_conflicts: 0 },
+    )
+    .unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("an incomplete cross-depth load cannot return a partial tombstone plan")
+    };
+    assert_eq!(report.rows_examined, 5, "the report records the first row beyond the cap");
+    assert_eq!(report.conflicts_lower_bound, 0);
+    assert_eq!(report.affected_ranges, [(id(1), KeyRange::all())].into_iter().collect());
+    assert_eq!(source.visited.len(), 3, "the bounded merge stops in the third row source");
+}
+
 #[test]
 fn fixture_ancestor_tombstone_preserves_deeper_rows_across_ranges() {
     let shallow = parse_fixture(TOMBSTONE_DEPTH_SHALLOW, RowKeyKind::Explicit);
