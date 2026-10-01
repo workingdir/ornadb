@@ -1,0 +1,13 @@
+pub table Note(id: Int) {
+    text: Str,
+    quantity: Int,
+}
+
+fn move_competitor_leaf() = Note.rekey(2, 3);
+fn move_competitor_middle() = move_competitor_leaf();
+fn move_competitor() = move_competitor_middle();
+
+fn main() {
+    move_competitor() |? (unexpected_failure => Note.update(1, { quantity: 99 }));
+    Note.rekey(1, 2)
+}
