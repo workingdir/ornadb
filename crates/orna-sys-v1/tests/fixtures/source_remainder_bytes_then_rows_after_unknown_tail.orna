@@ -1,0 +1,4 @@
+pub table SourceRemainderBytesRowsUnknownSource(id: Int) { value: Int, }
+pub table SourceRemainderBytesRowsUnknown(id: Int) { value: Int, }
+pub table SourceRemainderBytesRowsByteTail(id: Int) { value: Int, }
+pub table SourceRemainderBytesRowsRowTail(id: Int) { value: Int, }
