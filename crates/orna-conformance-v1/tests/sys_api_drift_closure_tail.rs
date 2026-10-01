@@ -613,6 +613,26 @@ fn edge_interplay_fixture_null_filters_unknown_exact_count_inside_key_column_cal
 }
 
 #[test]
+fn edge_interplay_fixture_null_filters_unknown_exact_count_inside_reference_callback() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Exactness does not imply a present row_count in the frozen schema. Evaluate the null
+    // predicate in a Reference callback, then carry its captured table through Key columns.
+    assert!(
+        analysis.is_ok(),
+        "Reference callback null filtering must preserve the nullable exact target count: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_composes_unknown_target_count_with_inexactness() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
