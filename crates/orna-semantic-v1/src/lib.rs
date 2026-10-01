@@ -8628,13 +8628,25 @@ fn infer_assignment(
 ) -> EffectSummary {
     let value = infer(value, scope, local, diagnostics);
     match (target, operator) {
-        (AssignmentTarget::Name { name, .. }, AssignmentOperator::Set) => match local.get(name) {
-            Some(symbol) => require_same(&symbol.ty, &value.ty, diagnostics),
-            None => diagnostics.push(diag(
-                DIAG_UNRESOLVED,
-                "assignment target cannot be resolved",
-            )),
-        },
+        (AssignmentTarget::Name { name, .. }, AssignmentOperator::Set) => {
+            let expected = local.get(name).map(|symbol| symbol.ty.clone());
+            match expected {
+                Some(expected)
+                    if is_snapshot_ref_value(&expected) && is_snapshot_ref_value(&value.ty) =>
+                {
+                    // Rebinding changes the pin seen by later reads of this local;
+                    // inferred closure types retain the previous snapshot value.
+                    if let Some(symbol) = local.get_mut(name) {
+                        symbol.ty = value.ty.clone();
+                    }
+                }
+                Some(expected) => require_same(&expected, &value.ty, diagnostics),
+                None => diagnostics.push(diag(
+                    DIAG_UNRESOLVED,
+                    "assignment target cannot be resolved",
+                )),
+            }
+        }
         (AssignmentTarget::Name { name, .. }, _) => match local.get(name) {
             Some(symbol) => require_same(&symbol.ty, &value.ty, diagnostics),
             None => diagnostics.push(diag(
@@ -16041,6 +16053,10 @@ fn is_contextual_snapshot_ref(ty: &Type) -> bool {
         Type::Applied { base, arguments }
             if base == "sys.SnapshotRefContext" && arguments.len() == 1
     )
+}
+
+fn is_snapshot_ref_value(ty: &Type) -> bool {
+    ty == &Type::Named("sys.SnapshotRef".into()) || is_contextual_snapshot_ref(ty)
 }
 
 /// Gives a selected history root a type-level context key so decomposing its
