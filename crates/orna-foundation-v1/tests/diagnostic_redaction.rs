@@ -18309,3 +18309,216 @@ fn deepest_empty_alias_tail_duplicates_survive_four_clone_levels() {
         reverse_projection["causes"]
     );
 }
+
+#[test]
+fn deepest_empty_alias_tail_duplicates_survive_five_clone_levels() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let diagnostic = |code: &str, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(message).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let alias = |message: &str| diagnostic("ORNA-E-FIVE-LEVEL-EMPTY-ALIAS", message);
+    let empty_tail = || {
+        diagnostic(
+            "ORNA-E-FIVE-LEVEL-EMPTY-TAIL",
+            "five-level empty tail secret",
+        )
+    };
+    let make_wire = |reverse: bool| {
+        let shared_leaf = alias("leaf alias secret")
+            .with_cause(empty_tail())
+            .with_cause(empty_tail());
+        let shared_level_two = alias("level two alias secret")
+            .with_cause(shared_leaf.clone())
+            .with_cause(shared_leaf.clone());
+        let shared_level_three = alias("level three alias secret")
+            .with_cause(shared_level_two.clone())
+            .with_cause(shared_level_two.clone());
+        let shared_level_four = alias("level four alias secret")
+            .with_cause(shared_level_three.clone())
+            .with_cause(shared_level_three.clone());
+        let shared_level_five = alias("level five alias secret")
+            .with_cause(shared_level_four.clone())
+            .with_cause(shared_level_four.clone());
+
+        let grown_leaf = shared_leaf.clone().with_cause(empty_tail());
+        let grown_level_two = shared_level_two.clone().with_cause(grown_leaf);
+        let grown_level_three = shared_level_three.clone().with_cause(grown_level_two);
+        let grown_level_four = shared_level_four.clone().with_cause(grown_level_three);
+        let grown_level_five = shared_level_five.clone().with_cause(grown_level_four);
+        let aliases = if reverse {
+            vec![shared_level_five, grown_level_five]
+        } else {
+            vec![grown_level_five, shared_level_five]
+        };
+        aliases
+            .into_iter()
+            .fold(
+                diagnostic("ORNA-E-FIVE-LEVEL-EMPTY-ROOT", "root secret"),
+                |root, alias| root.with_cause(alias),
+            )
+            .redacted()
+            .encode_ovb()
+            .unwrap()
+    };
+    fn five_level_empty_alias_shape(
+        diagnostic: &serde_json::Value,
+    ) -> Vec<Vec<Vec<Vec<Vec<usize>>>>> {
+        let aliases = diagnostic["causes"].as_array().unwrap();
+        assert_eq!(aliases.len(), 2);
+        aliases
+            .iter()
+            .map(|level_five| {
+                assert_eq!(level_five["code"], "ORNA-E-FIVE-LEVEL-EMPTY-ALIAS");
+                level_five["causes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|level_four| {
+                        assert_eq!(level_four["code"], "ORNA-E-FIVE-LEVEL-EMPTY-ALIAS");
+                        level_four["causes"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|level_three| {
+                                assert_eq!(level_three["code"], "ORNA-E-FIVE-LEVEL-EMPTY-ALIAS");
+                                level_three["causes"]
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .map(|level_two| {
+                                        assert_eq!(level_two["code"], "ORNA-E-FIVE-LEVEL-EMPTY-ALIAS");
+                                        level_two["causes"]
+                                            .as_array()
+                                            .unwrap()
+                                            .iter()
+                                            .map(|leaf| {
+                                                assert_eq!(
+                                                    leaf["code"],
+                                                    "ORNA-E-FIVE-LEVEL-EMPTY-ALIAS"
+                                                );
+                                                let tails = leaf["causes"].as_array().unwrap();
+                                                assert!(tails.iter().all(|tail| {
+                                                    tail["code"] == "ORNA-E-FIVE-LEVEL-EMPTY-TAIL"
+                                                        && tail["causes"]
+                                                            .as_array()
+                                                            .unwrap()
+                                                            .is_empty()
+                                                }));
+                                                tails.len()
+                                            })
+                                            .collect()
+                                    })
+                                    .collect()
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        for note in diagnostic["notes"].as_array().unwrap() {
+            assert_eq!(note, "<redacted>");
+        }
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+
+    let forward_wire = make_wire(false);
+    let reverse_wire = make_wire(true);
+    let forward = Diagnostic::decode_ovb(&forward_wire).unwrap();
+    let reverse = Diagnostic::decode_ovb(&reverse_wire).unwrap();
+    let forward_projection = serde_json::to_value(&forward).unwrap();
+    let reverse_projection = serde_json::to_value(&reverse).unwrap();
+    assert_redacted_tree(&forward_projection);
+    assert_redacted_tree(&reverse_projection);
+
+    // ORNA-SECRET-002 leaves equal-code order unspecified; these shapes follow insertion order.
+    let shared_leaf_shape = vec![2, 2];
+    let shared_level_two_shape = vec![shared_leaf_shape.clone(), shared_leaf_shape.clone()];
+    let shared_level_three_shape = vec![
+        shared_level_two_shape.clone(),
+        shared_level_two_shape.clone(),
+    ];
+    let shared_level_four_shape = vec![
+        shared_level_three_shape.clone(),
+        shared_level_three_shape.clone(),
+    ];
+    let grown_level_two_shape = vec![2, 2, 3];
+    let grown_level_three_shape = vec![
+        shared_leaf_shape.clone(),
+        shared_leaf_shape.clone(),
+        grown_level_two_shape,
+    ];
+    let grown_level_four_shape = vec![
+        shared_level_two_shape.clone(),
+        shared_level_two_shape.clone(),
+        grown_level_three_shape,
+    ];
+    let grown_level_five_shape = vec![
+        shared_level_three_shape.clone(),
+        shared_level_three_shape.clone(),
+        grown_level_four_shape,
+    ];
+    let grown_shape = grown_level_five_shape;
+    let shared_shape = shared_level_four_shape;
+    let forward_shape = vec![grown_shape.clone(), shared_shape.clone()];
+    let reverse_shape = vec![shared_shape, grown_shape];
+    assert_eq!(five_level_empty_alias_shape(&forward_projection), forward_shape);
+    assert_eq!(five_level_empty_alias_shape(&reverse_projection), reverse_shape);
+
+    let mut replacement = forward.clone();
+    replacement.clone_from(&reverse);
+    assert_eq!(
+        five_level_empty_alias_shape(&serde_json::to_value(&replacement).unwrap()),
+        reverse_shape
+    );
+    replacement.clone_from(&forward);
+    assert_eq!(replacement, forward);
+
+    let forward_json = serde_json::to_vec(&forward).unwrap();
+    let reverse_json = serde_json::to_vec(&reverse).unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"root secret".as_slice(),
+            b"level five alias secret".as_slice(),
+            b"level four alias secret".as_slice(),
+            b"level three alias secret".as_slice(),
+            b"level two alias secret".as_slice(),
+            b"leaf alias secret".as_slice(),
+            b"five-level empty tail secret".as_slice(),
+        ])
+    {
+        for bytes in [&forward_json, &reverse_json, &forward_wire, &reverse_wire] {
+            assert!(!bytes
+                .windows(disclosure.len())
+                .any(|window| window == disclosure));
+        }
+    }
+    assert_eq!(
+        serde_json::to_value(Diagnostic::decode_ovb(&forward_wire).unwrap()).unwrap()["causes"],
+        forward_projection["causes"]
+    );
+    assert_eq!(
+        serde_json::to_value(Diagnostic::decode_ovb(&reverse_wire).unwrap()).unwrap()["causes"],
+        reverse_projection["causes"]
+    );
+}
