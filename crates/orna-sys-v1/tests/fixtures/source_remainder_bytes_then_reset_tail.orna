@@ -1,0 +1,4 @@
+pub table BytesThenResetSource(id: Int) { value: Int, }
+pub table BytesThenResetUnknown(id: Int) { value: Int, }
+pub table BytesThenResetTail(id: Int) { value: Int, }
+pub table BytesThenResetTarget(id: Int) { value: Int, }
