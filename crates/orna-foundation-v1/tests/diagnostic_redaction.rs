@@ -13196,3 +13196,166 @@ fn error_tail_order_survives_crossed_snapshot_replay() {
     assert_redacted_tree(&decoded);
     assert_eq!(decoded["causes"], projection["causes"]);
 }
+
+#[test]
+fn replayed_error_tail_order_is_stable_between_siblings() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let admitted = |code: &str, severity: DiagnosticSeverity, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            severity,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let make_wire = |payload: &str, tail_codes: [&str; 2]| {
+        let terminal = admitted("ORNA-E-ORDER-REPLAY-TERMINAL", DiagnosticSeverity::Error, payload)
+            .with_cause(admitted(
+                tail_codes[0],
+                DiagnosticSeverity::Error,
+                &format!("{payload} first tail secret"),
+            ))
+            .with_cause(admitted(
+                tail_codes[1],
+                DiagnosticSeverity::Error,
+                &format!("{payload} second tail secret"),
+            ));
+        let parent = admitted("ORNA-E-ORDER-REPLAY-PARENT", DiagnosticSeverity::Error, payload)
+            .with_cause(terminal);
+        admitted("ORNA-E-ORDER-REPLAY-ROOT", DiagnosticSeverity::Error, payload)
+            .with_cause(parent)
+            .encode_ovb()
+            .unwrap()
+    };
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    fn tail_codes(diagnostic: &serde_json::Value) -> Vec<String> {
+        let terminal = &diagnostic["causes"][0]["causes"][0];
+        terminal["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tail| tail["code"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    let forward_wire = make_wire(
+        "forward replay payload",
+        ["ORNA-E-ORDER-REPLAY-TAIL-A", "ORNA-E-ORDER-REPLAY-TAIL-B"],
+    );
+    let reverse_wire = make_wire(
+        "reverse replay payload",
+        ["ORNA-E-ORDER-REPLAY-TAIL-B", "ORNA-E-ORDER-REPLAY-TAIL-A"],
+    );
+    let replay_forward = || Diagnostic::decode_ovb(&forward_wire).unwrap();
+    let replay_reverse = || Diagnostic::decode_ovb(&reverse_wire).unwrap();
+    let mut receiver = replay_forward();
+    let forward_before = receiver.clone();
+    receiver.clone_from(&replay_reverse());
+    let reverse = receiver.clone();
+    receiver.clone_from(&replay_forward());
+    let forward_after = receiver.clone();
+
+    // ORNA-SECRET-002 requires redaction but is silent on sibling and nested
+    // error-tail order after replay; preserve each source's insertion order.
+    let outer = admitted(
+        "ORNA-E-ORDER-REPLAY-OUTER",
+        DiagnosticSeverity::Error,
+        "outer replay public admission",
+    )
+    .with_cause(admitted(
+        "ORNA-E-ORDER-REPLAY-BEFORE",
+        DiagnosticSeverity::Warning,
+        "outer replay sibling payload",
+    ))
+    .with_cause(forward_before)
+    .with_cause(reverse)
+    .with_cause(forward_after)
+    .with_cause(admitted(
+        "ORNA-E-ORDER-REPLAY-AFTER",
+        DiagnosticSeverity::Warning,
+        "outer replay sibling payload",
+    ));
+    let projection = serde_json::to_value(&outer).unwrap();
+    assert_eq!(projection["severity"], "error");
+    assert_eq!(projection["message"], "outer replay public admission");
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 5);
+    assert_eq!(
+        causes
+            .iter()
+            .map(|cause| cause["code"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "ORNA-E-ORDER-REPLAY-BEFORE",
+            "ORNA-E-ORDER-REPLAY-ROOT",
+            "ORNA-E-ORDER-REPLAY-ROOT",
+            "ORNA-E-ORDER-REPLAY-ROOT",
+            "ORNA-E-ORDER-REPLAY-AFTER",
+        ],
+    );
+    for cause in causes {
+        assert_redacted_tree(cause);
+    }
+    assert_eq!(
+        causes[1..4].iter().map(tail_codes).collect::<Vec<_>>(),
+        vec![
+            vec![
+                "ORNA-E-ORDER-REPLAY-TAIL-A".to_owned(),
+                "ORNA-E-ORDER-REPLAY-TAIL-B".to_owned(),
+            ],
+            vec![
+                "ORNA-E-ORDER-REPLAY-TAIL-B".to_owned(),
+                "ORNA-E-ORDER-REPLAY-TAIL-A".to_owned(),
+            ],
+            vec![
+                "ORNA-E-ORDER-REPLAY-TAIL-A".to_owned(),
+                "ORNA-E-ORDER-REPLAY-TAIL-B".to_owned(),
+            ],
+        ],
+    );
+
+    let json = serde_json::to_vec(&outer).unwrap();
+    let encoded = outer.encode_ovb().unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"forward replay payload".as_slice(),
+            b"reverse replay payload".as_slice(),
+            b"outer replay sibling payload".as_slice(),
+            b"forward replay payload first tail secret".as_slice(),
+            b"forward replay payload second tail secret".as_slice(),
+            b"reverse replay payload first tail secret".as_slice(),
+            b"reverse replay payload second tail secret".as_slice(),
+        ])
+    {
+        assert!(
+            !json.windows(disclosure.len()).any(|window| window == disclosure),
+            "JSON retained test secret {:?}",
+            String::from_utf8_lossy(disclosure),
+        );
+        assert!(
+            !encoded.windows(disclosure.len()).any(|window| window == disclosure),
+            "OVB retained test secret {:?}",
+            String::from_utf8_lossy(disclosure),
+        );
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
+    assert_redacted_tree(&decoded);
+    assert_eq!(decoded["causes"], projection["causes"]);
+}
