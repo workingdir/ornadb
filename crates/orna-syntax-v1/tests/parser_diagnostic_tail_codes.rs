@@ -7755,6 +7755,144 @@ fn nested_closure_recovery_preserves_interpolated_closure_suffix() {
 }
 
 #[test]
+fn interpolated_closure_suffix_preserves_its_nested_recovery_tail() {
+    let source = include_str!("fixtures/malformed-interpolated-closure-suffix-with-nested-recovery.orna");
+    let parsed = parse_module(source);
+
+    let malformed_patterns = [
+        ("false 0", 6),
+        ("true 1", 5),
+        ("false 2", 6),
+        ("true 3", 5),
+        ("false 4", 6),
+        ("true 5", 5),
+        ("false 6", 6),
+        ("true 7", 5),
+    ];
+    assert_eq!(parsed.diagnostics.len(), malformed_patterns.len(), "{:?}", parsed.diagnostics);
+    for (diagnostic, (pattern, offset)) in parsed.diagnostics.iter().zip(malformed_patterns) {
+        let start = source.find(pattern).expect("malformed arm") + offset;
+        assert_eq!(diagnostic.code, "ORNA-PARSE-001");
+        assert_eq!(diagnostic.message, "expected `:` after case pattern");
+        assert_eq!(diagnostic.span.start, start);
+        assert_eq!(diagnostic.span.end, start + 1);
+    }
+
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
+        panic!("expected a function declaration");
+    };
+    let Expr::Block { tail: Some(root_tail), .. } = body else {
+        panic!("expected the root case tail");
+    };
+    let Expr::Control { arms: root_arms, .. } = root_tail.as_ref() else {
+        panic!("expected the root case expression");
+    };
+    assert_eq!(root_arms.len(), 2, "{root_arms:?}");
+    let Expr::InterpolatedString { segments, .. } = &root_arms[0].body else {
+        panic!("root arm lost its interpolated string");
+    };
+    let [
+        StringSegment::Text { text: prefix, .. },
+        StringSegment::Expression {
+            value: Expr::Lambda { body: outer_body, .. },
+            ..
+        },
+        StringSegment::Text { text: between_closures, .. },
+        StringSegment::Expression {
+            value: Expr::Lambda { body: suffix_body, .. },
+            ..
+        },
+        StringSegment::Text { text: suffix, .. },
+    ] = segments.as_slice()
+    else {
+        panic!("recovery lost a string segment: {segments:?}");
+    };
+    assert_eq!(prefix, "prefix ");
+    assert_eq!(between_closures, " middle ");
+    assert_eq!(suffix, " end");
+
+    let Expr::Block {
+        statements: outer_statements,
+        tail: Some(after_closure),
+        ..
+    } = outer_body.as_ref()
+    else {
+        panic!("first recovery consumed its enclosing closure tail");
+    };
+    let [
+        Statement::Let { .. },
+        Statement::Control {
+            value: Expr::Control { arms: outer_recovered, .. },
+            ..
+        },
+    ] = outer_statements.as_slice()
+    else {
+        panic!("first recovered case lost its boundary: {outer_statements:?}");
+    };
+    assert_eq!(outer_recovered.len(), 1, "{outer_recovered:?}");
+
+    let Expr::Block {
+        statements: suffix_statements,
+        tail: Some(finish_closure),
+        ..
+    } = suffix_body.as_ref()
+    else {
+        panic!("suffix interpolation lost its closure block tail");
+    };
+    let [
+        Statement::Let { .. },
+        Statement::Control {
+            value: Expr::Control { arms: suffix_recovered, .. },
+            ..
+        },
+    ] = suffix_statements.as_slice()
+    else {
+        panic!("suffix recovery lost its case boundary: {suffix_statements:?}");
+    };
+    assert_eq!(suffix_recovered.len(), 2, "{suffix_recovered:?}");
+    assert!(matches!(&suffix_recovered[0].body, Expr::Lambda { .. }));
+    let Expr::InterpolatedString { segments, .. } = &suffix_recovered[1].body else {
+        panic!("suffix recovery lost its nested interpolated closure prefix");
+    };
+    let [
+        StringSegment::Text { text: inner_prefix, .. },
+        StringSegment::Expression {
+            value: Expr::Lambda { body: inner_closure_body, .. },
+            ..
+        },
+        StringSegment::Text { text: inner_suffix, .. },
+    ] = segments.as_slice()
+    else {
+        panic!("nested suffix closure lost its boundaries: {segments:?}");
+    };
+    assert_eq!(inner_prefix, "inner ");
+    assert_eq!(inner_suffix, " tail");
+    let Expr::Block { tail: Some(inner_tail), .. } = inner_closure_body.as_ref() else {
+        panic!("nested suffix closure lost its case tail");
+    };
+    assert!(matches!(inner_tail.as_ref(), Expr::Control { .. }));
+
+    let Expr::Lambda { body: after_body, .. } = after_closure.as_ref() else {
+        panic!("closure after the first recovery was lost");
+    };
+    let Expr::Block { tail: Some(after_tail), .. } = after_body.as_ref() else {
+        panic!("closure after the first recovery lost its tail");
+    };
+    assert!(matches!(after_tail.as_ref(), Expr::Control { .. }));
+
+    let Expr::Lambda { body: finish_body, .. } = finish_closure.as_ref() else {
+        panic!("closure after suffix recovery was lost");
+    };
+    let Expr::Block { tail: Some(finish_tail), .. } = finish_body.as_ref() else {
+        panic!("closure after suffix recovery lost its tail");
+    };
+    assert!(matches!(finish_tail.as_ref(), Expr::Control { .. }));
+
+    // The reference is silent on a suffix interpolation with its own recovery;
+    // retain both interpolations and each closure tail after recovery.
+}
+
+#[test]
 fn semicolon_keeps_control_expression_as_a_statement() {
     let parsed = parse_module(include_str!("fixtures/semicolon-control-block-item.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
