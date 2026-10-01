@@ -20622,3 +20622,113 @@ fn composed_decoded_deep_empty_tails_stay_contained() {
         }
     }
 }
+
+#[test]
+fn deep_decoded_tail_containment_keeps_the_middle_empty() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let diagnostic = |code: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+    };
+    let decoded_empty = Diagnostic::decode_ovb(
+        &diagnostic("ORNA-E-DEEP-EDGE-EMPTY")
+            .redacted()
+            .encode_ovb()
+            .unwrap(),
+    )
+    .unwrap();
+    let mut branch = diagnostic("ORNA-E-DEEP-EDGE-ORDERED")
+        .with_cause(diagnostic("ORNA-E-DEEP-EDGE-A"))
+        .with_cause(decoded_empty.clone())
+        .with_cause(diagnostic("ORNA-E-DEEP-EDGE-B"))
+        .redacted();
+    for level in 0..5 {
+        // Keep the empty sibling before the prior branch at every decoded generation.
+        branch = diagnostic(&format!("ORNA-E-DEEP-EDGE-LEVEL-{level}"))
+            .with_cause(decoded_empty.clone())
+            .with_cause(branch)
+            .redacted();
+        branch = Diagnostic::decode_ovb(&branch.encode_ovb().unwrap()).unwrap();
+    }
+    let composed = diagnostic("ORNA-E-DEEP-EDGE-OUTER")
+        .with_cause(branch.clone())
+        .with_cause(decoded_empty)
+        .with_cause(branch)
+        .redacted();
+
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        assert!(diagnostic["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|note| note == "<redacted>"));
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    let projection = serde_json::to_value(&composed).unwrap();
+    assert_redacted_tree(&projection);
+    let outer_causes = projection["causes"].as_array().unwrap();
+    assert_eq!(outer_causes.len(), 3);
+    assert_eq!(outer_causes[0], outer_causes[2]);
+    assert_eq!(outer_causes[1]["code"], "ORNA-E-DEEP-EDGE-EMPTY");
+    assert!(outer_causes[1]["causes"].as_array().unwrap().is_empty());
+
+    let mut terminal = &outer_causes[0];
+    for level in (0..5).rev() {
+        assert_eq!(
+            terminal["code"],
+            format!("ORNA-E-DEEP-EDGE-LEVEL-{level}")
+        );
+        let causes = terminal["causes"].as_array().unwrap();
+        assert_eq!(causes.len(), 2);
+        assert_eq!(causes[0]["code"], "ORNA-E-DEEP-EDGE-EMPTY");
+        assert!(causes[0]["causes"].as_array().unwrap().is_empty());
+        terminal = &causes[1];
+    }
+    assert_eq!(terminal["code"], "ORNA-E-DEEP-EDGE-ORDERED");
+    let terminal_causes = terminal["causes"].as_array().unwrap();
+    assert_eq!(
+        terminal_causes
+            .iter()
+            .map(|cause| cause["code"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "ORNA-E-DEEP-EDGE-A",
+            "ORNA-E-DEEP-EDGE-EMPTY",
+            "ORNA-E-DEEP-EDGE-B",
+        ]
+    );
+    assert!(terminal_causes[1]["causes"].as_array().unwrap().is_empty());
+
+    let wire = composed.encode_ovb().unwrap();
+    let replayed = Diagnostic::decode_ovb(&wire).unwrap();
+    let replayed_projection = serde_json::to_value(&replayed).unwrap();
+    assert_redacted_tree(&replayed_projection);
+    assert_eq!(replayed_projection, projection);
+    let json = serde_json::to_vec(&replayed_projection).unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([fixture.as_bytes()])
+    {
+        for bytes in [&json, &wire] {
+            assert!(!bytes
+                .windows(disclosure.len())
+                .any(|window| window == disclosure));
+        }
+    }
+}
