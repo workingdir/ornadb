@@ -513,6 +513,27 @@ fn edge_interplay_fixture_null_filters_projected_exact_region_count_before_hando
 }
 
 #[test]
+fn edge_interplay_fixture_filters_projected_exact_count_after_function_handoff() {
+    let analysis = analyze(&[ModuleInput::new(
+        "sys-api-drift-edge-interplay.orna",
+        EDGE_INTERPLAY,
+    )]);
+
+    // Project exact-table counts in one function and apply the null predicate after that
+    // Relation<Int?> crosses the function boundary. The schema does not equate exactness with
+    // count presence.
+    assert!(
+        analysis.is_ok(),
+        "filtering a function's projected exact counts must retain nullable row_count: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn edge_interplay_fixture_projects_unknown_exact_target_count_through_columns() {
     let analysis = analyze(&[ModuleInput::new(
         "sys-api-drift-edge-interplay.orna",
