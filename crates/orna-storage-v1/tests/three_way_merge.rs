@@ -23,6 +23,8 @@ const CHECKPOINT_RESET: &str = include_str!("fixtures/merge-checkpoint-reset.orn
 const CHECKPOINT_TAIL_BASE: &str = include_str!("fixtures/merge-checkpoint-tail-base.orna");
 const CHECKPOINT_TAIL_LEFT: &str = include_str!("fixtures/merge-checkpoint-tail-left.orna");
 const CHECKPOINT_TAIL_RIGHT: &str = include_str!("fixtures/merge-checkpoint-tail-right.orna");
+const TOMBSTONE_DEPTH_SHALLOW: &str = include_str!("fixtures/merge-tombstone-depth-shallow.orna");
+const TOMBSTONE_DEPTH_DEEP: &str = include_str!("fixtures/merge-tombstone-depth-deep.orna");
 
 fn id(value: u8) -> ObjectId {
     ObjectId::new([value; 16])
@@ -52,6 +54,24 @@ fn schema(explicit_key: bool, name_type: FieldType) -> Schema {
     }
 }
 
+fn string_key_schema() -> Schema {
+    let mut schema = schema(true, FieldType::Str);
+    schema.tables[0].fields[0].ty = FieldType::Str;
+    schema
+}
+
+fn rekey_row(row: &KeyedRow, key: &str) -> KeyedRow {
+    let mut row = row.clone();
+    row.key = string(key);
+    row
+}
+
+fn edit_name(row: &KeyedRow, value: &str) -> KeyedRow {
+    let mut row = row.clone();
+    row.fields.insert(id(2), string(value));
+    row
+}
+
 fn parse_fixture(source: &str, kind: RowKeyKind) -> KeyedRow {
     let parsed = parse_row(source);
     assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
@@ -62,9 +82,17 @@ fn parse_fixture(source: &str, kind: RowKeyKind) -> KeyedRow {
         let Expr::Literal { text, kind: literal_kind, .. } = field.value else { panic!("literal fixture") };
         match field.name.as_str() {
             "id" => {
-                assert_eq!(literal_kind, LiteralKind::Integer);
-                let number: i64 = text.parse().unwrap();
-                key = Some(CanonicalValue::new(OvbRaw::Int(number.into())).unwrap());
+                key = Some(match literal_kind {
+                    LiteralKind::Integer => {
+                        let number: i64 = text.parse().unwrap();
+                        CanonicalValue::new(OvbRaw::Int(number.into())).unwrap()
+                    }
+                    LiteralKind::String => {
+                        let value = text.strip_prefix('"').unwrap().strip_suffix('"').unwrap();
+                        string(value)
+                    }
+                    other => panic!("unexpected key literal {other:?}"),
+                });
             }
             "name" | "city" => {
                 assert_eq!(literal_kind, LiteralKind::String);
@@ -144,10 +172,7 @@ impl BranchRowSource for FixtureRows {
         for row in self.rows.get(&(side, locator)).into_iter().flatten() {
             assert_eq!(row.table, table);
             let key = row.key.encode().map_err(|error| error.to_string())?;
-            if range.start.as_deref().is_none_or(|start| key.as_slice() >= start)
-                && range.end.as_deref().is_none_or(|end| key.as_slice() < end)
-                && !visitor(row.clone())
-            {
+            if range.contains(&key) && !visitor(row.clone()) {
                 break;
             }
         }
@@ -15237,4 +15262,122 @@ fn nested_checkpoint_reset_conflicts_preserve_fixture_states_and_identity() {
             assert!(source.visited.is_empty());
         }
     }
+}
+
+#[test]
+fn fixture_row_tombstones_are_exact_keys_and_follow_logical_depth_order() {
+    let shallow = parse_fixture(TOMBSTONE_DEPTH_SHALLOW, RowKeyKind::Explicit);
+    let deep = parse_fixture(TOMBSTONE_DEPTH_DEEP, RowKeyKind::Explicit);
+    let middle = rekey_row(&shallow, "root/child");
+    let short_sibling = rekey_row(&shallow, "z");
+    let boundary = short_sibling.key.encode().unwrap();
+    let shallow_range = KeyRange::new(None, Some(boundary.clone()))
+        .expect("logical path keys sort before the short sibling despite encoded length");
+    let sibling_range = KeyRange::new(Some(boundary), None).unwrap();
+    let split_manifest = |digest, shallow_digest, sibling_digest, shallow_locator: &[u8], sibling_locator: &[u8]| {
+        TableManifest {
+            digest: [digest; 32],
+            segments: vec![
+                RowSegmentManifest {
+                    locator: shallow_locator.to_vec(),
+                    range: shallow_range.clone(),
+                    digest: [shallow_digest; 32],
+                },
+                RowSegmentManifest {
+                    locator: sibling_locator.to_vec(),
+                    range: sibling_range.clone(),
+                    digest: [sibling_digest; 32],
+                },
+            ],
+        }
+    };
+
+    // The left side retains only the middle child; the right side retains
+    // only the deepest child. Deleting a path-shaped key never cascades into
+    // another depth, and the short sibling forces encoded and logical order
+    // to differ because its CBOR text-length prefix is smaller.
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"depth-base-shallow", vec![shallow.clone(), middle.clone(), deep.clone()]);
+    source.add(MergeSide::Base, b"depth-base-sibling", vec![short_sibling.clone()]);
+    source.add(MergeSide::Left, b"depth-left-shallow", vec![middle]);
+    source.add(MergeSide::Left, b"depth-left-sibling", vec![short_sibling.clone()]);
+    source.add(MergeSide::Right, b"depth-right-shallow", vec![deep]);
+    source.add(MergeSide::Right, b"depth-right-sibling", vec![short_sibling.clone()]);
+    let base = snapshot(
+        string_key_schema(),
+        split_manifest(1, 1, 2, b"depth-base-shallow", b"depth-base-sibling"),
+        None,
+    );
+    let left = snapshot(
+        string_key_schema(),
+        split_manifest(2, 3, 4, b"depth-left-shallow", b"depth-left-sibling"),
+        None,
+    );
+    let right = snapshot(
+        string_key_schema(),
+        split_manifest(3, 5, 6, b"depth-right-shallow", b"depth-right-sibling"),
+        None,
+    );
+
+    let plan = merge_three_way_snapshots(&base, &left, &right, &mut source, budget())
+        .expect("independent nested keys merge as exact tombstones");
+    let MergedSegment::Rows { rows, tombstones, .. } = &plan.tables[&id(1)].segments[0] else {
+        panic!("changed fixture range materializes rows and tombstones")
+    };
+    assert!(rows.is_empty());
+    assert_eq!(
+        tombstones,
+        &[string("root"), string("root/child"), string("root/child/deep")],
+        "logical primary-key order keeps each ancestor before its deeper keys",
+    );
+    let MergedSegment::Rows { rows, tombstones, .. } = &plan.tables[&id(1)].segments[1] else {
+        panic!("the short sibling range remains a separate merged range")
+    };
+    assert_eq!(rows, &[short_sibling]);
+    assert!(tombstones.is_empty());
+}
+
+#[test]
+fn fixture_nested_delete_edit_conflicts_follow_logical_key_order() {
+    let shallow = parse_fixture(TOMBSTONE_DEPTH_SHALLOW, RowKeyKind::Explicit);
+    let deep = parse_fixture(TOMBSTONE_DEPTH_DEEP, RowKeyKind::Explicit);
+    let middle = rekey_row(&shallow, "root/child");
+    let short_sibling = rekey_row(&shallow, "z");
+    let base_rows = vec![shallow.clone(), middle.clone(), deep.clone(), short_sibling.clone()];
+    let edited_rows = vec![
+        edit_name(&shallow, "edited"),
+        edit_name(&middle, "edited"),
+        edit_name(&deep, "edited"),
+        short_sibling.clone(),
+    ];
+
+    let mut source = FixtureRows::default();
+    source.add(MergeSide::Base, b"conflict-depth-base", base_rows);
+    source.add(MergeSide::Left, b"conflict-depth-left", vec![short_sibling]);
+    source.add(MergeSide::Right, b"conflict-depth-right", edited_rows);
+    let base = snapshot(string_key_schema(), manifest(4, 4, b"conflict-depth-base"), None);
+    let left = snapshot(string_key_schema(), manifest(5, 5, b"conflict-depth-left"), None);
+    let right = snapshot(string_key_schema(), manifest(6, 6, b"conflict-depth-right"), None);
+
+    let BranchMergeError::Conflicts { conflicts, report } =
+        merge_three_way_snapshots(&base, &left, &right, &mut source, budget()).unwrap_err()
+    else {
+        panic!("nested delete/edit conflicts reject the complete plan")
+    };
+    let conflict_keys = conflicts
+        .iter()
+        .map(|conflict| match conflict {
+            BranchMergeConflict::Row {
+                conflict: orna_evolution_v1::RowMergeConflict::DeleteAndEdit { key, .. },
+                ..
+            } => key.clone(),
+            other => panic!("unexpected nested-key conflict: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        conflict_keys,
+        vec![string("root"), string("root/child"), string("root/child/deep")],
+    );
+    assert_eq!(report.conflicts_lower_bound, 3);
+    assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
 }
