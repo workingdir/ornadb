@@ -138,6 +138,114 @@ fn int(value: i64) -> CanonicalValue {
     CanonicalValue::new(Value::int(value.into()).raw().clone()).unwrap()
 }
 
+fn capture_standard_gitlink(
+    project_path: &Path,
+    standard_snapshot: &str,
+    message: &str,
+) -> String {
+    git_output_at(project_path, &["add", "main.orna", ".gitmodules"]);
+    let gitlink = format!("160000,{standard_snapshot},stdlib/std");
+    git_output_at(
+        project_path,
+        &["update-index", "--add", "--cacheinfo", &gitlink],
+    );
+    git_output_at(project_path, &["commit", "--quiet", "-m", message]);
+    git_output_at(project_path, &["rev-parse", "HEAD"])
+}
+
+fn module_upgrade_projects() -> (TempDir, LoadedProject, LoadedProject, String, String) {
+    let directory = tempfile::tempdir().unwrap();
+    let project_path = directory.path().join("project");
+    fs::create_dir_all(&project_path).unwrap();
+    fs::write(
+        project_path.join("main.orna"),
+        include_str!("fixtures/module-upgrade-project.orna"),
+    )
+    .unwrap();
+    git_output_at(&project_path, &["init", "--quiet"]);
+    for (key, value) in [
+        ("user.email", "kieran@drewett.dev"),
+        ("user.name", "kierandrewett"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git_output_at(&project_path, &["config", key, value]);
+    }
+    fs::write(
+        project_path.join(".gitmodules"),
+        "[submodule \"std\"]\n\tpath = stdlib/std\n\turl = https://example.invalid/ornadb-std.git\n",
+    )
+    .unwrap();
+
+    let standard_path = project_path.join("stdlib/std");
+    fs::create_dir_all(&standard_path).unwrap();
+    initialize_repository(&standard_path).unwrap();
+    fs::write(
+        standard_path.join("main.orna"),
+        include_str!("fixtures/module-upgrade-std-main.orna"),
+    )
+    .unwrap();
+    fs::write(
+        standard_path.join("collection.orna"),
+        include_str!("fixtures/module-upgrade-std-collection.orna"),
+    )
+    .unwrap();
+    fs::write(
+        standard_path.join("math.orna"),
+        include_str!("fixtures/module-upgrade-std-v1.orna"),
+    )
+    .unwrap();
+    commit_directory(&standard_path, "standard module v1");
+    let snapshot_v1 = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+    let parent_v1 = capture_standard_gitlink(&project_path, &snapshot_v1, "capture std v1");
+
+    fs::write(
+        standard_path.join("math.orna"),
+        include_str!("fixtures/module-upgrade-std-v2.orna"),
+    )
+    .unwrap();
+    commit_directory(&standard_path, "standard module v2");
+    let snapshot_v2 = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+    capture_standard_gitlink(&project_path, &snapshot_v2, "capture std v2");
+
+    let repository = Repository::discover(&project_path).unwrap();
+    let loader = ProjectLoader::default();
+    let parent_v1 = repository.resolve_snapshot(&parent_v1).unwrap();
+    let historical = loader
+        .load_committed_snapshot(&repository, &parent_v1)
+        .unwrap();
+    let upgraded = loader.load(&repository).unwrap();
+    (directory, historical, upgraded, snapshot_v1, snapshot_v2)
+}
+
+#[test]
+fn project_gitlink_upgrade_keeps_historical_standard_sources_available() {
+    let (_directory, historical, upgraded, snapshot_v1, snapshot_v2) = module_upgrade_projects();
+
+    assert_ne!(snapshot_v1, snapshot_v2);
+    assert_eq!(
+        historical.standard_profile().unwrap().snapshot(),
+        snapshot_v1
+    );
+    assert_eq!(
+        upgraded.standard_profile().unwrap().snapshot(),
+        snapshot_v2
+    );
+    for (project, expected) in [
+        (&historical, include_str!("fixtures/module-upgrade-std-v1.orna")),
+        (&upgraded, include_str!("fixtures/module-upgrade-std-v2.orna")),
+    ] {
+        assert_eq!(
+            project
+                .standard_sources()
+                .iter()
+                .find(|(path, _)| path == "std/math.orna")
+                .unwrap()
+                .1,
+            expected
+        );
+    }
+}
+
 #[test]
 fn replayed_closure_uses_its_captured_dependency_snapshot_after_snapshot_changes() {
     let (_directory, project_v1, project_v2, snapshot_v1, snapshot_v2, sources_v1, sources_v2) =
