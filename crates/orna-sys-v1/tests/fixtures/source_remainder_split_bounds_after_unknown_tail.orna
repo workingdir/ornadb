@@ -1,0 +1,4 @@
+pub table SourceRemainderSplitBoundsSource(id: Int) { value: Int, }
+pub table SourceRemainderSplitBoundsUnknown(id: Int) { value: Int, }
+pub table SourceRemainderSplitBoundsRows(id: Int) { value: Int, }
+pub table SourceRemainderSplitBoundsBytes(id: Int) { value: Int, }
