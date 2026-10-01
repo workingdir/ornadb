@@ -1,11 +1,10 @@
 use orna_core::revision::ArtifactCompatibilityCoordinates;
+use orna_sys_v1::system_api_json;
 use serde_json::Value;
-
-const SYS_API: &str = include_str!("../../../api/sys.json");
 
 #[test]
 fn sys_compatibility_info_schema_matches_the_published_contract() {
-    let document: Value = serde_json::from_str(SYS_API).expect("portable sys API JSON");
+    let document: Value = serde_json::from_str(&system_api_json()).expect("portable sys API JSON");
     let compatibility = document["value_types"]
         .as_array()
         .expect("value types")
