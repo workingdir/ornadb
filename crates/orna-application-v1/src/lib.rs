@@ -8723,6 +8723,99 @@ mod tests {
     }
 
     #[test]
+    fn rekey_handoff_keeps_effect_success_across_call_depth_reset() {
+        // The reference specifies recoverable mutation failures and statement
+        // savepoints, but not how the evaluator accounts for depth while it
+        // decodes a canonical effect result. Local policy: effect results get
+        // a fresh value-depth budget so an applied rekey is not then surfaced
+        // as a depth failure solely because its helper-call chain was deep.
+        let limits = Limits {
+            max_depth: 6,
+            ..Limits::default()
+        };
+        let authority = ApplicationAuthority::new(Catalogue::authoritative_core(), limits);
+        let application = authority
+            .admit_module(
+                "table-rekey-handoff-depth-reset.orna",
+                include_str!("../tests/fixtures/table-rekey-handoff-depth-reset.orna"),
+                "main",
+            )
+            .expect("checked-in depth-reset handoff fixture should be admitted");
+
+        let int = |value: i64| {
+            CanonicalValue::new(OvbRaw::Int(value.into())).expect("integer is canonical")
+        };
+        let row = |id: i64, text: &str, quantity: i64| {
+            CanonicalValue::new(OvbRaw::Map(vec![
+                (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
+                (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
+                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+            ]))
+            .expect("row is canonical")
+        };
+        let key = |value: i64| int(value).encode().expect("key is canonical");
+        let owner = row(1, "owner", 10);
+        let competitor = row(2, "competitor", 20);
+        let rows = BTreeMap::from([(
+            "Note".to_owned(),
+            vec![
+                (key(1), owner.encode().unwrap()),
+                (key(2), competitor.encode().unwrap()),
+            ],
+        )]);
+        let tables = admitted_table_schemas(&application.module_header);
+        let mut handler =
+            SourceMutationEffectHandler::with_table_rows(tables, rows).expect("valid snapshot");
+
+        invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            &Environment::new(),
+            application.limits,
+            &mut handler,
+        )
+        .expect("the deep helper rekey and final owner handoff should both succeed");
+
+        assert_eq!(
+            handler.current_row("Note", &key(1)).unwrap(),
+            None,
+            "the owner source key is released"
+        );
+        assert_eq!(
+            handler.current_row("Note", &key(2)).unwrap(),
+            Some(row(2, "owner", 10)),
+            "depth accounting must not run the recovery handler after the rekey succeeds"
+        );
+        assert_eq!(
+            handler.current_row("Note", &key(3)).unwrap(),
+            Some(row(3, "competitor", 20)),
+            "the competitor's rekey remains in the shared activation overlay"
+        );
+
+        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        assert_eq!(mutations.len(), 2, "the unexpected recovery update is skipped");
+        let expected = [
+            (2, Some(3), row(3, "competitor", 20)),
+            (1, Some(2), row(2, "owner", 10)),
+        ];
+        for (index, (mutation, (old_key, new_key, expected_row))) in
+            mutations.iter().zip(expected).enumerate()
+        {
+            assert_eq!(mutation.key(), key(old_key), "mutation {index} source key");
+            assert_eq!(
+                mutation.rekey_to(),
+                new_key.map(key).as_deref(),
+                "mutation {index} destination"
+            );
+            assert_eq!(
+                CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
+                expected_row,
+                "mutation {index} row value"
+            );
+        }
+    }
+
+    #[test]
     fn competitor_retry_survives_successive_inserted_target_moves() {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
