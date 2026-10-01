@@ -4,6 +4,7 @@ use orna_sys_v1::{
 use serde_json::Value;
 
 #[path = "../build_support.rs"]
+#[allow(dead_code)]
 mod build_support;
 
 const PUBLISHED_SYS_API: &str = include_str!("../../../api/sys.json");
