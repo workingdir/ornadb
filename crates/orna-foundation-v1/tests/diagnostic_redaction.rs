@@ -12736,3 +12736,177 @@ fn repeated_error_tails_survive_empty_snapshot_replacements() {
     assert_redacted_tree(&decoded);
     assert_eq!(decoded["causes"], projection["causes"]);
 }
+
+#[test]
+fn error_tail_replay_preserves_repeated_entries_after_empty_recovery() {
+    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture_credentials = fixture
+        .lines()
+        .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
+        .map(|value| value.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_credentials.len(), 2);
+
+    let admitted = |code: &str, severity: DiagnosticSeverity, message: &str| {
+        Diagnostic::new(
+            SafeText::new(code).unwrap(),
+            severity,
+            SafeText::new(fixture).unwrap(),
+        )
+        .unwrap()
+        .with_note(SafeText::new(fixture).unwrap())
+        .redacted_with_message(SafeText::new(message).unwrap())
+    };
+    let make_chain = |tails: Vec<Diagnostic>| {
+        let terminal = tails.into_iter().fold(
+            admitted("ORNA-E-REPLAY-TERMINAL", DiagnosticSeverity::Error, "replay payload"),
+            |terminal, tail| terminal.with_cause(tail),
+        );
+        let nested = admitted("ORNA-E-REPLAY-NESTED", DiagnosticSeverity::Help, "replay payload")
+            .with_cause(terminal);
+        let parent = admitted("ORNA-E-REPLAY-PARENT", DiagnosticSeverity::Error, "replay payload")
+            .with_cause(nested);
+        let branch = admitted("ORNA-E-REPLAY-BRANCH", DiagnosticSeverity::Warning, "replay payload")
+            .with_cause(parent);
+        admitted("ORNA-E-REPLAY-ROOT", DiagnosticSeverity::Error, "replay payload")
+            .with_cause(branch)
+    };
+    fn assert_redacted_tree(diagnostic: &serde_json::Value) {
+        assert_eq!(diagnostic["message"], "<redacted>");
+        for cause in diagnostic["causes"].as_array().unwrap() {
+            assert_redacted_tree(cause);
+        }
+    }
+    fn cause_shape(diagnostic: &serde_json::Value) -> Vec<usize> {
+        let causes = diagnostic["causes"].as_array().unwrap();
+        let mut shape = vec![causes.len()];
+        for cause in causes {
+            shape.extend(cause_shape(cause));
+        }
+        shape
+    }
+    fn severity_path(diagnostic: &serde_json::Value) -> Vec<String> {
+        let mut node = diagnostic;
+        let mut path = Vec::new();
+        for depth in 0..5 {
+            path.push(node["severity"].as_str().unwrap().to_owned());
+            if depth < 4 {
+                node = &node["causes"][0];
+            }
+        }
+        path
+    }
+    fn tail_codes(diagnostic: &serde_json::Value) -> Vec<String> {
+        let mut terminal = diagnostic;
+        for _ in 0..4 {
+            terminal = &terminal["causes"][0];
+        }
+        terminal["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tail| tail["code"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    let repeated_wire = make_chain(vec![
+        admitted("ORNA-E-REPLAY-TAIL", DiagnosticSeverity::Error, "first replay error secret"),
+        admitted("ORNA-E-REPLAY-TAIL", DiagnosticSeverity::Fatal, "second replay fatal secret"),
+    ])
+    .encode_ovb()
+    .unwrap();
+    let empty_wire = make_chain(vec![]).encode_ovb().unwrap();
+    let replay_error = || Diagnostic::decode_ovb(&repeated_wire).unwrap();
+    let replay_empty = || Diagnostic::decode_ovb(&empty_wire).unwrap();
+    let first_replay = replay_error();
+    let second_replay = replay_error();
+    assert_eq!(first_replay, second_replay);
+
+    let capture = |snapshot: Diagnostic| move || snapshot.clone();
+    let mut receiver = first_replay.clone();
+    let initial = capture(receiver.clone());
+    receiver.clone_from(&replay_empty());
+    let empty_before_replay = capture(receiver.clone());
+    receiver.clone_from(&replay_error());
+    let restored_first_replay = capture(receiver.clone());
+    receiver.clone_from(&replay_empty());
+    let empty_after_replay = capture(receiver.clone());
+    receiver.clone_from(&replay_error());
+    let restored_second_replay = capture(receiver.clone());
+    assert_eq!(initial(), first_replay);
+    assert_eq!(empty_before_replay(), replay_empty());
+    assert_eq!(restored_first_replay(), first_replay);
+    assert_eq!(empty_after_replay(), replay_empty());
+    assert_eq!(restored_second_replay(), second_replay);
+
+    // ORNA-SECRET-002 requires redaction but is silent on repeated Error/Fatal
+    // tails remaining ordered when a decoded snapshot is replayed after empties.
+    let snapshots = [
+        initial(),
+        empty_before_replay(),
+        restored_first_replay(),
+        empty_after_replay(),
+        restored_second_replay(),
+    ];
+    let outer = snapshots.into_iter().fold(
+        admitted("ORNA-E-REPLAY-OUTER", DiagnosticSeverity::Error, "outer replay admission"),
+        |outer, snapshot| outer.with_cause(snapshot),
+    );
+    let projection = serde_json::to_value(&outer).unwrap();
+    let causes = projection["causes"].as_array().unwrap();
+    assert_eq!(causes.len(), 5);
+    for cause in causes {
+        assert_redacted_tree(cause);
+    }
+    assert_eq!(causes[0], causes[2]);
+    assert_eq!(causes[2], causes[4]);
+    assert_eq!(causes[1], causes[3]);
+    assert_eq!(
+        causes.iter().map(cause_shape).collect::<Vec<_>>(),
+        vec![
+            vec![1, 1, 1, 1, 2, 0, 0],
+            vec![1, 1, 1, 1, 0],
+            vec![1, 1, 1, 1, 2, 0, 0],
+            vec![1, 1, 1, 1, 0],
+            vec![1, 1, 1, 1, 2, 0, 0],
+        ],
+    );
+    assert_eq!(severity_path(&causes[0]), ["error", "warning", "error", "help", "error"]);
+    assert_eq!(severity_path(&causes[1]), ["error", "warning", "error", "help", "error"]);
+    assert_eq!(
+        causes.iter().map(tail_codes).collect::<Vec<_>>(),
+        vec![
+            vec!["ORNA-E-REPLAY-TAIL".to_owned(), "ORNA-E-REPLAY-TAIL".to_owned()],
+            vec![],
+            vec!["ORNA-E-REPLAY-TAIL".to_owned(), "ORNA-E-REPLAY-TAIL".to_owned()],
+            vec![],
+            vec!["ORNA-E-REPLAY-TAIL".to_owned(), "ORNA-E-REPLAY-TAIL".to_owned()],
+        ],
+    );
+    let mut terminal = &causes[0];
+    for _ in 0..4 {
+        terminal = &terminal["causes"][0];
+    }
+    let tails = terminal["causes"].as_array().unwrap();
+    assert_eq!(tails[0]["severity"], "error");
+    assert_eq!(tails[1]["severity"], "fatal");
+
+    let json = serde_json::to_vec(&outer).unwrap();
+    let encoded = outer.encode_ovb().unwrap();
+    for disclosure in fixture_credentials
+        .iter()
+        .map(|value| value.as_bytes())
+        .chain([
+            fixture.as_bytes(),
+            b"replay payload".as_slice(),
+            b"first replay error secret".as_slice(),
+            b"second replay fatal secret".as_slice(),
+        ])
+    {
+        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+    }
+    let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
+    assert_redacted_tree(&decoded);
+    assert_eq!(decoded["causes"], projection["causes"]);
+}
