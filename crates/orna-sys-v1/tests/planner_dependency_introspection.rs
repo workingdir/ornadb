@@ -11290,3 +11290,62 @@ fn explain_keeps_half_block_source_scan_fallback_partial() {
     assert!(surface["nodes"][0].get("actual_rows").is_none());
     assert!(surface["nodes"][0].get("actual_bytes").is_none());
 }
+
+#[test]
+fn explain_keeps_partial_half_block_scan_fallback_through_filter() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // The reference fixes the scan fallback but is silent on partial byte
+    // estimates through a filter. Keep the scan's 2-KiB lower bound partial;
+    // filtering it must not turn that bound into exact work or total cost.
+    let explain = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:partial-half-block-filter-fallback"),
+        source: obj("table:ByteWorkThreeScanSource"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: None,
+            estimated_bytes: Some(2_048),
+            mutable_branch: None,
+        }),
+        joins: Vec::new(),
+        predicate: Some(orna_sys_v1::ExpressionRef::descriptive(
+            "expr:ByteWorkThreeScanSource.value > 0",
+        )),
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("partial half-block source fallback through filter");
+
+    assert_eq!(explain.nodes().len(), 2);
+    assert_eq!(explain.root().kind(), PlanNodeKind::Filter);
+    assert_eq!(explain.root().inputs().len(), 1);
+    assert_eq!(explain.root().estimated_rows(), None);
+    assert_eq!(explain.root().estimated_bytes(), Some(1_024));
+    assert_eq!(explain.root().estimated_work(), None);
+    assert_eq!(
+        explain.root().details().get("selectivity_assumption"),
+        Some(&PlanDetail::Text("0.5_no_histogram".to_owned()))
+    );
+
+    let scan = explain
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan)
+        .expect("fallback source scan");
+    assert_eq!(scan.object(), Some(&obj("table:ByteWorkThreeScanSource")));
+    assert_eq!(scan.estimated_rows(), None);
+    assert_eq!(scan.estimated_bytes(), Some(2_048));
+    assert_eq!(scan.estimated_work(), None);
+    assert_eq!(explain.plan().estimated_cost(), None);
+
+    let surface = serde_json::to_value(&explain).expect("partial filter fallback surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
