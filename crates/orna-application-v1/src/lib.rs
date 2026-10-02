@@ -2983,6 +2983,51 @@ mod tests {
     }
 
     #[test]
+    fn table_insert_rejects_an_existing_key_without_recording_a_write() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "core-table-duplicate-insert-om35q.orna",
+                include_str!("../tests/fixtures/core-table-duplicate-insert-om35q.orna"),
+                "main",
+            )
+            .expect("duplicate insert fixture should be admitted");
+        let int = |value: i64| {
+            CanonicalValue::new(OvbRaw::Int(value.into())).expect("integer is canonical")
+        };
+        let key = int(1).encode().expect("key is canonical");
+        let existing = CanonicalValue::new(OvbRaw::Map(vec![
+            (OvbRaw::Text("id".into()), OvbRaw::Int(1.into())),
+            (OvbRaw::Text("text".into()), OvbRaw::Text("kept".into())),
+        ]))
+        .expect("snapshot row is canonical");
+        let rows = BTreeMap::from([(
+            "Note".to_owned(),
+            vec![(key.clone(), existing.encode().expect("row encodes"))],
+        )]);
+        let mut effects = SourceMutationEffectHandler::with_table_rows(
+            admitted_table_schemas(&application.module_header),
+            rows,
+        )
+        .expect("snapshot row is valid");
+
+        let error = invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            &Environment::new(),
+            application.limits,
+            &mut effects,
+        )
+        .expect_err("insert must fail when its key is already present");
+        assert_eq!(error.code(), "ORNA-EVAL-TABLE-DUPLICATE-KEY");
+        assert!(effects
+            .into_mutations()
+            .expect("failed insert leaves no tentative mutation")
+            .is_empty());
+    }
+
+    #[test]
     fn table_insert_evaluates_key_and_row_defaults_once_into_the_returned_value() {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
@@ -3065,6 +3110,62 @@ mod tests {
             CanonicalValue::decode(mutations[0].value().expect("stored row"))
                 .expect("stored row is canonical"),
             expected
+        );
+    }
+
+    #[test]
+    fn table_upsert_existing_row_does_not_evaluate_insert_defaults() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "core-table-upsert-existing-default-om35q.orna",
+                include_str!("../tests/fixtures/core-table-upsert-existing-default-om35q.orna"),
+                "main",
+            )
+            .expect("existing-upsert fixture should be admitted");
+        let int = |value: i64| {
+            CanonicalValue::new(OvbRaw::Int(value.into())).expect("integer is canonical")
+        };
+        let key = int(1).encode().expect("key is canonical");
+        let existing = CanonicalValue::new(OvbRaw::Map(vec![
+            (OvbRaw::Text("id".into()), OvbRaw::Int(1.into())),
+            (OvbRaw::Text("value".into()), OvbRaw::Int(7.into())),
+        ]))
+        .expect("snapshot row is canonical");
+        let rows = BTreeMap::from([(
+            "Note".to_owned(),
+            vec![(key, existing.encode().expect("row encodes"))],
+        )]);
+        let mut effects = SourceMutationEffectHandler::with_table_rows(
+            admitted_table_schemas(&application.module_header),
+            rows,
+        )
+        .expect("snapshot row is valid")
+        .with_insert_defaults(
+            application.table_insert_defaults.clone(),
+            application.functions.clone(),
+            application.limits,
+        );
+
+        let result = invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            &Environment::new(),
+            application.limits,
+            &mut effects,
+        )
+        .expect("existing upsert must not evaluate the failing insert default");
+        assert_eq!(result, existing);
+        let mutations = effects
+            .into_mutations()
+            .expect("existing upsert should stage a canonical replacement");
+        assert_eq!(mutations.len(), 1);
+        assert!(!mutations[0].is_insert());
+        assert_eq!(
+            CanonicalValue::decode(mutations[0].value().expect("updated row"))
+                .expect("updated row is canonical"),
+            existing
         );
     }
 
