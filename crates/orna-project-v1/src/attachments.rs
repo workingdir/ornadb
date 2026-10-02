@@ -736,6 +736,58 @@ impl PackageResolver {
         Ok(route)
     }
 
+    /// Continues a terminal-pair chain from an exact retained session. The
+    /// first pair uses that session as its handoff root; later pairs continue
+    /// from the preceding pair's newest handoff. The reference does not define
+    /// selecting an older handoff for a chained pair; v1 keeps that explicit
+    /// depth and preserves the displaced terminal route with the new history.
+    /// An empty chain leaves the previous route unchanged.
+    pub fn extend_nested_terminal_pair_chain_from_retained(
+        &self,
+        previous: &ReboundPathResolution,
+        retained_session: usize,
+        replacement_waves: &[[PinnedDatabase; 2]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let Some((first, remaining)) = replacement_waves.split_first() else {
+            return Ok(previous.clone());
+        };
+        let route = self.extend_nested_terminal_pair_from_retained(
+            previous,
+            retained_session,
+            first.clone(),
+        )?;
+        self.extend_nested_terminal_pair_chain(&route, remaining)
+    }
+
+    /// Continues a terminal-pair chain from an exact snapshot in a retained
+    /// wave. The selected route determines the first pair's closure depth;
+    /// subsequent pairs preserve the normal one-depth handoff between waves.
+    /// Invalid wave or snapshot positions return no new route. The reference
+    /// is silent on this selection rule; v1 resolves from the exact snapshot.
+    pub fn extend_nested_terminal_pair_chain_from_wave(
+        &self,
+        previous: &ReboundPathResolution,
+        wave: usize,
+        snapshot: usize,
+        replacement_waves: &[[PinnedDatabase; 2]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let selected_wave = previous
+            .retained_wave(wave)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+        if snapshot >= selected_wave.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+        let retained_session = previous.retained_wave_lengths[..wave]
+            .iter()
+            .sum::<usize>()
+            + snapshot;
+        self.extend_nested_terminal_pair_chain_from_retained(
+            previous,
+            retained_session,
+            replacement_waves,
+        )
+    }
+
     /// Resolves independently rebound paths for sibling parent snapshots.
     /// Each input plan is `(parent, replacements)`; results keep input order
     /// and each route retains its own pre-rebind sessions. No partial batch is
