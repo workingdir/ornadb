@@ -360,10 +360,23 @@ impl BranchMergeTombstoneHistory {
         let Some(expected) = self.next_order else {
             return Err(BranchMergeTombstoneHistoryError::OrderExhausted);
         };
-        if step.order < expected || self.pending_deltas.contains_key(&step.order) {
+        if step.order < expected {
             return Err(BranchMergeTombstoneHistoryError::DuplicateOrStale {
                 order: step.order,
             });
+        }
+        match self.pending_deltas.get(&step.order) {
+            Some(BufferedBranchMergeTombstoneDelta::DepthFragments { .. }) => {
+                return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission {
+                    order: step.order,
+                });
+            }
+            Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => {
+                return Err(BranchMergeTombstoneHistoryError::DuplicateOrStale {
+                    order: step.order,
+                });
+            }
+            None => {}
         }
         if has_duplicate_tombstones_in_wave(&step.ordered_row_tombstones) {
             return Err(BranchMergeTombstoneHistoryError::DuplicateTombstone {
