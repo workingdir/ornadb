@@ -340,6 +340,45 @@ enum BranchMergeTombstoneSubmissionMode {
     DepthFragments,
 }
 
+type PairedRetryPlanSignature = (u64, [u8; 32], Vec<(ObjectId, CanonicalValue)>);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AppliedDepthFragmentRetryTransaction {
+    bindings: Vec<PairedRetryPlanSignature>,
+    recoveries: Vec<BranchMergeDepthFragmentRecovery>,
+    appends: Vec<PairedRetryPlanSignature>,
+}
+
+impl AppliedDepthFragmentRetryTransaction {
+    fn new(
+        bindings: &[SequencedBranchMergePlan],
+        recoveries: &[BranchMergeDepthFragmentRecovery],
+        appends: &[SequencedBranchMergePlan],
+    ) -> Self {
+        let plan_signatures = |steps: &[SequencedBranchMergePlan]| {
+            let mut signatures = steps
+                .iter()
+                .map(|step| {
+                    (
+                        step.order,
+                        paired_plan_retry_identity(&step.plan),
+                        step.ordered_row_tombstones.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            signatures.sort_unstable_by_key(|(order, _, _)| *order);
+            signatures
+        };
+        let mut recoveries = recoveries.to_vec();
+        recoveries.sort_unstable_by_key(|recovery| (recovery.order, recovery.fragment));
+        Self {
+            bindings: plan_signatures(bindings),
+            recoveries,
+            appends: plan_signatures(appends),
+        }
+    }
+}
+
 /// Append-only tombstone history for committed paired merge plans.
 ///
 /// MERGE-1 is silent on tombstone accumulation across committed waves,
@@ -393,7 +432,10 @@ enum BranchMergeTombstoneSubmissionMode {
 /// waves can compare only their tombstone projection because fragment
 /// submissions carry no schema, checkpoint, or row state. Incomplete or
 /// changed cross-mode deltas still return `ConflictingSubmission`; ordinary
-/// submission APIs remain mode-strict.
+/// submission APIs remain mode-strict. A successful combined bind/recovery
+/// transaction records its normalized request, so replaying the same paired
+/// identities and fragment repairs returns no events and cannot duplicate
+/// committed tombstones.
 /// Unrecorded stale order precedes
 /// buffered and retry-mode checks, and mixed-mode conflicts precede
 /// fragment-index or tombstone-content validation.
@@ -409,6 +451,7 @@ pub struct BranchMergeTombstoneHistory {
     committed_modes: BTreeMap<u64, BranchMergeTombstoneSubmissionMode>,
     committed_plan_identities: BTreeMap<u64, [u8; 32]>,
     duplicate_retry_modes: BTreeMap<u64, BranchMergeTombstoneSubmissionMode>,
+    applied_fragment_retry_transactions: Vec<AppliedDepthFragmentRetryTransaction>,
 }
 
 impl BranchMergeTombstoneHistory {
@@ -422,6 +465,7 @@ impl BranchMergeTombstoneHistory {
             committed_modes: BTreeMap::new(),
             committed_plan_identities: BTreeMap::new(),
             duplicate_retry_modes: BTreeMap::new(),
+            applied_fragment_retry_transactions: Vec::new(),
         }
     }
 
@@ -692,15 +736,29 @@ impl BranchMergeTombstoneHistory {
     /// MERGE-1 is silent on composing retry identity binding with fragment
     /// recovery. This v1 policy makes the combined operation all-or-nothing;
     /// callers that need separate transactions can use the constituent APIs.
+    /// A successful equivalent request can be retried: it returns no new
+    /// events and leaves the already-committed result unchanged.
     pub fn bind_depth_fragment_retry_plans_with_recovery(
         &mut self,
         bindings: &[SequencedBranchMergePlan],
         recoveries: &[BranchMergeDepthFragmentRecovery],
         appends: &[SequencedBranchMergePlan],
     ) -> Result<Vec<BranchMergeTombstoneEvent>, BranchMergeTombstoneHistoryError> {
+        let transaction =
+            AppliedDepthFragmentRetryTransaction::new(bindings, recoveries, appends);
+        if self
+            .applied_fragment_retry_transactions
+            .contains(&transaction)
+        {
+            return Ok(Vec::new());
+        }
+
         let mut candidate = self.clone();
         candidate.bind_depth_fragment_retry_plans(bindings)?;
         let released = candidate.recover_depth_merge_fragments_with_appends(recoveries, appends)?;
+        candidate
+            .applied_fragment_retry_transactions
+            .push(transaction);
         *self = candidate;
         Ok(released)
     }
