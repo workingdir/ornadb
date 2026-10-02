@@ -1,0 +1,27 @@
+pub table PlannerStormNestedRebindCaps(id: Int) {
+    outer: Bool,
+    middle: Bool,
+    inner: Bool,
+    sibling: Bool,
+}
+pub fn nested_rebind_caps() = PlannerStormNestedRebindCaps
+    | union(
+        PlannerStormNestedRebindCaps
+            | take(6)
+            | union(
+                PlannerStormNestedRebindCaps
+                    | take(50)
+                    | union(
+                        PlannerStormNestedRebindCaps | take(90) | filter(row => row.inner),
+                        PlannerStormNestedRebindCaps | take(90) | filter(row => row.inner),
+                        PlannerStormNestedRebindCaps | take(90) | filter(row => row.inner)
+                    )
+                    | take(100)
+                    | filter(row => row.middle),
+                PlannerStormNestedRebindCaps | take(50) | filter(row => row.middle),
+                PlannerStormNestedRebindCaps | take(50) | filter(row => row.middle)
+            )
+            | take(100)
+            | filter(row => row.outer),
+        PlannerStormNestedRebindCaps | take(20) | filter(row => row.sibling)
+    );
