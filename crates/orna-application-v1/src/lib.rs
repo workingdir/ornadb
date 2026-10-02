@@ -1396,19 +1396,23 @@ impl EffectHandler for SourceMutationEffectHandler {
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 };
                 let key = self.key_from_row(schema, patch)?;
-                let row = if let Some(existing) = self.current_row(&table, &key)? {
-                    self.patch_row(schema, patch, &existing, true)?
+                if let Some(existing) = self.current_row(&table, &key)? {
+                    let row = self.patch_row(schema, patch, &existing, true)?;
+                    self.record(&table, key.clone(), Some(row.clone()))?;
+                    self.overlay
+                        .entry(table.to_owned())
+                        .or_default()
+                        .insert(key, Some(row.clone()));
+                    Ok(Some(row))
                 } else {
                     self.row_matches_schema(schema, patch)?;
-                    patch.clone()
-                };
-                let key = self.key_from_row(schema, &row)?;
-                self.record(&table, key.clone(), Some(row.clone()))?;
-                self.overlay
-                    .entry(table.to_owned())
-                    .or_default()
-                    .insert(key, Some(row.clone()));
-                Ok(Some(row))
+                    self.record_insert(&table, key.clone(), patch.clone())?;
+                    self.overlay
+                        .entry(table.to_owned())
+                        .or_default()
+                        .insert(key, Some(patch.clone()));
+                    Ok(Some(patch.clone()))
+                }
             }
             "update" => {
                 let [key, patch] = arguments else {
@@ -2676,6 +2680,82 @@ mod tests {
             _ => None,
         });
         assert_eq!(text, Some(orna_foundation_v1::OvbRaw::Text("once".into())));
+    }
+
+    #[test]
+    fn core_table_operations_return_and_stage_documented_row_values() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "core-table-operations-real-bodies-om35q.orna",
+                include_str!("../tests/fixtures/core-table-operations-real-bodies-om35q.orna"),
+                "main",
+            )
+            .expect("core table operations fixture should be admitted");
+
+        let int = |value: i64| {
+            CanonicalValue::new(OvbRaw::Int(value.into())).expect("integer is canonical")
+        };
+        let row = |id: i64, text: &str, quantity: i64| {
+            CanonicalValue::new(OvbRaw::Map(vec![
+                (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
+                (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
+                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+            ]))
+            .expect("row is canonical")
+        };
+        let key = |value: i64| int(value).encode().expect("key is canonical");
+        let initial = row(1, "original", 2);
+        let rows = BTreeMap::from([(
+            "Note".to_owned(),
+            vec![(key(1), initial.encode().expect("row encodes"))],
+        )]);
+        let mut handler = SourceMutationEffectHandler::with_table_rows(
+            admitted_table_schemas(&application.module_header),
+            rows,
+        )
+        .expect("activation snapshot is valid");
+
+        let result = invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            &Environment::new(),
+            application.limits,
+            &mut handler,
+        )
+        .expect("all five operations should evaluate against one candidate snapshot");
+
+        assert_eq!(result, row(4, "upserted", 5));
+        let mutations = handler
+            .into_mutations()
+            .expect("all staged operation results should be valid mutations");
+        assert_eq!(mutations.len(), 6);
+        assert!(mutations[0].is_insert());
+        assert_eq!(
+            CanonicalValue::decode(mutations[0].value().expect("insert row")).unwrap(),
+            row(2, "inserted", 3)
+        );
+        assert_eq!(
+            CanonicalValue::decode(mutations[1].value().expect("updated row")).unwrap(),
+            row(1, "original", 5)
+        );
+        assert_eq!(
+            CanonicalValue::decode(mutations[2].value().expect("upserted row")).unwrap(),
+            row(1, "upserted", 5)
+        );
+        assert!(mutations[3].is_insert());
+        assert_eq!(
+            CanonicalValue::decode(mutations[3].value().expect("upsert insert row")).unwrap(),
+            row(3, "created", 9)
+        );
+        assert_eq!(mutations[4].value(), None);
+        assert_eq!(mutations[5].key(), key(1));
+        assert_eq!(mutations[5].rekey_to(), Some(key(4).as_slice()));
+        assert_eq!(
+            CanonicalValue::decode(mutations[5].value().expect("rekeyed row")).unwrap(),
+            row(4, "upserted", 5)
+        );
     }
 
     #[test]
