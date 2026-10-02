@@ -15,6 +15,10 @@ fn text_value(value: &str) -> CanonicalValue {
     CanonicalValue::new(Raw::Text(value.to_owned())).unwrap()
 }
 
+fn int_value(value: i64) -> CanonicalValue {
+    CanonicalValue::new(Raw::Int(value.into())).unwrap()
+}
+
 fn fixture_root(source: &str, root: &Path) -> String {
     source.replace("ROOT_PATH", &root.to_string_lossy())
 }
@@ -99,6 +103,65 @@ fn sys_filesystem_registry_dispatches_real_reads_writes_lists_and_denials() {
             .unwrap_err()
             .code(),
         "ORNA-EVAL-ERROR"
+    );
+}
+
+#[test]
+fn filesystem_codec_roundtrip_preserves_existing_and_exact_values() {
+    let root = tempfile::tempdir().unwrap();
+    let file_path = root.path().join("value.json");
+    std::fs::write(&file_path, "preserve-me").unwrap();
+    let mut filesystem = FilesystemProvider::new();
+    filesystem.allow_root(root.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem);
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    session
+        .submit(include_str!("fixtures/stdlib-use-encoding-6u13r.orna"))
+        .unwrap();
+    session
+        .submit(include_str!("fixtures/stdlib-use-io-fs-mpk0d.orna"))
+        .unwrap();
+
+    let rejected_overwrite = fixture_root(
+        include_str!("fixtures/stdlib-io-json-write-nonoverwrite-i50o4.orna"),
+        root.path(),
+    );
+    assert_eq!(
+        session
+            .submit_with_sys_host_bindings(&rejected_overwrite, &mut bindings)
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-ERROR"
+    );
+    assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "preserve-me");
+
+    let accepted_overwrite = fixture_root(
+        include_str!("fixtures/stdlib-io-json-write-overwrite-i50o4.orna"),
+        root.path(),
+    );
+    assert_eq!(
+        session.submit_with_sys_host_bindings(&accepted_overwrite, &mut bindings),
+        Ok(Some(CanonicalValue::new(Raw::Null).unwrap()))
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file_path).unwrap(),
+        "9007199254740993"
+    );
+
+    let decoded = fixture_root(
+        include_str!("fixtures/stdlib-io-json-read-decode-i50o4.orna"),
+        root.path(),
+    );
+    assert_eq!(
+        session.submit_with_sys_host_bindings(&decoded, &mut bindings),
+        Ok(Some(int_value(9_007_199_254_740_993)))
+    );
+    assert_eq!(
+        session.submit(include_str!(
+            "fixtures/stdlib-base64-padded-binary-roundtrip-i50o4.orna"
+        )),
+        Ok(Some(text_value("AAECA/8=")))
     );
 }
 
