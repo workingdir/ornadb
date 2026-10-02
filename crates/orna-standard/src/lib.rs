@@ -106,6 +106,10 @@ pub const REFERENCE_STANDARD_ENCODING_ORNA_PATH_V1: &str = "std/encoding/orna.or
 pub const REFERENCE_STANDARD_ENCODING_OVB_PATH_V1: &str = "std/encoding/ovb.orna";
 pub const REFERENCE_STANDARD_ENCODING_JSON_PATH_V1: &str = "std/encoding/json.orna";
 pub const REFERENCE_STANDARD_ENCODING_BASE64_PATH_V1: &str = "std/encoding/base64.orna";
+pub const REFERENCE_STANDARD_NET_PATH_V1: &str = "std/net/main.orna";
+pub const REFERENCE_STANDARD_URL_PATH_V1: &str = "std/url.orna";
+pub const REFERENCE_STANDARD_NET_HTTP_PATH_V1: &str = "std/net/http.orna";
+pub const REFERENCE_STANDARD_NET_WEBSOCKET_PATH_V1: &str = "std/net/websocket.orna";
 pub const REFERENCE_STANDARD_TIME_COMPACT_PATH_V1: &str = "std/time/duration/compact.orna";
 pub const REFERENCE_STANDARD_TIME_CLOCK_PATH_V1: &str = "std/time/duration/clock.orna";
 pub const REFERENCE_STANDARD_TIME_WORDS_PATH_V1: &str = "std/time/duration/words.orna";
@@ -143,6 +147,12 @@ const REFERENCE_STANDARD_ENCODING_JSON_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/encoding/json.orna");
 const REFERENCE_STANDARD_ENCODING_BASE64_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/encoding/base64.orna");
+const REFERENCE_STANDARD_NET_SOURCE_V1: &str = include_str!("../../../stdlib/std/net/main.orna");
+const REFERENCE_STANDARD_URL_SOURCE_V1: &str = include_str!("../../../stdlib/std/url.orna");
+const REFERENCE_STANDARD_NET_HTTP_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/net/http.orna");
+const REFERENCE_STANDARD_NET_WEBSOCKET_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/net/websocket.orna");
 const REFERENCE_STANDARD_TIME_COMPACT_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/time/duration/compact.orna");
 const REFERENCE_STANDARD_TIME_CLOCK_SOURCE_V1: &str =
@@ -167,7 +177,7 @@ const REFERENCE_STANDARD_CONCURRENT_SOURCE_V1: &str =
 /// This is the current source-backed standard boundary. The retained `orna.std/1`–
 /// `orna.std/11` APIs below model older, explicitly versioned snapshots.
 #[must_use]
-pub fn reference_standard_sources_v1() -> [(String, String); 29] {
+pub fn reference_standard_sources_v1() -> [(String, String); 33] {
     [
         (
             REFERENCE_STANDARD_MATH_PATH_V1.into(),
@@ -284,6 +294,22 @@ pub fn reference_standard_sources_v1() -> [(String, String); 29] {
         (
             REFERENCE_STANDARD_ENCODING_BASE64_PATH_V1.into(),
             REFERENCE_STANDARD_ENCODING_BASE64_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_NET_PATH_V1.into(),
+            REFERENCE_STANDARD_NET_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_URL_PATH_V1.into(),
+            REFERENCE_STANDARD_URL_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_NET_HTTP_PATH_V1.into(),
+            REFERENCE_STANDARD_NET_HTTP_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_NET_WEBSOCKET_PATH_V1.into(),
+            REFERENCE_STANDARD_NET_WEBSOCKET_SOURCE_V1.into(),
         ),
     ]
 }
