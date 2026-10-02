@@ -699,9 +699,36 @@ fn table_all_unique_assertion_permits_atomic_publication() {
     );
     assert!(
         runtime
-            .committed_row("Note", &Value::int(8.into()))
-            .is_some()
+        .committed_row("Note", &Value::int(8.into()))
+        .is_some()
     );
+}
+
+#[test]
+fn all_unique_factory_treats_null_as_a_selected_key_value() {
+    let mut unique = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = unique.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-all-unique-optional-keys.orna"
+    )));
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    assert!(unique.committed_row("Account", &Value::int(1.into())).is_some());
+    assert!(unique.committed_row("Account", &Value::int(2.into())).is_some());
+}
+
+#[test]
+fn all_unique_factory_rejects_a_second_null_key_and_rolls_back_both_rows() {
+    let mut duplicate = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = duplicate.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-all-unique-duplicate-null-keys.orna"
+    )));
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+    ));
+    assert_eq!(duplicate.committed_row("Account", &Value::int(1.into())), None);
+    assert_eq!(duplicate.committed_row("Account", &Value::int(2.into())), None);
 }
 
 #[test]
