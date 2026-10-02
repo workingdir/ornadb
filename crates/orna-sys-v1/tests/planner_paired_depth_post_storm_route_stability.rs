@@ -417,6 +417,14 @@ fn unknown_byte_handoffs_retain_prior_stage_output_paths() {
         }
         expected_input_scope.push_str(&format!("/storm{stage}/branch1/limit1"));
         assert_eq!(routes[0].input_scope, expected_input_scope);
+        let (computed_input_scope, computed_output_scope) = routes[0].scope_labels();
+        assert_eq!(computed_input_scope, expected_input_scope);
+        assert_eq!(
+            computed_output_scope,
+            format!("{expected_input_scope}/rebind1/cascade1")
+        );
+        assert_eq!(routes[0].input_scope_label(), expected_input_scope);
+        assert_eq!(routes[0].output_scope_label(), computed_output_scope);
         assert_eq!(
             routes[0].output_scope,
             format!("{expected_input_scope}/rebind1/cascade1")
@@ -436,6 +444,13 @@ fn unknown_byte_handoffs_retain_prior_stage_output_paths() {
         assert_eq!(
             &routes[0].input_path[..expected_prior_outputs.len()],
             expected_prior_outputs
+        );
+        let serialized_route =
+            serde_json::to_value(&routes[0]).expect("real planner handoff route serializes");
+        assert_eq!(serialized_route["input_scope"], expected_input_scope);
+        assert_eq!(
+            serialized_route["output_scope"],
+            format!("{expected_input_scope}/rebind1/cascade1")
         );
 
         let filter = explained
