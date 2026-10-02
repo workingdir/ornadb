@@ -5299,7 +5299,7 @@ fn paired_reproductions_remain_stable_across_alternating_storm_orders() {
 }
 
 #[test]
-fn paired_checkpoint_roots_retain_their_selected_lane_contexts() {
+fn paired_checkpoints_retain_their_selected_lane_contexts() {
     fn collect_snapshot_contexts(ty: &Type, contexts: &mut BTreeSet<String>) {
         match ty {
             Type::Named(name) if name.starts_with("selector:") => {
@@ -5380,13 +5380,19 @@ fn paired_checkpoint_roots_retain_their_selected_lane_contexts() {
         ),
     ] {
         let ty = checkpoints.get(lane).expect("paired lane checkpoint record");
-        let mut actual = BTreeSet::new();
-        collect_snapshot_contexts(ty, &mut actual);
-        assert_eq!(
-            actual,
-            expected.map(str::to_owned).into_iter().collect(),
-            "{lane} root checkpoint must retain its original root, bridge, and leaf selectors"
-        );
+        let Type::Record(depths) = ty else {
+            panic!("{lane} must expose checkpoint depth records");
+        };
+        for depth in ["roots", "bridges", "leaves", "outputs"] {
+            let ty = depths.get(depth).expect("checkpoint depth field");
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(ty, &mut contexts);
+            assert_eq!(
+                contexts,
+                expected.map(str::to_owned).into_iter().collect(),
+                "{lane}.{depth} must preserve every nested snapshot selector"
+            );
+        }
     }
 }
 
