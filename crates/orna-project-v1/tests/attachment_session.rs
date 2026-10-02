@@ -11532,6 +11532,216 @@ fn sibling_terminal_routes_stabilize_across_repeated_post_storm_waves() {
     );
 }
 
+#[test]
+fn paired_terminal_depth_waves_retain_pre_and_between_routes() {
+    let package_source = include_str!("fixtures/attach-package.orna");
+    let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
+    let aliases = [
+        "archive",
+        "archive_copy",
+        "archive_copy_archive",
+        "archive_copy_archive_archive",
+    ];
+    let write = |marker: &str, manifest: Option<&str>, message: &str| {
+        write_package_snapshot(
+            shared_dir.path(),
+            package_source,
+            marker,
+            manifest,
+            message,
+        )
+    };
+    let leaves = ["700", "701", "702", "703", "704"]
+        .into_iter()
+        .map(|marker| write(marker, None, &format!("leaf {marker}")))
+        .collect::<Vec<_>>();
+    let terminal_base_manifest = format!("{} {}\n", aliases[3], leaves[0]);
+    let terminal_base = write(
+        "710",
+        Some(&terminal_base_manifest),
+        "terminal route before pair",
+    );
+    let terminal_left_manifest = format!("{} {}\n", aliases[3], leaves[1]);
+    let terminal_left = write(
+        "711",
+        Some(&terminal_left_manifest),
+        "left terminal pair route",
+    );
+    let terminal_right_manifest = format!("{} {}\n", aliases[3], leaves[2]);
+    let terminal_right = write(
+        "712",
+        Some(&terminal_right_manifest),
+        "right terminal pair route",
+    );
+    let deep_base_manifest = format!("{} {}\n", aliases[2], terminal_base);
+    let deep_base = write("600", Some(&deep_base_manifest), "deep route before storm");
+    let deep_left_manifest = format!("{} {}\n", aliases[2], terminal_base);
+    let deep_left = write("601", Some(&deep_left_manifest), "left deep pair route");
+    let deep_right_manifest = format!("{} {}\n", aliases[2], terminal_base);
+    let deep_right = write("602", Some(&deep_right_manifest), "right deep pair route");
+    let middle_commits = [
+        ("500", "initial left middle"),
+        ("501", "initial right middle"),
+        ("502", "post-storm left middle"),
+        ("503", "post-storm right middle"),
+        ("504", "paired left middle"),
+        ("505", "paired right middle"),
+    ]
+    .into_iter()
+    .map(|(marker, message)| {
+        let manifest = format!("{} {}\n", aliases[1], deep_base);
+        write(marker, Some(&manifest), message)
+    })
+    .collect::<Vec<_>>();
+    let left_parent_manifest = format!("{} {}\n", aliases[0], middle_commits[0]);
+    let left_parent_commit = write("400", Some(&left_parent_manifest), "left sibling root");
+    let right_parent_manifest = format!("{} {}\n", aliases[0], middle_commits[1]);
+    let right_parent_commit = write("401", Some(&right_parent_manifest), "right sibling root");
+
+    let loader = ProjectLoader::default();
+    let resolve_pin = |name: &str, commit: &str| {
+        PinnedDatabase::resolve(
+            name.to_owned(),
+            shared_repository.clone(),
+            commit,
+            loader,
+        )
+        .unwrap()
+    };
+    let resolver = PackageResolver::new(
+        aliases
+            .iter()
+            .map(|alias| ((*alias).to_owned(), shared_repository.clone())),
+        loader,
+    )
+    .unwrap();
+    let assert_pin = |session: &AttachedDatabaseSession, alias: &str, commit: &str| {
+        assert_eq!(
+            session.database(alias).unwrap().pin().commit().as_str(),
+            commit
+        );
+    };
+
+    let mut left_parent = resolver
+        .resolve_for_parent(resolve_pin("app_left", &left_parent_commit))
+        .unwrap();
+    let mut right_parent = resolver
+        .resolve_for_parent(resolve_pin("app_right", &right_parent_commit))
+        .unwrap();
+    left_parent
+        .rebind_database(resolve_pin(aliases[0], &middle_commits[2]))
+        .unwrap();
+    right_parent
+        .rebind_database(resolve_pin(aliases[0], &middle_commits[3]))
+        .unwrap();
+
+    let left_history = resolver
+        .resolve_nested_terminal_pair(
+            &left_parent,
+            [
+                resolve_pin(aliases[0], &middle_commits[4]),
+                resolve_pin(aliases[1], &deep_left),
+            ],
+        )
+        .unwrap();
+    let right_history = resolver
+        .resolve_nested_terminal_pair(
+            &right_parent,
+            [
+                resolve_pin(aliases[0], &middle_commits[5]),
+                resolve_pin(aliases[1], &deep_right),
+            ],
+        )
+        .unwrap();
+    for (history, parent_middle, paired_middle, deep) in [
+        (
+            &left_history,
+            &middle_commits[2],
+            &middle_commits[4],
+            &deep_left,
+        ),
+        (
+            &right_history,
+            &middle_commits[3],
+            &middle_commits[5],
+            &deep_right,
+        ),
+    ] {
+        let initial_wave = history.retained_wave(0).unwrap();
+        assert_eq!(initial_wave.len(), 2);
+        assert_pin(&initial_wave[0], aliases[0], parent_middle);
+        assert_pin(&initial_wave[1], aliases[0], paired_middle);
+        assert_pin(&initial_wave[1], aliases[1], &deep_base);
+        assert_pin(history.final_session(), aliases[1], deep);
+        assert_pin(history.final_session(), aliases[2], &terminal_base);
+    }
+
+    let left_terminal_pair = [
+        resolve_pin(aliases[2], &terminal_left),
+        resolve_pin(aliases[3], &leaves[3]),
+    ];
+    let right_terminal_pair = [
+        resolve_pin(aliases[2], &terminal_right),
+        resolve_pin(aliases[3], &leaves[4]),
+    ];
+    let terminal_pair_wave = resolver
+        .extend_sibling_terminal_pair_paths(&[
+            (&left_history, &left_terminal_pair),
+            (&right_history, &right_terminal_pair),
+        ])
+        .unwrap();
+    assert_eq!(terminal_pair_wave.routes().len(), 2);
+    for (route, terminal, prior_leaf, final_leaf, terminal_marker, leaf_marker) in [
+        (
+            &terminal_pair_wave.routes()[0],
+            &terminal_left,
+            &leaves[1],
+            &leaves[3],
+            "711",
+            "701",
+        ),
+        (
+            &terminal_pair_wave.routes()[1],
+            &terminal_right,
+            &leaves[2],
+            &leaves[4],
+            "712",
+            "702",
+        ),
+    ] {
+        let terminal_wave = route.retained_wave(1).unwrap();
+        assert_eq!(terminal_wave.len(), 2);
+        assert_pin(&terminal_wave[0], aliases[2], &terminal_base);
+        assert_module_route(&terminal_wave[0], "archive_copy_archive.orna", "= 710");
+        assert_pin(&terminal_wave[1], aliases[3], prior_leaf);
+        assert_pin(&terminal_wave[1], aliases[2], terminal);
+        assert_module_route(&terminal_wave[1], "main.orna", &format!("= {terminal_marker}"));
+        assert_module_route(
+            &terminal_wave[1],
+            "archive_copy_archive_archive.orna",
+            &format!("= {leaf_marker}"),
+        );
+        assert_pin(route.final_session(), aliases[3], final_leaf);
+    }
+    assert_pin(left_history.final_session(), aliases[2], &terminal_base);
+    assert_pin(right_history.final_session(), aliases[2], &terminal_base);
+
+    let failed_pair = [
+        resolve_pin(aliases[2], &terminal_right),
+        resolve_pin("unavailable", &leaves[4]),
+    ];
+    let failed_batch = resolver.extend_sibling_terminal_pair_paths(&[
+        (&left_history, &left_terminal_pair),
+        (&right_history, &failed_pair),
+    ]);
+    assert!(matches!(
+        failed_batch,
+        Err(AttachmentError::AttachmentNotFound)
+    ));
+    assert_pin(left_history.final_session(), aliases[2], &terminal_base);
+    assert_pin(right_history.final_session(), aliases[2], &terminal_base);
+}
+
 fn assert_module_route(session: &AttachedDatabaseSession, path: &str, source_marker: &str) {
     assert!(
         session

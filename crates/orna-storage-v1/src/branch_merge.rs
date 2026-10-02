@@ -256,6 +256,15 @@ pub struct SequencedBranchMergePlan {
     pub ordered_row_tombstones: Vec<(ObjectId, CanonicalValue)>,
 }
 
+/// One incomplete paired depth wave and the replacement fragments to apply
+/// during an atomic recovery transaction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeDepthWaveRecovery {
+    pub order: u64,
+    pub fragment_count: usize,
+    pub fragments: BTreeMap<usize, Vec<(ObjectId, CanonicalValue)>>,
+}
+
 /// One exact-key tombstone event retained in committed paired history.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeTombstoneEvent {
@@ -343,6 +352,11 @@ enum BranchMergeTombstoneSubmissionMode {
 /// Multiple wave restarts can be applied as one transaction: the batch is
 /// normalized by lineage order, and any invalid member leaves every wave and
 /// queued append unchanged.
+/// A recovery batch may also include new whole-plan appends, which are applied
+/// after the restarts and participate in the same all-or-nothing transaction.
+/// Recovery can include replacement fragments as well; restarts, appends, and
+/// fragment submissions commit together, with released events returned only
+/// after the entire transaction succeeds.
 /// Unrecorded stale order precedes
 /// buffered and retry-mode checks, and mixed-mode conflicts precede
 /// fragment-index or tombstone-content validation.
@@ -588,6 +602,71 @@ impl BranchMergeTombstoneHistory {
         }
         *self = candidate;
         Ok(())
+    }
+
+    /// Atomically restarts incomplete depth waves and adds whole-plan appends
+    /// to the resulting queue. Appends are processed in ascending lineage
+    /// order after wave validation. If any restart or append fails, neither
+    /// the wave replacements nor any earlier append in this batch is retained.
+    /// Existing queued appends remain in place throughout the transaction.
+    pub fn restart_depth_merge_waves_with_appends(
+        &mut self,
+        restarts: &[(u64, usize)],
+        appends: &[SequencedBranchMergePlan],
+    ) -> Result<(), BranchMergeTombstoneHistoryError> {
+        let mut candidate = self.clone();
+        candidate.restart_depth_merge_waves(restarts)?;
+
+        let mut appends = appends.to_vec();
+        appends.sort_unstable_by_key(|step| step.order);
+        for step in &appends {
+            candidate.append(step)?;
+        }
+
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Atomically recovers multiple incomplete depth waves with replacement
+    /// fragments and adds whole-plan appends to the same lineage queue.
+    /// Wave restarts and appends are normalized by lineage order; fragments
+    /// within each wave are applied by fragment index. Any invalid restart,
+    /// append, or replacement fragment leaves the original history unchanged,
+    /// including events that a partial attempt would otherwise release.
+    pub fn recover_depth_merge_waves_with_appends(
+        &mut self,
+        recoveries: &[BranchMergeDepthWaveRecovery],
+        appends: &[SequencedBranchMergePlan],
+    ) -> Result<Vec<BranchMergeTombstoneEvent>, BranchMergeTombstoneHistoryError> {
+        let restarts = recoveries
+            .iter()
+            .map(|recovery| (recovery.order, recovery.fragment_count))
+            .collect::<Vec<_>>();
+        let mut candidate = self.clone();
+        candidate.restart_depth_merge_waves(&restarts)?;
+
+        let mut appends = appends.to_vec();
+        appends.sort_unstable_by_key(|step| step.order);
+        for step in &appends {
+            candidate.append(step)?;
+        }
+
+        let mut recoveries = recoveries.to_vec();
+        recoveries.sort_unstable_by_key(|recovery| recovery.order);
+        let mut released = Vec::new();
+        for recovery in &recoveries {
+            for (fragment, tombstones) in &recovery.fragments {
+                released.extend(candidate.submit_depth_merge_fragment(
+                    recovery.order,
+                    *fragment,
+                    recovery.fragment_count,
+                    tombstones,
+                )?);
+            }
+        }
+
+        *self = candidate;
+        Ok(released)
     }
 
     fn release_contiguous(&mut self) -> Vec<BranchMergeTombstoneEvent> {

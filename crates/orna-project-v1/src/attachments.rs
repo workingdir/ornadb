@@ -520,6 +520,7 @@ impl PackageResolver {
         Ok(ReboundPathResolution {
             final_session,
             retained_sessions: retained,
+            retained_wave_lengths: vec![1],
         })
     }
 
@@ -542,10 +543,27 @@ impl PackageResolver {
             retained_sessions.append(&mut retained);
             current = next;
         }
+        let retained_wave_lengths = if retained_sessions.is_empty() {
+            Vec::new()
+        } else {
+            vec![retained_sessions.len()]
+        };
         Ok(ReboundPathResolution {
             final_session: current,
             retained_sessions,
+            retained_wave_lengths,
         })
+    }
+
+    /// Resolves two ordered terminal-depth replacements as one atomic wave.
+    /// The two prior sessions remain together in `retained_wave(0)`, so the
+    /// pre-pair and between-depth routes can both be reopened independently.
+    pub fn resolve_nested_terminal_pair(
+        &self,
+        parent: &AttachedDatabaseSession,
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        self.resolve_nested_rebind_path(parent, &replacements)
     }
 
     /// Continues a resolved rebind path with another wave of replacements.
@@ -559,13 +577,31 @@ impl PackageResolver {
     ) -> Result<ReboundPathResolution, AttachmentError> {
         let extension =
             self.resolve_nested_rebind_path(previous.final_session(), replacements)?;
-        let (final_session, mut retained_sessions) = extension.into_parts();
+        let ReboundPathResolution {
+            final_session,
+            mut retained_sessions,
+            retained_wave_lengths: extension_wave_lengths,
+        } = extension;
         let mut all_retained = previous.retained_sessions.clone();
         all_retained.append(&mut retained_sessions);
+        let mut retained_wave_lengths = previous.retained_wave_lengths.clone();
+        retained_wave_lengths.extend(extension_wave_lengths);
         Ok(ReboundPathResolution {
             final_session,
             retained_sessions: all_retained,
+            retained_wave_lengths,
         })
+    }
+
+    /// Extends a post-storm route with two ordered terminal-depth rebinds.
+    /// The prior history stays intact and the new pair is exposed together in
+    /// the last retained wave. A failure leaves `previous` unchanged.
+    pub fn extend_nested_terminal_pair(
+        &self,
+        previous: &ReboundPathResolution,
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        self.extend_nested_rebind_path(previous, &replacements)
     }
 
     /// Resolves independently rebound paths for sibling parent snapshots.
@@ -618,6 +654,22 @@ impl PackageResolver {
         Ok(SiblingRebindResolution { routes })
     }
 
+    /// Applies one ordered terminal-depth pair to each sibling route. Every
+    /// branch retains its own two pre-rebind snapshots, input order is stable,
+    /// and no partial sibling batch is returned on failure.
+    pub fn extend_sibling_terminal_pair_paths(
+        &self,
+        paths: &[(&ReboundPathResolution, &[PinnedDatabase; 2])],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, replacements)| {
+                self.extend_nested_terminal_pair(previous, (**replacements).clone())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
     /// Repeats one identical rebind path across a completed sibling batch.
     /// Each branch extends from its own terminal session and keeps its earlier
     /// route snapshots; the returned batch preserves sibling order.
@@ -660,6 +712,7 @@ impl PackageResolver {
 pub struct ReboundPathResolution {
     final_session: AttachedDatabaseSession,
     retained_sessions: Vec<AttachedDatabaseSession>,
+    retained_wave_lengths: Vec<usize>,
 }
 
 impl ReboundPathResolution {
@@ -671,6 +724,15 @@ impl ReboundPathResolution {
     /// Snapshots retained before each replacement, in path order.
     pub fn retained_sessions(&self) -> &[AttachedDatabaseSession] {
         &self.retained_sessions
+    }
+
+    /// Snapshots retained by one resolution wave, in the order they were
+    /// captured. The reference fixes exact historical pins but does not define
+    /// how paired rebind snapshots are grouped; v1 keeps each call's boundary.
+    pub fn retained_wave(&self, wave: usize) -> Option<&[AttachedDatabaseSession]> {
+        let length = *self.retained_wave_lengths.get(wave)?;
+        let start = self.retained_wave_lengths[..wave].iter().sum::<usize>();
+        self.retained_sessions.get(start..start + length)
     }
 
     /// Takes ownership of the final closure and every retained route snapshot.

@@ -123,6 +123,7 @@ fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
     let stages = vec![
         top_level_stage("first-stage", &[120, 60], [20, 40]),
         top_level_stage("post-storm-stage", &[96, 48], [16, 32]),
+        top_level_stage("third-stage", &[72, 36], [12, 24]),
     ];
     let explained = explain_query_with_disjunct_storm_branch_limit_chains(&query(), &stages, &[])
         .expect("paired-depth routes are emitted across both storm stages");
@@ -136,7 +137,11 @@ fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
 
     let first_routes = routes_for_stage(&explained, 1);
     let post_storm_routes = routes_for_stage(&explained, 2);
-    for routes in [first_routes, post_storm_routes] {
+    let third_stage_routes = routes_for_stage(&explained, 3);
+    assert!(first_routes.iter().all(|route| {
+        route.input_scope.starts_with("root/") && route.output_scope.starts_with("root/")
+    }));
+    for routes in [first_routes, post_storm_routes, third_stage_routes] {
         assert_eq!(
             routes.iter().map(|route| route.depth).collect::<Vec<_>>(),
             vec![1, 1, 2, 2]
@@ -206,6 +211,31 @@ fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
             &route.input_path[..post_storm_prefix.len()],
             post_storm_prefix
         );
+        assert!(route.input_scope.starts_with("root/storm1/output/storm2/"));
+        assert!(route.output_scope.starts_with("root/storm1/output/storm2/"));
+    }
+    let third_stage_prefix = [
+        PlanByteCapScopeSegment::StormStage { index: 1 },
+        PlanByteCapScopeSegment::StormStageOutput { index: 1 },
+        PlanByteCapScopeSegment::StormStage { index: 2 },
+        PlanByteCapScopeSegment::StormStageOutput { index: 2 },
+        PlanByteCapScopeSegment::StormStage { index: 3 },
+    ];
+    for route in third_stage_routes {
+        assert_eq!(
+            &route.input_path[..third_stage_prefix.len()],
+            third_stage_prefix
+        );
+        assert_eq!(
+            &route.output_path[..third_stage_prefix.len()],
+            third_stage_prefix
+        );
+        assert!(route
+            .input_scope
+            .starts_with("root/storm1/output/storm2/output/storm3/"));
+        assert!(route
+            .output_scope
+            .starts_with("root/storm1/output/storm2/output/storm3/"));
     }
     assert!(
         post_storm_routes[2]
@@ -218,7 +248,7 @@ fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
             .contains(&PlanByteCapScopeSegment::NestedStormOutput { index: 1 })
     );
 
-    for stage in 1..=2 {
+    for stage in 1..=3 {
         let serialized_filter = serialized["nodes"]
             .as_array()
             .unwrap()
