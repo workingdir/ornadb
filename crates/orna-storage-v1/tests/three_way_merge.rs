@@ -20372,6 +20372,56 @@ fn paired_mixed_mode_priority_survives_completed_depth_restore_waves() {
 }
 
 #[test]
+fn paired_append_keeps_mixed_mode_priority_after_wave_release() {
+    let fixture_key = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .find(|row| row.key == string("a/child/deep"))
+        .expect("the in-crate depth fixture supplies a tombstone key")
+        .key
+        .clone();
+    let whole_plan = SequencedBranchMergePlan {
+        order: 0,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: vec![(id(1), fixture_key)],
+    };
+
+    let mut fragment_history = BranchMergeTombstoneHistory::new(0);
+    assert_eq!(
+        fragment_history
+            .submit_depth_merge_fragment(0, 0, 1, &whole_plan.ordered_row_tombstones)
+            .unwrap()
+            .len(),
+        1,
+    );
+    let before_conflict = fragment_history.clone();
+    assert_eq!(
+        fragment_history.append(&whole_plan),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 0 }),
+        "append checks committed mode before returning its strict order error",
+    );
+    assert_eq!(fragment_history, before_conflict);
+
+    let mut whole_plan_history = BranchMergeTombstoneHistory::new(0);
+    whole_plan_history.append(&whole_plan).unwrap();
+    let before_stale = whole_plan_history.clone();
+    assert_eq!(
+        whole_plan_history.append(&whole_plan),
+        Err(BranchMergeTombstoneHistoryError::OutOfOrder {
+            expected: 1,
+            actual: 0,
+        }),
+        "same-mode append replays preserve the strict append ordering contract",
+    );
+    assert_eq!(whole_plan_history, before_stale);
+}
+
+#[test]
 fn paired_depth_storm_tombstone_history_stabilizes_across_restore_waves() {
     let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
         .split("\n\n")
