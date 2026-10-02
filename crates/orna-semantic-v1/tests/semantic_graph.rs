@@ -4393,6 +4393,32 @@ fn paired_depth_storm_reproductions_keep_nested_pin_consistency() {
 }
 
 #[test]
+fn paired_depth_storm_reproductions_reject_cross_lane_terminal_mixing() {
+    let source = include_str!("fixtures/historical-paired-depth-storm-rebind-reproduction-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-depth-storm-rebind-reproduction-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "left and right terminal pins must remain distinct after cross-depth reproduction: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
