@@ -6111,6 +6111,15 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
             );
         }
 
+        // Carry the whole accumulated set across the reconnect pair before this
+        // owner is handed off, including the oldest and newest completed pairs.
+        replay_durable_status_snapshots_reverse(
+            &mut host,
+            current_attachment,
+            &snapshots,
+            &mut sequence,
+            &mut application,
+        );
         current_owner = replacement;
         drop(host);
     }
