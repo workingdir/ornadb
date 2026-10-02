@@ -8310,6 +8310,76 @@ fn tuple_checkpoint_map_promotion_stops_at_width_drift() {
 }
 
 #[test]
+fn tuple_checkpoint_compaction_fold_preserves_slot_pin_identity() {
+    let source = include_str!("fixtures/historical-tuple-checkpoint-cross-slot-fold.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-tuple-checkpoint-cross-slot-fold.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "compaction must reject a fold that invents cross-slot pin identities: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("tuple_checkpoint_cross_slot_compaction_fold"))
+        .expect("tuple checkpoint cross-slot fold fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["tuple_checkpoint_cross_slot_compaction_fold"].ty
+    else {
+        panic!("tuple checkpoint fold proof must return computed values");
+    };
+    let Type::Record(values) = result.as_ref() else {
+        panic!("tuple checkpoint fold proof must expose saved and folded values");
+    };
+
+    let slot_maps = |name: &str| {
+        let value = values.get(name).expect("computed checkpoint value");
+        assert_canonical_snapshot_context_maps(value);
+        let Type::List(element) = value else {
+            panic!("{name} must remain a checkpoint list: {value:?}");
+        };
+        let Type::Tuple(slots) = element.as_ref() else {
+            panic!("{name} must retain its tuple element: {element:?}");
+        };
+        slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                assert!(!contexts.is_empty(), "{name} must retain actual selector values");
+                contexts
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let expected = vec![
+        BTreeSet::from(["selector:HEAD~20".into()]),
+        BTreeSet::from(["selector:HEAD~21".into()]),
+    ];
+    assert_eq!(slot_maps("saved"), expected, "saved tuple pins stay slot-local");
+    assert_eq!(
+        slot_maps("folded"),
+        expected,
+        "a rejected width fold must not union opposite-slot pins"
+    );
+}
+
+#[test]
 fn pinned_callable_map_width_rebind_preserves_computed_values() {
     let source = include_str!("fixtures/historical-pinned-map-width-rebind-values.orna");
     let parsed = orna_syntax_v1::parse_module(source);
