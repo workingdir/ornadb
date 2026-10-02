@@ -1,0 +1,19 @@
+if true {
+    let unknown_operand = sys.MaintenanceJob
+        | filter(job => job.id >= 8);
+    let nested_two = unknown_operand
+        | union(unknown_operand);
+    let nested_three = nested_two
+        | union(unknown_operand);
+    let nested_four = nested_three
+        | union(unknown_operand);
+
+    sys.Storage
+        | filter(storage => storage.id >= 7)
+        | filter(storage => storage.id == 99)
+        | union(nested_four)
+        | filter(job => job.id >= 10)
+        | filter(job => job.id == 99)
+        | exists(job => true)
+        |? (failure => failure.code)
+} else { 0 }

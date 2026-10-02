@@ -384,10 +384,11 @@ enum BranchMergeTombstoneSubmissionMode {
 /// paired result at an accepted order returns `AppendRetryMismatch`. A
 /// recovery append may also match a complete depth-fragment delta at that
 /// same order, independent of fragment count or boundaries, provided the
-/// batch does not replace fragments at that order. Because fragment
-/// submissions carry no schema, checkpoint, or row state, this cross-mode
-/// case can compare only the tombstone projection. Incomplete or changed
-/// cross-mode deltas still return `ConflictingSubmission`; ordinary
+/// batch does not replace fragments at that order. A caller with the paired
+/// plan can bind its full identity to a complete fragment wave; unbound legacy
+/// waves can compare only their tombstone projection because fragment
+/// submissions carry no schema, checkpoint, or row state. Incomplete or
+/// changed cross-mode deltas still return `ConflictingSubmission`; ordinary
 /// submission APIs remain mode-strict.
 /// Unrecorded stale order precedes
 /// buffered and retry-mode checks, and mixed-mode conflicts precede
@@ -570,6 +571,70 @@ impl BranchMergeTombstoneHistory {
         };
         fragments.insert(fragment, tombstones.to_vec());
         Ok(self.release_contiguous())
+    }
+
+    /// Associates a complete paired result with an already-complete depth
+    /// fragment wave at the same order. This preserves the schema, checkpoint,
+    /// row, and tombstone identity that fragments cannot carry by themselves,
+    /// so an equivalent recovery append can be deduplicated across uneven
+    /// fragment boundaries without accepting a different paired result.
+    ///
+    /// The wave may still be pending behind an earlier lineage gap or may
+    /// already be committed. Incomplete, missing, conflicting, or tombstone-
+    /// mismatched waves return [`BranchMergeTombstoneHistoryError::ConflictingSubmission`]
+    /// without changing history. Rebinding the same identity is idempotent.
+    /// MERGE-1 does not specify this cross-mode recovery case; this v1 policy
+    /// uses the full paired retry identity when a caller supplies it and keeps
+    /// tombstone-projection matching for legacy unbound fragment waves.
+    pub fn bind_depth_fragment_retry_plan(
+        &mut self,
+        step: &SequencedBranchMergePlan,
+    ) -> Result<(), BranchMergeTombstoneHistoryError> {
+        let order = step.order;
+        let planned_tombstones = step.plan.ordered_row_tombstones();
+        if has_duplicate_tombstones_in_wave(&planned_tombstones)
+            || !same_tombstone_encoding_delta(&planned_tombstones, &step.ordered_row_tombstones)
+        {
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+        }
+
+        let existing = match self.pending_deltas.get(&order) {
+            Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
+                fragment_count,
+                fragments,
+            }) if fragments.len() == *fragment_count => {
+                Some(fragments.values().flatten().cloned().collect::<Vec<_>>())
+            }
+            _ if self.committed_modes.get(&order)
+                == Some(&BranchMergeTombstoneSubmissionMode::DepthFragments) => Some(
+                    self.events
+                        .iter()
+                        .filter(|event| event.order == order)
+                        .map(|event| (event.table, event.key.clone()))
+                        .collect::<Vec<_>>(),
+                ),
+            _ => None,
+        };
+        let Some(existing) = existing else {
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+        };
+        if !same_tombstone_encoding_delta(&existing, &step.ordered_row_tombstones) {
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+        }
+
+        let identity = paired_plan_retry_identity(&step.plan);
+        let identities = if self.committed_modes.get(&order)
+            == Some(&BranchMergeTombstoneSubmissionMode::DepthFragments)
+        {
+            &mut self.committed_plan_identities
+        } else {
+            &mut self.pending_plan_identities
+        };
+        if identities.get(&order).is_some_and(|previous| *previous != identity) {
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+        }
+        identities.insert(order, identity);
+        Ok(())
     }
 
     /// Restarts an incomplete depth wave after its split plan has been
@@ -776,7 +841,21 @@ impl BranchMergeTombstoneHistory {
             })
             .or_else(|| self.duplicate_retry_modes.get(&step.order).copied());
         if existing_mode == Some(BranchMergeTombstoneSubmissionMode::DepthFragments) {
-            if !replaces_same_order && !has_duplicate_tombstones_in_wave(&step.ordered_row_tombstones) {
+            let plan_tombstones = step.plan.ordered_row_tombstones();
+            let identity = self
+                .pending_plan_identities
+                .get(&step.order)
+                .or_else(|| self.committed_plan_identities.get(&step.order));
+            if !replaces_same_order
+                && !has_duplicate_tombstones_in_wave(&step.ordered_row_tombstones)
+                && identity.is_none_or(|_| {
+                    !has_duplicate_tombstones_in_wave(&plan_tombstones)
+                        && same_tombstone_encoding_delta(
+                            &plan_tombstones,
+                            &step.ordered_row_tombstones,
+                        )
+                })
+            {
                 let existing = match self.pending_deltas.get(&step.order) {
                     Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
                         fragment_count,
@@ -793,9 +872,18 @@ impl BranchMergeTombstoneHistory {
                         ),
                     _ => None,
                 };
-                if existing.as_ref().is_some_and(|existing| {
-                    same_tombstone_delta(existing, &step.ordered_row_tombstones)
-                }) {
+                let tombstones_match = existing.as_ref().is_some_and(|existing| {
+                    if identity.is_some() {
+                        same_tombstone_encoding_delta(existing, &step.ordered_row_tombstones)
+                    } else {
+                        same_tombstone_delta(existing, &step.ordered_row_tombstones)
+                    }
+                });
+                if tombstones_match
+                    && identity.is_none_or(|identity| {
+                        *identity == paired_plan_retry_identity(&step.plan)
+                    })
+                {
                     return Ok(());
                 }
             }
@@ -902,6 +990,14 @@ impl BranchMergeTombstoneHistory {
                 order: recovery.order,
             });
         }
+        if self.pending_plan_identities.contains_key(&recovery.order) {
+            let accepted = fragments.values().flatten().cloned().collect::<Vec<_>>();
+            if !same_tombstone_encoding_delta(&accepted, &combined) {
+                return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission {
+                    order: recovery.order,
+                });
+            }
+        }
         if let Some(other_order) = self.pending_duplicate_order(recovery.order, &combined) {
             return Err(concurrent_duplicate_error(recovery.order, other_order));
         }
@@ -933,12 +1029,10 @@ impl BranchMergeTombstoneHistory {
             let delta = self.pending_deltas.remove(&order).expect("ready delta is buffered");
             let mode = delta.submission_mode();
             self.duplicate_retry_modes.remove(&order);
-            if mode == BranchMergeTombstoneSubmissionMode::WholePlan {
-                let identity = self
-                    .pending_plan_identities
-                    .remove(&order)
-                    .expect("whole-plan identity is buffered with its tombstone delta");
+            if let Some(identity) = self.pending_plan_identities.remove(&order) {
                 self.committed_plan_identities.insert(order, identity);
+            } else if mode == BranchMergeTombstoneSubmissionMode::WholePlan {
+                unreachable!("whole-plan identity is buffered with its tombstone delta");
             }
             let mut tombstones = match delta {
                 BufferedBranchMergeTombstoneDelta::WholePlan(tombstones) => tombstones,
@@ -1129,6 +1223,18 @@ fn same_tombstone_delta(
             right.iter().any(|(other_table, other_key)| {
                 table == other_table && same_primary_key(key, other_key)
             })
+        })
+}
+
+fn same_tombstone_encoding_delta(
+    left: &[(ObjectId, CanonicalValue)],
+    right: &[(ObjectId, CanonicalValue)],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().all(|(table, key)| {
+            right
+                .iter()
+                .any(|(other_table, other_key)| table == other_table && key == other_key)
         })
 }
 
