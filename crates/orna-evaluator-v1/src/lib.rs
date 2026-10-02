@@ -9320,6 +9320,53 @@ mod tests {
     }
 
     #[test]
+    fn relation_plan_pushes_ordered_cascade_through_zero_drop_unknown_union_storm() {
+        let left_first = Value::Bool(true);
+        let right_map = Value::Int(7.into());
+        let right_first = Value::Bool(false);
+        let outer_first = Value::Bool(false);
+        let outer_second = Value::Bool(true);
+        let left = RelationPlan::new("Known".into())
+            .with_stage(RelationStage::Filter(vec![left_first.clone()]));
+        let unknown_left = RelationPlan::new("UnknownLeft".into())
+            .with_stage(RelationStage::Map(right_map.clone()));
+        let unknown_right = RelationPlan::new("UnknownRight".into())
+            .with_stage(RelationStage::Filter(vec![right_first.clone()]));
+        let plan = RelationPlan::union(left, RelationPlan::union(unknown_left, unknown_right))
+            .with_stage(RelationStage::Drop(0))
+            .with_stage(RelationStage::Filter(vec![outer_first.clone()]))
+            .with_stage(RelationStage::Filter(vec![outer_second.clone()]))
+            .with_stage(RelationStage::Take(2));
+
+        assert_eq!(plan.stages, vec![RelationStage::Take(2)]);
+        let (left, right) = plan.source_union.as_ref().unwrap();
+        assert_eq!(
+            left.stages,
+            vec![RelationStage::Filter(vec![
+                left_first,
+                outer_first.clone(),
+                outer_second.clone(),
+            ])]
+        );
+        let (unknown_left, unknown_right) = right.source_union.as_ref().unwrap();
+        assert_eq!(
+            unknown_left.stages,
+            vec![
+                RelationStage::Map(right_map),
+                RelationStage::Filter(vec![outer_first.clone(), outer_second.clone()]),
+            ]
+        );
+        assert_eq!(
+            unknown_right.stages,
+            vec![RelationStage::Filter(vec![
+                right_first,
+                outer_first,
+                outer_second,
+            ])]
+        );
+    }
+
+    #[test]
     fn relation_scan_checks_cancellation_before_each_page() {
         let functions = Functions::new();
         let cancellation = CancellationToken::new();
