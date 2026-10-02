@@ -1,0 +1,18 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn nested_factory(anchor: sys.SnapshotRef) =
+    (intermediate_pin: sys.SnapshotRef) =>
+        (next_pin: sys.SnapshotRef) => {
+            anchor: factory_at(anchor),
+            intermediate: factory_at(intermediate_pin),
+            selected: factory_at(next_pin),
+        };
+
+pub fn nested_selector_pins_do_not_collapse_to_the_outer_call_site() {
+    let nested = nested_factory(sys.snapshot("HEAD~80"));
+    [
+        nested(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~20")).selected,
+        nested(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~21")).selected,
+    ]
+}
