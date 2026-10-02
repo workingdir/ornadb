@@ -765,6 +765,12 @@ impl PlanByteCapHandoffRoute {
             byte_cap_scope_path_label(&self.output_path),
         )
     }
+
+    /// Returns the canonical input-to-output scope label for this route.
+    pub fn paired_scope_label(&self) -> String {
+        let (input_scope, output_scope) = self.scope_labels();
+        format!("{input_scope}=>{output_scope}")
+    }
 }
 
 impl Serialize for PlanByteCapHandoffRoute {
@@ -2993,10 +2999,9 @@ fn rebind_byte_cap_handoff_routes_by_depth_text(
         let output_bytes = route
             .output_bytes
             .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
-        let (input_scope, output_scope) = route.scope_labels();
         by_depth.entry(route.depth).or_default().push(format!(
-            "{}=>{}={input_bytes}>{output_bytes}",
-            input_scope, output_scope
+            "{}={input_bytes}>{output_bytes}",
+            route.paired_scope_label()
         ));
     }
     by_depth
@@ -3834,6 +3839,10 @@ mod byte_cap_handoff_route_scope_tests {
 
         let input_scope = "root/storm1/storm_stage_output1/storm2/branch1/limit1";
         let output_scope = format!("{input_scope}/rebind1/cascade1");
+        assert_eq!(
+            stale_route.paired_scope_label(),
+            format!("{input_scope}=>{output_scope}")
+        );
         assert_eq!(
             rebind_byte_cap_handoff_scopes_by_depth_text(&[stale_route.clone()]),
             format!("2:{output_scope}=?>?")

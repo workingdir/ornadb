@@ -17246,6 +17246,11 @@ fn type_contains_valid_pinned_snapshot_identity(ty: &Type) -> bool {
 /// local rebinding; permit it when the only differences are selector contexts
 /// on pinned snapshot values. Saved aliases retain their original identities.
 fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
+    if !checkpoint_snapshot_maps_are_valid(expected)
+        || !checkpoint_snapshot_maps_are_valid(actual)
+    {
+        return false;
+    }
     if expected == actual {
         return true;
     }
@@ -19250,11 +19255,13 @@ mod tests {
         assert!(is_snapshot_context_map_shape(&first));
         assert!(types_match(&first, &first));
         assert!(types_match(&first, &Type::Bottom));
+        assert!(pinned_snapshot_shape_matches(&first, &first));
         assert!(type_contains_pinned_snapshot_identity(&first));
         assert!(pinned_snapshot_rebind_compatible(&first, &second));
         assert!(!is_snapshot_context_map_shape(&malformed));
         assert!(!types_match(&malformed, &malformed));
         assert!(!types_match(&malformed, &Type::Bottom));
+        assert!(!pinned_snapshot_shape_matches(&malformed, &malformed));
         assert!(!type_contains_pinned_snapshot_identity(&malformed));
         assert!(!pinned_snapshot_rebind_compatible(&malformed, &second));
         assert!(!is_snapshot_context_map_shape(&singleton));
@@ -19267,6 +19274,10 @@ mod tests {
         assert!(!checkpoint_snapshot_maps_are_valid(&nested_malformed));
         assert!(!types_match(&nested_malformed, &nested_malformed));
         assert!(!types_match(&nested_malformed, &Type::Bottom));
+        assert!(!pinned_snapshot_shape_matches(
+            &nested_malformed,
+            &nested_malformed
+        ));
         assert!(!type_contains_pinned_snapshot_identity(&nested_malformed));
         assert!(merge_list_element_types(&nested_malformed, &nested_malformed).is_none());
         assert!(merge_checkpoint_field_map(&nested_malformed, &nested_malformed).is_none());
