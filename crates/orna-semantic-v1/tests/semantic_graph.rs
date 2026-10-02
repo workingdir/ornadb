@@ -2709,6 +2709,10 @@ fn dynamic_selector_occurrences_from_distinct_modules_do_not_alias() {
 }
 
 fn historical_nested_callable_catalogue() -> Catalogue {
+    historical_nested_callable_catalogue_with_other(false)
+}
+
+fn historical_nested_callable_catalogue_with_other(include_other: bool) -> Catalogue {
     let continuation = Type::Function {
         parameters: Vec::new(),
         parameter_names: Some(Vec::new()),
@@ -2735,7 +2739,26 @@ fn historical_nested_callable_catalogue() -> Catalogue {
         enum_variants: BTreeSet::new(),
         table_schema: None,
     };
-    let symbols = BTreeMap::from([("factory".to_owned(), factory)]);
+    let mut symbols = BTreeMap::from([("factory".to_owned(), factory)]);
+    if include_other {
+        symbols.insert(
+            "other".into(),
+            Symbol {
+                kind: SymbolKind::Function,
+                ty: Type::Function {
+                    parameters: Vec::new(),
+                    parameter_names: Some(Vec::new()),
+                    default_parameters: BTreeSet::new(),
+                    result: Box::new(Type::Text),
+                },
+                public: true,
+                effects: EffectSummary::default(),
+                generic_parameters: Vec::new(),
+                enum_variants: BTreeSet::new(),
+                table_schema: None,
+            },
+        );
+    }
     Catalogue::authoritative_fixture().with_historical_modules([ModuleHeader {
         namespace: Namespace(vec!["energy".into()]),
         exports: symbols.clone(),
@@ -2773,6 +2796,4710 @@ fn nested_callables_from_distinct_historical_contexts_cannot_mix() {
             .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
         "{:?}",
         result.diagnostics
+    );
+}
+
+#[test]
+fn dynamic_nested_callable_context_survives_decomposition() {
+    let source = include_str!("fixtures/historical-dynamic-nested-closure-context.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-dynamic-nested-closure-context.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
+fn nested_callables_from_distinct_dynamic_contexts_cannot_mix() {
+    let source = include_str!("fixtures/historical-dynamic-nested-closure-context-mixed.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-dynamic-nested-closure-context-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn calls_to_dynamic_pin_helpers_keep_call_site_identity() {
+    let source = include_str!("fixtures/historical-dynamic-helper-closure-context-mixed.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-dynamic-helper-closure-context-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn reassigned_dynamic_selector_keeps_helper_closure_pins_distinct() {
+    let source = include_str!("fixtures/historical-dynamic-helper-reassignment.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-dynamic-helper-reassignment.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn dynamic_helper_literal_head_context_matches_symbolic_head() {
+    let source = include_str!("fixtures/historical-dynamic-helper-head-context.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-dynamic-helper-head-context.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
+fn resolved_snapshot_identity_survives_specialized_pinned_closure_chains() {
+    let source = include_str!("fixtures/historical-pinned-closure-chain-same.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-same.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
+fn different_resolved_snapshots_stay_separate_across_pinned_closure_chains() {
+    let source = include_str!("fixtures/historical-pinned-closure-chain-distinct.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-distinct.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "distinct pins should not compose: {:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn rebinding_snapshot_pin_preserves_old_and_specializes_new_closure_chains() {
+    let source = include_str!("fixtures/historical-pinned-closure-chain-rebinding.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-rebinding.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
+fn rebound_snapshot_closures_from_distinct_pins_cannot_mix() {
+    let source = include_str!("fixtures/historical-pinned-closure-chain-rebinding-mixed.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-rebinding-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "closures from different sides of a pin rebind should not compose: {:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn pinned_closure_identities_survive_parameter_rebinding_chains() {
+    let source = include_str!("fixtures/historical-pinned-closure-chain-parameter-rebinding.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-parameter-rebinding.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn each_call_specializes_all_stages_of_a_pinned_rebinding_chain() {
+    let source = include_str!("fixtures/historical-pinned-closure-chain-parameter-rebinding.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-parameter-rebinding.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn closure_contexts_from_parameter_rebinding_stages_stay_distinct() {
+    let source = include_str!(
+        "fixtures/historical-pinned-closure-chain-parameter-rebinding-mixed.orna"
+    );
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-parameter-rebinding-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "closures from separate parameter rebinding stages should not compose: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn closure_contexts_from_distinct_rebinding_chain_calls_do_not_merge() {
+    let source = include_str!(
+        "fixtures/historical-pinned-closure-chain-parameter-rebinding-mixed.orna"
+    );
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-parameter-rebinding-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "closures from distinct rebinding-chain calls should not compose: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn pinned_closure_identity_survives_rebinding_chain_storms() {
+    let source = include_str!("fixtures/historical-pinned-closure-chain-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn pinned_closure_chain_storms_reject_cross_stage_and_cross_call_mixing() {
+    let source = include_str!("fixtures/historical-pinned-closure-chain-storm-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-storm-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "closures from separate storm stages and call sites should not compose: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn closure_rebinding_retains_identity_through_nested_callables() {
+    let source = include_str!("fixtures/historical-pinned-closure-chain-closure-rebind.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-closure-rebind.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn closure_rebinding_does_not_merge_old_and_new_pin_contexts() {
+    let source = include_str!(
+        "fixtures/historical-pinned-closure-chain-closure-rebind-mixed.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-closure-rebind-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "closures rebound across distinct pins should not compose: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn closure_rebinding_rejects_a_changed_callable_shape() {
+    let source = include_str!(
+        "fixtures/historical-pinned-closure-chain-closure-rebind-shape-mismatch.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-closure-rebind-shape-mismatch.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue_with_other(true),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "closures with different callable contracts should not rebind: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn closure_identity_returns_with_its_pin_after_rebinding_round_trips() {
+    // The reference requires exact SnapshotRef pinning but does not specify
+    // whether repeated local closure rebinds create a new identity. Identity
+    // follows the pinned snapshot value, so returning to a prior pin rejoins it.
+    let source = include_str!(
+        "fixtures/historical-pinned-closure-chain-rebind-round-trip.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-rebind-round-trip.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn closure_identity_round_trips_do_not_merge_intermediate_pins() {
+    let source = include_str!(
+        "fixtures/historical-pinned-closure-chain-rebind-round-trip-mixed.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-rebind-round-trip-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "round-tripping to an older pin must not merge an intermediate closure: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn closure_bundle_rebinding_retains_component_pin_identities() {
+    let source = include_str!("fixtures/historical-pinned-closure-bundle-rebind.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-bundle-rebind.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn closure_bundle_round_trips_keep_intermediate_pins_distinct() {
+    let source = include_str!(
+        "fixtures/historical-pinned-closure-bundle-rebind-mixed.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-bundle-rebind-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        1,
+        "bundle rebinds should succeed while distinct pin values stay incompatible: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn structural_closure_rebind_storm_preserves_every_stage_pin() {
+    let source = include_str!("fixtures/historical-pinned-closure-bundle-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-bundle-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn structural_closure_rebind_storm_keeps_nonadjacent_pins_distinct() {
+    let source = include_str!(
+        "fixtures/historical-pinned-closure-bundle-storm-mixed.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-bundle-storm-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        1,
+        "eight rebind stages must remain distinct after returning to the first pin: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn nested_pins_keep_identity_across_rebind_chain_storms() {
+    let source = include_str!("fixtures/historical-pinned-closure-nested-chain-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-nested-chain-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "nested captured pins and round-trip aliases should match their own stages: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn nested_pins_do_not_merge_intermediate_chain_stages_after_round_trip() {
+    let source = include_str!("fixtures/historical-pinned-closure-nested-chain-storm-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-nested-chain-storm-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "nested closures from distinct intermediate pins must remain incompatible: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn nested_selector_pins_are_specialized_at_the_inner_call_across_rebind_storms() {
+    let source = include_str!("fixtures/historical-pinned-closure-nested-selector-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-nested-selector-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "each nested call must specialize its own pin while retaining the anchor pin: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn nested_selector_pins_at_one_call_site_remain_distinct() {
+    let source =
+        include_str!("fixtures/historical-pinned-closure-nested-selector-storm-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-nested-selector-storm-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "distinct pins passed to a nested callable at one source call site must not alias: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn structural_rebind_storms_preserve_each_nested_component_pin() {
+    let source = include_str!("fixtures/historical-pinned-closure-structural-pin-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-structural-pin-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "all structural rebind stages and the round trip should retain component pins: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn structural_rebind_round_trip_does_not_merge_intermediate_nested_pins() {
+    let source = include_str!("fixtures/historical-pinned-closure-structural-pin-storm-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-structural-pin-storm-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "an intermediate continuation pin must remain distinct after the round trip: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn nested_callable_rebind_cascades_preserve_each_pin_owner() {
+    let source = include_str!("fixtures/historical-pinned-closure-rebind-cascade.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-rebind-cascade.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "curried closure rebinds must preserve the root, bridge, and leaf pins independently: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn nested_callable_cascade_keeps_intermediate_bridge_pins_distinct() {
+    let source = include_str!("fixtures/historical-pinned-closure-rebind-cascade-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-rebind-cascade-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "a bridge closure from an intermediate cascade stage must not merge with the returned stage: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn structural_storms_preserve_curried_cascade_pins_at_every_depth() {
+    let source = include_str!("fixtures/historical-pinned-closure-cascade-structural-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-cascade-structural-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "structurally rebound cascades at every record depth must retain their pin owners: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn structural_storm_round_trip_keeps_nested_cascade_pins_distinct() {
+    let source = include_str!("fixtures/historical-pinned-closure-cascade-structural-storm-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-cascade-structural-storm-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "a nested cascade from an intermediate structural stage must stay distinct after round trip: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn structural_storms_preserve_identity_through_chained_rebind_cascades() {
+    let source = include_str!("fixtures/historical-pinned-closure-chained-cascade-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chained-cascade-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "nested closure identities must survive structural storms and successive outer/inner rebinds: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn chained_rebind_round_trips_keep_intermediate_structural_pins_distinct() {
+    let source = include_str!("fixtures/historical-pinned-closure-chained-cascade-storm-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chained-cascade-storm-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "an intermediate bridge pin must not merge with the returned structure after chained rebinds: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn shared_ancestor_pin_survives_sibling_cascade_rebind_storms() {
+    let source = include_str!("fixtures/historical-pinned-closure-sibling-cascade-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-sibling-cascade-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "sibling cascades must share the same ancestor pin while retaining their own child pins: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn sibling_bridge_pins_do_not_merge_after_structural_round_trip() {
+    let source = include_str!("fixtures/historical-pinned-closure-sibling-cascade-storm-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-sibling-cascade-storm-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "sibling cascades with distinct bridge pins must remain incompatible after structural round trip: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn tuple_structural_storms_preserve_chained_pin_identity() {
+    let source = include_str!("fixtures/historical-pinned-closure-tuple-chain-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-tuple-chain-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "tuple-nested root, bridge, and leaf pins must survive structural storm rebinding at saved stages: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn tuple_structural_round_trip_keeps_chain_pins_from_distinct_stages() {
+    let source = include_str!("fixtures/historical-pinned-closure-tuple-chain-storm-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-tuple-chain-storm-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "tuple-nested chain closures from distinct storm stages must retain distinct pins after round trip: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn tuple_pin_slots_keep_identity_through_structural_storm_rebinds() {
+    let source = include_str!("fixtures/historical-tuple-pins-structural-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-tuple-pins-structural-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "nested tuple pin slots must keep their selector identities across structural storm rebinds: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn tuple_pin_rebind_stages_remain_distinct_after_round_trip() {
+    let source = include_str!("fixtures/historical-tuple-pins-structural-storm-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-tuple-pins-structural-storm-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "pins from the intermediate and returned tuple stages must remain distinct: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn tuple_pin_cascades_keep_identity_through_storm_rebinds() {
+    let source = include_str!("fixtures/historical-tuple-pin-cascade-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-tuple-pin-cascade-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "tuple-held root, bridge, and leaf pins must survive chained storm and closure rebinds: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn tuple_pin_cascade_stages_do_not_merge_after_round_trip() {
+    let source = include_str!("fixtures/historical-tuple-pin-cascade-storm-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-tuple-pin-cascade-storm-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "closure cascades built from intermediate and returned tuple pin stages must stay distinct: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn tuple_pin_cascade_depths_stay_isolated_through_chained_storm_rebinds() {
+    let source = include_str!("fixtures/historical-tuple-pin-cascade-depth-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-tuple-pin-cascade-depth-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "nested tuple pin cascades must preserve each depth and storm stage independently: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn tuple_pin_cascade_depths_reject_cross_depth_mixing_after_storm_rebinds() {
+    let source = include_str!("fixtures/historical-tuple-pin-cascade-depth-storm-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-tuple-pin-cascade-depth-storm-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "cascade results rooted at separate tuple depths must remain type-distinct: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn tuple_pin_cascade_paired_depths_preserve_each_side_through_storm_rebinds() {
+    let source = include_str!("fixtures/historical-tuple-pin-cascade-paired-depth-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-tuple-pin-cascade-paired-depth-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired tuple cascades must preserve left and right pins at every depth and saved storm stage: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn concurrent_tuple_pin_callbacks_keep_paired_depth_identities_after_rebind() {
+    let source = include_str!("fixtures/historical-concurrent-paired-tuple-pin-rebind.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-concurrent-paired-tuple-pin-rebind.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "same-lane callbacks must retain their tuple pin through paired-depth rebind and restore: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("concurrent_paired_tuple_pins_survive_rebind")
+        })
+        .expect("concurrent paired tuple-pin fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["concurrent_paired_tuple_pins_survive_rebind"]
+        .ty
+    else {
+        panic!("paired callback proof must be a function");
+    };
+    let Type::Record(streams) = result.as_ref() else {
+        panic!("paired callback proof must expose its concurrent checkpoints");
+    };
+    let pin_type = |name: &str| {
+        let Type::Stream(element) = streams.get(name).expect("parallel result field") else {
+            panic!("{name} must be a parallel stream");
+        };
+        assert!(
+            matches!(element.as_ref(), Type::Applied { base, .. } if base == "sys.HistoricalCallable"),
+            "{name} must carry the captured historical callable identity: {element:?}"
+        );
+        element.as_ref()
+    };
+
+    // The reference requires one common callback result type, but does not
+    // define an identity merge for captured historical pins. Keep each lane
+    // and depth exact so a rebind cannot make unrelated concurrent callbacks
+    // type-compatible.
+    assert_ne!(pin_type("restored_left_root"), pin_type("restored_right_root"));
+    assert_ne!(pin_type("restored_left_leaf"), pin_type("restored_right_leaf"));
+    assert_ne!(pin_type("restored_left_root"), pin_type("restored_left_leaf"));
+    assert_ne!(pin_type("rebound_left_root"), pin_type("restored_left_root"));
+    assert_ne!(pin_type("rebound_right_leaf"), pin_type("restored_right_leaf"));
+}
+
+#[test]
+fn concurrent_tuple_pin_callbacks_reject_cross_lane_rebind_mixing() {
+    let source = include_str!("fixtures/historical-concurrent-paired-tuple-pin-rebind-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-concurrent-paired-tuple-pin-rebind-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "parallel callbacks restored from opposite tuple lanes must not collapse to one pin identity: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn concurrent_callback_tuples_preserve_pin_identity_across_rebind() {
+    let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-concurrent-tuple-callback-rebind.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "tuple-stored callbacks must keep their captured pins through rebinding and concurrent use: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_callback_pins_survive_tuple_rebind")
+        })
+        .expect("tuple-stored concurrent callback fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_callback_pins_survive_tuple_rebind"]
+        .ty
+    else {
+        panic!("tuple callback proof must be a function");
+    };
+    let Type::Record(streams) = result.as_ref() else {
+        panic!("tuple callback proof must expose concurrent checkpoint streams");
+    };
+    let pin_type = |name: &str| {
+        let Type::Stream(element) = streams.get(name).expect("parallel result field") else {
+            panic!("{name} must be a parallel stream");
+        };
+        assert!(
+            matches!(element.as_ref(), Type::Applied { base, .. } if base == "sys.HistoricalCallable"),
+            "{name} must preserve its captured historical callable: {element:?}"
+        );
+        element.as_ref()
+    };
+
+    assert_ne!(pin_type("saved_left_root"), pin_type("saved_right_root"));
+    assert_ne!(pin_type("saved_left_leaf"), pin_type("saved_right_leaf"));
+    assert_ne!(pin_type("saved_left_root"), pin_type("saved_left_leaf"));
+    assert_ne!(pin_type("saved_left_root"), pin_type("rebound_left_root"));
+    assert_ne!(pin_type("saved_right_leaf"), pin_type("rebound_right_leaf"));
+}
+
+#[test]
+fn sequential_paired_callback_leaf_rebinds_preserve_sibling_pins() {
+    let source = include_str!("fixtures/historical-sequential-paired-callback-leaf-rebinds.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-sequential-paired-callback-leaf-rebinds.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "sequential leaf-lane rebinds must preserve sibling and saved callback pins: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_callback_leaf_rebinds_preserve_siblings")
+        })
+        .expect("sequential paired callback rebind fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_callback_leaf_rebinds_preserve_siblings"]
+        .ty
+    else {
+        panic!("paired callback rebind proof must be a function");
+    };
+    let Type::Record(streams) = result.as_ref() else {
+        panic!("paired callback rebind proof must expose concurrent checkpoints");
+    };
+    let pin_type = |name: &str| {
+        let Type::Stream(element) = streams.get(name).expect("parallel result field") else {
+            panic!("{name} must be a parallel stream");
+        };
+        assert!(
+            matches!(element.as_ref(), Type::Applied { base, .. } if base == "sys.HistoricalCallable"),
+            "{name} must retain its captured pin: {element:?}"
+        );
+        element.as_ref()
+    };
+
+    assert_eq!(pin_type("saved_left_root"), pin_type("middle_left_root"));
+    assert_eq!(pin_type("middle_left_root"), pin_type("final_left_root"));
+    assert_eq!(pin_type("saved_right_root"), pin_type("final_right_root"));
+    assert_ne!(pin_type("saved_left_root"), pin_type("saved_right_root"));
+
+    assert_ne!(pin_type("saved_left_leaf"), pin_type("middle_left_leaf"));
+    assert_eq!(pin_type("saved_right_leaf"), pin_type("middle_right_leaf"));
+    assert_eq!(pin_type("middle_left_leaf"), pin_type("final_left_leaf"));
+    assert_ne!(pin_type("middle_right_leaf"), pin_type("final_right_leaf"));
+    assert_ne!(pin_type("final_left_leaf"), pin_type("final_right_leaf"));
+}
+
+#[test]
+fn sequential_paired_callback_leaf_rebinds_reject_cross_lane_parallel_mix() {
+    let source = include_str!("fixtures/historical-sequential-paired-callback-leaf-rebinds-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-sequential-paired-callback-leaf-rebinds-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "separately rebound tuple leaves from opposite lanes must remain type-distinct: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_shadowed_callbacks_specialize_each_chained_inner_pin() {
+    let source = include_str!("fixtures/historical-paired-shadowed-callback-rebind.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-shadowed-callback-rebind.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_shadowed_callback_rebinds_preserve_inner_pins")
+        })
+        .expect("paired shadowed callback fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_shadowed_callback_rebinds_preserve_inner_pins"]
+        .ty
+    else {
+        panic!("paired shadowed callback proof must be a function");
+    };
+    let Type::Record(streams) = result.as_ref() else {
+        panic!("paired shadowed callback proof must expose concurrent results");
+    };
+    let pin_type = |name: &str| {
+        let Type::Stream(element) = streams.get(name).expect("parallel result field") else {
+            panic!("{name} must be a stream");
+        };
+        element.as_ref()
+    };
+    assert_ne!(
+        pin_type("left_first"),
+        pin_type("left_second"),
+        "each chained invocation must specialize the shadowed inner pin independently"
+    );
+    assert_ne!(pin_type("right_first"), pin_type("right_second"));
+    assert_ne!(pin_type("left_first"), pin_type("right_first"));
+}
+
+#[test]
+fn paired_shadowed_callback_depth_rebinds_preserve_selected_pins() {
+    let source = include_str!("fixtures/historical-paired-shadowed-callback-depth.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-shadowed-callback-depth.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_shadowed_callback_depth_rebinds_preserve_selected_pins")
+        })
+        .expect("paired shadowed callback depth fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_shadowed_callback_depth_rebinds_preserve_selected_pins"]
+        .ty
+    else {
+        panic!("paired shadowed callback depth proof must be a function");
+    };
+    let Type::Record(streams) = result.as_ref() else {
+        panic!("paired shadowed callback depth proof must expose concurrent results");
+    };
+    let pin_type = |name: &str| {
+        let Type::Stream(element) = streams.get(name).expect("parallel result field") else {
+            panic!("{name} must be a stream");
+        };
+        element.as_ref()
+    };
+    assert_eq!(pin_type("left_first"), pin_type("left_second"));
+    assert_eq!(pin_type("right_first"), pin_type("right_second"));
+    assert_ne!(pin_type("left_first"), pin_type("right_first"));
+    assert_ne!(pin_type("left_first"), pin_type("rebound_left"));
+    assert_ne!(pin_type("right_first"), pin_type("rebound_right"));
+}
+
+#[test]
+fn paired_shadowed_callback_parameter_contracts_keep_depth_pin_scope() {
+    let source = include_str!("fixtures/historical-paired-shadowed-callback-contract.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+    let nested_callback = Type::Function {
+        parameters: Vec::new(),
+        parameter_names: Some(Vec::new()),
+        default_parameters: BTreeSet::new(),
+        result: Box::new(Type::Applied {
+            base: "sys.HistoricalCallable".into(),
+            arguments: vec![
+                Type::Applied {
+                    base: "sys.SnapshotRefContext".into(),
+                    arguments: vec![Type::Named("selector:parameter:pin".into())],
+                },
+                Type::Function {
+                    parameters: Vec::new(),
+                    parameter_names: Some(Vec::new()),
+                    default_parameters: BTreeSet::new(),
+                    result: Box::new(Type::Int),
+                },
+            ],
+        }),
+    };
+    let parameters = vec![Type::Named("sys.SnapshotRef".into()), nested_callback];
+    let maker = Symbol {
+        kind: SymbolKind::Function,
+        ty: Type::Function {
+            parameters: vec![Type::Named("sys.SnapshotRef".into())],
+            parameter_names: Some(vec!["pin".into()]),
+            default_parameters: BTreeSet::new(),
+            result: Box::new(Type::Function {
+                parameters,
+                parameter_names: Some(vec!["pin".into(), "callback".into()]),
+                default_parameters: BTreeSet::new(),
+                result: Box::new(Type::Text),
+            }),
+        },
+        public: true,
+        effects: EffectSummary::default(),
+        generic_parameters: Vec::new(),
+        enum_variants: BTreeSet::new(),
+        table_schema: None,
+    };
+    let symbols = BTreeMap::from([("maker".to_owned(), maker)]);
+    let catalogue = Catalogue::authoritative_fixture().with_historical_modules([ModuleHeader {
+        namespace: Namespace(vec!["energy".into()]),
+        exports: symbols.clone(),
+        symbols,
+        generic_functions: BTreeMap::new(),
+        prelude_exports: BTreeSet::new(),
+        implicit: true,
+    }]);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-shadowed-callback-contract.orna",
+            source,
+        )],
+        &catalogue,
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_shadowed_callback_contracts_keep_depth_pin_scope")
+        })
+        .expect("paired shadowed callback contract fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_shadowed_callback_contracts_keep_depth_pin_scope"]
+        .ty
+    else {
+        panic!("paired callback contract proof must be a function");
+    };
+    let Type::Tuple(lanes) = result.as_ref() else {
+        panic!("paired callback contract proof must expose its two lanes");
+    };
+    let [left, right] = lanes.as_slice() else {
+        panic!("paired callback contract proof must expose exactly two lanes");
+    };
+    fn callback_pin(maker: &Type) -> &Type {
+        let Type::Applied { base, arguments } = maker else {
+            panic!("historical maker must retain its context wrapper: {maker:?}");
+        };
+        assert_eq!(base, "sys.HistoricalCallable");
+        let [_, Type::Function { parameters, .. }] = arguments.as_slice() else {
+            panic!("historical maker must expose its returned callback: {maker:?}");
+        };
+        let Type::Function {
+            result: callback_result,
+            ..
+        } = &parameters[1]
+        else {
+            panic!("nested callback contract must be a function: {:?}", parameters[1]);
+        };
+        let Type::Applied { base, arguments } = callback_result.as_ref() else {
+            panic!("callback contract result must retain its historical pin");
+        };
+        assert_eq!(base, "sys.HistoricalCallable");
+        let [pin, _] = arguments.as_slice() else {
+            panic!("historical result must carry one pin");
+        };
+        pin
+    }
+    let left_pin = callback_pin(left);
+    let right_pin = callback_pin(right);
+    let expected_shadowed_pin = Type::Applied {
+        base: "sys.SnapshotRefContext".into(),
+        arguments: vec![Type::Named("selector:parameter:pin".into())],
+    };
+    assert_eq!(left_pin, &expected_shadowed_pin);
+    assert_eq!(right_pin, &expected_shadowed_pin);
+}
+
+#[test]
+fn paired_shadowed_callback_depth_rebinds_retain_untouched_lanes() {
+    let source = include_str!("fixtures/historical-paired-shadowed-callback-retention.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-shadowed-callback-retention.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_shadowed_callback_depth_rebinds_retain_untouched_lanes")
+        })
+        .expect("paired shadowed callback retention fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_shadowed_callback_depth_rebinds_retain_untouched_lanes"]
+        .ty
+    else {
+        panic!("paired shadowed callback retention proof must be a function");
+    };
+    let Type::Record(streams) = result.as_ref() else {
+        panic!("paired shadowed callback retention proof must expose concurrent pins");
+    };
+    let pin_type = |name: &str| {
+        let Type::Stream(element) = streams.get(name).expect("parallel result field") else {
+            panic!("{name} must be a stream");
+        };
+        let Type::Applied { base, arguments } = element.as_ref() else {
+            panic!("{name} must retain a historical callable pin: {element:?}");
+        };
+        assert_eq!(base, "sys.HistoricalCallable");
+        let [pin, _] = arguments.as_slice() else {
+            panic!("historical callable must expose its pin: {arguments:?}");
+        };
+        pin
+    };
+    assert_eq!(pin_type("saved_left"), pin_type("middle_left"));
+    assert_eq!(pin_type("saved_right"), pin_type("middle_right"));
+    assert_eq!(pin_type("middle_left"), pin_type("final_left"));
+    assert_eq!(pin_type("middle_right"), pin_type("final_right"));
+    assert_ne!(pin_type("final_left"), pin_type("final_right"));
+    assert_eq!(
+        pin_type("final_left"),
+        &Type::Applied {
+            base: "sys.SnapshotRefContext".into(),
+            arguments: vec![Type::Named("selector:HEAD~100".into())],
+        }
+    );
+    assert_eq!(
+        pin_type("final_right"),
+        &Type::Applied {
+            base: "sys.SnapshotRefContext".into(),
+            arguments: vec![Type::Named("selector:HEAD~90".into())],
+        }
+    );
+}
+
+#[test]
+fn paired_shadowed_callback_depths_retain_each_lane() {
+    let source = include_str!("fixtures/historical-paired-shadowed-callback-depth-capture.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-shadowed-callback-depth-capture.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("paired_shadowed_callback_depths_retain_each_lane"))
+        .expect("paired callback depth capture fixture module");
+    let Type::Function { result, .. } = &module.symbols["paired_shadowed_callback_depths_retain_each_lane"].ty else {
+        panic!("paired callback depth capture proof must be a function");
+    };
+    let Type::Record(streams) = result.as_ref() else {
+        panic!("paired callback depth capture must expose its lanes");
+    };
+    let pin_type = |name: &str| {
+        let Type::Stream(element) = streams.get(name).expect("parallel result field") else {
+            panic!("{name} must be a stream");
+        };
+        let Type::Applied { base, arguments } = element.as_ref() else {
+            panic!("{name} must preserve its historical pin: {element:?}");
+        };
+        assert_eq!(base, "sys.HistoricalCallable");
+        let [pin, _] = arguments.as_slice() else {
+            panic!("historical callable must expose its pin: {arguments:?}");
+        };
+        pin
+    };
+    let expected = |selector: &str| Type::Applied {
+        base: "sys.SnapshotRefContext".into(),
+        arguments: vec![Type::Named(format!("selector:{selector}"))],
+    };
+    assert_eq!(pin_type("saved_left"), &expected("HEAD~80"));
+    assert_eq!(pin_type("saved_right"), &expected("HEAD~70"));
+    assert_eq!(pin_type("middle_left"), &expected("HEAD~79"));
+    assert_eq!(pin_type("middle_right"), &expected("HEAD~70"));
+    assert_eq!(pin_type("final_left"), &expected("HEAD~79"));
+    assert_eq!(pin_type("final_right"), &expected("HEAD~69"));
+}
+
+#[test]
+fn paired_shadowed_callback_depth_waves_preserve_capture_identity() {
+    let source = include_str!("fixtures/historical-paired-shadowed-callback-depth-wave.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-shadowed-callback-depth-wave.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired shadowed callback depth waves must keep every captured pin through save, rebind, and restore: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_shadowed_callback_depth_waves_preserve_capture_identity")
+        })
+        .expect("paired shadowed callback depth wave fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_shadowed_callback_depth_waves_preserve_capture_identity"]
+        .ty
+    else {
+        panic!("paired callback depth wave proof must be a function");
+    };
+    let Type::Record(streams) = result.as_ref() else {
+        panic!("paired callback depth wave proof must expose captured pins");
+    };
+    let pin_type = |name: &str| {
+        let Type::Stream(element) = streams.get(name).expect("parallel result field") else {
+            panic!("{name} must be a stream");
+        };
+        let Type::Applied { base, arguments } = element.as_ref() else {
+            panic!("{name} must retain its historical callable pin: {element:?}");
+        };
+        assert_eq!(base, "sys.HistoricalCallable");
+        let [pin, _] = arguments.as_slice() else {
+            panic!("historical callable must expose its captured pin: {arguments:?}");
+        };
+        pin
+    };
+    let expected = |selector: &str| Type::Applied {
+        base: "sys.SnapshotRefContext".into(),
+        arguments: vec![Type::Named(format!("selector:{selector}"))],
+    };
+    for (field, selector) in [
+        ("left_old_maker", "HEAD~500"),
+        ("left_old_first", "HEAD~450"),
+        ("left_old_second", "HEAD~400"),
+        ("left_old_third", "HEAD~350"),
+        ("left_restored_maker", "HEAD~500"),
+        ("left_restored_first", "HEAD~450"),
+        ("left_restored_second", "HEAD~400"),
+        ("left_restored_third", "HEAD~350"),
+        ("left_rebound_maker", "HEAD~500"),
+        ("left_rebound_first", "HEAD~449"),
+        ("left_rebound_second", "HEAD~399"),
+        ("left_rebound_third", "HEAD~349"),
+        ("right_old_maker", "HEAD~490"),
+        ("right_old_first", "HEAD~440"),
+        ("right_old_second", "HEAD~390"),
+        ("right_old_third", "HEAD~340"),
+        ("right_rebound_maker", "HEAD~490"),
+        ("right_rebound_first", "HEAD~439"),
+        ("right_rebound_second", "HEAD~389"),
+        ("right_rebound_third", "HEAD~339"),
+    ] {
+        assert_eq!(pin_type(field), &expected(selector), "{field}");
+    }
+    assert_eq!(pin_type("left_old_maker"), pin_type("left_rebound_maker"));
+    assert_ne!(pin_type("left_old_first"), pin_type("left_rebound_first"));
+    assert_ne!(pin_type("left_old_second"), pin_type("left_rebound_second"));
+    assert_ne!(pin_type("left_old_third"), pin_type("left_rebound_third"));
+    assert_ne!(pin_type("left_rebound_maker"), pin_type("right_rebound_maker"));
+    assert_ne!(pin_type("left_rebound_first"), pin_type("right_rebound_first"));
+    assert_ne!(pin_type("left_rebound_second"), pin_type("right_rebound_second"));
+    assert_ne!(pin_type("left_rebound_third"), pin_type("right_rebound_third"));
+}
+
+#[test]
+fn paired_shadowed_callback_depth_waves_reject_cross_lane_capture_mix() {
+    let source = include_str!("fixtures/historical-paired-shadowed-callback-depth-wave-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-shadowed-callback-depth-wave-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "captured pins from opposite shadowed callback waves must remain incompatible: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_tuple_shadow_waves_preserve_local_pin_scope() {
+    let source = include_str!("fixtures/historical-paired-shadowed-tuple-capture-depth-wave.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-shadowed-tuple-capture-depth-wave.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "tuple-destructured shadowed local pins must remain scoped through a callback depth wave: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_tuple_shadow_waves_preserve_local_pin_scope")
+        })
+        .expect("paired tuple shadow wave fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_tuple_shadow_waves_preserve_local_pin_scope"]
+        .ty
+    else {
+        panic!("paired tuple shadow wave proof must be a function");
+    };
+    let Type::Record(streams) = result.as_ref() else {
+        panic!("paired tuple shadow wave proof must expose both lanes");
+    };
+    let pin_type = |name: &str| {
+        let Type::Stream(element) = streams.get(name).expect("parallel result field") else {
+            panic!("{name} must be a stream");
+        };
+        let Type::Applied { base, arguments } = element.as_ref() else {
+            panic!("{name} must retain a historical callable pin: {element:?}");
+        };
+        assert_eq!(base, "sys.HistoricalCallable");
+        let [pin, _] = arguments.as_slice() else {
+            panic!("historical callable must expose its pin: {arguments:?}");
+        };
+        pin
+    };
+    let expected = |selector: &str| Type::Applied {
+        base: "sys.SnapshotRefContext".into(),
+        arguments: vec![Type::Named(format!("selector:{selector}"))],
+    };
+    for (field, selector) in [
+        ("left_selected", "HEAD~450"),
+        ("left_sibling", "HEAD~440"),
+        ("left_terminal", "HEAD~400"),
+        ("right_selected", "HEAD~430"),
+        ("right_sibling", "HEAD~420"),
+        ("right_terminal", "HEAD~390"),
+    ] {
+        assert_eq!(pin_type(field), &expected(selector), "{field}");
+    }
+    assert_ne!(pin_type("left_selected"), pin_type("left_sibling"));
+    assert_ne!(pin_type("left_selected"), pin_type("right_selected"));
+}
+
+#[test]
+fn paired_nested_tuple_shadow_waves_keep_each_capture_depth_pin() {
+    let source = include_str!("fixtures/historical-paired-nested-tuple-shadow-depth-waves.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-tuple-shadow-depth-waves.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "nested tuple pins must stay scoped to their capture depth: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("paired_nested_tuple_shadow_waves"))
+        .expect("nested tuple shadow wave fixture module");
+    let Type::Function { result, .. } = &module.symbols["paired_nested_tuple_shadow_waves"].ty
+    else {
+        panic!("nested tuple shadow wave proof must be a function");
+    };
+    let Type::Record(lanes) = result.as_ref() else {
+        panic!("nested tuple shadow wave proof must expose both lanes");
+    };
+    let expected = |selector: &str| Type::Applied {
+        base: "sys.SnapshotRefContext".into(),
+        arguments: vec![Type::Named(format!("selector:{selector}"))],
+    };
+    for (lane_name, fields) in [
+        (
+            "left",
+            [
+                ("outer_selected", "HEAD~450"),
+                ("outer_left", "HEAD~440"),
+                ("outer_right", "HEAD~430"),
+                ("middle_selected", "HEAD~380"),
+                ("middle_left", "HEAD~370"),
+                ("middle_right", "HEAD~360"),
+                ("terminal_selected", "HEAD~320"),
+                ("terminal_left", "HEAD~310"),
+                ("terminal_right", "HEAD~300"),
+            ],
+        ),
+        (
+            "right",
+            [
+                ("outer_selected", "HEAD~420"),
+                ("outer_left", "HEAD~410"),
+                ("outer_right", "HEAD~400"),
+                ("middle_selected", "HEAD~350"),
+                ("middle_left", "HEAD~340"),
+                ("middle_right", "HEAD~330"),
+                ("terminal_selected", "HEAD~290"),
+                ("terminal_left", "HEAD~280"),
+                ("terminal_right", "HEAD~270"),
+            ],
+        ),
+    ] {
+        let Type::Record(streams) = lanes.get(lane_name).expect("paired lane") else {
+            panic!("{lane_name} must expose its pin streams");
+        };
+        for (field, selector) in fields {
+            let Type::Stream(element) = streams.get(field).expect("parallel result field") else {
+                panic!("{lane_name}.{field} must be a stream");
+            };
+            let Type::Applied { base, arguments } = element.as_ref() else {
+                panic!("{lane_name}.{field} must retain a historical callable pin");
+            };
+            assert_eq!(base, "sys.HistoricalCallable");
+            let [pin, _] = arguments.as_slice() else {
+                panic!("historical callable must expose its pin: {arguments:?}");
+            };
+            assert_eq!(pin, &expected(selector), "{lane_name}.{field}");
+        }
+    }
+}
+
+#[test]
+fn malformed_nested_tuple_does_not_partially_bind_snapshot_identities() {
+    let source = include_str!("fixtures/historical-nested-tuple-pin-shape-mismatch.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-nested-tuple-pin-shape-mismatch.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "an incompatible nested tuple must be rejected"
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("malformed_nested_tuple_call_keeps_pin_binders_symbolic")
+        })
+        .expect("nested tuple mismatch fixture module");
+    let ty = &module.symbols["malformed_nested_tuple_call_keeps_pin_binders_symbolic"].ty;
+    let summary = format!("{ty:?}");
+    assert!(
+        !summary.contains("HEAD~450") && !summary.contains("HEAD~440"),
+        "mismatched nested tuple leaves must not partially specialize pin contexts: {summary}"
+    );
+}
+
+#[test]
+fn nested_tuple_error_wave_keeps_paired_capture_pins_atomic() {
+    let source = include_str!("fixtures/historical-paired-nested-tuple-error-wave.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-tuple-error-wave.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_UNRESOLVED),
+        "the recovery wave must retain its unresolved-name diagnostic"
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_nested_tuple_error_wave_atomicity")
+        })
+        .expect("paired tuple error-wave fixture module");
+    let ty = &module.symbols["paired_nested_tuple_error_wave_atomicity"].ty;
+    let summary = format!("{ty:?}");
+    assert!(
+        !summary.contains("HEAD~380") && !summary.contains("HEAD~370"),
+        "an error in a later nested tuple leaf must not specialize earlier pins in that wave: {summary}"
+    );
+    assert!(
+        summary.contains("HEAD~450") && summary.contains("HEAD~320"),
+        "the failed wave must preserve earlier and later valid capture depths: {summary}"
+    );
+}
+
+#[test]
+fn nested_tuple_bottom_wave_keeps_paired_capture_pins_atomic() {
+    let source = include_str!("fixtures/historical-paired-nested-tuple-bottom-wave.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-tuple-bottom-wave.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "the non-returning tuple leaf is statically compatible: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_nested_tuple_bottom_wave_atomicity")
+        })
+        .expect("paired tuple bottom-wave fixture module");
+    let ty = &module.symbols["paired_nested_tuple_bottom_wave_atomicity"].ty;
+    let summary = format!("{ty:?}");
+    assert!(
+        !summary.contains("HEAD~380") && !summary.contains("HEAD~370"),
+        "a non-returning nested tuple argument must not specialize sibling pins: {summary}"
+    );
+    assert!(
+        summary.contains("HEAD~450")
+            && summary.contains("HEAD~320")
+            && summary.contains("HEAD~350")
+            && summary.contains("HEAD~290"),
+        "skipping the incomplete wave must preserve prior, later, and opposite-lane pins: {summary}"
+    );
+}
+
+#[test]
+fn nested_tuple_bottom_terminal_wave_keeps_paired_capture_pins_atomic() {
+    let source = include_str!("fixtures/historical-paired-nested-tuple-bottom-wave.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-tuple-bottom-wave.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "the non-returning tuple leaf is statically compatible: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_nested_tuple_bottom_terminal_wave_atomicity")
+        })
+        .expect("paired terminal tuple bottom-wave fixture module");
+    let ty = &module.symbols["paired_nested_tuple_bottom_terminal_wave_atomicity"].ty;
+    let summary = format!("{ty:?}");
+    assert!(
+        !summary.contains("HEAD~320") && !summary.contains("HEAD~310"),
+        "a non-returning leaf in the terminal tuple must not bind earlier siblings: {summary}"
+    );
+    assert!(
+        summary.contains("HEAD~450")
+            && summary.contains("HEAD~380")
+            && summary.contains("HEAD~290"),
+        "the terminal incomplete wave must preserve prior depths and the opposite lane: {summary}"
+    );
+}
+
+#[test]
+fn bottom_terminal_tuple_wave_preserves_each_capture_depth_pin_identity() {
+    let source = include_str!("fixtures/historical-paired-nested-tuple-bottom-wave.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-tuple-bottom-wave.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_nested_tuple_bottom_terminal_depth_identities")
+        })
+        .expect("bottom terminal identity fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_nested_tuple_bottom_terminal_depth_identities"].ty
+    else {
+        panic!("bottom terminal identity proof must be a function");
+    };
+    let Type::Record(lanes) = result.as_ref() else {
+        panic!("bottom terminal identity proof must expose both lanes");
+    };
+    fn pin_type<'a>(lanes: &'a BTreeMap<String, Type>, lane: &str, field: &str) -> &'a Type {
+        let Type::Record(fields) = lanes.get(lane).expect("paired lane") else {
+            panic!("{lane} lane must expose pin streams");
+        };
+        let Type::Stream(element) = fields.get(field).expect("capture depth field") else {
+            panic!("{lane}.{field} must be a stream");
+        };
+        let Type::Applied { base, arguments } = element.as_ref() else {
+            panic!("{lane}.{field} must retain a historical callable");
+        };
+        assert_eq!(base, "sys.HistoricalCallable");
+        let [pin, _] = arguments.as_slice() else {
+            panic!("historical callable must expose its pin: {arguments:?}");
+        };
+        pin
+    }
+    let expected = |selector: &str| Type::Applied {
+        base: "sys.SnapshotRefContext".into(),
+        arguments: vec![Type::Named(format!("selector:{selector}"))],
+    };
+    for (field, selector) in [
+        ("outer_selected", "HEAD~450"),
+        ("outer_left", "HEAD~440"),
+        ("outer_right", "HEAD~430"),
+        ("middle_selected", "HEAD~380"),
+        ("middle_left", "HEAD~370"),
+        ("middle_right", "HEAD~360"),
+    ] {
+        assert_eq!(pin_type(lanes, "left", field), &expected(selector), "left.{field}");
+    }
+    for (field, selector) in [
+        ("outer_selected", "HEAD~420"),
+        ("outer_left", "HEAD~410"),
+        ("outer_right", "HEAD~400"),
+        ("middle_selected", "HEAD~350"),
+        ("middle_left", "HEAD~340"),
+        ("middle_right", "HEAD~330"),
+        ("terminal_selected", "HEAD~290"),
+        ("terminal_left", "HEAD~280"),
+        ("terminal_right", "HEAD~270"),
+    ] {
+        assert_eq!(
+            pin_type(lanes, "right", field),
+            &expected(selector),
+            "right.{field}"
+        );
+    }
+    let summary = format!("{result:?}");
+    assert!(
+        !summary.contains("HEAD~320") && !summary.contains("HEAD~310"),
+        "a failed bottom leaf must not bind any terminal tuple sibling: {summary}"
+    );
+}
+
+#[test]
+fn bottom_cascade_keeps_completed_capture_depth_identities() {
+    let source = include_str!("fixtures/historical-paired-nested-tuple-bottom-wave.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-tuple-bottom-wave.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_nested_tuple_bottom_cascade_identity")
+        })
+        .expect("bottom cascade fixture module");
+    let summary = format!("{:?}", module.symbols["paired_nested_tuple_bottom_cascade_identity"].ty);
+    for selector in [
+        "HEAD~450",
+        "HEAD~440",
+        "HEAD~430",
+        "HEAD~420",
+        "HEAD~410",
+        "HEAD~400",
+        "HEAD~350",
+        "HEAD~340",
+        "HEAD~330",
+    ] {
+        assert!(
+            summary.contains(&format!("selector:{selector}")),
+            "completed capture depth lost {selector}: {summary}"
+        );
+    }
+    for selector in [
+        "HEAD~380",
+        "HEAD~370",
+        "HEAD~360",
+        "HEAD~320",
+        "HEAD~310",
+        "HEAD~290",
+        "HEAD~280",
+        "HEAD~270",
+    ] {
+        assert!(
+            !summary.contains(selector),
+            "incomplete tuple wave leaked {selector}: {summary}"
+        );
+    }
+}
+
+#[test]
+fn concurrent_callback_tuples_reject_cross_lane_identity_mix_after_rebind() {
+    let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-concurrent-tuple-callback-rebind-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "tuple-stored callbacks from opposite paired lanes must keep distinct pins after restore: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn tuple_pin_cascade_paired_depths_reject_cross_pair_mixing_after_storm_rebinds() {
+    let source = include_str!("fixtures/historical-tuple-pin-cascade-paired-depth-storm-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-tuple-pin-cascade-paired-depth-storm-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "paired cascade results from separate pin trees must remain type-distinct: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn tuple_pin_cascade_paired_chains_preserve_every_depth_through_storm_rebinds() {
+    let source = include_str!("fixtures/historical-tuple-pin-cascade-paired-chain-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-tuple-pin-cascade-paired-chain-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired tuple cascade chains must preserve all depth pins through each storm rebind: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn tuple_pin_cascade_paired_chains_reject_cross_chain_mixing_after_storm_rebinds() {
+    let source = include_str!("fixtures/historical-tuple-pin-cascade-paired-chain-storm-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-tuple-pin-cascade-paired-chain-storm-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "cascade results from separate paired chains must remain type-distinct: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_cascade_chains_preserve_root_bridge_and_leaf_pins_through_storm_rebinds() {
+    let source = include_str!("fixtures/historical-paired-cascade-chains-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-cascade-chains-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired root-to-leaf closure chains must preserve each captured pin at every saved storm stage: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_cascade_chains_reject_cross_chain_leaf_mixing_after_storm_rebinds() {
+    let source = include_str!("fixtures/historical-paired-cascade-chains-storm-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-cascade-chains-storm-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "leaf results from separate paired closure chains must remain type-distinct: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_nested_closure_chains_preserve_each_pin_through_storm_rebinds() {
+    let source = include_str!("fixtures/historical-paired-nested-closure-chains-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-closure-chains-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired nested closure chains must preserve root, bridge, and leaf pins through forwarded storm rebinds: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_nested_closure_chains_reject_cross_chain_leaf_mixing() {
+    let source = include_str!("fixtures/historical-paired-nested-closure-chains-storm-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-closure-chains-storm-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "leaf results from separate nested closure chains must remain type-distinct: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_nested_closure_chain_depth_storms_preserve_each_captured_pin() {
+    let source = include_str!("fixtures/historical-paired-nested-closure-chain-depth-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-closure-chain-depth-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired nested closure chains must preserve root pins through the first storm and captured bridge pins through the second: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_nested_closure_chain_depth_storms_reject_cross_chain_leaf_mixing() {
+    let source = include_str!("fixtures/historical-paired-nested-closure-chain-depth-storm-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-closure-chain-depth-storm-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "leaf values captured by opposite sides of the nested closure pair must remain type-distinct: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_nested_chain_rebind_cascades_preserve_each_captured_depth() {
+    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-cascades.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-chain-rebind-cascades.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired root, bridge, and leaf closures must preserve their captured pins through chained rebind cascades: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_nested_chain_rebind_cascades_reject_cross_chain_terminal_mixing() {
+    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-cascades-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-chain-rebind-cascades-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "terminal values from opposite sides of the paired nested chain must remain type-distinct: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_nested_chain_rebind_replays_preserve_captured_pin_identity() {
+    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-replay-stability.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-chain-rebind-replay-stability.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "replaying saved paired closures after nested decoy storms must preserve root, bridge, leaf, and terminal pin identity: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_nested_chain_rebind_replays_reject_cross_chain_terminal_mixing() {
+    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-replay-stability-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-chain-rebind-replay-stability-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "replayed terminal closures from opposite sides of a paired chain must remain type-distinct: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_nested_chain_reproduction_after_depth_storms_preserves_pin_identity() {
+    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-reproduction.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-chain-rebind-reproduction.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "a freshly reproduced paired chain must retain each original root, bridge, leaf, and terminal pin after intervening depth storms: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_nested_chain_reproduction_rejects_cross_chain_terminal_mixing() {
+    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-reproduction-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-chain-rebind-reproduction-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "terminal pins from a reproduced chain must remain distinct across pair sides after depth storms: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_nested_chain_rebind_paths_stay_consistent_across_storm_orders() {
+    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-consistency.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-chain-rebind-consistency.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "direct, restored, and freshly rebuilt paired chains must agree on every captured pin across different depth-storm orders: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_nested_chain_rebind_consistency_keeps_rebuilt_pair_sides_distinct() {
+    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-consistency-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-chain-rebind-consistency-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "a rebuilt right-side terminal must not type-check as the original left-side terminal after storm-order variation: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_nested_chain_reproductions_stay_consistent_at_each_storm_depth() {
+    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-checkpoints.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-chain-rebind-checkpoints.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "fresh paired-chain reproductions after root, bridge, and leaf storms must retain identical pins at every downstream depth: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_nested_chain_reproductions_keep_checkpoint_sides_distinct() {
+    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-checkpoints-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-chain-rebind-checkpoints-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "terminal identities from opposite sides must not merge across reproduction checkpoints: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_depth_storm_reproductions_keep_nested_pin_consistency() {
+    let source = include_str!("fixtures/historical-paired-depth-storm-rebind-reproduction.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-depth-storm-rebind-reproduction.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired sides stormed at different nested depths and in different orders must reproduce the same root, bridge, leaf, and terminal pins: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_depth_storm_reproductions_reject_cross_lane_terminal_mixing() {
+    let source = include_str!("fixtures/historical-paired-depth-storm-rebind-reproduction-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-depth-storm-rebind-reproduction-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "left and right terminal pins must remain distinct after cross-depth reproduction: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_depth_storm_reproductions_preserve_chained_nested_identity() {
+    let source = include_str!("fixtures/historical-paired-depth-storm-chained-reproduction.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-depth-storm-chained-reproduction.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "the reproduced paired chain and its chained follow-up must agree on every captured pin after depth storms: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_depth_storm_chained_reproductions_reject_cross_pair_mixing() {
+    let source = include_str!("fixtures/historical-paired-depth-storm-chained-reproduction-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-depth-storm-chained-reproduction-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "terminal identities in chained follow-ups must remain isolated across the paired reproductions: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_depth_storm_chained_rebinds_preserve_followup_stability() {
+    let source = include_str!("fixtures/historical-paired-depth-storm-chained-rebind-stability.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-depth-storm-chained-rebind-stability.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "restored and freshly reproduced follow-up chains must remain consistent after their own root, bridge, and leaf rebind storms: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_depth_storm_chained_rebinds_reject_followup_pair_mixing() {
+    let source = include_str!("fixtures/historical-paired-depth-storm-chained-rebind-stability-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-depth-storm-chained-rebind-stability-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "follow-up terminal pins must remain distinct across paired rebind storms: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_depth_storm_followup_continuations_preserve_rebind_identity() {
+    let source = include_str!("fixtures/historical-paired-depth-storm-followup-continuation.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-depth-storm-followup-continuation.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "a continuation captured by an original or reproduced follow-up must retain its paired root, bridge, and leaf identities after rebind storms: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_depth_storm_followup_continuations_reject_cross_pair_mixing() {
+    let source = include_str!("fixtures/historical-paired-depth-storm-followup-continuation-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-depth-storm-followup-continuation-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "follow-up continuations from different reproduced sides must retain distinct snapshot identities: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_depth_storm_followup_continuation_chains_remain_consistent() {
+    let source = include_str!("fixtures/historical-paired-depth-storm-followup-continuation-chain.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-depth-storm-followup-continuation-chain.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "terminal follow-up chains captured by original and reproduced continuations must stay consistent through a second paired root, bridge, and leaf storm: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_depth_storm_followup_continuation_chains_reject_cross_pair_mixing() {
+    let source = include_str!("fixtures/historical-paired-depth-storm-followup-continuation-chain-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-depth-storm-followup-continuation-chain-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "terminal follow-up chains from different reproduced sides must retain distinct snapshot identities: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_followup_continuation_checkpoints_verify_nested_storm_rebinds() {
+    let source = include_str!("fixtures/historical-paired-depth-storm-followup-continuation-verification.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-depth-storm-followup-continuation-verification.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "saved and restored roots, bridges, leaves, and terminal values must remain consistent throughout both nested follow-up chains: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_followup_continuation_checkpoints_reject_cross_pair_mixing() {
+    let source = include_str!("fixtures/historical-paired-depth-storm-followup-continuation-verification-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-depth-storm-followup-continuation-verification-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "terminal outputs from different paired follow-up chains must retain distinct snapshot identities: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_continuation_rebind_chains_verify_depth_storms() {
+    let source = include_str!("fixtures/historical-paired-continuation-rebind-chain-verification.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-rebind-chain-verification.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "saved and restored roots, bridges, leaves, and terminal values must remain consistent through a third nested paired continuation chain: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_continuation_rebind_chains_reject_cross_pair_mixing() {
+    let source = include_str!("fixtures/historical-paired-continuation-rebind-chain-verification-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-rebind-chain-verification-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "deepest follow-up outputs from different paired sides must retain distinct snapshot identities: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_continuation_chain_depth_storms_preserve_rebind_stability() {
+    let source = include_str!("fixtures/historical-paired-continuation-chain-storm-stability.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-chain-storm-stability.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired continuation roots, bridges, and leaves must restore their captured identities across repeated depth storms: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_continuation_chain_depth_storms_reject_mixed_lanes() {
+    let source = include_str!("fixtures/historical-paired-continuation-chain-storm-stability-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-chain-storm-stability-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "terminal values from the left and right paired continuation chains must retain distinct identities after restoration: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_continuation_chains_survive_chained_depth_storm_rebinds() {
+    let source = include_str!("fixtures/historical-paired-continuation-chain-depth-storm-rebinds.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-chain-depth-storm-rebinds.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired roots, bridges, and leaves must retain identity through two successive continuation chains and their rebind storms: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_continuation_chains_reject_final_cross_lane_mixing() {
+    let source = include_str!("fixtures/historical-paired-continuation-chain-depth-storm-rebinds-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-chain-depth-storm-rebinds-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "final terminal values from paired continuation chains must remain distinct after chained storms: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_continuation_chain_consistency_survives_rebind_order_changes() {
+    let source = include_str!("fixtures/historical-paired-continuation-chain-consistency-rebind-order.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-chain-consistency-rebind-order.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired continuation chains must retain consistent captured identities when the two sides restore rebind depths in different orders: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_continuation_chain_consistency_rebind_orders_reject_cross_pairing() {
+    let source = include_str!("fixtures/historical-paired-continuation-chain-consistency-rebind-order-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-chain-consistency-rebind-order-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "cross-paired terminal pins must remain distinct after restoring a chained continuation storm: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_continuation_rebind_cascades_remain_consistent() {
+    let source = include_str!("fixtures/historical-paired-continuation-rebind-cascade-stability.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-rebind-cascade-stability.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "captured follow-up and terminal continuations must keep consistent identities through successive paired rebind cascades: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_continuation_rebind_cascades_reject_cross_lane_mixing() {
+    let source = include_str!("fixtures/historical-paired-continuation-rebind-cascade-stability-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-rebind-cascade-stability-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "terminal values from opposite cascade lanes must keep distinct snapshot identities after restoration: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_continuation_rebind_reproductions_remain_consistent() {
+    let source = include_str!("fixtures/historical-paired-continuation-rebind-reproduction.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-rebind-reproduction.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "freshly reconstructed paired continuation chains must agree with captured outputs after chained depth storms: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_continuation_rebind_reproductions_reject_cross_lane_mixing() {
+    let source = include_str!("fixtures/historical-paired-continuation-rebind-reproduction-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-rebind-reproduction-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "reproduced terminal outputs from distinct pair lanes must keep their snapshot identities after storms: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_continuation_reproductions_remain_stable_across_storm_cycles() {
+    let source = include_str!("fixtures/historical-paired-continuation-reproduction-stability.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-reproduction-stability.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired continuation outputs must remain stable after repeated rebind storms and fresh reproduction at both nested depths: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_continuation_reproductions_reject_cross_lane_mixing() {
+    let source = include_str!("fixtures/historical-paired-continuation-reproduction-stability-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-reproduction-stability-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "terminal outputs from reproduced continuations on different pair lanes must retain distinct identities: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_continuation_reproduction_consistency_survives_repeated_storm_rebinds() {
+    let source = include_str!("fixtures/historical-paired-continuation-reproduction-consistency.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-reproduction-consistency.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "repeatedly reconstructed continuations must preserve each lane's restored observations through chained depth-storm rebinds: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_continuation_reproduction_consistency_rejects_lane_mixing() {
+    let source = include_str!("fixtures/historical-paired-continuation-reproduction-consistency-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-reproduction-consistency-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "repeatedly reproduced terminal values from distinct lanes must retain separate snapshot identities after restoration: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_continuation_reproductions_remain_consistent_across_paired_depth_storms() {
+    let source = include_str!("fixtures/historical-paired-continuation-reproduction-paired-storms.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-reproduction-paired-storms.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "repeatedly reconstructed pairs must retain each lane's saved closure identity after restoring every depth of paired rebind storms: {:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn paired_continuation_reproduction_storms_reject_cross_lane_mixing() {
+    let source = include_str!("fixtures/historical-paired-continuation-reproduction-paired-storms-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-reproduction-paired-storms-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "repeatedly reproduced continuations must keep the paired lanes distinct after depth-storm restoration: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_continuation_reproductions_remain_stable_across_chained_rebind_orders() {
+    let source = include_str!("fixtures/historical-paired-continuation-reproduction-stability-rebind-order.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-reproduction-stability-rebind-order.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "repeated paired continuation reproductions must remain stable across opposite chained depth-storm rebind orders: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_continuation_reproduction_storms_reject_mixed_repeated_lanes() {
+    let source = include_str!("fixtures/historical-paired-continuation-reproduction-stability-rebind-order-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-reproduction-stability-rebind-order-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "cross-paired repeated continuation outputs must keep lane-specific identities after chained storms: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_reproductions_remain_stable_across_alternating_storm_orders() {
+    let source = include_str!("fixtures/historical-paired-reproduction-stability-roundtrip.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-reproduction-stability-roundtrip.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired continuation outputs must remain stable when repeated chains alternate root-first and descendant-first storm restoration: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_reproductions_remain_stable_across_chained_storm_orders")
+        })
+        .expect("paired reproduction verification module");
+    let function_ty = &module.symbols
+        ["paired_reproductions_remain_stable_across_chained_storm_orders"]
+        .ty;
+    let Type::Function { result, .. } = function_ty else {
+        panic!("paired reproduction proof must export a function");
+    };
+    let Type::Record(outputs) = result.as_ref() else {
+        panic!("paired reproduction proof must expose its verification record");
+    };
+    for lane in ["left_checkpoints", "right_checkpoints"] {
+        let Some(Type::Record(checkpoints)) = outputs.get(lane) else {
+            panic!("{lane} must expose depth checkpoints");
+        };
+        for depth in ["roots", "bridges", "leaves", "outputs"] {
+            let Some(Type::List(element)) = checkpoints.get(depth) else {
+                panic!("{lane}.{depth} must expose a homogeneous verification sequence");
+            };
+            assert!(
+                !matches!(element.as_ref(), Type::Error),
+                "{lane}.{depth} must retain a valid static type"
+            );
+        }
+    }
+    assert_ne!(
+        outputs.get("left_checkpoints"),
+        outputs.get("right_checkpoints"),
+        "paired storm orders must retain lane-specific snapshot identities"
+    );
+}
+
+#[test]
+fn paired_checkpoints_retain_their_selected_lane_contexts() {
+    let source = include_str!("fixtures/historical-paired-reproduction-stability-roundtrip.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-reproduction-stability-roundtrip.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_reproductions_remain_stable_across_chained_storm_orders")
+        })
+        .expect("paired reproduction checkpoint module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_reproductions_remain_stable_across_chained_storm_orders"]
+        .ty
+    else {
+        panic!("paired reproduction proof must export a function");
+    };
+    let Type::Record(checkpoints) = result.as_ref() else {
+        panic!("paired reproduction proof must expose checkpoint records");
+    };
+
+    for (lane, expected_depths) in [
+        (
+            "left_checkpoints",
+            [
+                ("roots", &["selector:HEAD~760"][..]),
+                (
+                    "bridges",
+                    &["selector:HEAD~730", "selector:HEAD~740", "selector:HEAD~760"][..],
+                ),
+                (
+                    "leaves",
+                    &[
+                        "selector:HEAD~710",
+                        "selector:HEAD~720",
+                        "selector:HEAD~730",
+                        "selector:HEAD~740",
+                        "selector:HEAD~760",
+                    ][..],
+                ),
+                (
+                    "outputs",
+                    &[
+                        "selector:HEAD~690",
+                        "selector:HEAD~700",
+                        "selector:HEAD~710",
+                        "selector:HEAD~720",
+                        "selector:HEAD~730",
+                        "selector:HEAD~740",
+                        "selector:HEAD~760",
+                    ][..],
+                ),
+            ],
+        ),
+        (
+            "right_checkpoints",
+            [
+                ("roots", &["selector:HEAD~750"][..]),
+                (
+                    "bridges",
+                    &["selector:HEAD~730", "selector:HEAD~750"][..],
+                ),
+                (
+                    "leaves",
+                    &[
+                        "selector:HEAD~710",
+                        "selector:HEAD~730",
+                        "selector:HEAD~750",
+                    ][..],
+                ),
+                (
+                    "outputs",
+                    &[
+                        "selector:HEAD~690",
+                        "selector:HEAD~710",
+                        "selector:HEAD~730",
+                        "selector:HEAD~750",
+                    ][..],
+                ),
+            ],
+        ),
+    ] {
+        let ty = checkpoints.get(lane).expect("paired lane checkpoint record");
+        let Type::Record(depths) = ty else {
+            panic!("{lane} must expose checkpoint depth records");
+        };
+        for (depth, expected) in expected_depths {
+            let ty = depths.get(depth).expect("checkpoint depth field");
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(ty, &mut contexts);
+            let selected_contexts = contexts
+                .iter()
+                .filter(|context| context.starts_with("selector:HEAD~"))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                selected_contexts,
+                expected.iter().map(|context| (*context).to_owned()).collect(),
+                "{lane}.{depth} must keep every concrete pin selected at that rebind depth"
+            );
+            assert!(
+                contexts
+                    .iter()
+                    .all(|context| !context.starts_with("selector:parameter:")),
+                "{lane}.{depth} must not leave a same-named pin parameter unresolved: {contexts:?}"
+            );
+        }
+    }
+}
+
+fn collect_snapshot_contexts(ty: &Type, contexts: &mut BTreeSet<String>) {
+    match ty {
+        Type::Named(name) if name.starts_with("selector:") => {
+            contexts.insert(name.clone());
+        }
+        Type::List(inner)
+        | Type::Range(inner)
+        | Type::Relation(inner)
+        | Type::Stream(inner)
+        | Type::Optional(inner) => collect_snapshot_contexts(inner, contexts),
+        Type::Applied { arguments, .. } => {
+            for argument in arguments {
+                collect_snapshot_contexts(argument, contexts);
+            }
+        }
+        Type::Function {
+            parameters, result, ..
+        } => {
+            for parameter in parameters {
+                collect_snapshot_contexts(parameter, contexts);
+            }
+            collect_snapshot_contexts(result, contexts);
+        }
+        Type::Record(fields) => {
+            for field in fields.values() {
+                collect_snapshot_contexts(field, contexts);
+            }
+        }
+        Type::Tuple(items) => {
+            for item in items {
+                collect_snapshot_contexts(item, contexts);
+            }
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            collect_snapshot_contexts(currency, contexts);
+            collect_snapshot_contexts(unit, contexts);
+        }
+        _ => {}
+    }
+}
+
+fn assert_canonical_snapshot_context_maps(ty: &Type) {
+    match ty {
+        Type::Applied { base, arguments } => {
+            if base == "semantic.SnapshotContextMap" {
+                assert!(arguments.len() > 1, "singleton maps must use SnapshotRefContext");
+                assert!(arguments.iter().all(|argument| matches!(
+                    argument,
+                    Type::Named(selector) if selector.starts_with("selector:")
+                )), "maps contain only canonical snapshot selectors");
+                assert!(arguments.windows(2).all(|pair| matches!(
+                    pair,
+                    [Type::Named(left), Type::Named(right)] if left < right
+                )), "map selectors are sorted and unique");
+            }
+            for argument in arguments {
+                assert_canonical_snapshot_context_maps(argument);
+            }
+        }
+        Type::List(inner)
+        | Type::Range(inner)
+        | Type::Relation(inner)
+        | Type::Stream(inner)
+        | Type::Optional(inner) => assert_canonical_snapshot_context_maps(inner),
+        Type::Record(fields) => {
+            for field in fields.values() {
+                assert_canonical_snapshot_context_maps(field);
+            }
+        }
+        Type::Tuple(items) => {
+            for item in items {
+                assert_canonical_snapshot_context_maps(item);
+            }
+        }
+        Type::Function {
+            parameters, result, ..
+        } => {
+            for parameter in parameters {
+                assert_canonical_snapshot_context_maps(parameter);
+            }
+            assert_canonical_snapshot_context_maps(result);
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            assert_canonical_snapshot_context_maps(currency);
+            assert_canonical_snapshot_context_maps(unit);
+        }
+        _ => {}
+    }
+}
+
+fn checkpoint_output_fields(ty: &Type) -> &BTreeMap<String, Type> {
+    match ty {
+        Type::List(inner) => checkpoint_output_fields(inner),
+        Type::Function { result, .. } => checkpoint_output_fields(result),
+        Type::Record(fields) => fields,
+        _ => panic!("checkpoint must resolve to a record of pinned outputs: {ty:?}"),
+    }
+}
+
+#[test]
+fn paired_checkpoint_outputs_keep_lane_to_snapshot_mapping() {
+    let source = include_str!("fixtures/historical-paired-reproduction-stability-roundtrip.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-reproduction-stability-roundtrip.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_reproductions_remain_stable_across_chained_storm_orders")
+        })
+        .expect("paired reproduction checkpoint module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_reproductions_remain_stable_across_chained_storm_orders"]
+        .ty
+    else {
+        panic!("paired reproduction proof must export a function");
+    };
+    let Type::Record(checkpoints) = result.as_ref() else {
+        panic!("paired reproduction proof must expose checkpoint records");
+    };
+
+    for (lane, expected_depths) in [
+        (
+            "left_checkpoints",
+            [
+                ("roots", &["760"][..], None, None, None),
+                ("bridges", &["760"][..], Some(&["740", "730"][..]), None, None),
+                (
+                    "leaves",
+                    &["760"][..],
+                    Some(&["740", "730"][..]),
+                    Some(&["720", "710"][..]),
+                    None,
+                ),
+                (
+                    "outputs",
+                    &["760"][..],
+                    Some(&["740", "730"][..]),
+                    Some(&["720", "710"][..]),
+                    Some(&["700", "690"][..]),
+                ),
+            ],
+        ),
+        (
+            "right_checkpoints",
+            [
+                ("roots", &["750"][..], None, None, None),
+                ("bridges", &["750"][..], Some(&["730"][..]), None, None),
+                (
+                    "leaves",
+                    &["750"][..],
+                    Some(&["730"][..]),
+                    Some(&["710"][..]),
+                    None,
+                ),
+                (
+                    "outputs",
+                    &["750"][..],
+                    Some(&["730"][..]),
+                    Some(&["710"][..]),
+                    Some(&["690"][..]),
+                ),
+            ],
+        ),
+    ] {
+        let ty = checkpoints.get(lane).expect("paired lane checkpoint record");
+        let Type::Record(depths) = ty else {
+            panic!("{lane} must expose checkpoint depth records");
+        };
+        for (depth, root, bridge, leaf, terminal) in expected_depths {
+            let fields = checkpoint_output_fields(
+                depths.get(depth).expect("checkpoint depth field"),
+            );
+            for (field, expected_contexts) in [
+                ("root", Some(root)),
+                ("bridge", bridge),
+                ("leaf", leaf),
+                ("terminal", terminal),
+            ] {
+                let ty = fields.get(field).expect("pinned output field");
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(ty, &mut contexts);
+                if let Some(expected_contexts) = expected_contexts {
+                    assert_eq!(
+                        contexts,
+                        expected_contexts
+                            .iter()
+                            .map(|context| format!("selector:HEAD~{context}"))
+                            .collect(),
+                        "{lane}.{depth}.{field} must retain its lane-specific snapshot map"
+                    );
+                } else {
+                    assert_eq!(contexts.len(), 1, "{lane}.{depth}.{field} pin binder");
+                    assert!(
+                        contexts
+                            .iter()
+                            .all(|context| context.starts_with("selector:binder:")),
+                        "{lane}.{depth}.{field} must keep the not-yet-invoked lexical pin: {contexts:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn shadowed_paired_checkpoint_parameters_keep_their_innermost_pins() {
+    let source = include_str!("fixtures/historical-paired-shadowed-checkpoint-rebinds.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-shadowed-checkpoint-rebinds.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("paired_nested_rebind_checkpoints"))
+        .expect("paired nested checkpoint module");
+    let Type::Function { result, .. } = &module.symbols["paired_nested_rebind_checkpoints"].ty
+    else {
+        panic!("paired nested checkpoints must be callable");
+    };
+    let Type::Record(checkpoints) = result.as_ref() else {
+        panic!("paired nested checkpoints must expose both lanes");
+    };
+
+    for (lane, expected) in [("left", "selector:HEAD~1"), ("right", "selector:HEAD~2")] {
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(
+            checkpoints.get(lane).expect("paired lane output"),
+            &mut contexts,
+        );
+        assert_eq!(
+            contexts,
+            BTreeSet::from([expected.to_owned()]),
+            "{lane} output must use its innermost shadowed snapshot parameter"
+        );
+    }
+}
+#[test]
+fn paired_checkpoint_lists_preserve_field_specific_pin_maps() {
+    let source = include_str!("fixtures/historical-paired-checkpoint-field-map-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-checkpoint-field-map-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_checkpoint_field_maps_across_rebind_storms")
+        })
+        .expect("paired checkpoint field-map module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_checkpoint_field_maps_across_rebind_storms"].ty
+    else {
+        panic!("paired checkpoint field map must be callable");
+    };
+    let Type::Record(lanes) = result.as_ref() else {
+        panic!("paired checkpoint field map must retain both lanes");
+    };
+
+    for (lane, expected_maps) in [
+        (
+            "left",
+            [
+                (
+                    "saved",
+                    &["selector:HEAD~840", "selector:HEAD~838"][..],
+                    &["selector:HEAD~740", "selector:HEAD~741"][..],
+                ),
+                (
+                    "after_storm",
+                    &["selector:HEAD~837", "selector:HEAD~840"][..],
+                    &["selector:HEAD~742", "selector:HEAD~743"][..],
+                ),
+                (
+                    "restored",
+                    &["selector:HEAD~840", "selector:HEAD~838"][..],
+                    &["selector:HEAD~740", "selector:HEAD~741"][..],
+                ),
+            ],
+        ),
+        (
+            "right",
+            [
+                (
+                    "saved",
+                    &["selector:HEAD~830", "selector:HEAD~828"][..],
+                    &["selector:HEAD~730", "selector:HEAD~731"][..],
+                ),
+                (
+                    "after_storm",
+                    &["selector:HEAD~827", "selector:HEAD~830"][..],
+                    &["selector:HEAD~732", "selector:HEAD~733"][..],
+                ),
+                (
+                    "restored",
+                    &["selector:HEAD~830", "selector:HEAD~828"][..],
+                    &["selector:HEAD~730", "selector:HEAD~731"][..],
+                ),
+            ],
+        ),
+    ] {
+        let Type::Record(checkpoint_maps) = lanes.get(lane).expect("paired checkpoint lane") else {
+            panic!("{lane} must retain its saved, storm, and restored checkpoint maps");
+        };
+        for (checkpoint_map, roots, children) in expected_maps {
+            let Type::List(element) = checkpoint_maps.get(checkpoint_map).expect("checkpoint map")
+            else {
+                panic!("{lane}.{checkpoint_map} must remain a list");
+            };
+            let Type::Record(checkpoint) = element.as_ref() else {
+                panic!("{lane}.{checkpoint_map} list elements must retain their field map");
+            };
+            for (field, expected) in [
+                ("root_pin", roots),
+                ("root", roots),
+                ("child_pin", children),
+                ("child", children),
+            ] {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(
+                    checkpoint.get(field).expect("checkpoint field"),
+                    &mut contexts,
+                );
+                assert_eq!(
+                    contexts,
+                    expected.iter().map(|context| (*context).to_owned()).collect(),
+                    "{lane}.{checkpoint_map}.{field} must keep its own snapshot map across rebind waves"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn paired_checkpoint_maps_merge_distinct_lambda_binders_without_cross_field_loss() {
+    let source = include_str!(
+        "fixtures/historical-paired-checkpoint-distinct-binder-field-map-storm.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-checkpoint-distinct-binder-field-map-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_checkpoint_distinct_binder_field_maps_across_storms")
+        })
+        .expect("paired distinct-binder checkpoint module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_checkpoint_distinct_binder_field_maps_across_storms"].ty
+    else {
+        panic!("paired distinct-binder checkpoints must be callable");
+    };
+    let Type::Record(lanes) = result.as_ref() else {
+        panic!("paired distinct-binder checkpoints must retain both lanes");
+    };
+
+    let mut lane_child_maps = BTreeMap::new();
+    for (lane, expected_stages) in [
+        (
+            "left",
+            [
+                ("saved", &["840", "838"][..]),
+                ("after_storm", &["835", "834"][..]),
+                ("restored", &["840", "838"][..]),
+            ],
+        ),
+        (
+            "right",
+            [
+                ("saved", &["830", "828"][..]),
+                ("after_storm", &["825", "824"][..]),
+                ("restored", &["830", "828"][..]),
+            ],
+        ),
+    ] {
+        let Type::Record(stages) = lanes.get(lane).expect("paired lane") else {
+            panic!("{lane} must retain saved, storm, and restored maps");
+        };
+        let mut lane_child_map = None;
+        for (stage, expected_roots) in expected_stages {
+            let fields = checkpoint_output_fields(stages.get(stage).expect("checkpoint stage"));
+            let expected_roots = expected_roots
+                .iter()
+                .map(|root| format!("selector:HEAD~{root}"))
+                .collect::<BTreeSet<_>>();
+            for field in ["root_pin", "root"] {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(
+                    fields.get(field).expect("root checkpoint field"),
+                    &mut contexts,
+                );
+                assert_eq!(
+                    contexts, expected_roots,
+                    "{lane}.{stage}.{field} must retain only that lane's root map"
+                );
+            }
+
+            let mut child_contexts = BTreeSet::new();
+            for field in ["child_pin", "child"] {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(
+                    fields.get(field).expect("child checkpoint field"),
+                    &mut contexts,
+                );
+                assert_eq!(
+                    contexts.len(),
+                    2,
+                    "{lane}.{stage}.{field} must retain both distinct lambda binders: {contexts:?}"
+                );
+                assert!(
+                    contexts
+                        .iter()
+                        .all(|context| context.starts_with("selector:binder:")),
+                    "{lane}.{stage}.{field} must not absorb either root selector: {contexts:?}"
+                );
+                if field == "child_pin" {
+                    child_contexts = contexts;
+                } else {
+                    assert_eq!(
+                        contexts, child_contexts,
+                        "{lane}.{stage} child pin and callable fields must preserve the same map"
+                    );
+                }
+            }
+            if let Some(expected) = &lane_child_map {
+                assert_eq!(
+                    &child_contexts, expected,
+                    "{lane}.{stage} must retain its original child binder map through storms"
+                );
+            } else {
+                lane_child_map = Some(child_contexts);
+            }
+        }
+        lane_child_maps.insert(lane, lane_child_map.expect("child map"));
+    }
+    assert_ne!(
+        lane_child_maps.get("left"),
+        lane_child_maps.get("right"),
+        "the two lanes' child binders must remain distinct"
+    );
+}
+
+#[test]
+fn paired_checkpoint_snapshot_maps_survive_chained_depth_storms() {
+    let source = include_str!(
+        "fixtures/historical-paired-checkpoint-snapshot-retention-depth-storm.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-checkpoint-snapshot-retention-depth-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_checkpoint_snapshot_retention_across_depth_storms")
+        })
+        .expect("paired depth-storm snapshot-retention module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_checkpoint_snapshot_retention_across_depth_storms"].ty
+    else {
+        panic!("paired checkpoint retention must be callable");
+    };
+    let Type::Record(lanes) = result.as_ref() else {
+        panic!("paired checkpoint retention must retain both lanes");
+    };
+
+    let mut retained_lane_maps = BTreeMap::new();
+    for (lane, stages) in [
+        (
+            "left",
+            [
+                ("saved", &["950", "948"][..]),
+                ("after_storm", &["945", "944"][..]),
+                ("restored", &["950", "948"][..]),
+            ],
+        ),
+        (
+            "right",
+            [
+                ("saved", &["930", "928"][..]),
+                ("after_storm", &["925", "924"][..]),
+                ("restored", &["930", "928"][..]),
+            ],
+        ),
+    ] {
+        let Type::Record(checkpoints) = lanes.get(lane).expect("paired lane") else {
+            panic!("{lane} must retain all checkpoint stages");
+        };
+        let mut field_maps = BTreeMap::new();
+        for (stage, roots) in stages {
+            let fields = checkpoint_output_fields(checkpoints.get(stage).expect("stage"));
+            let expected_roots = roots
+                .iter()
+                .map(|root| format!("selector:HEAD~{root}"))
+                .collect::<BTreeSet<_>>();
+            for field in ["root_pin", "root"] {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(
+                    fields.get(field).expect("root field"),
+                    &mut contexts,
+                );
+                assert_eq!(contexts, expected_roots, "{lane}.{stage}.{field} root map");
+            }
+            for field in ["middle_pin", "middle", "leaf_pin", "leaf"] {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(
+                    fields.get(field).expect("nested checkpoint field"),
+                    &mut contexts,
+                );
+                assert_eq!(
+                    contexts.len(),
+                    2,
+                    "{lane}.{stage}.{field} must retain both nested snapshot binders: {contexts:?}"
+                );
+                assert!(
+                    contexts
+                        .iter()
+                        .all(|context| context.starts_with("selector:binder:")),
+                    "{lane}.{stage}.{field} must not absorb the root snapshot map: {contexts:?}"
+                );
+                if let Some(expected) = field_maps.get(field) {
+                    assert_eq!(
+                        &contexts, expected,
+                        "{lane}.{stage}.{field} pin map must survive rebind and restore"
+                    );
+                } else {
+                    field_maps.insert(field.to_owned(), contexts);
+                }
+            }
+            assert_eq!(
+                field_maps.get("middle_pin"),
+                field_maps.get("middle"),
+                "{lane}.{stage} middle pin and historical field maps must agree"
+            );
+            assert_eq!(
+                field_maps.get("leaf_pin"),
+                field_maps.get("leaf"),
+                "{lane}.{stage} leaf pin and historical field maps must agree"
+            );
+        }
+        retained_lane_maps.insert(lane, field_maps);
+    }
+    assert_ne!(
+        retained_lane_maps
+            .get("left")
+            .and_then(|maps| maps.get("middle_pin")),
+        retained_lane_maps
+            .get("right")
+            .and_then(|maps| maps.get("middle_pin")),
+        "paired lanes must retain separate nested snapshot maps"
+    );
+}
+
+#[test]
+fn paired_checkpoint_retains_merged_snapshot_maps_through_rebind_storms() {
+    let source = include_str!("fixtures/historical-paired-checkpoint-retained-maps-rebind-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-checkpoint-retained-maps-rebind-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_checkpoint_retained_maps_across_rebind_storms")
+        })
+        .expect("paired retained-map checkpoint module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_checkpoint_retained_maps_across_rebind_storms"].ty
+    else {
+        panic!("paired retained-map checkpoint must be callable");
+    };
+    let Type::Record(lanes) = result.as_ref() else {
+        panic!("paired retained-map checkpoint must expose both lanes");
+    };
+
+    let mut lane_maps = BTreeMap::new();
+    for lane in ["left", "right"] {
+        let Type::Record(stages) = lanes.get(lane).expect("paired lane") else {
+            panic!("{lane} must retain saved, storm, and restored maps");
+        };
+        let mut stage_maps = BTreeMap::new();
+        for stage in ["saved", "after_storm", "restored"] {
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(
+                stages.get(stage).expect("checkpoint stage"),
+                &mut contexts,
+            );
+            assert_eq!(
+                contexts.len(),
+                2,
+                "{lane}.{stage} must retain both function-parameter map entries: {contexts:?}"
+            );
+            assert!(
+                contexts
+                    .iter()
+                    .all(|context| context.starts_with("selector:binder:")),
+                "{lane}.{stage} must retain binder maps, not substitute other snapshots: {contexts:?}"
+            );
+            stage_maps.insert(stage, contexts);
+        }
+        assert_eq!(
+            stage_maps.get("saved"),
+            stage_maps.get("restored"),
+            "{lane} restoring a checkpoint must restore its original field map"
+        );
+        assert_ne!(
+            stage_maps.get("saved"),
+            stage_maps.get("after_storm"),
+            "{lane} storm maps must retain their own snapshot identities"
+        );
+        lane_maps.insert(lane, stage_maps);
+    }
+    assert_ne!(
+        lane_maps["left"]["saved"],
+        lane_maps["right"]["saved"],
+        "paired lanes must not collapse retained checkpoint maps"
+    );
+}
+
+#[test]
+fn paired_depth_storms_retain_field_maps_at_each_rebound_depth() {
+    let source = include_str!(
+        "fixtures/historical-paired-checkpoint-depth-storm-chained-rebind.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-checkpoint-depth-storm-chained-rebind.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_checkpoint_depth_storm_chained_rebind_retains_maps")
+        })
+        .expect("paired depth-storm checkpoint module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_checkpoint_depth_storm_chained_rebind_retains_maps"]
+        .ty
+    else {
+        panic!("paired depth-storm checkpoint must be callable");
+    };
+    let Type::Record(lanes) = result.as_ref() else {
+        panic!("paired depth-storm checkpoint must expose both lanes");
+    };
+    assert_canonical_snapshot_context_maps(result.as_ref());
+
+    let cases: [
+        (
+            &str,
+            &str,
+            &str,
+            &[&str],
+            Option<&[&str]>,
+            Option<&[&str]>,
+        );
+        18
+    ] = [
+        ("left", "root", "saved", &["950", "948"], None, None),
+        (
+            "left",
+            "root",
+            "after_storm",
+            &["945", "944"],
+            None,
+            None,
+        ),
+        ("left", "root", "restored", &["950", "948"], None, None),
+        (
+            "left",
+            "middle",
+            "saved",
+            &["950", "948"],
+            Some(&["850", "848"]),
+            None,
+        ),
+        (
+            "left",
+            "middle",
+            "after_storm",
+            &["945", "944"],
+            Some(&["845", "844"]),
+            None,
+        ),
+        (
+            "left",
+            "middle",
+            "restored",
+            &["950", "948"],
+            Some(&["850", "848"]),
+            None,
+        ),
+        (
+            "left",
+            "leaf",
+            "saved",
+            &["950", "948"],
+            Some(&["850", "848"]),
+            Some(&["750", "748"]),
+        ),
+        (
+            "left",
+            "leaf",
+            "after_storm",
+            &["945", "944"],
+            Some(&["845", "844"]),
+            Some(&["745", "744"]),
+        ),
+        (
+            "left",
+            "leaf",
+            "restored",
+            &["950", "948"],
+            Some(&["850", "848"]),
+            Some(&["750", "748"]),
+        ),
+        ("right", "root", "saved", &["930", "928"], None, None),
+        (
+            "right",
+            "root",
+            "after_storm",
+            &["925", "924"],
+            None,
+            None,
+        ),
+        ("right", "root", "restored", &["930", "928"], None, None),
+        (
+            "right",
+            "middle",
+            "saved",
+            &["930", "928"],
+            Some(&["830", "828"]),
+            None,
+        ),
+        (
+            "right",
+            "middle",
+            "after_storm",
+            &["925", "924"],
+            Some(&["825", "824"]),
+            None,
+        ),
+        (
+            "right",
+            "middle",
+            "restored",
+            &["930", "928"],
+            Some(&["830", "828"]),
+            None,
+        ),
+        (
+            "right",
+            "leaf",
+            "saved",
+            &["930", "928"],
+            Some(&["830", "828"]),
+            Some(&["730", "728"]),
+        ),
+        (
+            "right",
+            "leaf",
+            "after_storm",
+            &["925", "924"],
+            Some(&["825", "824"]),
+            Some(&["725", "724"]),
+        ),
+        (
+            "right",
+            "leaf",
+            "restored",
+            &["930", "928"],
+            Some(&["830", "828"]),
+            Some(&["730", "728"]),
+        ),
+    ];
+
+    for (lane, depth, stage, roots, middles, leaves) in cases {
+        let Type::Record(stages) = lanes.get(lane).expect("paired lane") else {
+            panic!("{lane} must preserve each checkpoint depth");
+        };
+        let Type::Record(depths) = stages.get(depth).expect("checkpoint depth") else {
+            panic!("{lane}.{depth} must retain stage maps");
+        };
+        let fields = checkpoint_output_fields(depths.get(stage).expect("checkpoint stage"));
+        for (field, expected) in [
+            ("root_pin", Some(roots)),
+            ("root", Some(roots)),
+            ("middle_pin", middles),
+            ("middle", middles),
+            ("leaf_pin", leaves),
+            ("leaf", leaves),
+        ] {
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(fields.get(field).expect("checkpoint field"), &mut contexts);
+            if let Some(expected) = expected {
+                assert_eq!(
+                    contexts,
+                    expected
+                        .iter()
+                        .map(|selector| format!("selector:HEAD~{selector}"))
+                        .collect(),
+                    "{lane}.{depth}.{stage}.{field} must retain its selected snapshot map"
+                );
+            } else {
+                assert_eq!(
+                    contexts.len(),
+                    2,
+                    "{lane}.{depth}.{stage}.{field} must retain both nested binders: {contexts:?}"
+                );
+                assert!(
+                    contexts
+                        .iter()
+                        .all(|context| context.starts_with("selector:binder:")),
+                    "{lane}.{depth}.{stage}.{field} must remain isolated from selected maps: {contexts:?}"
+                );
+            }
+        }
+        for (pin_field, value_field) in [
+            ("root_pin", "root"),
+            ("middle_pin", "middle"),
+            ("leaf_pin", "leaf"),
+        ] {
+            let mut pin_contexts = BTreeSet::new();
+            collect_snapshot_contexts(
+                fields.get(pin_field).expect("snapshot pin field"),
+                &mut pin_contexts,
+            );
+            let mut value_contexts = BTreeSet::new();
+            collect_snapshot_contexts(
+                fields.get(value_field).expect("historical value field"),
+                &mut value_contexts,
+            );
+            assert_eq!(
+                pin_contexts, value_contexts,
+                "{lane}.{depth}.{stage}.{pin_field} and {value_field} must share one map"
+            );
+        }
+    }
+}
+
+#[test]
+fn paired_reproduction_checkpoint_types_stay_stable_across_interleaved_analyses() {
+    const FUNCTION: &str =
+        "paired_reproductions_remain_stable_across_chained_storm_orders";
+    let paired = include_str!("fixtures/historical-paired-reproduction-stability-roundtrip.orna");
+    let mixed =
+        include_str!("fixtures/historical-paired-reproduction-stability-roundtrip-mixed.orna");
+    let catalogue = historical_nested_callable_catalogue();
+    let analyze_fixture = |path, source| {
+        analyze_with_catalogue(&[ModuleInput::new(path, source)], &catalogue)
+    };
+    let checkpoint_type = |analysis: &orna_semantic_v1::Analysis| {
+        analysis
+            .modules
+            .values()
+            .find_map(|module| module.symbols.get(FUNCTION))
+            .expect("paired reproduction function")
+            .ty
+            .clone()
+    };
+
+    let first = analyze_fixture("paired-reproduction.orna", paired);
+    assert!(first.is_ok(), "{:?}", first.diagnostics);
+    let first_checkpoint_type = checkpoint_type(&first);
+
+    let mixed_result = analyze_fixture("paired-reproduction-mixed.orna", mixed);
+    assert!(
+        mixed_result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "cross-lane checkpoint mixing must remain rejected: {:?}",
+        mixed_result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+
+    let repeated = analyze_fixture("paired-reproduction.orna", paired);
+    assert!(repeated.is_ok(), "{:?}", repeated.diagnostics);
+    assert_eq!(
+        first_checkpoint_type,
+        checkpoint_type(&repeated),
+        "rejected cross-lane analysis must not change either lane's checkpoint identity"
+    );
+}
+
+#[test]
+fn paired_reproductions_reject_cross_lane_after_alternating_storms() {
+    let source = include_str!("fixtures/historical-paired-reproduction-stability-roundtrip-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-reproduction-stability-roundtrip-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "terminal outputs from repeated paired chains must retain separate pin identities after chained rebind storms: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
     );
 }
 

@@ -237,9 +237,193 @@ impl PackageResolver {
     /// lookup for every selected parent's historical manifest.
     /// After a caller rebinds an alias, selecting that replacement here loads
     /// its own committed manifest. Sibling aliases remain pinned in the source
-    /// session and do not retarget the replacement's closure.
-    /// The reference requires each historical parent's exact pins but does not
+    /// session and do not retarget the replacement's closure. Each replacement
+    /// starts a new resolution branch: aliases from the prior parent's
+    /// manifest are not inherited or used as fallback at the next depth.
+    /// If an alias is rebound through several candidates before nested
+    /// expansion, the currently attached pin supplies that session's next
+    /// manifest; earlier candidates are not accumulated. A caller can retain a
+    /// candidate pin before rebinding again. It remains immutable, and
+    /// explicitly resolving it later reads its own manifest after the source
+    /// session has moved on. Since the reference is silent on storm history,
+    /// v1 treats the explicitly passed pin as the caller's closure choice.
+    /// Repeating detach/attach runs on one session replaces only the selected
+    /// exact alias in sequence. At the end of each run, that session's current
+    /// pin alone supplies the next manifest; previous run candidates remain
+    /// selectable only when the caller kept their pins separately. The
+    /// reference does not define how repeated runs compose, so v1 uses the
+    /// last attached pin for the session's current exact alias.
+    ///
+    /// Rebinding prefix-related aliases in one session keeps them as
+    /// independent exact-key entries. The session retains every unmodified
+    /// key, including longer prefix-related siblings. Expanding one replacement
+    /// uses only its manifest to create a fresh next-depth session, even when
+    /// that manifest names an alias matching a retained sibling. The reference
+    /// is silent on precedence across rebound alias chains; v1 makes the
+    /// selected parent's committed manifest authoritative at that depth. The
+    /// reference requires exact pins for each historical parent but does not
     /// require flattening a recursive closure into one session.
+    /// Apply the same precedence independently at every edge of a longer
+    /// chain: rebinding a descendant affects only that descendant session, and
+    /// the next closure uses its final selected pin's manifest. Since the
+    /// reference is silent on repeated storms across nested chains, v1 does
+    /// not overlay manifests from earlier candidates or ancestor sessions.
+    /// A pin retained from an earlier outer storm can still be expanded after
+    /// later storms; its own manifest starts that closure branch. Rebinding a
+    /// descendant in one expanded branch cannot retarget another retained
+    /// branch, and expanding a selected descendant uses only that pin's
+    /// manifest rather than carrying forward the ancestor's prefix siblings.
+    /// This keeps precedence stable across repeated storms at multiple closure
+    /// depths, including when those storms finish in different candidates.
+    /// If the caller returns to an ancestor session after rebinding descendants,
+    /// a later expansion follows the ancestor pin selected at that time. A
+    /// closure already expanded from a retained pin remains its own branch;
+    /// descendant storms do not become fallback pins for a newly selected
+    /// ancestor candidate. Where the reference is silent, v1 gives precedence
+    /// to the exact pin passed to each closure expansion.
+    /// A storm cascade is resolved edge by edge from that pin: selecting a new
+    /// ancestor starts a fresh descendant chain, and the terminal route follows
+    /// the final pin chosen at every edge. Pins retained from an earlier
+    /// cascade continue to resolve their own terminal routes.
+    /// After expanding the terminal parent, rebinding its exact terminal alias
+    /// changes only that closure's route to the latest attached terminal pin.
+    /// Earlier terminal candidates and the manifest-selected snapshot remain
+    /// independently resolvable; v1 applies the same last-pin rule at this
+    /// final edge when the reference does not specify terminal rebind storms.
+    /// Apply that rule separately to every retained closure branch: a terminal
+    /// alias storm follows the exact terminal pin selected through that
+    /// branch's ancestor manifests, and cannot retarget a same-named terminal
+    /// route in another branch. Reopening a retained ancestor starts its own
+    /// terminal route chain from that pin's manifest.
+    /// Expanding one retained parent pin more than once also creates sibling
+    /// closure branches: storms at paired nested depths remain local to each
+    /// session, and each terminal route follows only its branch's selected
+    /// pins.
+    /// A sibling expanded later from the retained ancestor still starts at
+    /// that ancestor's manifest-selected child; an earlier sibling's terminal
+    /// rebind does not supply a fallback for the late branch.
+    /// This remains true through additional nested edges: a late branch reads
+    /// each selected middle and deep manifest in turn, then applies terminal
+    /// alias storms only to the route reached through those exact pins.
+    /// A middle pin retained before a sibling rebind is also an independent
+    /// late-branch root: reopening it follows its own deep manifest and
+    /// terminal route rather than inheriting the sibling's later selections.
+    /// Sibling manifests may converge on the same exact deep and terminal
+    /// pins; rebinding that terminal alias in one closure changes only that
+    /// closure's route, while another retained branch can still resolve the
+    /// shared manifest-selected terminal pin.
+    /// Distinct sibling closures expanded before any terminal rebind also
+    /// keep independent route state when their terminal storms are interleaved.
+    /// Each session follows only its own last attached terminal pin, and a
+    /// fresh expansion from their shared deep pin still starts at the terminal
+    /// pin recorded in that deep manifest. The reference is silent on shared
+    /// terminal route storms, so v1 applies the exact-alias last-pin rule per
+    /// session.
+    /// Paired sibling branches may also storm their middle and deep aliases
+    /// independently before reaching a shared terminal pin. Each terminal
+    /// closure still begins at the exact pin in its selected deep manifest;
+    /// interleaving later terminal storms cannot change the other branch or a
+    /// fresh expansion from either retained deep pin.
+    /// Sibling middle pins that converge on one exact deep pin can then take
+    /// independent deep-rebind storms whose candidates select the same
+    /// terminal pin. Terminal closures opened from those selected deep pins
+    /// still begin on that shared route; later terminal rebinds remain local
+    /// to each sibling closure.
+    /// This holds across a wider sibling set as well: when several middle
+    /// routes converge on one deep pin, each branch can take its own paired
+    /// depth and terminal storms while retaining the exact shared route from
+    /// each selected pin's manifest.
+    /// Since the reference does not define an event order across sibling
+    /// sessions, v1 makes independent storms order-stable: interleaving or
+    /// reversing operations across branches leaves each branch at its own
+    /// last selected pin on every edge.
+    /// When distinct sibling middle pins converge on one deep pin, their
+    /// terminal closures may also converge after independent rebind storms.
+    /// Each closure still resolves its terminal edge from the exact selected
+    /// deep pin, and a terminal session retained before rebinding keeps the
+    /// manifest-selected route. Since the reference is silent on this
+    /// reconvergent storm case, v1 keeps convergence based on exact pin
+    /// identity while preserving each session's prior route snapshot.
+    /// Reopening the retained sibling middle pins after those storms starts
+    /// each closure again from its committed manifest. A later rebind wave on
+    /// the new closures remains local and may converge on the same exact
+    /// terminal pin; previously retained storm sessions keep their selections.
+    /// The reference does not define this post-storm reopen sequence, so v1
+    /// treats each newly expanded parent pin as a fresh route root.
+    /// A terminal rebind in one sibling may interleave with a later paired
+    /// middle/deep rebind in another. The new terminal closure follows only
+    /// its selected deep pin's manifest, while the first sibling keeps its
+    /// own last terminal pin. Since the reference is silent on cross-depth
+    /// event order, v1 preserves each closure's exact-pin route independently.
+    /// If another paired middle/deep rebind wave follows that reopen, each
+    /// new terminal closure still starts from its selected deep pin's
+    /// manifest, regardless of terminal pins retained from earlier waves.
+    /// Siblings whose selected deep manifests name the same terminal pin can
+    /// then converge again through local terminal rebinds. The reference is
+    /// silent on repeated post-storm depth waves; v1 keeps each wave rooted
+    /// in the exact pins selected along its own path.
+    /// After an earlier terminal storm across several siblings, a later
+    /// paired middle/deep closure wave also starts from each sibling's newly
+    /// selected middle pin, then follows that middle pin's exact deep pin.
+    /// Rebinding those reopened terminal closures can converge on one exact
+    /// terminal pin without merging their state: prior storm sessions and
+    /// pre-rebind snapshots retain their original routes. Since the reference
+    /// is silent on this wider post-storm sequence, v1 treats every reopened
+    /// closure as a fresh route root and keeps rebinds local to that session.
+    /// If a later paired middle/deep rebind selects different child pins for
+    /// sibling roots, each new deep closure follows the exact middle
+    /// manifest it was opened from. Rebinding its deep alias affects only
+    /// that closure; retained pre-storm and manifest-selected snapshots keep
+    /// their own pins. The reference is silent on diverging post-storm child
+    /// routes, so v1 resolves each edge from its selected immutable pin and
+    /// does not inherit a sibling's prior route.
+    /// Route consistency also applies to retained sessions: each attached
+    /// module resolves through the same package snapshot as that session's
+    /// pin. A paired depth rebind can make a fresh descendant closure follow
+    /// another manifest route, while the old closure keeps its matching pin
+    /// and module route. Since the reference does not define cross-session
+    /// route refresh, v1 keeps pin and module routing in the same session
+    /// snapshot.
+    /// Applying the same paired depth rebinds to sibling sessions in another
+    /// interleaving produces the same per-sibling pin and module-route pairs.
+    /// v1 makes independent sibling route updates order-stable, while keeping
+    /// each earlier closure snapshot tied to its original selected pins.
+    /// Across repeated paired depth storms, distinct sibling middle and deep
+    /// pins may reconverge on a shared terminal pin. The reference is silent
+    /// on this sequence, so v1 derives each route from its exact selected pin.
+    /// Each session's modules follow the pins in that snapshot; later sibling
+    /// rebinds do not refresh or retarget earlier sessions.
+    /// After those paired depth waves, a terminal rebind storm updates only
+    /// that sibling session's terminal pin and module route. Siblings can
+    /// diverge and reconverge on the same terminal pin, while retained
+    /// manifest and pre-rebind snapshots keep their prior routes.
+    /// A later paired depth storm also leaves those rebound terminal
+    /// snapshots intact. Newly opened terminal closures start from their
+    /// latest exact deep pins and follow those pins' manifest routes.
+    /// The reference is silent on terminal rebinds in those reopened
+    /// sessions, so v1 updates only each selected sibling's route and keeps
+    /// every retained manifest snapshot on its original pin-to-module route.
+    /// Reordering terminal rebind events between siblings while preserving
+    /// each sibling's own event order leaves both final routes unchanged.
+    /// v1 treats the sibling sessions as independent; retained snapshots
+    /// continue to use their manifest-selected terminal pins.
+    /// Repeating the same post-storm terminal rebind wave stabilizes each
+    /// sibling on its own final pin while snapshots from earlier waves retain
+    /// the route they captured. The reference is silent on repeated waves, so
+    /// v1 applies the exact-pin rule independently on every rebind.
+    /// Repeating paired middle and deep rebinds after those terminal storms
+    /// opens each new terminal route from the exact selected deep pin; the
+    /// earlier terminal sessions keep their captured routes. The reference
+    /// does not define this post-storm sequence, so v1 resolves each edge from
+    /// the pin selected in that wave.
+    /// Reopening a retained pre-rebind middle snapshot after later paired
+    /// depth waves still follows the deep and terminal pins in that snapshot's
+    /// manifest, even if a sibling's newer rebound route now differs.
+    /// Terminal sessions retained before those waves keep both their
+    /// manifest-selected terminal pin and the ancestor module route captured
+    /// from the selected deep pin. Later sibling depth rebinds do not refresh
+    /// either part of that session snapshot. The reference is silent on
+    /// cross-wave refresh, so v1 keeps both routes bound to the captured pins.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
@@ -301,6 +485,477 @@ impl PackageResolver {
         }
         Ok(session)
     }
+
+    /// Resolves the next closure from an exact alias selected in `parent`.
+    /// This uses that session's current pin, so a retained sibling session
+    /// continues from its own route after another session is rebound.
+    pub fn resolve_nested_for_alias(
+        &self,
+        parent: &AttachedDatabaseSession,
+        alias: &str,
+    ) -> Result<AttachedDatabaseSession, AttachmentError> {
+        let alias = checked_name(alias.to_owned())?;
+        let selected = parent
+            .database(&alias)
+            .cloned()
+            .ok_or(AttachmentError::DatabaseUnavailable)?;
+        self.resolve_for_parent(selected)
+    }
+
+    /// Rebinds one exact alias on a private copy of `parent`, then resolves
+    /// the replacement's next closure. The returned snapshot preserves the
+    /// prior route, and a failed expansion leaves the caller's session intact.
+    /// Where the reference does not define rebind ordering, v1 uses the new
+    /// pin's committed manifest for this edge.
+    pub fn resolve_nested_rebind(
+        &self,
+        parent: &AttachedDatabaseSession,
+        replacement: PinnedDatabase,
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let alias = replacement.pin.name.clone();
+        let retained = vec![parent.clone()];
+        let mut rebound_parent = parent.clone();
+        rebound_parent.rebind_database(replacement)?;
+        let final_session = self.resolve_nested_for_alias(&rebound_parent, &alias)?;
+        Ok(ReboundPathResolution {
+            final_session,
+            retained_sessions: retained,
+            retained_wave_lengths: vec![1],
+        })
+    }
+
+    /// Applies replacements one closure depth at a time and resolves the
+    /// resulting terminal route. One pre-rebind snapshot is retained per
+    /// depth. The whole path is atomic from the caller's view: if any later
+    /// replacement or closure fails, no partial result is returned and
+    /// `parent` remains unchanged. An empty path returns a clone of `parent`.
+    pub fn resolve_nested_rebind_path(
+        &self,
+        parent: &AttachedDatabaseSession,
+        replacements: &[PinnedDatabase],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let mut current = parent.clone();
+        let mut retained_sessions = Vec::with_capacity(replacements.len());
+        for replacement in replacements {
+            let (next, mut retained) = self
+                .resolve_nested_rebind(&current, replacement.clone())?
+                .into_parts();
+            retained_sessions.append(&mut retained);
+            current = next;
+        }
+        let retained_wave_lengths = if retained_sessions.is_empty() {
+            Vec::new()
+        } else {
+            vec![retained_sessions.len()]
+        };
+        Ok(ReboundPathResolution {
+            final_session: current,
+            retained_sessions,
+            retained_wave_lengths,
+        })
+    }
+
+    /// Resolves two ordered terminal-depth replacements as one atomic wave.
+    /// The two prior sessions remain together in `retained_wave(0)`, so the
+    /// pre-pair and between-depth routes can both be reopened independently.
+    pub fn resolve_nested_terminal_pair(
+        &self,
+        parent: &AttachedDatabaseSession,
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        self.resolve_nested_rebind_path(parent, &replacements)
+    }
+
+    /// Continues a resolved rebind path with another wave of replacements.
+    /// Snapshots from the earlier wave stay in order, followed by the prior
+    /// terminal session and any new intermediate routes. A failed extension
+    /// leaves `previous` available with its original final route.
+    pub fn extend_nested_rebind_path(
+        &self,
+        previous: &ReboundPathResolution,
+        replacements: &[PinnedDatabase],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let extension =
+            self.resolve_nested_rebind_path(previous.final_session(), replacements)?;
+        Ok(Self::append_rebound_extension(previous, extension))
+    }
+
+    /// Continues a route from one of its retained snapshots rather than its
+    /// deepest resolved closure. `retained_session` indexes the flattened
+    /// history returned by `retained_sessions()`. This keeps post-storm
+    /// closure work rooted in the exact intermediate pins captured earlier.
+    /// The reference is silent on reopening these historical routes; v1 uses
+    /// the flattened index to select the exact snapshot and retains the
+    /// superseded final route as its own wave. Any snapshots produced by the
+    /// new call form another retained wave. A missing index or failed closure
+    /// returns no new route.
+    pub fn extend_nested_rebind_path_from_retained(
+        &self,
+        previous: &ReboundPathResolution,
+        retained_session: usize,
+        replacements: &[PinnedDatabase],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let parent = previous
+            .retained_sessions()
+            .get(retained_session)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+        let extension = self.resolve_nested_rebind_path(parent, replacements)?;
+        Ok(Self::append_retained_rebound_extension(previous, extension))
+    }
+
+    /// Continues a route from a snapshot selected by retained wave and
+    /// position within that wave. The reference does not define reopening
+    /// between waves; v1 resolves from the exact selected pins and appends the
+    /// superseded final route as its own wave before appending the new
+    /// snapshots as another wave. Invalid wave or snapshot positions and
+    /// failed closures return no new route.
+    pub fn extend_nested_rebind_path_from_wave(
+        &self,
+        previous: &ReboundPathResolution,
+        wave: usize,
+        snapshot: usize,
+        replacements: &[PinnedDatabase],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let parent = previous
+            .retained_wave(wave)
+            .and_then(|sessions| sessions.get(snapshot))
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+        let extension = self.resolve_nested_rebind_path(parent, replacements)?;
+        Ok(Self::append_retained_rebound_extension(previous, extension))
+    }
+
+    fn append_rebound_extension(
+        previous: &ReboundPathResolution,
+        extension: ReboundPathResolution,
+    ) -> ReboundPathResolution {
+        let ReboundPathResolution {
+            final_session,
+            mut retained_sessions,
+            retained_wave_lengths: extension_wave_lengths,
+        } = extension;
+        let mut all_retained = previous.retained_sessions.clone();
+        all_retained.append(&mut retained_sessions);
+        let mut retained_wave_lengths = previous.retained_wave_lengths.clone();
+        retained_wave_lengths.extend(extension_wave_lengths);
+        ReboundPathResolution {
+            final_session,
+            retained_sessions: all_retained,
+            retained_wave_lengths,
+        }
+    }
+
+    fn append_retained_rebound_extension(
+        previous: &ReboundPathResolution,
+        extension: ReboundPathResolution,
+    ) -> ReboundPathResolution {
+        let ReboundPathResolution {
+            final_session,
+            mut retained_sessions,
+            retained_wave_lengths: extension_wave_lengths,
+        } = extension;
+        let mut all_retained = previous.retained_sessions.clone();
+        all_retained.push(previous.final_session.clone());
+        all_retained.append(&mut retained_sessions);
+        let mut retained_wave_lengths = previous.retained_wave_lengths.clone();
+        retained_wave_lengths.push(1);
+        retained_wave_lengths.extend(extension_wave_lengths);
+        ReboundPathResolution {
+            final_session,
+            retained_sessions: all_retained,
+            retained_wave_lengths,
+        }
+    }
+
+    /// Extends a post-storm route with two ordered terminal-depth rebinds.
+    /// The prior history stays intact and the new pair is exposed together in
+    /// the last retained wave. A failure leaves `previous` unchanged.
+    pub fn extend_nested_terminal_pair(
+        &self,
+        previous: &ReboundPathResolution,
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        self.extend_nested_rebind_path(previous, &replacements)
+    }
+
+    /// Extends a route with a terminal-depth pair from one of its retained
+    /// snapshots. This is useful after a rebind storm has resolved a deeper
+    /// closure and callers need to continue from an earlier exact route.
+    /// Prior snapshots stay in order; the previous final route is then
+    /// retained as its own wave, followed by the selected root and
+    /// intermediate route captured by the new pair. The input route remains
+    /// unchanged if either replacement or closure fails.
+    pub fn extend_nested_terminal_pair_from_retained(
+        &self,
+        previous: &ReboundPathResolution,
+        retained_session: usize,
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        self.extend_nested_rebind_path_from_retained(previous, retained_session, &replacements)
+    }
+
+    /// Extends a terminal-depth pair from one snapshot in a retained wave.
+    /// This keeps repeated post-storm continuations attached to their explicit
+    /// wave and snapshot positions while preserving every prior route.
+    pub fn extend_nested_terminal_pair_from_wave(
+        &self,
+        previous: &ReboundPathResolution,
+        wave: usize,
+        snapshot: usize,
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        self.extend_nested_rebind_path_from_wave(previous, wave, snapshot, &replacements)
+    }
+
+    /// Resolves independently rebound paths for sibling parent snapshots.
+    /// Each input plan is `(parent, replacements)`; results keep input order
+    /// and each route retains its own pre-rebind sessions. No partial batch is
+    /// returned if any sibling path fails. Where sibling event ordering is
+    /// unspecified, v1 resolves every path from its own exact pins.
+    pub fn resolve_sibling_rebind_paths(
+        &self,
+        paths: &[(&AttachedDatabaseSession, &[PinnedDatabase])],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(parent, replacements)| {
+                self.resolve_nested_rebind_path(parent, replacements)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Applies one identical replacement path to every sibling parent while
+    /// retaining each parent's route snapshots independently. Results keep
+    /// parent order and are returned only when every sibling resolves.
+    pub fn resolve_sibling_rebind_wave(
+        &self,
+        parents: &[AttachedDatabaseSession],
+        replacements: &[PinnedDatabase],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let paths = parents
+            .iter()
+            .map(|parent| (parent, replacements))
+            .collect::<Vec<_>>();
+        self.resolve_sibling_rebind_paths(&paths)
+    }
+
+    /// Extends independently selected sibling routes with another wave.
+    /// Every earlier snapshot remains in its route's history, and input order
+    /// is retained. A failed sibling extension returns no partial batch and
+    /// leaves all supplied results unchanged.
+    pub fn extend_sibling_rebind_paths(
+        &self,
+        paths: &[(&ReboundPathResolution, &[PinnedDatabase])],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, replacements)| {
+                self.extend_nested_rebind_path(previous, replacements)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Applies one ordered terminal-depth pair to each sibling route. Every
+    /// branch retains its own two pre-rebind snapshots, input order is stable,
+    /// and no partial sibling batch is returned on failure.
+    pub fn extend_sibling_terminal_pair_paths(
+        &self,
+        paths: &[(&ReboundPathResolution, &[PinnedDatabase; 2])],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, replacements)| {
+                self.extend_nested_terminal_pair(previous, (**replacements).clone())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Continues sibling routes from their own retained snapshots with one
+    /// terminal-depth pair per route. `retained_session` is each route's
+    /// flattened history index; results preserve input order and prior waves.
+    /// The batch is returned only if every selected snapshot and closure is
+    /// available.
+    pub fn extend_sibling_terminal_pair_paths_from_retained(
+        &self,
+        paths: &[(&ReboundPathResolution, usize, &[PinnedDatabase; 2])],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, retained_session, replacements)| {
+                self.extend_nested_terminal_pair_from_retained(
+                    previous,
+                    *retained_session,
+                    (**replacements).clone(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Continues sibling routes from explicit retained-wave snapshots with
+    /// one terminal-depth pair per route. Results preserve sibling order and
+    /// each route's prior waves; the batch is atomic when any wave, snapshot,
+    /// replacement or closure is unavailable.
+    pub fn extend_sibling_terminal_pair_paths_from_waves(
+        &self,
+        paths: &[(&ReboundPathResolution, usize, usize, &[PinnedDatabase; 2])],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, wave, snapshot, replacements)| {
+                self.extend_nested_terminal_pair_from_wave(
+                    previous,
+                    *wave,
+                    *snapshot,
+                    (**replacements).clone(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Applies one identical terminal-depth pair to sibling routes selected
+    /// from retained waves. Each route resolves from its own exact snapshot,
+    /// keeps its displaced final endpoint and earlier waves, and preserves
+    /// input order. No partial sibling batch is returned on failure.
+    pub fn extend_sibling_terminal_pair_wave_from_waves(
+        &self,
+        paths: &[(&ReboundPathResolution, usize, usize)],
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, wave, snapshot)| {
+                self.extend_nested_terminal_pair_from_wave(
+                    previous,
+                    *wave,
+                    *snapshot,
+                    replacements.clone(),
+                )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Applies one identical terminal-depth pair to the latest retained-wave
+    /// root of every sibling route. The reference is silent on continuing a
+    /// convergent post-storm pair; v1 uses the first snapshot in each latest
+    /// wave as that route's root, retains the displaced final session as its
+    /// own wave, and returns no partial batch if any branch fails.
+    pub fn extend_sibling_terminal_pair_wave(
+        &self,
+        previous: &SiblingRebindResolution,
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = previous
+            .routes
+            .iter()
+            .map(|route| {
+                let latest_wave = route
+                    .retained_wave_lengths
+                    .len()
+                    .checked_sub(1)
+                    .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+                self.extend_nested_terminal_pair_from_wave(
+                    route,
+                    latest_wave,
+                    0,
+                    replacements.clone(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Repeats one identical rebind path across a completed sibling batch.
+    /// Each branch extends from its own terminal session and keeps its earlier
+    /// route snapshots; the returned batch preserves sibling order.
+    pub fn extend_sibling_rebind_wave(
+        &self,
+        previous: &SiblingRebindResolution,
+        replacements: &[PinnedDatabase],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let paths = previous
+            .routes
+            .iter()
+            .map(|route| (route, replacements))
+            .collect::<Vec<_>>();
+        self.extend_sibling_rebind_paths(&paths)
+    }
+
+    /// Resolves a chain of exact aliases from a retained session snapshot.
+    /// Each edge is selected from the session opened at the preceding edge;
+    /// a failure leaves the caller's snapshot untouched.
+    pub fn resolve_nested_path(
+        &self,
+        parent: &AttachedDatabaseSession,
+        aliases: &[&str],
+    ) -> Result<AttachedDatabaseSession, AttachmentError> {
+        let mut current = parent.clone();
+        for alias in aliases {
+            current = self.resolve_nested_for_alias(&current, alias)?;
+        }
+        Ok(current)
+    }
+}
+
+/// The terminal session and route snapshots retained while resolving a
+/// sequence of nested alias rebinds.
+///
+/// `retained_sessions` is ordered from the original parent through each
+/// intermediate closure, with one snapshot recorded before each replacement.
+/// The final session is the closure reached after the last replacement.
+#[derive(Clone, Debug)]
+pub struct ReboundPathResolution {
+    final_session: AttachedDatabaseSession,
+    retained_sessions: Vec<AttachedDatabaseSession>,
+    retained_wave_lengths: Vec<usize>,
+}
+
+impl ReboundPathResolution {
+    /// The closure reached after all requested replacements.
+    pub fn final_session(&self) -> &AttachedDatabaseSession {
+        &self.final_session
+    }
+
+    /// Snapshots retained before each replacement, in path order.
+    pub fn retained_sessions(&self) -> &[AttachedDatabaseSession] {
+        &self.retained_sessions
+    }
+
+    /// Snapshots retained by one resolution wave, in the order they were
+    /// captured. The reference fixes exact historical pins but does not define
+    /// how paired rebind snapshots are grouped; v1 keeps each call's boundary.
+    pub fn retained_wave(&self, wave: usize) -> Option<&[AttachedDatabaseSession]> {
+        let length = *self.retained_wave_lengths.get(wave)?;
+        let start = self.retained_wave_lengths[..wave].iter().sum::<usize>();
+        self.retained_sessions.get(start..start + length)
+    }
+
+    /// Takes ownership of the final closure and every retained route snapshot.
+    pub fn into_parts(self) -> (AttachedDatabaseSession, Vec<AttachedDatabaseSession>) {
+        (self.final_session, self.retained_sessions)
+    }
+}
+
+/// Independently resolved sibling paths, kept in input order.
+#[derive(Clone, Debug, Default)]
+pub struct SiblingRebindResolution {
+    routes: Vec<ReboundPathResolution>,
+}
+
+impl SiblingRebindResolution {
+    /// The sibling results in the same order as their input plans.
+    pub fn routes(&self) -> &[ReboundPathResolution] {
+        &self.routes
+    }
+
+    /// Takes ownership of the sibling results in input order.
+    pub fn into_routes(self) -> Vec<ReboundPathResolution> {
+        self.routes
+    }
 }
 
 /// A primary database and zero or more read-only, commit-pinned attachments.
@@ -344,6 +999,28 @@ impl AttachedDatabaseSession {
         }
         self.attached.insert(name, database);
         Ok(())
+    }
+
+    /// Atomically replaces one attached alias with a new immutable pin and
+    /// returns the previous pin for later use as a retained closure root.
+    /// Matching is by the new pin's exact alias; sibling aliases are unchanged.
+    /// The alias must already be attached, and failures leave the session as-is.
+    pub fn rebind_database(
+        &mut self,
+        database: PinnedDatabase,
+    ) -> Result<PinnedDatabase, AttachmentError> {
+        let name = checked_name(database.pin.name.clone())?;
+        if name == "sys" {
+            return Err(AttachmentError::SystemDatabaseCannotAttach);
+        }
+        if name == self.primary.pin.name {
+            return Err(AttachmentError::DuplicateAttachment);
+        }
+        let current = self
+            .attached
+            .get_mut(&name)
+            .ok_or(AttachmentError::AttachmentNotFound)?;
+        Ok(std::mem::replace(current, database))
     }
 
     /// Detaches an optional database alias from subsequent session lookups.
@@ -640,6 +1317,7 @@ pub enum AttachmentError {
     PrimaryDatabaseCannotDetach,
     SystemDatabaseCannotDetach,
     AttachmentNotFound,
+    RetainedSnapshotUnavailable,
     Repository(RepositoryError),
     Project(ProjectLoadError),
 }
@@ -663,6 +1341,7 @@ impl fmt::Display for AttachmentError {
             Self::PrimaryDatabaseCannotDetach => "the primary database cannot be detached",
             Self::SystemDatabaseCannotDetach => "the system database cannot be detached",
             Self::AttachmentNotFound => "database attachment does not exist",
+            Self::RetainedSnapshotUnavailable => "retained route snapshot does not exist",
             Self::Repository(_) => "repository snapshot could not be read",
             Self::Project(_) => "pinned database source could not be loaded",
         })

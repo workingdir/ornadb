@@ -1,0 +1,105 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn cascade_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+            };
+
+pub fn pair_at(left_root: sys.SnapshotRef, right_root: sys.SnapshotRef) =
+    (cascade_at(left_root), cascade_at(right_root));
+pub fn forwarded_pair(left_root: sys.SnapshotRef, right_root: sys.SnapshotRef) =
+    pair_at(left_root, right_root);
+pub fn chained_pair(left_root: sys.SnapshotRef, right_root: sys.SnapshotRef) =
+    forwarded_pair(left_root, right_root);
+
+// Reconstruct the original pair only after each saved depth has been rebound through decoys.
+pub fn paired_nested_chain_reproduction_stays_stable() {
+    let roots_first = chained_pair(sys.snapshot("HEAD~460"), sys.snapshot("HEAD~450"));
+    let roots_rolling = roots_first;
+    roots_rolling = chained_pair(sys.snapshot("HEAD~459"), sys.snapshot("HEAD~449"));
+    roots_rolling = chained_pair(sys.snapshot("HEAD~458"), sys.snapshot("HEAD~448"));
+    roots_rolling = chained_pair(sys.snapshot("HEAD~457"), sys.snapshot("HEAD~447"));
+
+    let (left_root_first, right_root_first) = roots_first;
+    let bridges_first = (
+        left_root_first(sys.snapshot("HEAD~420")),
+        right_root_first(sys.snapshot("HEAD~410")),
+    );
+    let bridges_rolling = bridges_first;
+    bridges_rolling = (
+        left_root_first(sys.snapshot("HEAD~419")),
+        right_root_first(sys.snapshot("HEAD~409")),
+    );
+    bridges_rolling = (
+        left_root_first(sys.snapshot("HEAD~418")),
+        right_root_first(sys.snapshot("HEAD~408")),
+    );
+    bridges_rolling = (
+        left_root_first(sys.snapshot("HEAD~417")),
+        right_root_first(sys.snapshot("HEAD~407")),
+    );
+
+    let (left_bridge_first, right_bridge_first) = bridges_first;
+    let leaves_first = (
+        left_bridge_first(sys.snapshot("HEAD~380")),
+        right_bridge_first(sys.snapshot("HEAD~370")),
+    );
+    let leaves_rolling = leaves_first;
+    leaves_rolling = (
+        left_bridge_first(sys.snapshot("HEAD~379")),
+        right_bridge_first(sys.snapshot("HEAD~369")),
+    );
+    leaves_rolling = (
+        left_bridge_first(sys.snapshot("HEAD~378")),
+        right_bridge_first(sys.snapshot("HEAD~368")),
+    );
+    leaves_rolling = (
+        left_bridge_first(sys.snapshot("HEAD~377")),
+        right_bridge_first(sys.snapshot("HEAD~367")),
+    );
+
+    let (left_leaf_first, right_leaf_first) = leaves_first;
+    let left_first = left_leaf_first(sys.snapshot("HEAD~340"));
+    let right_first = right_leaf_first(sys.snapshot("HEAD~330"));
+
+    // This is a fresh construction from the same pins, not restoration of the saved pair.
+    let roots_reproduced = chained_pair(sys.snapshot("HEAD~460"), sys.snapshot("HEAD~450"));
+    let (left_root_reproduced, right_root_reproduced) = roots_reproduced;
+    let bridges_reproduced = (
+        left_root_reproduced(sys.snapshot("HEAD~420")),
+        right_root_reproduced(sys.snapshot("HEAD~410")),
+    );
+    let (left_bridge_reproduced, right_bridge_reproduced) = bridges_reproduced;
+    let leaves_reproduced = (
+        left_bridge_reproduced(sys.snapshot("HEAD~380")),
+        right_bridge_reproduced(sys.snapshot("HEAD~370")),
+    );
+    let (left_leaf_reproduced, right_leaf_reproduced) = leaves_reproduced;
+    let left_reproduced = left_leaf_reproduced(sys.snapshot("HEAD~340"));
+    let right_reproduced = right_leaf_reproduced(sys.snapshot("HEAD~330"));
+
+    {
+        left: {
+            root: [left_first.root, left_reproduced.root, chained_factory(sys.snapshot("HEAD~460"))],
+            bridge: [left_first.bridge, left_reproduced.bridge, chained_factory(sys.snapshot("HEAD~420"))().read],
+            leaf: [left_first.leaf, left_reproduced.leaf, chained_factory(sys.snapshot("HEAD~380"))().read],
+            terminal: [left_first.terminal, left_reproduced.terminal, chained_factory(sys.snapshot("HEAD~340"))().read()],
+        },
+        right: {
+            root: [right_first.root, right_reproduced.root, chained_factory(sys.snapshot("HEAD~450"))],
+            bridge: [right_first.bridge, right_reproduced.bridge, chained_factory(sys.snapshot("HEAD~410"))().read],
+            leaf: [right_first.leaf, right_reproduced.leaf, chained_factory(sys.snapshot("HEAD~370"))().read],
+            terminal: [right_first.terminal, right_reproduced.terminal, chained_factory(sys.snapshot("HEAD~330"))().read()],
+        },
+        cross_reproduction: [left_first.terminal, right_reproduced.terminal],
+    }
+}

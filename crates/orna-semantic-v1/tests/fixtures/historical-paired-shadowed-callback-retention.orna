@@ -1,0 +1,46 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+// The returned callback shadows the maker's `pin`, but its alias must retain
+// the maker pin through both callback depths and subsequent paired rebinds.
+pub fn callback_chain_at(pin: sys.SnapshotRef) {
+    let captured = pin;
+    (pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) => factory_at(captured)
+}
+
+pub fn paired_shadowed_callback_depth_rebinds_retain_untouched_lanes() {
+    let roots = (
+        callback_chain_at(sys.snapshot("HEAD~100")),
+        callback_chain_at(sys.snapshot("HEAD~90")),
+    );
+    let (left_root, right_root) = roots;
+    let left_bridge = left_root(sys.snapshot("HEAD~80"));
+    let right_bridge = right_root(sys.snapshot("HEAD~70"));
+
+    let rolling = (left_bridge, right_bridge);
+    let saved = rolling;
+    rolling = (left_root(sys.snapshot("HEAD~79")), right_bridge);
+    let after_left = rolling;
+    let (middle_left, middle_right) = after_left;
+    rolling = (middle_left, right_root(sys.snapshot("HEAD~69")));
+    let after_right = rolling;
+
+    let (saved_left, saved_right) = saved;
+    let (final_left, final_right) = after_right;
+    let saved_left_result = saved_left(sys.snapshot("HEAD~60"));
+    let saved_right_result = saved_right(sys.snapshot("HEAD~50"));
+    let middle_left_result = middle_left(sys.snapshot("HEAD~45"));
+    let middle_right_result = middle_right(sys.snapshot("HEAD~44"));
+    let final_left_result = final_left(sys.snapshot("HEAD~40"));
+    let final_right_result = final_right(sys.snapshot("HEAD~30"));
+
+    {
+        saved_left: std.concurrent.parallel([() => saved_left_result, () => saved_left_result]),
+        saved_right: std.concurrent.parallel([() => saved_right_result, () => saved_right_result]),
+        middle_left: std.concurrent.parallel([() => middle_left_result, () => middle_left_result]),
+        middle_right: std.concurrent.parallel([() => middle_right_result, () => middle_right_result]),
+        final_left: std.concurrent.parallel([() => final_left_result, () => final_left_result]),
+        final_right: std.concurrent.parallel([() => final_right_result, () => final_right_result]),
+    }
+}

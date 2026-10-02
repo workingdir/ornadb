@@ -499,6 +499,16 @@ fn admitted_runtime_sources(
                     );
                 }
                 Declaration::Use { .. } => {}
+                // The bounded REPL admits pinned standard functions as
+                // executable source, while enum constructors are still
+                // represented by the semantic catalogue only. Keep an
+                // optional std enum module from preventing unrelated std
+                // functions from loading; ordinary project enums remain
+                // outside this evaluator boundary.
+                Declaration::Enum { .. }
+                    if namespace
+                        .as_deref()
+                        .is_some_and(|namespace| namespace.starts_with("std.")) => {}
                 _ => return Err(ReplError::fixed("ORNA-REPL-UNSUPPORTED")),
             }
         }

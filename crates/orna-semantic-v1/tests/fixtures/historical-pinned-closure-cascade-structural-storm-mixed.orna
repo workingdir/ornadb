@@ -1,0 +1,113 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn cascade_at(root_pin: sys.SnapshotRef, bridge_pin: sys.SnapshotRef) =
+    (leaf_pin: sys.SnapshotRef) => {
+        root: chained_factory(root_pin),
+        nested: {
+            bridge: chained_factory(bridge_pin)().read,
+            leaf: {
+                reader: chained_factory(leaf_pin)().read,
+                continuation: chained_factory(leaf_pin)().read(),
+            },
+        },
+    };
+
+pub fn structure_at(
+    primary_root: sys.SnapshotRef,
+    primary_bridge: sys.SnapshotRef,
+    secondary_root: sys.SnapshotRef,
+    secondary_bridge: sys.SnapshotRef,
+    tertiary_root: sys.SnapshotRef,
+    tertiary_bridge: sys.SnapshotRef,
+) = {
+    primary: cascade_at(primary_root, primary_bridge),
+    nested: {
+        secondary: cascade_at(secondary_root, secondary_bridge),
+        deeper: {
+            tertiary: cascade_at(tertiary_root, tertiary_bridge),
+        },
+    },
+};
+
+pub fn intermediate_deep_cascade_pin_survives_structural_round_trip() {
+    let rolling = structure_at(
+        sys.snapshot("HEAD~80"),
+        sys.snapshot("HEAD~70"),
+        sys.snapshot("HEAD~60"),
+        sys.snapshot("HEAD~50"),
+        sys.snapshot("HEAD~40"),
+        sys.snapshot("HEAD~30"),
+    );
+    let first = rolling;
+    rolling = structure_at(
+        sys.snapshot("HEAD~79"),
+        sys.snapshot("HEAD~69"),
+        sys.snapshot("HEAD~59"),
+        sys.snapshot("HEAD~49"),
+        sys.snapshot("HEAD~39"),
+        sys.snapshot("HEAD~29"),
+    );
+    rolling = structure_at(
+        sys.snapshot("HEAD~78"),
+        sys.snapshot("HEAD~68"),
+        sys.snapshot("HEAD~58"),
+        sys.snapshot("HEAD~48"),
+        sys.snapshot("HEAD~38"),
+        sys.snapshot("HEAD~28"),
+    );
+    rolling = structure_at(
+        sys.snapshot("HEAD~77"),
+        sys.snapshot("HEAD~67"),
+        sys.snapshot("HEAD~57"),
+        sys.snapshot("HEAD~47"),
+        sys.snapshot("HEAD~37"),
+        sys.snapshot("HEAD~27"),
+    );
+    let intermediate = rolling;
+    rolling = structure_at(
+        sys.snapshot("HEAD~76"),
+        sys.snapshot("HEAD~66"),
+        sys.snapshot("HEAD~56"),
+        sys.snapshot("HEAD~46"),
+        sys.snapshot("HEAD~36"),
+        sys.snapshot("HEAD~26"),
+    );
+    rolling = structure_at(
+        sys.snapshot("HEAD~75"),
+        sys.snapshot("HEAD~65"),
+        sys.snapshot("HEAD~55"),
+        sys.snapshot("HEAD~45"),
+        sys.snapshot("HEAD~35"),
+        sys.snapshot("HEAD~25"),
+    );
+    rolling = structure_at(
+        sys.snapshot("HEAD~74"),
+        sys.snapshot("HEAD~64"),
+        sys.snapshot("HEAD~54"),
+        sys.snapshot("HEAD~44"),
+        sys.snapshot("HEAD~34"),
+        sys.snapshot("HEAD~24"),
+    );
+    rolling = structure_at(
+        sys.snapshot("HEAD~73"),
+        sys.snapshot("HEAD~63"),
+        sys.snapshot("HEAD~53"),
+        sys.snapshot("HEAD~43"),
+        sys.snapshot("HEAD~33"),
+        sys.snapshot("HEAD~23"),
+    );
+    rolling = first;
+    let returned = rolling;
+
+    let intermediate_value = intermediate.nested.deeper.tertiary(sys.snapshot("HEAD~10"));
+    let returned_value = returned.nested.deeper.tertiary(sys.snapshot("HEAD~10"));
+    [
+        intermediate_value.nested.bridge,
+        returned_value.nested.bridge,
+    ]
+}

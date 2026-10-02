@@ -1,0 +1,28 @@
+use std.introspection as introspection;
+use std.reflection as reflection;
+
+pub fn metadata(value: Int): sys.ValueMetadata<Int> = introspection.metadata(value);
+pub fn resolve_object(name: Str): sys.ObjectRef = introspection.resolve_object(name);
+pub fn resolve_function(name: Str): sys.FunctionRef = introspection.resolve_function(name);
+pub fn describe(object: sys.ObjectRef): sys.ObjectDescription = introspection.describe(object);
+pub fn object_source(object: sys.ObjectRef): sys.SourceDocument = introspection.source(object);
+pub fn file_source(file: sys.FileRef): sys.SourceDocument = introspection.file_source(file);
+pub fn object_history(object: sys.ObjectRef): Relation<sys.Revision> = introspection.history(object);
+pub fn file_history(file: sys.FileRef): Relation<sys.FileVersion> = introspection.file_history(file);
+pub fn dependencies(object: sys.ObjectRef): Relation<sys.Dependency> = introspection.dependencies(object);
+pub fn dependents(object: sys.ObjectRef): Relation<sys.Dependency> = introspection.dependents(object);
+pub fn explain(function: sys.FunctionRef): sys.Plan = introspection.explain_function(function);
+pub fn explain_diagnostic(diagnostic: sys.Diagnostic): sys.Explanation =
+    introspection.explain_diagnostic(diagnostic);
+
+pub fn invoke_typed(function: sys.FunctionRef, arguments: sys.ArgumentMap): Int =
+    reflection.invoke_as<Int>(function, arguments);
+pub fn invoke_erased(function: sys.FunctionRef, arguments: sys.ArgumentMap): sys.Value =
+    reflection.invoke_value(function, arguments);
+pub fn start_typed(function: sys.FunctionRef, arguments: sys.ArgumentMap): sys.InvocationHandle<Int> =
+    reflection.start_as<Int>(function, arguments);
+pub fn start_erased(function: sys.FunctionRef, arguments: sys.ArgumentMap): sys.InvocationHandle<sys.Value> =
+    reflection.start_value(function, arguments);
+pub fn await_typed(invocation: sys.InvocationHandle<Int>): sys.InvocationResult<Int> =
+    reflection.await_result(invocation);
+pub fn cancel_typed(invocation: sys.InvocationHandle<Int>): Bool = reflection.cancel(invocation);

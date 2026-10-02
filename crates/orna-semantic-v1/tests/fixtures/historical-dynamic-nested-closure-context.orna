@@ -1,0 +1,13 @@
+pub fn dynamic_nested_closure_context_survives_decomposition() {
+    let selector = "HEAD~10";
+    let selected = sys.snapshot(selector);
+    let first = sys.database.as_of(selected);
+    let second = sys.database.as_of(selected);
+    let first_factory = first.energy.factory;
+    let second_factory = second.energy.factory;
+    let first_product = first_factory();
+    let second_product = second_factory();
+    let first_read = first_product.read;
+    let second_read = second_product.read;
+    [first_read, second_read]
+}

@@ -1,0 +1,5 @@
+use std.option;
+use std.result;
+
+pub fn has_optional_value(value: Int?): Bool = option.is_some(value);
+pub fn passthrough_result(value: result.Result<Int, Str>): result.Result<Int, Str> = value;

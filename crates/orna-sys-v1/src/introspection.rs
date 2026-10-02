@@ -19,6 +19,7 @@ pub const MAX_DEPENDENCY_EDGES: usize = 1_000_000;
 pub const MAX_PLAN_NODES: usize = 16_384;
 pub const MAX_PLAN_EXPRESSIONS: usize = 8_192;
 pub const MAX_REFERENCE_BYTES: usize = 4_096;
+const MAX_DISJUNCT_STORM_DEPTH: usize = 64;
 
 macro_rules! descriptive_reference {
     ($name:ident) => {
@@ -563,6 +564,60 @@ pub struct QueryPlanDescription {
     pub materialize_into: Option<ObjectRef>,
 }
 
+/// One nested disjunct storm stage whose branches each have their own limit
+/// cascade and conjunct chain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisjunctStormDescription {
+    /// Resolved predicate reference for this expansion stage.
+    pub predicate: ExpressionRef,
+    /// Number of independent OR branches expanded at this stage.
+    pub disjunct_count: u64,
+    /// Ordered limits applied independently inside every branch.
+    pub nested_branch_limits: Vec<u64>,
+    /// Ordered AND terms evaluated inside each branch after its limits.
+    pub conjunct_count_per_disjunct: u64,
+}
+
+/// One branch in a storm whose branch-local limit chain differs from its
+/// siblings.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisjunctStormBranchDescription {
+    /// Ordered limits applied to this branch before its conjuncts.
+    pub nested_limits: Vec<u64>,
+    /// Ordered AND terms evaluated in this branch after its limits.
+    pub conjunct_count: u64,
+    /// Nested cascades rebound after one-based positions in `nested_limits`.
+    /// List entries must be ordered by position; entries at one position run
+    /// in declaration order. Each cascade consumes current branch rows, and
+    /// its output feeds the next limit in the chain. A rebind at a later
+    /// position starts from the branch output after all earlier limits and
+    /// rebinds; it never restarts from the enclosing storm input.
+    pub limit_rebinds: Vec<DisjunctStormLimitRebindDescription>,
+    /// Nested disjunct storms evaluated against this branch's filtered output.
+    pub nested_storms: Vec<DisjunctStormCascadeDescription>,
+}
+
+/// A group of cascades rebound at a specific point in a branch-local limit chain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisjunctStormLimitRebindDescription {
+    /// One-based position in the enclosing branch's `nested_limits` chain.
+    pub after_limit: usize,
+    /// Cascades to run in declaration order after this limit. The first uses
+    /// the branch rows and bytes after the limit; each later cascade uses the
+    /// previous cascade's bounded output, which ultimately feeds the next
+    /// limit in the enclosing branch.
+    pub storms: Vec<DisjunctStormCascadeDescription>,
+}
+
+/// A disjunct storm stage with independently described branch pipelines.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisjunctStormCascadeDescription {
+    /// Resolved predicate reference for this expansion stage.
+    pub predicate: ExpressionRef,
+    /// Branch pipelines are combined in declaration order.
+    pub branches: Vec<DisjunctStormBranchDescription>,
+}
+
 /// Statistics supplied by the snapshot/catalogue adapter, never measured by
 /// the explain path itself. Missing values remain missing in the plan.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -638,6 +693,58 @@ pub enum PlanDetail {
     Boolean(bool),
     Expressions(Vec<ExpressionRef>),
     Ordering(Vec<PlanOrdering>),
+    /// Routes are ordered by nesting depth, typed input path, then typed
+    /// output path.
+    ByteCapHandoffRoutes(Vec<PlanByteCapHandoffRoute>),
+}
+
+/// One typed source-to-destination byte-cap handoff reported by a planner
+/// storm rebind. Unknown byte estimates remain `None`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PlanByteCapHandoffRoute {
+    /// One-based nesting depth of the storm scope containing the rebind.
+    pub depth: usize,
+    /// Typed path to the branch scope supplying the byte estimate.
+    pub input_path: Vec<PlanByteCapScopeSegment>,
+    /// Typed path to the nested cascade receiving the byte estimate.
+    pub output_path: Vec<PlanByteCapScopeSegment>,
+    /// Human-readable label derived from the complete typed input ancestry.
+    pub input_scope: String,
+    /// Human-readable label derived from the complete typed output ancestry.
+    pub output_scope: String,
+    /// Known input byte estimate; `None` means the estimate is unknown.
+    pub input_bytes: Option<u64>,
+    /// Known capped output byte estimate; `None` means the estimate is unknown.
+    pub output_bytes: Option<u64>,
+}
+
+/// One typed step in a nested storm byte-cap handoff route. A route path
+/// preserves every preceding handoff output in its ancestry, including when a
+/// later limit or cascade consumes that bounded result.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlanByteCapScopeSegment {
+    /// A one-based top-level storm stage.
+    StormStage { index: usize },
+    /// The bounded output of a one-based top-level storm stage.
+    StormStageOutput { index: usize },
+    /// A one-based branch within a storm.
+    Branch { index: usize },
+    /// A one-based nested limit position within a branch.
+    Limit { position: usize },
+    /// The bounded output of a one-based branch after its limits, rebinds,
+    /// and conjuncts, before that branch's nested storms.
+    BranchOutput { index: usize },
+    /// A one-based rebind declaration position within a branch.
+    Rebind { position: usize },
+    /// A one-based cascade position within a rebind.
+    Cascade { index: usize },
+    /// The bounded output of a one-based cascade at a rebind position.
+    RebindCascadeOutput { position: usize, index: usize },
+    /// A one-based nested storm position within a branch.
+    NestedStorm { index: usize },
+    /// The bounded output of a one-based nested storm within a branch.
+    NestedStormOutput { index: usize },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -852,7 +959,605 @@ pub fn explain_query_with_disjunct_limit_chain(
     disjunct_count: u64,
     additional_limits: &[u64],
 ) -> Result<ExplainedPlan, ExplainError> {
-    if disjunct_count == 0 || (disjunct_count > 1 && query.predicate.is_none()) {
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        None,
+        None,
+        &[],
+        &[],
+        None,
+        additional_limits,
+    )
+}
+
+/// Explains a disjunction followed by a left-to-right chain of conjunctive
+/// predicates and ordered limit stages.
+///
+/// ORNA-PLAN leaves predicate selectivity and cost estimates unspecified. In
+/// the absence of histograms, each OR arm and each subsequent AND conjunct is
+/// estimated at 50% selectivity. The planner charges every expanded OR arm
+/// for the full input, then charges each AND conjunct for the rows surviving
+/// earlier conjuncts. AND work follows the reference's left-to-right short-
+/// circuit order. Limits retain their input-row work and cannot refund this
+/// predicate work. `conjunct_count` must be nonzero and describes the AND
+/// terms evaluated after the expanded disjunction.
+pub fn explain_query_with_disjunct_conjunct_limit_chain(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    conjunct_count: u64,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        Some(conjunct_count),
+        None,
+        &[],
+        &[],
+        None,
+        additional_limits,
+    )
+}
+
+/// Explains a disjunction whose expanded arms each contain a short-circuiting
+/// chain of conjuncts, followed by ordered limit stages.
+///
+/// ORNA-PLAN does not prescribe selectivity or expanded-filter cost
+/// aggregation. Without histograms, each conjunct is estimated to match half
+/// of its input, arm selectivity is the product of those conjunct estimates,
+/// and arms are treated as independent. Every expanded arm is charged against
+/// the full source input; within an arm, each later conjunct is charged only
+/// against rows surviving its predecessors. Integer match estimates round up
+/// at each arm. `conjunct_count_per_disjunct` and `disjunct_count` must be
+/// nonzero, and their product must fit the plan expression bound.
+pub fn explain_query_with_conjunct_disjunct_limit_chain(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    conjunct_count_per_disjunct: u64,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0 || conjunct_count_per_disjunct == 0 {
+        return Err(ExplainError::InvalidExpression);
+    }
+    if disjunct_count.saturating_mul(conjunct_count_per_disjunct) > MAX_PLAN_EXPRESSIONS as u64 {
+        return Err(ExplainError::TooManyExpressions);
+    }
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        None,
+        Some(conjunct_count_per_disjunct),
+        &[],
+        &[],
+        None,
+        additional_limits,
+    )
+}
+
+/// Explains disjunct expansion whose individual branches each run a nested
+/// limit chain followed by a left-to-right conjunct chain, then applies the
+/// query's outer limit and any additional limit stages.
+///
+/// Each branch starts from the same source/join input. Its nested limits run
+/// in order before its conjuncts; limit work is charged once per disjunct.
+/// The disjunction then combines the branch estimates. ORNA-PLAN leaves this
+/// estimate composition unspecified, so the adapter uses the deterministic
+/// 50%-per-conjunct, independent-branch fallback and rounds each branch's
+/// surviving rows upward. The query's `limit` and `additional_limits` run
+/// after the disjunction and retain all branch work. `disjunct_count`,
+/// and `conjunct_count_per_disjunct` must be positive; `nested_branch_limits`
+/// must be nonempty and the query must have a predicate.
+pub fn explain_query_with_disjunct_branch_limit_conjunct_cascade(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    nested_branch_limits: &[u64],
+    conjunct_count_per_disjunct: u64,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0
+        || nested_branch_limits.is_empty()
+        || conjunct_count_per_disjunct == 0
+        || query.predicate.is_none()
+    {
+        return Err(ExplainError::InvalidExpression);
+    }
+    if disjunct_count.saturating_mul(conjunct_count_per_disjunct)
+        > MAX_PLAN_EXPRESSIONS as u64
+    {
+        return Err(ExplainError::TooManyExpressions);
+    }
+    explain_query_with_predicate_pressure_and_branch_limits(
+        query,
+        disjunct_count,
+        None,
+        Some(conjunct_count_per_disjunct),
+        &[],
+        nested_branch_limits,
+        &[],
+        None,
+        additional_limits,
+    )
+}
+
+/// Explains a sequence of nested disjunct storms. Every stage starts from the
+/// previous stage's estimated output, expands its own disjuncts, applies an
+/// ordered limit cascade to each branch, evaluates that branch's conjunct
+/// chain, and combines the surviving branch estimates before feeding the
+/// next storm. The query's outer limit and `additional_limits` run after all
+/// storms.
+///
+/// ORNA-PLAN leaves estimate aggregation unspecified for this composition.
+/// The adapter uses independent branches with 50% selectivity per conjunct,
+/// rounds branch matches upward, and charges every branch limit for each
+/// disjunct. It retains work and known overflow from earlier storms through
+/// later stages and zero limits. The query-level predicate must be absent;
+/// each `DisjunctStormDescription` supplies the predicate for its stage.
+pub fn explain_query_with_disjunct_storm_chain(
+    query: &QueryPlanDescription,
+    storms: &[DisjunctStormDescription],
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if storms.is_empty() || query.predicate.is_some() {
+        return Err(ExplainError::InvalidExpression);
+    }
+    if storms.iter().any(|storm| {
+        storm.disjunct_count == 0
+            || storm.nested_branch_limits.is_empty()
+            || storm.conjunct_count_per_disjunct == 0
+    }) {
+        return Err(ExplainError::InvalidExpression);
+    }
+    explain_query_with_predicate_pressure_and_branch_limits_and_storms(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        additional_limits,
+        storms,
+        &[],
+    )
+}
+
+/// Explains ordered disjunct-storm stages whose branches may use different
+/// nested limit chains and conjunct counts.
+///
+/// ORNA-PLAN does not specify estimates for branch-local limit chains inside
+/// nested disjunctions or where nested cascades rebind within those chains.
+/// This adapter applies each branch's limits and 50%-per-conjunct fallback
+/// independently from the same stage input, combines branch matches in
+/// declaration order without counting more rows or bytes than that input, and
+/// feeds the bounded result to the next storm stage. Every cascade result is
+/// capped to its immediate input at every nesting depth, so a nested rebind
+/// cannot expand beyond its ancestor branch's bounded estimate. The immediate
+/// cap at a rebind is the current branch's bounded rows and bytes. An explicit
+/// rebind runs just after its one-based limit position and feeds its capped
+/// output to the following limit. Rebinds at the same position run in
+/// declaration order, each consuming the previous rebind's bounded result.
+/// Row and byte estimates are capped independently; an unknown dimension stays
+/// unknown while a known dimension continues to use its immediate input cap.
+/// Unknown row-based work does not erase a known byte estimate.
+/// A rebind nested inside a cascade uses that nested branch's own post-limit
+/// estimate as its cap, so nested work cannot borrow a wider ancestor cap.
+/// The known byte cap therefore follows the immediate branch input at every
+/// rebind depth, even when every row-based work estimate is unknown.
+/// Plan details report the deepest cascade level that contains a rebind so the
+/// nested cap boundary is visible alongside the recursive branch shape.
+/// Since
+/// `sys.PlanNodeKind` has no union node, each storm is one aggregate filter
+/// node whose details retain the exact branch chains and rebind points; this
+/// avoids presenting sibling limits as a false serial pipeline. The
+/// query-level predicate must be absent because every stage supplies its own
+/// predicate.
+pub fn explain_query_with_disjunct_storm_branch_limit_chains(
+    query: &QueryPlanDescription,
+    storms: &[DisjunctStormCascadeDescription],
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if storms.is_empty() || query.predicate.is_some() {
+        return Err(ExplainError::InvalidExpression);
+    }
+    explain_query_with_predicate_pressure_and_branch_limits_and_storms(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        additional_limits,
+        &[],
+        storms,
+    )
+}
+
+/// Explains nested input limits, one expanded disjunctive filter, and then
+/// the query's outer limit followed by any additional limits.
+///
+/// The input limits model an already nested relation and run after source and
+/// join work but before the predicate. Each limit is charged for its immediate
+/// input rows; disjunct expansion then charges each arm for the bounded rows
+/// that remain. ORNA-PLAN leaves cost aggregation unspecified, so this keeps
+/// the same documented independent 50%-per-arm fallback as
+/// [`explain_query_with_disjunct_limit_chain`].
+pub fn explain_query_with_input_limit_disjunct_chain(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    nested_input_limits: &[u64],
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0 || query.predicate.is_none() {
+        return Err(ExplainError::InvalidExpression);
+    }
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        None,
+        None,
+        nested_input_limits,
+        &[],
+        None,
+        additional_limits,
+    )
+}
+
+/// Explains nested input limits, expanded disjuncts with a conjunct chain in
+/// each arm, and then the query's outer limit followed by any additional
+/// limits.
+///
+/// Each nested input limit runs after source and join work but before the
+/// predicate, and is charged for its immediate input rows. Every disjunct arm
+/// then starts from the capped rows and evaluates its conjuncts
+/// left-to-right, charging later conjuncts only for rows surviving earlier
+/// ones. ORNA-PLAN leaves estimate aggregation unspecified, so the documented
+/// independent 50%-per-conjunct fallback is applied within each arm; each arm
+/// is charged against the full capped input.
+pub fn explain_query_with_input_limit_conjunct_disjunct_chain(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    conjunct_count_per_disjunct: u64,
+    nested_input_limits: &[u64],
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0 || conjunct_count_per_disjunct == 0 || query.predicate.is_none() {
+        return Err(ExplainError::InvalidExpression);
+    }
+    if disjunct_count.saturating_mul(conjunct_count_per_disjunct)
+        > MAX_PLAN_EXPRESSIONS as u64
+    {
+        return Err(ExplainError::TooManyExpressions);
+    }
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        None,
+        Some(conjunct_count_per_disjunct),
+        nested_input_limits,
+        &[],
+        None,
+        additional_limits,
+    )
+}
+
+/// Explains nested input limits, disjunct expansion, and then a separate
+/// left-to-right conjunct chain followed by the query's outer limit and any
+/// additional limits.
+///
+/// The input limits run once after source and join work and before the
+/// disjunctive predicate. Disjunct expansion charges each arm for the capped
+/// input; the conjunct chain then charges each term for the rows surviving
+/// its predecessors. ORNA-PLAN leaves these estimates unspecified, so the
+/// same deterministic 50%-per-arm and 50%-per-conjunct fallback is used.
+/// `query.predicate` describes the disjunction and `conjunct_predicate`
+/// describes the later AND chain. At least one nested limit, one disjunct,
+/// and one conjunct are required.
+pub fn explain_query_with_input_limit_disjunct_conjunct_chain(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    nested_input_limits: &[u64],
+    conjunct_predicate: ExpressionRef,
+    conjunct_count: u64,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0
+        || nested_input_limits.is_empty()
+        || conjunct_count == 0
+        || query.predicate.is_none()
+    {
+        return Err(ExplainError::InvalidExpression);
+    }
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        Some(conjunct_count),
+        None,
+        nested_input_limits,
+        &[],
+        Some(&conjunct_predicate),
+        additional_limits,
+    )
+}
+
+/// Explains nested input limits, disjunct expansion, a nested limit chain,
+/// and then a left-to-right conjunct chain followed by the query's outer
+/// limit and any additional limits.
+///
+/// Input limits run after source and join work, before disjunct expansion.
+/// Each expanded disjunct is charged against the capped input; the nested
+/// disjunct limits run after expansion and charge their immediate input. The
+/// conjunct chain runs after those limits and charges each term for rows
+/// surviving earlier terms. ORNA-PLAN leaves these estimate choices
+/// unspecified, so this adapter uses independent 50% selectivity per OR arm
+/// and left-to-right 50% selectivity per conjunct. Earlier work remains
+/// charged when later limits reduce the estimated rows. At least one input
+/// limit, one disjunct, one post-expansion limit, and one conjunct are
+/// required. `query.predicate` describes the disjunction and
+/// `conjunct_predicate` describes the later AND chain.
+pub fn explain_query_with_input_disjunct_limit_conjunct_chain(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    nested_input_limits: &[u64],
+    nested_disjunct_limits: &[u64],
+    conjunct_predicate: ExpressionRef,
+    conjunct_count: u64,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0
+        || nested_input_limits.is_empty()
+        || nested_disjunct_limits.is_empty()
+        || conjunct_count == 0
+        || query.predicate.is_none()
+    {
+        return Err(ExplainError::InvalidExpression);
+    }
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        Some(conjunct_count),
+        None,
+        nested_input_limits,
+        nested_disjunct_limits,
+        Some(&conjunct_predicate),
+        additional_limits,
+    )
+}
+
+/// Explains nested input limits, expanded disjuncts whose arms each contain a
+/// conjunct chain, a nested disjunct limit cascade, and then a separate
+/// conjunct chain followed by the query's outer limit and any additional
+/// limits.
+///
+/// Input limits run after source and join work and before disjunct expansion.
+/// Each disjunct arm evaluates its conjuncts left-to-right against the capped
+/// input. The nested disjunct limits then charge their immediate input before
+/// the separate final conjunct chain runs. ORNA-PLAN leaves selectivity and
+/// estimate aggregation unspecified, so this adapter uses independent 50%
+/// selectivity per arm and per conjunct, rounds branch row estimates upward,
+/// and keeps prior work charged after later caps. At least one input limit,
+/// one disjunct, one per-arm conjunct, one post-disjunct limit, and one final
+/// conjunct are required. `query.predicate` describes the disjunction with
+/// its per-arm conjuncts; `conjunct_predicate` describes the later AND chain.
+pub fn explain_query_with_input_limit_conjunct_disjunct_limit_conjunct_chain(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    conjunct_count_per_disjunct: u64,
+    nested_input_limits: &[u64],
+    nested_disjunct_limits: &[u64],
+    conjunct_predicate: ExpressionRef,
+    conjunct_count: u64,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0
+        || conjunct_count_per_disjunct == 0
+        || nested_input_limits.is_empty()
+        || nested_disjunct_limits.is_empty()
+        || conjunct_count == 0
+        || query.predicate.is_none()
+    {
+        return Err(ExplainError::InvalidExpression);
+    }
+    if disjunct_count.saturating_mul(conjunct_count_per_disjunct)
+        > MAX_PLAN_EXPRESSIONS as u64
+    {
+        return Err(ExplainError::TooManyExpressions);
+    }
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        Some(conjunct_count),
+        Some(conjunct_count_per_disjunct),
+        nested_input_limits,
+        nested_disjunct_limits,
+        Some(&conjunct_predicate),
+        additional_limits,
+    )
+}
+
+/// Explains an expanded disjunction, a nested limit chain, and then a
+/// left-to-right conjunct chain followed by the query's outer limit and any
+/// additional limits.
+///
+/// Each disjunct is estimated at 50% selectivity and charged against the full
+/// input. The nested limits run after that expansion, retain its work, and
+/// charge each immediate input. The subsequent conjuncts use the same
+/// deterministic 50%-per-term fallback, with each term charged only for rows
+/// surviving its predecessors. `query.predicate` describes the disjunctive
+/// predicate, and `conjunct_predicate` describes the post-limit conjunct
+/// chain. ORNA-PLAN does not specify these estimate aggregation choices. At
+/// least one nested limit, one disjunct, and one conjunct are required.
+pub fn explain_query_with_disjunct_limit_conjunct_chain(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    nested_limits: &[u64],
+    conjunct_predicate: ExpressionRef,
+    conjunct_count: u64,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0
+        || nested_limits.is_empty()
+        || conjunct_count == 0
+        || query.predicate.is_none()
+    {
+        return Err(ExplainError::InvalidExpression);
+    }
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        Some(conjunct_count),
+        None,
+        &[],
+        nested_limits,
+        Some(&conjunct_predicate),
+        additional_limits,
+    )
+}
+
+fn explain_query_with_predicate_pressure(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    conjunct_count: Option<u64>,
+    conjunct_count_per_disjunct: Option<u64>,
+    nested_input_limits: &[u64],
+    limits_between_disjunct_and_conjunct: &[u64],
+    post_expansion_conjunct: Option<&ExpressionRef>,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_with_predicate_pressure_and_branch_limits(
+        query,
+        disjunct_count,
+        conjunct_count,
+        conjunct_count_per_disjunct,
+        nested_input_limits,
+        &[],
+        limits_between_disjunct_and_conjunct,
+        post_expansion_conjunct,
+        additional_limits,
+    )
+}
+
+fn explain_query_with_predicate_pressure_and_branch_limits(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    conjunct_count: Option<u64>,
+    conjunct_count_per_disjunct: Option<u64>,
+    nested_input_limits: &[u64],
+    nested_branch_limits: &[u64],
+    limits_between_disjunct_and_conjunct: &[u64],
+    post_expansion_conjunct: Option<&ExpressionRef>,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_with_predicate_pressure_and_branch_limits_and_storms(
+        query,
+        disjunct_count,
+        conjunct_count,
+        conjunct_count_per_disjunct,
+        nested_input_limits,
+        nested_branch_limits,
+        limits_between_disjunct_and_conjunct,
+        post_expansion_conjunct,
+        additional_limits,
+        &[],
+        &[],
+    )
+}
+
+fn disjunct_storm_cascade_shape_counts<'a>(
+    storms: &'a [DisjunctStormCascadeDescription],
+) -> Result<(usize, usize, Vec<&'a ExpressionRef>), ExplainError> {
+    let mut pending = storms.iter().map(|storm| (storm, 1usize)).collect::<Vec<_>>();
+    let mut operators = 0usize;
+    let mut expressions = 0usize;
+    let mut predicates = Vec::new();
+    while let Some((storm, depth)) = pending.pop() {
+        if depth > MAX_DISJUNCT_STORM_DEPTH {
+            return Err(ExplainError::TooManyNodes);
+        }
+        if storm.branches.is_empty() {
+            return Err(ExplainError::InvalidExpression);
+        }
+        operators = operators.saturating_add(1);
+        predicates.push(&storm.predicate);
+        for branch in &storm.branches {
+            if branch.nested_limits.is_empty() || branch.conjunct_count == 0 {
+                return Err(ExplainError::InvalidExpression);
+            }
+            operators = operators
+                .saturating_add(branch.nested_limits.len())
+                .saturating_add(branch.limit_rebinds.len());
+            expressions = expressions.saturating_add(
+                usize::try_from(branch.conjunct_count).unwrap_or(usize::MAX),
+            );
+            let mut previous_rebind_position = 0;
+            for rebind in &branch.limit_rebinds {
+                if rebind.after_limit == 0
+                    || rebind.after_limit > branch.nested_limits.len()
+                    || rebind.after_limit < previous_rebind_position
+                    || rebind.storms.is_empty()
+                {
+                    return Err(ExplainError::InvalidExpression);
+                }
+                previous_rebind_position = rebind.after_limit;
+            }
+            pending.extend(
+                branch
+                    .limit_rebinds
+                    .iter()
+                    .flat_map(|rebind| rebind.storms.iter())
+                    .map(|nested| (nested, depth.saturating_add(1))),
+            );
+            pending.extend(
+                branch
+                    .nested_storms
+                    .iter()
+                    .map(|nested| (nested, depth.saturating_add(1))),
+            );
+            if operators > MAX_PLAN_NODES {
+                return Err(ExplainError::TooManyNodes);
+            }
+            if expressions > MAX_PLAN_EXPRESSIONS {
+                return Err(ExplainError::TooManyExpressions);
+            }
+        }
+    }
+    Ok((operators, expressions, predicates))
+}
+
+fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    conjunct_count: Option<u64>,
+    conjunct_count_per_disjunct: Option<u64>,
+    nested_input_limits: &[u64],
+    nested_branch_limits: &[u64],
+    limits_between_disjunct_and_conjunct: &[u64],
+    post_expansion_conjunct: Option<&ExpressionRef>,
+    additional_limits: &[u64],
+    disjunct_storms: &[DisjunctStormDescription],
+    disjunct_storm_cascades: &[DisjunctStormCascadeDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    let (storm_cascade_operators, storm_cascade_expressions, storm_cascade_predicates) =
+        disjunct_storm_cascade_shape_counts(disjunct_storm_cascades)?;
+    if disjunct_count == 0
+        || conjunct_count == Some(0)
+        || conjunct_count_per_disjunct == Some(0)
+        || (!nested_branch_limits.is_empty() && conjunct_count_per_disjunct.is_none())
+        || ((disjunct_count > 1
+            || conjunct_count.is_some()
+            || conjunct_count_per_disjunct.is_some())
+            && query.predicate.is_none())
+        || (!disjunct_storm_cascades.is_empty() && query.predicate.is_some())
+        || (!limits_between_disjunct_and_conjunct.is_empty()
+            && post_expansion_conjunct.is_none())
+        || (post_expansion_conjunct.is_some() && conjunct_count.is_none())
+        || (post_expansion_conjunct.is_none()
+            && conjunct_count.is_some()
+            && conjunct_count_per_disjunct.is_some())
+    {
         return Err(ExplainError::InvalidExpression);
     }
     if invalid_reference(query.snapshot.as_str()) {
@@ -885,10 +1590,19 @@ pub fn explain_query_with_disjunct_limit_chain(
     let operator_bound = 1usize
         .saturating_add(query.joins.len().saturating_mul(2))
         .saturating_add(usize::from(query.predicate.is_some()))
+        .saturating_add(disjunct_storms.len())
         .saturating_add(usize::from(!query.projections.is_empty()))
         .saturating_add(usize::from(query.distinct))
         .saturating_add(usize::from(!query.ordering.is_empty()))
         .saturating_add(usize::from(query.limit.is_some()))
+        .saturating_add(nested_input_limits.len())
+        .saturating_add(nested_branch_limits.len())
+        .saturating_add(disjunct_storms.iter().fold(0usize, |total, storm| {
+            total.saturating_add(storm.nested_branch_limits.len())
+        }))
+        .saturating_add(storm_cascade_operators)
+        .saturating_add(limits_between_disjunct_and_conjunct.len())
+        .saturating_add(usize::from(post_expansion_conjunct.is_some()))
         .saturating_add(additional_limits.len())
         .saturating_add(query.mutations.len())
         .saturating_add(usize::from(query.materialize_into.is_some()));
@@ -901,6 +1615,9 @@ pub fn explain_query_with_disjunct_limit_chain(
         .chain(query.projections.iter())
         .chain(query.ordering.iter().map(|ordering| &ordering.expression))
         .chain(query.joins.iter().filter_map(|join| join.predicate.as_ref()))
+        .chain(post_expansion_conjunct.iter().copied())
+        .chain(disjunct_storms.iter().map(|storm| &storm.predicate))
+        .chain(storm_cascade_predicates.iter().copied())
         .any(|expression| invalid_reference(expression.as_str()))
     {
         return Err(ExplainError::InvalidExpression);
@@ -910,7 +1627,18 @@ pub fn explain_query_with_disjunct_limit_chain(
         .len()
         .saturating_add(query.ordering.len())
         .saturating_add(usize::from(query.predicate.is_some()))
+        .saturating_add(usize::from(post_expansion_conjunct.is_some()))
         .saturating_add(query.joins.iter().filter(|join| join.predicate.is_some()).count())
+        .saturating_add(disjunct_storms.iter().fold(0usize, |total, storm| {
+            let stage = usize::try_from(
+                storm
+                    .disjunct_count
+                    .saturating_mul(storm.conjunct_count_per_disjunct),
+            )
+            .unwrap_or(usize::MAX);
+            total.saturating_add(stage)
+        }))
+        .saturating_add(storm_cascade_expressions)
         > MAX_PLAN_EXPRESSIONS
     {
         return Err(ExplainError::TooManyExpressions);
@@ -973,12 +1701,142 @@ pub fn explain_query_with_disjunct_limit_chain(
         ));
         current_cardinality = cardinality;
     }
+    for limit in nested_input_limits {
+        let cardinality = limit_cardinality(current_cardinality, *limit);
+        let work = current_cardinality.rows;
+        current = push_unary(
+            &mut operators,
+            current,
+            PlanNodeKind::Limit,
+            None,
+            BTreeMap::from([("limit".to_owned(), PlanDetail::Integer(*limit))]),
+            cardinality,
+            work,
+        );
+        current_cardinality = cardinality;
+    }
+    for limit in nested_branch_limits {
+        let cardinality = limit_cardinality(current_cardinality, *limit);
+        let work = current_cardinality
+            .rows
+            .and_then(|rows| rows.checked_mul(disjunct_count));
+        let mut details = BTreeMap::from([
+            ("limit".to_owned(), PlanDetail::Integer(*limit)),
+            (
+                "limit_scope".to_owned(),
+                PlanDetail::Text("per_disjunct_branch".to_owned()),
+            ),
+            (
+                "disjunct_count".to_owned(),
+                PlanDetail::Integer(disjunct_count),
+            ),
+        ]);
+        if current_cardinality.rows.is_some() && work.is_none() {
+            record_work_overflow(&mut details);
+        }
+        current = push_unary(
+            &mut operators,
+            current,
+            PlanNodeKind::Limit,
+            None,
+            details,
+            cardinality,
+            work,
+        );
+        current_cardinality = cardinality;
+    }
     if let Some(predicate) = &query.predicate {
-        // Expression references are opaque to this planner. A caller that
-        // supplies an expanded disjunction count gets one half-selective
-        // independent branch per disjunct; the default count of one preserves
-        // the historical single-filter fallback.
-        let (cardinality, work, mut details) = if disjunct_count == 1 {
+        // Expression references are opaque to this planner. The selected API
+        // shape supplies any branch/conjunct counts; the default count of one
+        // preserves the historical single-filter fallback.
+        let (cardinality, work, mut details) = if post_expansion_conjunct.is_some()
+            && conjunct_count_per_disjunct.is_none()
+        {
+            (
+                disjunction_cardinality(current_cardinality, disjunct_count),
+                current_cardinality
+                    .rows
+                    .and_then(|rows| rows.checked_mul(disjunct_count)),
+                BTreeMap::from([
+                    (
+                        "selectivity_assumption".to_owned(),
+                        PlanDetail::Text("0.5_per_disjunct_independent_or".to_owned()),
+                    ),
+                    (
+                        "disjunct_count".to_owned(),
+                        PlanDetail::Integer(disjunct_count),
+                    ),
+                    (
+                        "expansion_work".to_owned(),
+                        PlanDetail::Text("full_input_per_disjunct".to_owned()),
+                    ),
+                ]),
+            )
+        } else if let Some(conjunct_count) = conjunct_count_per_disjunct {
+            let (cardinality, work) = conjunctive_disjunction_cardinality_and_work(
+                current_cardinality,
+                disjunct_count,
+                conjunct_count,
+            );
+            (
+                cardinality,
+                work,
+                BTreeMap::from([
+                    (
+                        "selectivity_assumption".to_owned(),
+                        PlanDetail::Text(
+                            "0.5_per_left_to_right_conjunct_independent_disjuncts".to_owned(),
+                        ),
+                    ),
+                    (
+                        "disjunct_count".to_owned(),
+                        PlanDetail::Integer(disjunct_count),
+                    ),
+                    (
+                        "conjunct_count_per_disjunct".to_owned(),
+                        PlanDetail::Integer(conjunct_count),
+                    ),
+                    (
+                        "conjunct_order".to_owned(),
+                        PlanDetail::Text("left_to_right_short_circuit".to_owned()),
+                    ),
+                    (
+                        "expansion_work".to_owned(),
+                        PlanDetail::Text("full_input_per_disjunct".to_owned()),
+                    ),
+                ]),
+            )
+        } else if let Some(conjunct_count) = conjunct_count {
+            let (cardinality, work) = disjunction_conjunct_cardinality_and_work(
+                current_cardinality,
+                disjunct_count,
+                conjunct_count,
+            );
+            (
+                cardinality,
+                work,
+                BTreeMap::from([
+                    (
+                        "selectivity_assumption".to_owned(),
+                        PlanDetail::Text(
+                            "0.5_per_disjunct_independent_or_then_0.5_per_conjunct_and".to_owned(),
+                        ),
+                    ),
+                    (
+                        "disjunct_count".to_owned(),
+                        PlanDetail::Integer(disjunct_count),
+                    ),
+                    (
+                        "conjunct_count".to_owned(),
+                        PlanDetail::Integer(conjunct_count),
+                    ),
+                    (
+                        "conjunct_order".to_owned(),
+                        PlanDetail::Text("left_to_right_short_circuit".to_owned()),
+                    ),
+                ]),
+            )
+        } else if disjunct_count == 1 {
             (
                 scale_cardinality(current_cardinality, 1, 2),
                 current_cardinality.rows,
@@ -1018,6 +1876,449 @@ pub fn explain_query_with_disjunct_limit_chain(
             work,
         );
         current_cardinality = cardinality;
+        if post_expansion_conjunct.is_some() {
+            for limit in limits_between_disjunct_and_conjunct {
+                let cardinality = limit_cardinality(current_cardinality, *limit);
+                let work = current_cardinality.rows;
+                current = push_unary(
+                    &mut operators,
+                    current,
+                    PlanNodeKind::Limit,
+                    None,
+                    BTreeMap::from([("limit".to_owned(), PlanDetail::Integer(*limit))]),
+                    cardinality,
+                    work,
+                );
+                current_cardinality = cardinality;
+            }
+
+            let conjunct_count = conjunct_count.expect("nested disjunct limits require conjuncts");
+            let (cardinality, work) = conjunctive_disjunction_cardinality_and_work(
+                current_cardinality,
+                1,
+                conjunct_count,
+            );
+            let mut details = BTreeMap::from([
+                (
+                    "selectivity_assumption".to_owned(),
+                    PlanDetail::Text("0.5_per_left_to_right_conjunct".to_owned()),
+                ),
+                (
+                    "conjunct_count".to_owned(),
+                    PlanDetail::Integer(conjunct_count),
+                ),
+                (
+                    "conjunct_order".to_owned(),
+                    PlanDetail::Text("left_to_right_short_circuit".to_owned()),
+                ),
+            ]);
+            if current_cardinality.rows.is_some() && work.is_none() {
+                record_work_overflow(&mut details);
+            }
+            current = push_unary(
+                &mut operators,
+                current,
+                PlanNodeKind::Filter,
+                Some(
+                    post_expansion_conjunct
+                        .expect("nested disjunct limits require a conjunct predicate")
+                        .clone(),
+                ),
+                details,
+                cardinality,
+                work,
+            );
+            current_cardinality = cardinality;
+        }
+    }
+    for (storm_index, storm) in disjunct_storms.iter().enumerate() {
+        let storm_index = u64::try_from(storm_index + 1).map_err(|_| ExplainError::TooManyNodes)?;
+        for limit in &storm.nested_branch_limits {
+            let cardinality = limit_cardinality(current_cardinality, *limit);
+            let work = current_cardinality
+                .rows
+                .and_then(|rows| rows.checked_mul(storm.disjunct_count));
+            let mut details = BTreeMap::from([
+                ("limit".to_owned(), PlanDetail::Integer(*limit)),
+                (
+                    "limit_scope".to_owned(),
+                    PlanDetail::Text("per_disjunct_branch".to_owned()),
+                ),
+                (
+                    "disjunct_count".to_owned(),
+                    PlanDetail::Integer(storm.disjunct_count),
+                ),
+                (
+                    "disjunct_storm".to_owned(),
+                    PlanDetail::Integer(storm_index),
+                ),
+            ]);
+            if current_cardinality.rows.is_some() && work.is_none() {
+                record_work_overflow(&mut details);
+            }
+            current = push_unary(
+                &mut operators,
+                current,
+                PlanNodeKind::Limit,
+                None,
+                details,
+                cardinality,
+                work,
+            );
+            current_cardinality = cardinality;
+        }
+        let (cardinality, work) = conjunctive_disjunction_cardinality_and_work(
+            current_cardinality,
+            storm.disjunct_count,
+            storm.conjunct_count_per_disjunct,
+        );
+        let mut details = BTreeMap::from([
+            (
+                "selectivity_assumption".to_owned(),
+                PlanDetail::Text(
+                    "0.5_per_branch_conjunct_then_independent_disjuncts".to_owned(),
+                ),
+            ),
+            (
+                "disjunct_count".to_owned(),
+                PlanDetail::Integer(storm.disjunct_count),
+            ),
+            (
+                "conjunct_count_per_disjunct".to_owned(),
+                PlanDetail::Integer(storm.conjunct_count_per_disjunct),
+            ),
+            (
+                "conjunct_order".to_owned(),
+                PlanDetail::Text("left_to_right_short_circuit".to_owned()),
+            ),
+            (
+                "expansion_work".to_owned(),
+                PlanDetail::Text("full_input_per_disjunct_after_branch_limits".to_owned()),
+            ),
+            (
+                "disjunct_storm".to_owned(),
+                PlanDetail::Integer(storm_index),
+            ),
+        ]);
+        if current_cardinality.rows.is_some() && work.is_none() {
+            record_work_overflow(&mut details);
+        }
+        current = push_unary(
+            &mut operators,
+            current,
+            PlanNodeKind::Filter,
+            Some(storm.predicate.clone()),
+            details,
+            cardinality,
+            work,
+        );
+        current_cardinality = cardinality;
+    }
+    let mut prior_storm_stage_path = Vec::new();
+    for (storm_index, storm) in disjunct_storm_cascades.iter().enumerate() {
+        let storm_stage_index = storm_index + 1;
+        let storm_index =
+            u64::try_from(storm_stage_index).map_err(|_| ExplainError::TooManyNodes)?;
+        let branch_count =
+            u64::try_from(storm.branches.len()).map_err(|_| ExplainError::TooManyNodes)?;
+        let mut byte_cap_handoff_estimates_by_depth = BTreeMap::new();
+        let mut storm_scope_path = prior_storm_stage_path.clone();
+        storm_scope_path.push(PlanByteCapScopeSegment::StormStage {
+            index: storm_stage_index,
+        });
+        let (cardinality, work, overflowed) = disjunct_storm_cascade_cardinality_and_work(
+            current_cardinality,
+            storm,
+            1,
+            &storm_scope_path,
+            &mut byte_cap_handoff_estimates_by_depth,
+        );
+        stabilize_rebind_byte_cap_handoff_routes(&mut byte_cap_handoff_estimates_by_depth);
+        let branch_limits = storm
+            .branches
+            .iter()
+            .enumerate()
+            .map(|(index, branch)| {
+                format!(
+                    "{}:[{}]",
+                    index + 1,
+                    branch
+                        .nested_limits
+                        .iter()
+                        .map(u64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        let conjunct_counts = storm
+            .branches
+            .iter()
+            .map(|branch| branch.conjunct_count.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let nested_cascade_shapes = storm
+            .branches
+            .iter()
+            .enumerate()
+            .filter(|(_, branch)| !branch.nested_storms.is_empty())
+            .map(|(index, branch)| {
+                format!(
+                    "{}:{}",
+                    index + 1,
+                    branch
+                        .nested_storms
+                        .iter()
+                        .map(disjunct_storm_shape_text)
+                        .collect::<Vec<_>>()
+                        .join(">")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        let nested_cascade_predicates = storm
+            .branches
+            .iter()
+            .flat_map(|branch| disjunct_storm_predicates(&branch.nested_storms))
+            .collect::<Vec<_>>();
+        let has_nested_cascades = storm
+            .branches
+            .iter()
+            .any(|branch| !branch.nested_storms.is_empty());
+        let limit_chain_rebind_shapes = storm
+            .branches
+            .iter()
+            .enumerate()
+            .flat_map(|(branch_index, branch)| {
+                branch.limit_rebinds.iter().map(move |rebind| {
+                    format!(
+                        "{}@{}:{}",
+                        branch_index + 1,
+                        rebind.after_limit,
+                        rebind
+                            .storms
+                            .iter()
+                            .map(disjunct_storm_shape_text)
+                            .collect::<Vec<_>>()
+                            .join(">")
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        let limit_chain_rebind_byte_cap_handoffs_by_depth =
+            disjunct_storm_rebind_cascade_counts_by_depth(storm);
+        let limit_chain_rebind_byte_cap_depths = limit_chain_rebind_byte_cap_handoffs_by_depth
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        let limit_chain_rebind_max_nested_depth = limit_chain_rebind_byte_cap_depths
+            .last()
+            .copied()
+            .unwrap_or_default();
+        let limit_chain_rebind_byte_cap_depths_text = limit_chain_rebind_byte_cap_depths
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let limit_chain_rebind_byte_cap_handoffs_by_depth_text =
+            limit_chain_rebind_byte_cap_handoffs_by_depth
+                .iter()
+                .map(|(depth, count)| format!("{depth}:{count}"))
+                .collect::<Vec<_>>()
+                .join(",");
+        let limit_chain_rebind_byte_cap_handoff_estimates_by_depth_text =
+            rebind_byte_cap_handoff_estimates_by_depth_text(
+                &byte_cap_handoff_estimates_by_depth,
+            );
+        let limit_chain_rebind_byte_cap_handoff_route_records =
+            rebind_byte_cap_handoff_route_records(&byte_cap_handoff_estimates_by_depth);
+        // Derive both scoped handoff summaries from the serialized typed routes
+        // so their stage-output labels cannot diverge from route ancestry.
+        let limit_chain_rebind_byte_cap_handoff_scopes_by_depth_text =
+            rebind_byte_cap_handoff_scopes_by_depth_text(
+                &limit_chain_rebind_byte_cap_handoff_route_records,
+            );
+        let limit_chain_rebind_byte_cap_handoff_routes_by_depth_text =
+            rebind_byte_cap_handoff_routes_by_depth_text(
+                &limit_chain_rebind_byte_cap_handoff_route_records,
+            );
+        let has_limit_chain_rebind_byte_cap_handoff_routes =
+            !limit_chain_rebind_byte_cap_handoff_route_records.is_empty();
+        let limit_chain_rebind_predicates = storm
+            .branches
+            .iter()
+            .flat_map(|branch| {
+                branch
+                    .limit_rebinds
+                    .iter()
+                    .flat_map(|rebind| disjunct_storm_predicates(&rebind.storms))
+            })
+            .collect::<Vec<_>>();
+        let mut details = BTreeMap::from([
+            (
+                "selectivity_assumption".to_owned(),
+                PlanDetail::Text("0.5_per_branch_conjunct_then_ordered_independent_or".to_owned()),
+            ),
+            ("disjunct_count".to_owned(), PlanDetail::Integer(branch_count)),
+            (
+                "branch_limit_chains".to_owned(),
+                PlanDetail::Text(branch_limits),
+            ),
+            (
+                "branch_conjunct_counts".to_owned(),
+                PlanDetail::Text(conjunct_counts),
+            ),
+            (
+                "nested_cascade_shapes".to_owned(),
+                PlanDetail::Text(nested_cascade_shapes),
+            ),
+            (
+                "nested_cascade_predicates".to_owned(),
+                PlanDetail::Expressions(nested_cascade_predicates),
+            ),
+            (
+                "limit_chain_rebind_shapes".to_owned(),
+                PlanDetail::Text(limit_chain_rebind_shapes),
+            ),
+            (
+                "limit_chain_rebind_max_nested_depth".to_owned(),
+                PlanDetail::Integer(
+                    u64::try_from(limit_chain_rebind_max_nested_depth).unwrap_or(u64::MAX),
+                ),
+            ),
+            (
+                "limit_chain_rebind_byte_cap_depths".to_owned(),
+                PlanDetail::Text(limit_chain_rebind_byte_cap_depths_text),
+            ),
+            (
+                "limit_chain_rebind_byte_cap_handoffs_by_depth".to_owned(),
+                PlanDetail::Text(limit_chain_rebind_byte_cap_handoffs_by_depth_text),
+            ),
+            (
+                "limit_chain_rebind_byte_cap_handoff_estimates_by_depth".to_owned(),
+                PlanDetail::Text(limit_chain_rebind_byte_cap_handoff_estimates_by_depth_text),
+            ),
+            (
+                "limit_chain_rebind_byte_cap_handoff_scopes_by_depth".to_owned(),
+                PlanDetail::Text(limit_chain_rebind_byte_cap_handoff_scopes_by_depth_text),
+            ),
+            (
+                "limit_chain_rebind_byte_cap_handoff_routes_by_depth".to_owned(),
+                PlanDetail::Text(limit_chain_rebind_byte_cap_handoff_routes_by_depth_text),
+            ),
+            (
+                "limit_chain_rebind_byte_cap_handoff_route_records".to_owned(),
+                PlanDetail::ByteCapHandoffRoutes(
+                    limit_chain_rebind_byte_cap_handoff_route_records,
+                ),
+            ),
+            (
+                "limit_chain_rebind_predicates".to_owned(),
+                PlanDetail::Expressions(limit_chain_rebind_predicates),
+            ),
+            (
+                "storm_stage_input_scope".to_owned(),
+                PlanDetail::Text(
+                    "query_input_then_previous_stage_bounded_rows_and_bytes".to_owned(),
+                ),
+            ),
+            (
+                "limit_chain_rebind_stage_input_scope".to_owned(),
+                PlanDetail::Text(
+                    "post_limit_branch_input_then_previous_rebind_stage_bounded_rows_and_bytes"
+                        .to_owned(),
+                ),
+            ),
+            (
+                "limit_chain_rebind_stage_order".to_owned(),
+                PlanDetail::Text(
+                    "declaration_order_each_rebind_output_capped_before_next_rebind".to_owned(),
+                ),
+            ),
+            (
+                "limit_chain_rebind_dimension_scope".to_owned(),
+                PlanDetail::Text(
+                    "rows_and_bytes_capped_independently_unknown_dimensions_remain_unknown"
+                        .to_owned(),
+                ),
+            ),
+            (
+                "limit_chain_rebind_work_scope".to_owned(),
+                PlanDetail::Text(
+                    "unknown_row_work_does_not_erase_known_byte_estimates".to_owned(),
+                ),
+            ),
+            (
+                "nested_limit_chain_rebind_byte_cap_scope".to_owned(),
+                PlanDetail::Text(
+                    "immediate_post_limit_branch_bytes_at_every_rebind_nesting_depth".to_owned(),
+                ),
+            ),
+            (
+                "limit_chain_rebind_position_input_scope".to_owned(),
+                PlanDetail::Text(
+                    "current_branch_rows_and_bytes_after_prior_limits_and_rebind_cascades"
+                        .to_owned(),
+                ),
+            ),
+            (
+                "branch_local_storm_cap_scope".to_owned(),
+                PlanDetail::Text(
+                    "each_cascade_output_capped_to_immediate_input_rows_and_bytes_at_every_nesting_depth"
+                        .to_owned(),
+                ),
+            ),
+            (
+                "limit_chain_rebind_cap_scope".to_owned(),
+                PlanDetail::Text(
+                    "post_limit_branch_rows_and_bytes_at_every_rebind_nesting_depth".to_owned(),
+                ),
+            ),
+            (
+                "expansion_work".to_owned(),
+                PlanDetail::Text("sum_of_branch_limit_and_conjunct_inputs".to_owned()),
+            ),
+            (
+                "disjunct_storm".to_owned(),
+                PlanDetail::Integer(storm_index),
+            ),
+        ]);
+        if has_nested_cascades {
+            details.insert(
+                "nested_storm_input_scope".to_owned(),
+                PlanDetail::Text(
+                    "bounded_branch_output_after_limits_rebinds_and_conjuncts_then_prior_nested_storm_outputs"
+                        .to_owned(),
+                ),
+            );
+        }
+        if has_limit_chain_rebind_byte_cap_handoff_routes {
+            details.insert(
+                "limit_chain_rebind_byte_cap_handoff_route_order".to_owned(),
+                PlanDetail::Text(
+                    "ascending_depth_then_typed_input_path_then_typed_output_path".to_owned(),
+                ),
+            );
+        }
+        if overflowed {
+            record_work_overflow(&mut details);
+        }
+        current = push_unary(
+            &mut operators,
+            current,
+            PlanNodeKind::Filter,
+            Some(storm.predicate.clone()),
+            details,
+            cardinality,
+            work,
+        );
+        current_cardinality = cardinality;
+        prior_storm_stage_path = storm_scope_path;
+        prior_storm_stage_path.push(PlanByteCapScopeSegment::StormStageOutput {
+            index: storm_stage_index,
+        });
     }
     if !query.projections.is_empty() {
         let cardinality = current_cardinality;
@@ -1219,6 +2520,16 @@ struct Cardinality {
     bytes: Option<u64>,
 }
 
+struct RebindByteCapHandoffEstimate {
+    input_path: Vec<PlanByteCapScopeSegment>,
+    output_path: Vec<PlanByteCapScopeSegment>,
+    input_bytes: Option<u64>,
+    output_bytes: Option<u64>,
+}
+
+type RebindByteCapHandoffEstimatesByDepth =
+    BTreeMap<usize, Vec<RebindByteCapHandoffEstimate>>;
+
 fn source_cardinality(statistics: Option<&QuerySourceStatistics>) -> Cardinality {
     statistics.map_or_else(Cardinality::default, |statistics| Cardinality {
         rows: statistics.estimated_rows,
@@ -1360,6 +2671,564 @@ fn disjunction_cardinality(cardinality: Cardinality, disjunct_count: u64) -> Car
                 .map(|matched| matched.min(bytes))
         }),
     }
+}
+
+fn disjunction_conjunct_cardinality_and_work(
+    input: Cardinality,
+    disjunct_count: u64,
+    conjunct_count: u64,
+) -> (Cardinality, Option<u64>) {
+    let mut cardinality = disjunction_cardinality(input, disjunct_count);
+    let mut work = input.rows.and_then(|rows| rows.checked_mul(disjunct_count));
+    let mut overflowed = input.rows.is_some() && work.is_none();
+
+    // A u64 row estimate reaches its rounded-up fixed point (one row) within
+    // 64 halvings. Bound the loop even if a caller supplies a much larger
+    // logical conjunct count; any remaining one-row stages are accumulated
+    // with checked arithmetic below.
+    let explicit_stages = conjunct_count.min(u64::BITS.into());
+    for _ in 0..explicit_stages {
+        if let (Some(total), Some(rows)) = (work, cardinality.rows) {
+            match total.checked_add(rows) {
+                Some(total) => work = Some(total),
+                None => {
+                    work = None;
+                    overflowed = true;
+                }
+            }
+        }
+        cardinality = scale_cardinality(cardinality, 1, 2);
+    }
+
+    let remaining_stages = conjunct_count - explicit_stages;
+    if remaining_stages > 0 {
+        if let Some(rows_per_stage) = cardinality.rows {
+            if let Some(total) = work {
+                match rows_per_stage
+                    .checked_mul(remaining_stages)
+                    .and_then(|tail_work| total.checked_add(tail_work))
+                {
+                    Some(total) => work = Some(total),
+                    None => {
+                        work = None;
+                        overflowed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if overflowed {
+        work = None;
+    }
+    (cardinality, work)
+}
+
+fn conjunctive_disjunction_cardinality_and_work(
+    input: Cardinality,
+    disjunct_count: u64,
+    conjunct_count_per_disjunct: u64,
+) -> (Cardinality, Option<u64>) {
+    let mut branch_cardinality = input;
+    let explicit_stages = conjunct_count_per_disjunct.min(u64::BITS.into());
+    let mut branch_work = input.rows.map(|_| 0u64);
+    for _ in 0..explicit_stages {
+        if let (Some(total), Some(rows)) = (branch_work, branch_cardinality.rows) {
+            branch_work = total.checked_add(rows);
+        }
+        branch_cardinality = scale_cardinality(branch_cardinality, 1, 2);
+    }
+
+    // Repeated ceil-halving reaches one row (or zero for an empty input) in
+    // at most 64 stages. Remaining one-row conjuncts are added in one checked
+    // operation rather than iterating over an untrusted count.
+    let remaining_stages = conjunct_count_per_disjunct - explicit_stages;
+    if remaining_stages > 0 {
+        if let (Some(total), Some(rows)) = (branch_work, branch_cardinality.rows) {
+            branch_work = rows
+                .checked_mul(remaining_stages)
+                .and_then(|tail_work| total.checked_add(tail_work));
+        }
+    }
+
+    let work = branch_work.and_then(|per_disjunct| per_disjunct.checked_mul(disjunct_count));
+    let rows = input.rows.map(|rows| {
+        conjunctive_disjunction_rows(rows, disjunct_count, conjunct_count_per_disjunct)
+    });
+    let bytes = input.bytes.map(|bytes| {
+        conjunctive_disjunction_rows(bytes, disjunct_count, conjunct_count_per_disjunct)
+    });
+    (Cardinality { rows, bytes }, work)
+}
+
+fn disjunct_storm_shape_text(storm: &DisjunctStormCascadeDescription) -> String {
+    let branches = storm
+        .branches
+        .iter()
+        .enumerate()
+        .map(|(index, branch)| {
+            let limits = branch
+                .nested_limits
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let rebinds = branch
+                .limit_rebinds
+                .iter()
+                .map(|rebind| {
+                    format!(
+                        "@{}={}",
+                        rebind.after_limit,
+                        rebind
+                            .storms
+                            .iter()
+                            .map(disjunct_storm_shape_text)
+                            .collect::<Vec<_>>()
+                            .join(">")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            let nested = branch
+                .nested_storms
+                .iter()
+                .map(disjunct_storm_shape_text)
+                .collect::<Vec<_>>()
+                .join(">");
+            if nested.is_empty() {
+                format!(
+                    "{}:[{}]/{}{}",
+                    index + 1,
+                    limits,
+                    branch.conjunct_count,
+                    rebinds
+                )
+            } else {
+                format!(
+                    "{}:[{}]/{}{}{{{}}}",
+                    index + 1,
+                    limits,
+                    branch.conjunct_count,
+                    rebinds,
+                    nested
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    format!("[{branches}]")
+}
+
+fn disjunct_storm_predicates(storms: &[DisjunctStormCascadeDescription]) -> Vec<ExpressionRef> {
+    let mut pending = storms.iter().rev().collect::<Vec<_>>();
+    let mut predicates = Vec::new();
+    while let Some(storm) = pending.pop() {
+        predicates.push(storm.predicate.clone());
+        for branch in storm.branches.iter().rev() {
+            pending.extend(branch.nested_storms.iter().rev());
+            for rebind in branch.limit_rebinds.iter().rev() {
+                pending.extend(rebind.storms.iter().rev());
+            }
+        }
+    }
+    predicates
+}
+
+/// Returns the number of rebound cascades at each one-based storm nesting
+/// level. Every counted cascade has a byte-cap handoff from its immediate
+/// post-limit branch estimate or the previous rebound output.
+fn disjunct_storm_rebind_cascade_counts_by_depth(
+    storm: &DisjunctStormCascadeDescription,
+) -> BTreeMap<usize, usize> {
+    let mut pending = vec![(storm, 1usize)];
+    let mut rebind_counts = BTreeMap::new();
+    while let Some((storm, depth)) = pending.pop() {
+        for branch in &storm.branches {
+            for rebind in &branch.limit_rebinds {
+                if !rebind.storms.is_empty() {
+                    let count = rebind_counts.entry(depth).or_insert(0usize);
+                    *count = count.saturating_add(rebind.storms.len());
+                }
+            }
+            pending.extend(
+                branch
+                    .limit_rebinds
+                    .iter()
+                    .flat_map(|rebind| rebind.storms.iter())
+                    .chain(branch.nested_storms.iter())
+                    .map(|nested| (nested, depth.saturating_add(1))),
+            );
+        }
+    }
+    rebind_counts
+}
+
+fn rebind_byte_cap_handoff_estimates_by_depth_text(
+    estimates: &RebindByteCapHandoffEstimatesByDepth,
+) -> String {
+    estimates
+        .iter()
+        .map(|(depth, handoffs)| {
+            let handoffs = handoffs
+                .iter()
+                .map(|handoff| {
+                    let input_bytes = handoff
+                        .input_bytes
+                        .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+                    let output_bytes = handoff
+                        .output_bytes
+                        .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+                    format!("{input_bytes}>{output_bytes}")
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{depth}:{handoffs}")
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn rebind_byte_cap_handoff_scopes_by_depth_text(
+    routes: &[PlanByteCapHandoffRoute],
+) -> String {
+    let mut by_depth = BTreeMap::<usize, Vec<String>>::new();
+    for route in routes {
+        let input_bytes = route
+            .input_bytes
+            .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        let output_bytes = route
+            .output_bytes
+            .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        by_depth.entry(route.depth).or_default().push(format!(
+            "{}={input_bytes}>{output_bytes}",
+            route.output_scope
+        ));
+    }
+    by_depth
+        .into_iter()
+        .map(|(depth, handoffs)| format!("{depth}:{}", handoffs.join(",")))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn rebind_byte_cap_handoff_routes_by_depth_text(
+    routes: &[PlanByteCapHandoffRoute],
+) -> String {
+    let mut by_depth = BTreeMap::<usize, Vec<String>>::new();
+    for route in routes {
+        let input_bytes = route
+            .input_bytes
+            .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        let output_bytes = route
+            .output_bytes
+            .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        by_depth.entry(route.depth).or_default().push(format!(
+            "{}=>{}={input_bytes}>{output_bytes}",
+            route.input_scope, route.output_scope
+        ));
+    }
+    by_depth
+        .into_iter()
+        .map(|(depth, handoffs)| format!("{depth}:{}", handoffs.join(",")))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn rebind_byte_cap_handoff_route_records(
+    estimates: &RebindByteCapHandoffEstimatesByDepth,
+) -> Vec<PlanByteCapHandoffRoute> {
+    estimates
+        .iter()
+        .flat_map(|(depth, handoffs)| {
+            handoffs.iter().map(|handoff| PlanByteCapHandoffRoute {
+                depth: *depth,
+                input_path: handoff.input_path.clone(),
+                output_path: handoff.output_path.clone(),
+                input_scope: byte_cap_scope_path_label(&handoff.input_path),
+                output_scope: byte_cap_scope_path_label(&handoff.output_path),
+                input_bytes: handoff.input_bytes,
+                output_bytes: handoff.output_bytes,
+            })
+        })
+        .collect()
+}
+
+fn byte_cap_scope_path_label(path: &[PlanByteCapScopeSegment]) -> String {
+    let mut scope = "root".to_owned();
+    for segment in path {
+        let label = match segment {
+            PlanByteCapScopeSegment::StormStage { index } => format!("storm{index}"),
+            // ORNA-PLAN does not prescribe labels; preserve the complete typed
+            // segment name and producer index so it cannot read as a nested output.
+            PlanByteCapScopeSegment::StormStageOutput { index } => {
+                format!("storm_stage_output{index}")
+            }
+            PlanByteCapScopeSegment::Branch { index } => format!("branch{index}"),
+            PlanByteCapScopeSegment::Limit { position } => format!("limit{position}"),
+            PlanByteCapScopeSegment::BranchOutput { index } => format!("branch_output{index}"),
+            PlanByteCapScopeSegment::Rebind { position } => format!("rebind{position}"),
+            PlanByteCapScopeSegment::Cascade { index } => format!("cascade{index}"),
+            PlanByteCapScopeSegment::RebindCascadeOutput { position, index } => {
+                format!("rebind_output{position}_{index}")
+            }
+            PlanByteCapScopeSegment::NestedStorm { index } => format!("nested{index}"),
+            PlanByteCapScopeSegment::NestedStormOutput { index } => {
+                format!("nested_output{index}")
+            }
+        };
+        scope.push('/');
+        scope.push_str(&label);
+    }
+    scope
+}
+
+fn stabilize_rebind_byte_cap_handoff_routes(
+    estimates: &mut RebindByteCapHandoffEstimatesByDepth,
+) {
+    for handoffs in estimates.values_mut() {
+        handoffs.sort_by(|left, right| {
+            left.input_path
+                .cmp(&right.input_path)
+                .then_with(|| left.output_path.cmp(&right.output_path))
+        });
+    }
+}
+
+fn disjunct_storm_cascade_cardinality_and_work(
+    input: Cardinality,
+    storm: &DisjunctStormCascadeDescription,
+    storm_depth: usize,
+    storm_scope_path: &[PlanByteCapScopeSegment],
+    byte_cap_handoff_estimates_by_depth: &mut RebindByteCapHandoffEstimatesByDepth,
+) -> (Cardinality, Option<u64>, bool) {
+    let (estimated, work, overflowed) = disjunct_storm_branch_cascade_cardinality_and_work(
+        input,
+        &storm.branches,
+        storm_depth,
+        storm_scope_path,
+        byte_cap_handoff_estimates_by_depth,
+    );
+    (cap_cardinality_to_input(estimated, input), work, overflowed)
+}
+
+fn cap_cardinality_to_input(estimated: Cardinality, input: Cardinality) -> Cardinality {
+    // Apply the cap independently per dimension, retaining unknown estimates
+    // as unknown. Recursive callers pass their already bounded branch output
+    // as the next input, so these immediate caps compose through nested rebinds.
+    let rows = match (estimated.rows, input.rows) {
+        (Some(estimated), Some(cap)) => Some(estimated.min(cap)),
+        _ => None,
+    };
+    let bytes = match (estimated.bytes, input.bytes) {
+        (Some(estimated), Some(cap)) => Some(estimated.min(cap)),
+        _ => None,
+    };
+    Cardinality { rows, bytes }
+}
+
+fn disjunct_storm_branch_cascade_cardinality_and_work(
+    input: Cardinality,
+    branches: &[DisjunctStormBranchDescription],
+    storm_depth: usize,
+    storm_scope_path: &[PlanByteCapScopeSegment],
+    byte_cap_handoff_estimates_by_depth: &mut RebindByteCapHandoffEstimatesByDepth,
+) -> (Cardinality, Option<u64>, bool) {
+    let mut work = Some(0u64);
+    let mut overflowed = false;
+    let mut remaining_rows = input.rows;
+    let mut rows = input.rows.map(|_| 0u64);
+    let mut remaining_bytes = input.bytes;
+    let mut bytes = input.bytes.map(|_| 0u64);
+
+    for (branch_index, branch) in branches.iter().enumerate() {
+        let mut branch_cardinality = input;
+        let mut branch_byte_scope_path = storm_scope_path.to_vec();
+        branch_byte_scope_path.push(PlanByteCapScopeSegment::Branch {
+            index: branch_index + 1,
+        });
+        for (limit_index, limit) in branch.nested_limits.iter().enumerate() {
+            match (work, branch_cardinality.rows) {
+                (Some(total), Some(limit_work)) => match total.checked_add(limit_work) {
+                    Some(total) => work = Some(total),
+                    None => {
+                        work = None;
+                        overflowed = true;
+                    }
+                },
+                (Some(_), None) => work = None,
+                (None, _) => {}
+            }
+            branch_cardinality = limit_cardinality(branch_cardinality, *limit);
+            branch_byte_scope_path.push(PlanByteCapScopeSegment::Limit {
+                position: limit_index + 1,
+            });
+            for (rebind_index, rebind) in branch
+                .limit_rebinds
+                .iter()
+                .enumerate()
+                .filter(|(_, rebind)| rebind.after_limit == limit_index + 1)
+            {
+                for (cascade_index, rebind_storm) in rebind.storms.iter().enumerate() {
+                    let handoff_input_bytes = branch_cardinality.bytes;
+                    let handoff_input_path = branch_byte_scope_path.clone();
+                    // The typed destination path extends the actual bounded
+                    // source path. This carries earlier cascade outputs
+                    // through later cascades and limit positions.
+                    let mut handoff_scope_path = handoff_input_path.clone();
+                    handoff_scope_path.push(PlanByteCapScopeSegment::Rebind {
+                        position: rebind_index + 1,
+                    });
+                    handoff_scope_path.push(PlanByteCapScopeSegment::Cascade {
+                        index: cascade_index + 1,
+                    });
+                    let (rebound, rebound_work, rebound_overflowed) =
+                        disjunct_storm_cascade_cardinality_and_work(
+                            branch_cardinality,
+                            rebind_storm,
+                            storm_depth.saturating_add(1),
+                            &handoff_scope_path,
+                            byte_cap_handoff_estimates_by_depth,
+                        );
+                    byte_cap_handoff_estimates_by_depth
+                        .entry(storm_depth)
+                        .or_default()
+                        .push(RebindByteCapHandoffEstimate {
+                            input_path: handoff_input_path,
+                            output_path: handoff_scope_path.clone(),
+                            input_bytes: handoff_input_bytes,
+                            output_bytes: rebound.bytes,
+                        });
+                    overflowed |= rebound_overflowed;
+                    match (work, rebound_work) {
+                        (Some(total), Some(rebound_work)) => match total.checked_add(rebound_work) {
+                            Some(total) => work = Some(total),
+                            None => {
+                                work = None;
+                                overflowed = true;
+                            }
+                        },
+                        (Some(_), None) => work = None,
+                        (None, _) => {}
+                    }
+                    branch_cardinality = rebound;
+                    branch_byte_scope_path = handoff_scope_path;
+                    // Keep produced outputs distinct from cascade targets so later handoffs
+                    // retain provenance even when their estimates are unknown.
+                    branch_byte_scope_path.push(
+                        PlanByteCapScopeSegment::RebindCascadeOutput {
+                            position: rebind_index + 1,
+                            index: cascade_index + 1,
+                        },
+                    );
+                }
+            }
+        }
+
+        let (mut branch_output, branch_work) =
+            conjunctive_disjunction_cardinality_and_work(branch_cardinality, 1, branch.conjunct_count);
+        if branch_cardinality.rows.is_some() && branch_work.is_none() {
+            overflowed = true;
+        }
+        match (work, branch_work) {
+            (Some(total), Some(branch_work)) => match total.checked_add(branch_work) {
+                Some(total) => work = Some(total),
+                None => {
+                    work = None;
+                    overflowed = true;
+                }
+            },
+            (Some(_), None) => work = None,
+            (None, _) => {}
+        }
+
+        let mut prior_nested_storm_path = branch_byte_scope_path.clone();
+        if !branch.nested_storms.is_empty() {
+            // ORNA-PLAN does not name this intermediate scope. Keep a typed
+            // boundary so unknown estimates still preserve the bounded
+            // parent-branch output consumed by nested storms.
+            prior_nested_storm_path.push(PlanByteCapScopeSegment::BranchOutput {
+                index: branch_index + 1,
+            });
+        }
+        for (nested_index, nested_storm) in branch.nested_storms.iter().enumerate() {
+            let mut nested_scope_path = prior_nested_storm_path.clone();
+            nested_scope_path.push(PlanByteCapScopeSegment::NestedStorm {
+                index: nested_index + 1,
+            });
+            let (nested_output, nested_work, nested_overflowed) =
+                disjunct_storm_cascade_cardinality_and_work(
+                    branch_output,
+                    nested_storm,
+                    storm_depth.saturating_add(1),
+                    &nested_scope_path,
+                    byte_cap_handoff_estimates_by_depth,
+                );
+            overflowed |= nested_overflowed;
+            match (work, nested_work) {
+                (Some(total), Some(nested_work)) => match total.checked_add(nested_work) {
+                    Some(total) => work = Some(total),
+                    None => {
+                        work = None;
+                        overflowed = true;
+                    }
+                },
+                (Some(_), None) => work = None,
+                (None, _) => {}
+            }
+            branch_output = nested_output;
+            prior_nested_storm_path = nested_scope_path;
+            prior_nested_storm_path.push(PlanByteCapScopeSegment::NestedStormOutput {
+                index: nested_index + 1,
+            });
+        }
+
+        add_capped_estimate(&mut rows, &mut remaining_rows, branch_output.rows);
+        add_capped_estimate(&mut bytes, &mut remaining_bytes, branch_output.bytes);
+    }
+
+    (Cardinality { rows, bytes }, work, overflowed)
+}
+
+fn add_capped_estimate(total: &mut Option<u64>, remaining: &mut Option<u64>, branch: Option<u64>) {
+    match (*total, *remaining, branch) {
+        (Some(total_rows), Some(remaining_rows), Some(branch_rows)) => {
+            let matched = branch_rows.min(remaining_rows);
+            *total = Some(total_rows + matched);
+            *remaining = Some(remaining_rows - matched);
+        }
+        _ => {
+            *total = None;
+            *remaining = None;
+        }
+    }
+}
+
+fn conjunctive_disjunction_rows(
+    input_rows: u64,
+    disjunct_count: u64,
+    conjunct_count_per_disjunct: u64,
+) -> u64 {
+    if input_rows == 0 {
+        return 0;
+    }
+    if conjunct_count_per_disjunct >= u64::BITS.into() {
+        // The probability per arm is below one row; each rounded arm admits
+        // one row until the source estimate is exhausted.
+        return input_rows.min(disjunct_count);
+    }
+
+    let denominator = 1u128 << conjunct_count_per_disjunct;
+    let mut remaining = input_rows;
+    for _ in 0..disjunct_count {
+        if remaining == 0 {
+            break;
+        }
+        let matched = u64::try_from(u128::from(remaining).div_ceil(denominator))
+            .expect("a rounded branch match cannot exceed its input");
+        remaining -= matched;
+    }
+    input_rows - remaining
 }
 
 fn limit_cardinality(cardinality: Cardinality, limit: u64) -> Cardinality {
@@ -1776,6 +3645,68 @@ fn hash_plan_detail(hash: &mut Sha256, detail: &PlanDetail) {
                 hash_part(hash, item.expression.as_str().as_bytes());
                 hash_part(hash, item.direction.as_ref_str().as_bytes());
                 hash_part(hash, item.null_order.as_ref_str().as_bytes());
+            }
+        }
+        PlanDetail::ByteCapHandoffRoutes(routes) => {
+            hash.update([5]);
+            hash.update((routes.len() as u64).to_be_bytes());
+            for route in routes {
+                hash.update((route.depth as u64).to_be_bytes());
+                hash_byte_cap_scope_path(hash, &route.input_path);
+                hash_byte_cap_scope_path(hash, &route.output_path);
+                hash_part(hash, route.input_scope.as_bytes());
+                hash_part(hash, route.output_scope.as_bytes());
+                hash_optional_u64(hash, route.input_bytes);
+                hash_optional_u64(hash, route.output_bytes);
+            }
+        }
+    }
+}
+
+fn hash_byte_cap_scope_path(hash: &mut Sha256, path: &[PlanByteCapScopeSegment]) {
+    hash.update((path.len() as u64).to_be_bytes());
+    for segment in path {
+        match segment {
+            PlanByteCapScopeSegment::StormStage { index } => {
+                hash.update([0]);
+                hash.update((*index as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::StormStageOutput { index } => {
+                hash.update([6]);
+                hash.update((*index as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::Branch { index } => {
+                hash.update([1]);
+                hash.update((*index as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::Limit { position } => {
+                hash.update([2]);
+                hash.update((*position as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::BranchOutput { index } => {
+                hash.update([9]);
+                hash.update((*index as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::Rebind { position } => {
+                hash.update([3]);
+                hash.update((*position as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::Cascade { index } => {
+                hash.update([4]);
+                hash.update((*index as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::RebindCascadeOutput { position, index } => {
+                hash.update([8]);
+                hash.update((*position as u64).to_be_bytes());
+                hash.update((*index as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::NestedStorm { index } => {
+                hash.update([5]);
+                hash.update((*index as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::NestedStormOutput { index } => {
+                hash.update([7]);
+                hash.update((*index as u64).to_be_bytes());
             }
         }
     }

@@ -1,0 +1,4 @@
+testing.expect_true(true)
+    && testing.expect_false(false)
+    && testing.expect_equal(2 + 2, 4)
+    && testing.expect_not_equal(2, 3)
