@@ -680,6 +680,20 @@ fn admitted_upgrade_session(project: &LoadedProject) -> AdmittedReplSession {
     session
 }
 
+fn admitted_snapshot_app_session(project: &LoadedProject) -> AdmittedReplSession {
+    let mut session = AdmittedReplSession::from_loaded_project(
+        project,
+        project.standard_sources().iter().cloned(),
+        Limits::default(),
+    )
+    .unwrap_or_else(|error| panic!("failed to admit snapshot app project: {}", error.code()));
+    assert_eq!(
+        session.submit(include_str!("fixtures/module-upgrade-use-app.orna")),
+        Ok(None)
+    );
+    session
+}
+
 fn standard_source<'a>(project: &'a LoadedProject, path: &str) -> &'a str {
     project
         .standard_sources()
@@ -820,6 +834,54 @@ fn project_module_executes_a_real_function_from_its_gitlink_pinned_std_snapshot(
             .unwrap_or_else(|error| panic!("current snapshot_app.value failed: {}", error.code())),
         Some(int(100_007))
     );
+}
+
+#[test]
+fn imported_project_module_executes_under_each_captured_standard_snapshot() {
+    let (
+        _directory,
+        project_v1,
+        project_v2,
+        project_v3,
+        project_v4,
+        project_v5,
+        project_v6,
+        snapshots,
+    ) = module_upgrade_projects();
+    let projects = [
+        &project_v1,
+        &project_v2,
+        &project_v3,
+        &project_v4,
+        &project_v5,
+        &project_v6,
+    ];
+    let expected_values = [8, 107, 1007, 1007, 10007, 100007];
+
+    let mut sessions = projects
+        .iter()
+        .map(|project| admitted_snapshot_app_session(project))
+        .collect::<Vec<_>>();
+
+    for (index, ((project, snapshot), (session, expected))) in projects
+        .iter()
+        .zip(&snapshots)
+        .zip(sessions.iter_mut().zip(expected_values))
+        .enumerate()
+    {
+        assert_eq!(
+            project.standard_profile().unwrap().snapshot(),
+            snapshot,
+            "project v{} must retain its captured std gitlink",
+            index + 1
+        );
+        assert_eq!(
+            session.submit(include_str!("fixtures/module-upgrade-call-app.orna")),
+            Ok(Some(int(expected))),
+            "project v{} must execute snapshot_app against its pinned std body",
+            index + 1
+        );
+    }
 }
 
 #[test]
