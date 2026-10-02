@@ -7,6 +7,7 @@ use crate::{
     REFERENCE_STANDARD_TIME_PATH_V1,
     REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1,
     REFERENCE_STANDARD_STREAM_PATH_V1,
+    REFERENCE_STANDARD_RANDOM_PATH_V1, REFERENCE_STANDARD_HASH_PATH_V1,
     REFERENCE_STANDARD_TIME_COMPACT_PATH_V1, REFERENCE_STANDARD_TIME_CLOCK_PATH_V1,
     REFERENCE_STANDARD_TIME_WORDS_PATH_V1, REFERENCE_STANDARD_TIME_ISO_PATH_V1,
     REFERENCE_STANDARD_OPTION_PATH_V1, REFERENCE_STANDARD_RESULT_PATH_V1,
@@ -116,6 +117,45 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[1].1.contains(contract), "missing collection contract `{contract}`");
         assert!(sources[2].1.contains(contract), "missing query contract `{contract}`");
+    }
+    assert_eq!(sources[22].0, REFERENCE_STANDARD_RANDOM_PATH_V1);
+    for declaration in [
+        "pub fn bytes(count: Int): Blob",
+        "pub fn integer(lower_inclusive: Int, upper_exclusive: Int): Int",
+        "pub fn choose<T>(values: [T]): T?",
+        "pub fn shuffle<T>(values: [T]): [T]",
+    ] {
+        assert!(sources[22].1.contains(declaration), "missing random declaration `{declaration}`");
+    }
+    for contract in [
+        "host cryptographically secure random source",
+        "nondeterministic host effects",
+        "predictable pseudorandom source",
+        "rejection sampling",
+        "Return null for an empty list",
+        "unbiased Fisher-Yates permutation",
+    ] {
+        assert!(sources[22].1.contains(contract), "missing random contract `{contract}`");
+    }
+    assert_eq!(sources[23].0, REFERENCE_STANDARD_HASH_PATH_V1);
+    for declaration in [
+        "pub fn sha256(input: Blob): Digest",
+        "pub fn sha256_text(input: Str): Digest",
+        "pub fn domain_sha256(domain: Str, payload: Blob): Digest",
+        "pub fn to_hex(digest: Digest): Str",
+        "pub fn from_hex(value: Str): Digest?",
+    ] {
+        assert!(sources[23].1.contains(declaration), "missing hash declaration `{declaration}`");
+    }
+    for contract in [
+        "complete Blob",
+        "exact UTF-8 bytes",
+        "SHA256(ASCII(domain) || 00 || payload)",
+        "64 lowercase hexadecimal characters",
+        "Hashes of low-entropy secret values are sensitive",
+        "Digests are fingerprints, not equality proofs",
+    ] {
+        assert!(sources[23].1.contains(contract), "missing hash contract `{contract}`");
     }
     assert_eq!(sources[11].0, REFERENCE_STANDARD_OPTION_PATH_V1);
     assert!(sources[11].1.contains("pub fn and_then<T, U>"));
@@ -233,6 +273,14 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     assert!(profile
         .verify_source(REFERENCE_STANDARD_STREAM_PATH_V1, &changed_stream_source)
         .is_err());
+    for (path, source_index) in [
+        (REFERENCE_STANDARD_RANDOM_PATH_V1, 22),
+        (REFERENCE_STANDARD_HASH_PATH_V1, 23),
+    ] {
+        let mut changed_source = sources[source_index].1.clone();
+        changed_source.push_str("\n// changed after the captured snapshot\n");
+        assert!(profile.verify_source(path, &changed_source).is_err());
+    }
 
     let catalogue = reference_standard_catalogue_v1().expect("the standard module checks");
     for (path, source) in &sources[13..] {
@@ -257,6 +305,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     let error_result_consumer = include_str!("fixtures/v1_error_result_consumer.orna");
     let time_calendar_consumer = include_str!("fixtures/v1_time_calendar_consumer.orna");
     let iteration_consumer = include_str!("fixtures/v1_iteration_consumer.orna");
+    let random_hash_consumer = include_str!("fixtures/v1_random_hash_consumer.orna");
     for (path, source) in [
         ("list_consumer.orna", include_str!("fixtures/v1_list_consumer.orna")),
         ("map_consumer.orna", include_str!("fixtures/v1_map_consumer.orna")),
@@ -286,6 +335,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
             ModuleInput::new("error_result_consumer.orna", error_result_consumer),
             ModuleInput::new("time_calendar_consumer.orna", time_calendar_consumer),
             ModuleInput::new("iteration_consumer.orna", iteration_consumer),
+            ModuleInput::new("random_hash_consumer.orna", random_hash_consumer),
         ],
         &catalogue,
     );
