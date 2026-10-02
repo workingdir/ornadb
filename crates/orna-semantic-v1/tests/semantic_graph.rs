@@ -4138,6 +4138,60 @@ fn sequential_paired_callback_leaf_rebinds_reject_cross_lane_parallel_mix() {
 }
 
 #[test]
+fn paired_shadowed_callbacks_specialize_each_chained_inner_pin() {
+    let source = include_str!("fixtures/historical-paired-shadowed-callback-rebind.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-shadowed-callback-rebind.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_shadowed_callback_rebinds_preserve_inner_pins")
+        })
+        .expect("paired shadowed callback fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_shadowed_callback_rebinds_preserve_inner_pins"]
+        .ty
+    else {
+        panic!("paired shadowed callback proof must be a function");
+    };
+    let Type::Record(streams) = result.as_ref() else {
+        panic!("paired shadowed callback proof must expose concurrent results");
+    };
+    let pin_type = |name: &str| {
+        let Type::Stream(element) = streams.get(name).expect("parallel result field") else {
+            panic!("{name} must be a stream");
+        };
+        element.as_ref()
+    };
+    assert_ne!(
+        pin_type("left_first"),
+        pin_type("left_second"),
+        "each chained invocation must specialize the shadowed inner pin independently"
+    );
+    assert_ne!(pin_type("right_first"), pin_type("right_second"));
+    assert_ne!(pin_type("left_first"), pin_type("right_first"));
+}
+
+#[test]
 fn concurrent_callback_tuples_reject_cross_lane_identity_mix_after_rebind() {
     let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
