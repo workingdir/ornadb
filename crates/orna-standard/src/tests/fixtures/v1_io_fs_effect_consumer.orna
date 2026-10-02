@@ -1,0 +1,7 @@
+pub fn reads(root: Str, path: Str): Bool =
+    std.io.fs.read_text(root, path) == "ok";
+
+pub table FileProof(id: Int) {
+    value: Int,
+    assert reads("/authorized-root", "private-input");
+}

@@ -1,0 +1,43 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn rebinding_a_closure_keeps_each_captured_pin() {
+    let current = chained_factory(sys.snapshot("HEAD~20"));
+    let original = current;
+    let original_alias = current;
+    current = chained_factory(sys.snapshot("HEAD~10"));
+    let middle = current;
+    current = chained_factory(sys.snapshot("HEAD"));
+    {
+        original: [original, chained_factory(sys.snapshot("HEAD~20"))],
+        original_alias: [
+            original_alias,
+            forwarded_factory(sys.snapshot("HEAD~20")),
+        ],
+        middle: [middle, chained_factory(sys.snapshot("HEAD~10"))],
+        latest: [current, forwarded_factory(sys.snapshot("HEAD"))],
+    }
+}
+
+pub fn rebound_closures_keep_nested_callables_on_their_original_pins() {
+    let current = chained_factory(sys.snapshot("HEAD~20"));
+    let original = current;
+    current = chained_factory(sys.snapshot("HEAD~10"));
+    let latest = current;
+    let original_product = original();
+    let latest_product = latest();
+    {
+        original_reader: [
+            original_product.read,
+            chained_factory(sys.snapshot("HEAD~20"))().read,
+        ],
+        latest_reader: [
+            latest_product.read,
+            forwarded_factory(sys.snapshot("HEAD~10"))().read,
+        ],
+    }
+}

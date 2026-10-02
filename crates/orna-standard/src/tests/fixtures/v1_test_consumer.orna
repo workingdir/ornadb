@@ -1,0 +1,9 @@
+use std.test as testing;
+
+pub fn expectations(): Bool {
+    assert testing.expect_true(true);
+    assert testing.expect_false(false);
+    assert testing.expect_equal(2 + 2, 4);
+    assert testing.expect_not_equal(2, 3);
+    true
+}

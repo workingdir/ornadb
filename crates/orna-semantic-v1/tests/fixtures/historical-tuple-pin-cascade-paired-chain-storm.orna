@@ -1,0 +1,200 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn cascade_at(root_pin: sys.SnapshotRef, bridge_pin: sys.SnapshotRef) =
+    (leaf_pin: sys.SnapshotRef) => {
+        root: chained_factory(root_pin),
+        nested: {
+            bridge: chained_factory(bridge_pin)().read,
+            leaf: {
+                reader: chained_factory(leaf_pin)().read,
+                continuation: chained_factory(leaf_pin)().read(),
+            },
+        },
+    };
+
+// Each side is a three-depth cascade, and both sides rebind as one tuple value.
+
+pub fn paired_cascade_depths_survive_chained_storm_rebinds() {
+    let rolling = ((((sys.snapshot("HEAD~180"), (sys.snapshot("HEAD~160"), sys.snapshot("HEAD~140"))), (sys.snapshot("HEAD~120"), (sys.snapshot("HEAD~100"), sys.snapshot("HEAD~80")))), (sys.snapshot("HEAD~60"), (sys.snapshot("HEAD~40"), sys.snapshot("HEAD~20")))), (((sys.snapshot("HEAD~170"), (sys.snapshot("HEAD~150"), sys.snapshot("HEAD~130"))), (sys.snapshot("HEAD~110"), (sys.snapshot("HEAD~90"), sys.snapshot("HEAD~70")))), (sys.snapshot("HEAD~50"), (sys.snapshot("HEAD~30"), sys.snapshot("HEAD~10")))));
+    let stage_0 = rolling;
+    rolling = ((((sys.snapshot("HEAD~179"), (sys.snapshot("HEAD~159"), sys.snapshot("HEAD~139"))), (sys.snapshot("HEAD~119"), (sys.snapshot("HEAD~99"), sys.snapshot("HEAD~79")))), (sys.snapshot("HEAD~59"), (sys.snapshot("HEAD~39"), sys.snapshot("HEAD~19")))), (((sys.snapshot("HEAD~169"), (sys.snapshot("HEAD~149"), sys.snapshot("HEAD~129"))), (sys.snapshot("HEAD~109"), (sys.snapshot("HEAD~89"), sys.snapshot("HEAD~69")))), (sys.snapshot("HEAD~49"), (sys.snapshot("HEAD~29"), sys.snapshot("HEAD~9")))));
+    rolling = ((((sys.snapshot("HEAD~178"), (sys.snapshot("HEAD~158"), sys.snapshot("HEAD~138"))), (sys.snapshot("HEAD~118"), (sys.snapshot("HEAD~98"), sys.snapshot("HEAD~78")))), (sys.snapshot("HEAD~58"), (sys.snapshot("HEAD~38"), sys.snapshot("HEAD~18")))), (((sys.snapshot("HEAD~168"), (sys.snapshot("HEAD~148"), sys.snapshot("HEAD~128"))), (sys.snapshot("HEAD~108"), (sys.snapshot("HEAD~88"), sys.snapshot("HEAD~68")))), (sys.snapshot("HEAD~48"), (sys.snapshot("HEAD~28"), sys.snapshot("HEAD~8")))));
+    rolling = ((((sys.snapshot("HEAD~177"), (sys.snapshot("HEAD~157"), sys.snapshot("HEAD~137"))), (sys.snapshot("HEAD~117"), (sys.snapshot("HEAD~97"), sys.snapshot("HEAD~77")))), (sys.snapshot("HEAD~57"), (sys.snapshot("HEAD~37"), sys.snapshot("HEAD~17")))), (((sys.snapshot("HEAD~167"), (sys.snapshot("HEAD~147"), sys.snapshot("HEAD~127"))), (sys.snapshot("HEAD~107"), (sys.snapshot("HEAD~87"), sys.snapshot("HEAD~67")))), (sys.snapshot("HEAD~47"), (sys.snapshot("HEAD~27"), sys.snapshot("HEAD~7")))));
+    let stage_3 = rolling;
+    rolling = ((((sys.snapshot("HEAD~176"), (sys.snapshot("HEAD~156"), sys.snapshot("HEAD~136"))), (sys.snapshot("HEAD~116"), (sys.snapshot("HEAD~96"), sys.snapshot("HEAD~76")))), (sys.snapshot("HEAD~56"), (sys.snapshot("HEAD~36"), sys.snapshot("HEAD~16")))), (((sys.snapshot("HEAD~166"), (sys.snapshot("HEAD~146"), sys.snapshot("HEAD~126"))), (sys.snapshot("HEAD~106"), (sys.snapshot("HEAD~86"), sys.snapshot("HEAD~66")))), (sys.snapshot("HEAD~46"), (sys.snapshot("HEAD~26"), sys.snapshot("HEAD~6")))));
+    rolling = ((((sys.snapshot("HEAD~175"), (sys.snapshot("HEAD~155"), sys.snapshot("HEAD~135"))), (sys.snapshot("HEAD~115"), (sys.snapshot("HEAD~95"), sys.snapshot("HEAD~75")))), (sys.snapshot("HEAD~55"), (sys.snapshot("HEAD~35"), sys.snapshot("HEAD~15")))), (((sys.snapshot("HEAD~165"), (sys.snapshot("HEAD~145"), sys.snapshot("HEAD~125"))), (sys.snapshot("HEAD~105"), (sys.snapshot("HEAD~85"), sys.snapshot("HEAD~65")))), (sys.snapshot("HEAD~45"), (sys.snapshot("HEAD~25"), sys.snapshot("HEAD~5")))));
+    rolling = ((((sys.snapshot("HEAD~174"), (sys.snapshot("HEAD~154"), sys.snapshot("HEAD~134"))), (sys.snapshot("HEAD~114"), (sys.snapshot("HEAD~94"), sys.snapshot("HEAD~74")))), (sys.snapshot("HEAD~54"), (sys.snapshot("HEAD~34"), sys.snapshot("HEAD~14")))), (((sys.snapshot("HEAD~164"), (sys.snapshot("HEAD~144"), sys.snapshot("HEAD~124"))), (sys.snapshot("HEAD~104"), (sys.snapshot("HEAD~84"), sys.snapshot("HEAD~64")))), (sys.snapshot("HEAD~44"), (sys.snapshot("HEAD~24"), sys.snapshot("HEAD~4")))));
+    rolling = ((((sys.snapshot("HEAD~173"), (sys.snapshot("HEAD~153"), sys.snapshot("HEAD~133"))), (sys.snapshot("HEAD~113"), (sys.snapshot("HEAD~93"), sys.snapshot("HEAD~73")))), (sys.snapshot("HEAD~53"), (sys.snapshot("HEAD~33"), sys.snapshot("HEAD~13")))), (((sys.snapshot("HEAD~163"), (sys.snapshot("HEAD~143"), sys.snapshot("HEAD~123"))), (sys.snapshot("HEAD~103"), (sys.snapshot("HEAD~83"), sys.snapshot("HEAD~63")))), (sys.snapshot("HEAD~43"), (sys.snapshot("HEAD~23"), sys.snapshot("HEAD~3")))));
+    let stage_7 = rolling;
+    rolling = stage_0;
+    let returned = rolling;
+
+    let (((returned_left_primary, returned_left_secondary), returned_left_tertiary), ((returned_right_primary, returned_right_secondary), returned_right_tertiary)) = returned;
+    let (returned_left_primary_root, (returned_left_primary_bridge, returned_left_primary_leaf)) = returned_left_primary;
+    let (returned_left_secondary_root, (returned_left_secondary_bridge, returned_left_secondary_leaf)) = returned_left_secondary;
+    let (returned_left_tertiary_root, (returned_left_tertiary_bridge, returned_left_tertiary_leaf)) = returned_left_tertiary;
+    let (returned_right_primary_root, (returned_right_primary_bridge, returned_right_primary_leaf)) = returned_right_primary;
+    let (returned_right_secondary_root, (returned_right_secondary_bridge, returned_right_secondary_leaf)) = returned_right_secondary;
+    let (returned_right_tertiary_root, (returned_right_tertiary_bridge, returned_right_tertiary_leaf)) = returned_right_tertiary;
+    let (((stage_3_left_primary, stage_3_left_secondary), stage_3_left_tertiary), ((stage_3_right_primary, stage_3_right_secondary), stage_3_right_tertiary)) = stage_3;
+    let (stage_3_left_primary_root, (stage_3_left_primary_bridge, stage_3_left_primary_leaf)) = stage_3_left_primary;
+    let (stage_3_left_secondary_root, (stage_3_left_secondary_bridge, stage_3_left_secondary_leaf)) = stage_3_left_secondary;
+    let (stage_3_left_tertiary_root, (stage_3_left_tertiary_bridge, stage_3_left_tertiary_leaf)) = stage_3_left_tertiary;
+    let (stage_3_right_primary_root, (stage_3_right_primary_bridge, stage_3_right_primary_leaf)) = stage_3_right_primary;
+    let (stage_3_right_secondary_root, (stage_3_right_secondary_bridge, stage_3_right_secondary_leaf)) = stage_3_right_secondary;
+    let (stage_3_right_tertiary_root, (stage_3_right_tertiary_bridge, stage_3_right_tertiary_leaf)) = stage_3_right_tertiary;
+    let (((stage_7_left_primary, stage_7_left_secondary), stage_7_left_tertiary), ((stage_7_right_primary, stage_7_right_secondary), stage_7_right_tertiary)) = stage_7;
+    let (stage_7_left_primary_root, (stage_7_left_primary_bridge, stage_7_left_primary_leaf)) = stage_7_left_primary;
+    let (stage_7_left_secondary_root, (stage_7_left_secondary_bridge, stage_7_left_secondary_leaf)) = stage_7_left_secondary;
+    let (stage_7_left_tertiary_root, (stage_7_left_tertiary_bridge, stage_7_left_tertiary_leaf)) = stage_7_left_tertiary;
+    let (stage_7_right_primary_root, (stage_7_right_primary_bridge, stage_7_right_primary_leaf)) = stage_7_right_primary;
+    let (stage_7_right_secondary_root, (stage_7_right_secondary_bridge, stage_7_right_secondary_leaf)) = stage_7_right_secondary;
+    let (stage_7_right_tertiary_root, (stage_7_right_tertiary_bridge, stage_7_right_tertiary_leaf)) = stage_7_right_tertiary;
+
+    let cascade_cursor = (((cascade_at(returned_left_primary_root, returned_left_primary_bridge), cascade_at(returned_left_secondary_root, returned_left_secondary_bridge)), cascade_at(returned_left_tertiary_root, returned_left_tertiary_bridge)), ((cascade_at(returned_right_primary_root, returned_right_primary_bridge), cascade_at(returned_right_secondary_root, returned_right_secondary_bridge)), cascade_at(returned_right_tertiary_root, returned_right_tertiary_bridge)));
+    let returned_alias = cascade_cursor;
+    cascade_cursor = (((cascade_at(stage_3_left_primary_root, stage_3_left_primary_bridge), cascade_at(stage_3_left_secondary_root, stage_3_left_secondary_bridge)), cascade_at(stage_3_left_tertiary_root, stage_3_left_tertiary_bridge)), ((cascade_at(stage_3_right_primary_root, stage_3_right_primary_bridge), cascade_at(stage_3_right_secondary_root, stage_3_right_secondary_bridge)), cascade_at(stage_3_right_tertiary_root, stage_3_right_tertiary_bridge)));
+    let stage_3_alias = cascade_cursor;
+    cascade_cursor = (((cascade_at(stage_7_left_primary_root, stage_7_left_primary_bridge), cascade_at(stage_7_left_secondary_root, stage_7_left_secondary_bridge)), cascade_at(stage_7_left_tertiary_root, stage_7_left_tertiary_bridge)), ((cascade_at(stage_7_right_primary_root, stage_7_right_primary_bridge), cascade_at(stage_7_right_secondary_root, stage_7_right_secondary_bridge)), cascade_at(stage_7_right_tertiary_root, stage_7_right_tertiary_bridge)));
+    let stage_7_alias = cascade_cursor;
+    cascade_cursor = returned_alias;
+    let returned_cascades = cascade_cursor;
+
+    let (((returned_left_primary_cascade, returned_left_secondary_cascade), returned_left_tertiary_cascade), ((returned_right_primary_cascade, returned_right_secondary_cascade), returned_right_tertiary_cascade)) = returned_cascades;
+    let returned_left_primary_value = returned_left_primary_cascade(returned_left_primary_leaf);
+    let returned_left_secondary_value = returned_left_secondary_cascade(returned_left_secondary_leaf);
+    let returned_left_tertiary_value = returned_left_tertiary_cascade(returned_left_tertiary_leaf);
+    let returned_right_primary_value = returned_right_primary_cascade(returned_right_primary_leaf);
+    let returned_right_secondary_value = returned_right_secondary_cascade(returned_right_secondary_leaf);
+    let returned_right_tertiary_value = returned_right_tertiary_cascade(returned_right_tertiary_leaf);
+    let (((stage_3_left_primary_cascade, stage_3_left_secondary_cascade), stage_3_left_tertiary_cascade), ((stage_3_right_primary_cascade, stage_3_right_secondary_cascade), stage_3_right_tertiary_cascade)) = stage_3_alias;
+    let stage_3_left_primary_value = stage_3_left_primary_cascade(stage_3_left_primary_leaf);
+    let stage_3_left_secondary_value = stage_3_left_secondary_cascade(stage_3_left_secondary_leaf);
+    let stage_3_left_tertiary_value = stage_3_left_tertiary_cascade(stage_3_left_tertiary_leaf);
+    let stage_3_right_primary_value = stage_3_right_primary_cascade(stage_3_right_primary_leaf);
+    let stage_3_right_secondary_value = stage_3_right_secondary_cascade(stage_3_right_secondary_leaf);
+    let stage_3_right_tertiary_value = stage_3_right_tertiary_cascade(stage_3_right_tertiary_leaf);
+    let (((stage_7_left_primary_cascade, stage_7_left_secondary_cascade), stage_7_left_tertiary_cascade), ((stage_7_right_primary_cascade, stage_7_right_secondary_cascade), stage_7_right_tertiary_cascade)) = stage_7_alias;
+    let stage_7_left_primary_value = stage_7_left_primary_cascade(stage_7_left_primary_leaf);
+    let stage_7_left_secondary_value = stage_7_left_secondary_cascade(stage_7_left_secondary_leaf);
+    let stage_7_left_tertiary_value = stage_7_left_tertiary_cascade(stage_7_left_tertiary_leaf);
+    let stage_7_right_primary_value = stage_7_right_primary_cascade(stage_7_right_primary_leaf);
+    let stage_7_right_secondary_value = stage_7_right_secondary_cascade(stage_7_right_secondary_leaf);
+    let stage_7_right_tertiary_value = stage_7_right_tertiary_cascade(stage_7_right_tertiary_leaf);
+
+    {
+        returned: {
+            left: {
+                primary: {
+                    root: [returned_left_primary_value.root, chained_factory(sys.snapshot("HEAD~180"))],
+                    bridge: [returned_left_primary_value.nested.bridge, chained_factory(sys.snapshot("HEAD~160"))().read],
+                    leaf: [returned_left_primary_value.nested.leaf.continuation, chained_factory(sys.snapshot("HEAD~140"))().read()],
+                },
+                secondary: {
+                    root: [returned_left_secondary_value.root, chained_factory(sys.snapshot("HEAD~120"))],
+                    bridge: [returned_left_secondary_value.nested.bridge, chained_factory(sys.snapshot("HEAD~100"))().read],
+                    leaf: [returned_left_secondary_value.nested.leaf.continuation, chained_factory(sys.snapshot("HEAD~80"))().read()],
+                },
+                tertiary: {
+                    root: [returned_left_tertiary_value.root, chained_factory(sys.snapshot("HEAD~60"))],
+                    bridge: [returned_left_tertiary_value.nested.bridge, chained_factory(sys.snapshot("HEAD~40"))().read],
+                    leaf: [returned_left_tertiary_value.nested.leaf.continuation, chained_factory(sys.snapshot("HEAD~20"))().read()],
+                },
+            },
+            right: {
+                primary: {
+                    root: [returned_right_primary_value.root, chained_factory(sys.snapshot("HEAD~170"))],
+                    bridge: [returned_right_primary_value.nested.bridge, chained_factory(sys.snapshot("HEAD~150"))().read],
+                    leaf: [returned_right_primary_value.nested.leaf.continuation, chained_factory(sys.snapshot("HEAD~130"))().read()],
+                },
+                secondary: {
+                    root: [returned_right_secondary_value.root, chained_factory(sys.snapshot("HEAD~110"))],
+                    bridge: [returned_right_secondary_value.nested.bridge, chained_factory(sys.snapshot("HEAD~90"))().read],
+                    leaf: [returned_right_secondary_value.nested.leaf.continuation, chained_factory(sys.snapshot("HEAD~70"))().read()],
+                },
+                tertiary: {
+                    root: [returned_right_tertiary_value.root, chained_factory(sys.snapshot("HEAD~50"))],
+                    bridge: [returned_right_tertiary_value.nested.bridge, chained_factory(sys.snapshot("HEAD~30"))().read],
+                    leaf: [returned_right_tertiary_value.nested.leaf.continuation, chained_factory(sys.snapshot("HEAD~10"))().read()],
+                },
+            },
+        },
+        stage_3: {
+            left: {
+                primary: {
+                    root: [stage_3_left_primary_value.root, chained_factory(sys.snapshot("HEAD~177"))],
+                    bridge: [stage_3_left_primary_value.nested.bridge, chained_factory(sys.snapshot("HEAD~157"))().read],
+                    leaf: [stage_3_left_primary_value.nested.leaf.continuation, chained_factory(sys.snapshot("HEAD~137"))().read()],
+                },
+                secondary: {
+                    root: [stage_3_left_secondary_value.root, chained_factory(sys.snapshot("HEAD~117"))],
+                    bridge: [stage_3_left_secondary_value.nested.bridge, chained_factory(sys.snapshot("HEAD~97"))().read],
+                    leaf: [stage_3_left_secondary_value.nested.leaf.continuation, chained_factory(sys.snapshot("HEAD~77"))().read()],
+                },
+                tertiary: {
+                    root: [stage_3_left_tertiary_value.root, chained_factory(sys.snapshot("HEAD~57"))],
+                    bridge: [stage_3_left_tertiary_value.nested.bridge, chained_factory(sys.snapshot("HEAD~37"))().read],
+                    leaf: [stage_3_left_tertiary_value.nested.leaf.continuation, chained_factory(sys.snapshot("HEAD~17"))().read()],
+                },
+            },
+            right: {
+                primary: {
+                    root: [stage_3_right_primary_value.root, chained_factory(sys.snapshot("HEAD~167"))],
+                    bridge: [stage_3_right_primary_value.nested.bridge, chained_factory(sys.snapshot("HEAD~147"))().read],
+                    leaf: [stage_3_right_primary_value.nested.leaf.continuation, chained_factory(sys.snapshot("HEAD~127"))().read()],
+                },
+                secondary: {
+                    root: [stage_3_right_secondary_value.root, chained_factory(sys.snapshot("HEAD~107"))],
+                    bridge: [stage_3_right_secondary_value.nested.bridge, chained_factory(sys.snapshot("HEAD~87"))().read],
+                    leaf: [stage_3_right_secondary_value.nested.leaf.continuation, chained_factory(sys.snapshot("HEAD~67"))().read()],
+                },
+                tertiary: {
+                    root: [stage_3_right_tertiary_value.root, chained_factory(sys.snapshot("HEAD~47"))],
+                    bridge: [stage_3_right_tertiary_value.nested.bridge, chained_factory(sys.snapshot("HEAD~27"))().read],
+                    leaf: [stage_3_right_tertiary_value.nested.leaf.continuation, chained_factory(sys.snapshot("HEAD~7"))().read()],
+                },
+            },
+        },
+        stage_7: {
+            left: {
+                primary: {
+                    root: [stage_7_left_primary_value.root, chained_factory(sys.snapshot("HEAD~173"))],
+                    bridge: [stage_7_left_primary_value.nested.bridge, chained_factory(sys.snapshot("HEAD~153"))().read],
+                    leaf: [stage_7_left_primary_value.nested.leaf.continuation, chained_factory(sys.snapshot("HEAD~133"))().read()],
+                },
+                secondary: {
+                    root: [stage_7_left_secondary_value.root, chained_factory(sys.snapshot("HEAD~113"))],
+                    bridge: [stage_7_left_secondary_value.nested.bridge, chained_factory(sys.snapshot("HEAD~93"))().read],
+                    leaf: [stage_7_left_secondary_value.nested.leaf.continuation, chained_factory(sys.snapshot("HEAD~73"))().read()],
+                },
+                tertiary: {
+                    root: [stage_7_left_tertiary_value.root, chained_factory(sys.snapshot("HEAD~53"))],
+                    bridge: [stage_7_left_tertiary_value.nested.bridge, chained_factory(sys.snapshot("HEAD~33"))().read],
+                    leaf: [stage_7_left_tertiary_value.nested.leaf.continuation, chained_factory(sys.snapshot("HEAD~13"))().read()],
+                },
+            },
+            right: {
+                primary: {
+                    root: [stage_7_right_primary_value.root, chained_factory(sys.snapshot("HEAD~163"))],
+                    bridge: [stage_7_right_primary_value.nested.bridge, chained_factory(sys.snapshot("HEAD~143"))().read],
+                    leaf: [stage_7_right_primary_value.nested.leaf.continuation, chained_factory(sys.snapshot("HEAD~123"))().read()],
+                },
+                secondary: {
+                    root: [stage_7_right_secondary_value.root, chained_factory(sys.snapshot("HEAD~103"))],
+                    bridge: [stage_7_right_secondary_value.nested.bridge, chained_factory(sys.snapshot("HEAD~83"))().read],
+                    leaf: [stage_7_right_secondary_value.nested.leaf.continuation, chained_factory(sys.snapshot("HEAD~63"))().read()],
+                },
+                tertiary: {
+                    root: [stage_7_right_tertiary_value.root, chained_factory(sys.snapshot("HEAD~43"))],
+                    bridge: [stage_7_right_tertiary_value.nested.bridge, chained_factory(sys.snapshot("HEAD~23"))().read],
+                    leaf: [stage_7_right_tertiary_value.nested.leaf.continuation, chained_factory(sys.snapshot("HEAD~3"))().read()],
+                },
+            },
+        },
+    }
+}

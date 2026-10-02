@@ -1,7 +1,12 @@
 default: check
 
 # Run the default local fmt/build/lint/non-ignored test/rustdoc gate.
-check: fmt build lint test rustdoc-check
+check: fixture-audit fmt build lint test rustdoc-check
+
+# Reject external reference paths and a checkout-local reference tree.
+fixture-audit:
+    test ! -e reference || (echo "fixture-audit: remove the top-level reference tree" >&2; exit 1)
+    cargo test --locked -p orna-syntax --test reference_path_boundary
 
 
 # Verify formatting without changing source files.

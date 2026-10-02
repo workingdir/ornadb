@@ -1,0 +1,35 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn closure_identity_returns_to_a_saved_pin() {
+    let rolling = chained_factory(sys.snapshot("HEAD~30"));
+    let first = rolling;
+    let first_reader = rolling().read;
+    rolling = chained_factory(sys.snapshot("HEAD~20"));
+    let middle = rolling;
+    let middle_reader = rolling().read;
+    rolling = chained_factory(sys.snapshot("HEAD~10"));
+    let latest = rolling;
+    let latest_reader = rolling().read;
+    rolling = first;
+    let returned = rolling;
+    let returned_reader = rolling().read;
+    {
+        first_pin: [first, returned],
+        middle_pin: [middle, chained_factory(sys.snapshot("HEAD~20"))],
+        latest_pin: [latest, forwarded_factory(sys.snapshot("HEAD~10"))],
+        returned_nested: [first_reader, returned_reader],
+        retained_middle_nested: [
+            middle_reader,
+            chained_factory(sys.snapshot("HEAD~20"))().read,
+        ],
+        retained_latest_nested: [
+            latest_reader,
+            forwarded_factory(sys.snapshot("HEAD~10"))().read,
+        ],
+    }
+}

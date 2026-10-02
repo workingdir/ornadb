@@ -1,0 +1,17 @@
+pub fn nested_tuple_callback() {
+    ((selected, (left, right)): (sys.SnapshotRef, (sys.SnapshotRef, sys.SnapshotRef))) => {
+        {
+            selected: factory_at(selected),
+            left: factory_at(left),
+            right: factory_at(right),
+        }
+    }
+}
+
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn malformed_nested_tuple_call_keeps_pin_binders_symbolic() {
+    let callback = nested_tuple_callback();
+    callback((sys.snapshot("HEAD~450"), (sys.snapshot("HEAD~440"), true)))
+}

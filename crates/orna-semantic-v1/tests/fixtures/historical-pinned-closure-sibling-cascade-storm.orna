@@ -1,0 +1,93 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn cascade_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) => {
+            root: chained_factory(root_pin),
+            nested: {
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: {
+                    reader: chained_factory(leaf_pin)().read,
+                    continuation: chained_factory(leaf_pin)().read(),
+                },
+            },
+        };
+
+pub fn branches_at(shared_pin: sys.SnapshotRef) = {
+    left: cascade_at(shared_pin),
+    nested: {
+        right: cascade_at(shared_pin),
+    },
+};
+
+pub fn sibling_pin_owners_survive_structural_and_chain_rebinds() {
+    let rolling = branches_at(sys.snapshot("HEAD~80"));
+    let stage_0 = rolling;
+    rolling = branches_at(sys.snapshot("HEAD~79"));
+    rolling = branches_at(sys.snapshot("HEAD~78"));
+    rolling = branches_at(sys.snapshot("HEAD~77"));
+    let stage_3 = rolling;
+    rolling = branches_at(sys.snapshot("HEAD~76"));
+    rolling = branches_at(sys.snapshot("HEAD~75"));
+    rolling = branches_at(sys.snapshot("HEAD~74"));
+    rolling = branches_at(sys.snapshot("HEAD~73"));
+    let stage_7 = rolling;
+    rolling = stage_0;
+    let returned = rolling;
+
+    let left_middle = returned.left(sys.snapshot("HEAD~70"));
+    let branch_cursor = left_middle;
+    branch_cursor = returned.nested.right(sys.snapshot("HEAD~69"));
+    let right_middle = branch_cursor;
+    branch_cursor = left_middle;
+    let returned_left_middle = branch_cursor;
+
+    let returned_left = returned_left_middle(sys.snapshot("HEAD~50"));
+    let returned_right = right_middle(sys.snapshot("HEAD~40"));
+    let stage_3_left = stage_3.left(sys.snapshot("HEAD~67"))(sys.snapshot("HEAD~50"));
+    let stage_7_right = stage_7.nested.right(sys.snapshot("HEAD~63"))(sys.snapshot("HEAD~40"));
+    {
+        returned: {
+            shared_root: [
+                returned_left.root,
+                returned_right.root,
+                chained_factory(sys.snapshot("HEAD~80")),
+            ],
+            left_bridge: [
+                returned_left.nested.bridge,
+                chained_factory(sys.snapshot("HEAD~70"))().read,
+            ],
+            right_bridge: [
+                returned_right.nested.bridge,
+                chained_factory(sys.snapshot("HEAD~69"))().read,
+            ],
+            left_continuation: [
+                returned_left.nested.leaf.continuation,
+                chained_factory(sys.snapshot("HEAD~50"))().read(),
+            ],
+            right_continuation: [
+                returned_right.nested.leaf.continuation,
+                chained_factory(sys.snapshot("HEAD~40"))().read(),
+            ],
+        },
+        stage_3: {
+            root: [stage_3_left.root, chained_factory(sys.snapshot("HEAD~77"))],
+            bridge: [
+                stage_3_left.nested.bridge,
+                chained_factory(sys.snapshot("HEAD~67"))().read,
+            ],
+        },
+        stage_7: {
+            root: [stage_7_right.root, chained_factory(sys.snapshot("HEAD~73"))],
+            bridge: [
+                stage_7_right.nested.bridge,
+                chained_factory(sys.snapshot("HEAD~63"))().read,
+            ],
+        },
+    }
+}

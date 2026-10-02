@@ -1,0 +1,4 @@
+fn core_assertions_without_pattern(): Bool {
+    assert 2 + 2 == 4;
+    true
+}

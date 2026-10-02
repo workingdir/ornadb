@@ -1,0 +1,19 @@
+[
+    case calendar.add_months(2024, 1, 31, 1) {
+        Some(date): false,
+        null: true,
+    },
+    case calendar.add_months_clamped(2024, 1, 31, 1) {
+        Some(date): date == (2024, 2, 29),
+        null: false,
+    },
+    case calendar.add_months_clamped(2023, 1, 31, 1) {
+        Some(date): date == (2023, 2, 28),
+        null: false,
+    },
+    case calendar.add_months(2023, 12, 31, 1) {
+        Some(date): date == (2024, 1, 31),
+        null: false,
+    },
+    calendar.days_in_month(10000, 1) == null,
+]

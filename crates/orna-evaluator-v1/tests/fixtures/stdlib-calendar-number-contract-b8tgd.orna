@@ -1,0 +1,21 @@
+[
+    case calendar.day_number(1, 1, 1) {
+        Some(index): index == 0,
+        null: false,
+    },
+    case calendar.from_day_number(0) {
+        Some(date): date == (1, 1, 1),
+        null: false,
+    },
+    case calendar.day_number(9999, 12, 31) {
+        Some(index): case calendar.from_day_number(index) {
+            Some(date): date == (9999, 12, 31),
+            null: false,
+        },
+        null: false,
+    },
+    case calendar.weekday(2024, 2, 29) {
+        Some(day): day == 4,
+        null: false,
+    },
+]

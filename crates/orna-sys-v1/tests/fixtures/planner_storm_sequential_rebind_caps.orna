@@ -1,0 +1,47 @@
+pub table PlannerStormSequentialRebindCaps(id: Int) {
+    first: Bool,
+    middle: Bool,
+    deep: Bool,
+    sibling: Bool,
+}
+pub fn sequential_rebind_caps() = PlannerStormSequentialRebindCaps
+    | union(
+        PlannerStormSequentialRebindCaps
+            | take(10)
+            | union(
+                PlannerStormSequentialRebindCaps
+                    | take(100)
+                    | filter(row => row.deep),
+                PlannerStormSequentialRebindCaps
+                    | take(100)
+                    | filter(row => row.deep),
+                PlannerStormSequentialRebindCaps
+                    | take(100)
+                    | filter(row => row.deep)
+            )
+            | take(80)
+            | filter(row => row.first),
+        PlannerStormSequentialRebindCaps
+            | take(40)
+            | filter(row => row.sibling)
+    )
+    | union(
+        PlannerStormSequentialRebindCaps
+            | take(4)
+            | union(
+                PlannerStormSequentialRebindCaps
+                    | take(90)
+                    | filter(row => row.deep),
+                PlannerStormSequentialRebindCaps
+                    | take(90)
+                    | filter(row => row.deep),
+                PlannerStormSequentialRebindCaps
+                    | take(90)
+                    | filter(row => row.deep)
+            )
+            | take(100)
+            | filter(row => row.middle),
+        PlannerStormSequentialRebindCaps
+            | take(20)
+            | filter(row => row.sibling)
+    );

@@ -1,0 +1,31 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+// The sibling tuple parameters and the failing tuple wave capture at the same
+// callback depth. A bad leaf must prevent valid sibling tuple pins rebinding.
+pub fn sibling_capture_wave() =
+    ((sibling_left, sibling_right): (sys.SnapshotRef, sys.SnapshotRef),
+     (selected, sibling): (sys.SnapshotRef, sys.SnapshotRef)) =>
+        (leaf_pin: sys.SnapshotRef) => {
+            sibling_left_capture: factory_at(sibling_left),
+            sibling_right_capture: factory_at(sibling_right),
+            selected_capture: factory_at(selected),
+            sibling_capture: factory_at(sibling),
+            leaf_capture: factory_at(leaf_pin),
+        };
+
+pub fn malformed_tuple_sibling_capture_wave() {
+    let callback = sibling_capture_wave();
+    let incomplete = callback(
+        (sys.snapshot("HEAD~600"), sys.snapshot("HEAD~590")),
+        (sys.snapshot("HEAD~580"), true),
+    )(sys.snapshot("HEAD~570"));
+    let complete = callback(
+        (sys.snapshot("HEAD~560"), sys.snapshot("HEAD~550")),
+        (sys.snapshot("HEAD~540"), sys.snapshot("HEAD~530")),
+    )(sys.snapshot("HEAD~520"));
+    {
+        incomplete: incomplete,
+        complete: complete,
+    }
+}
