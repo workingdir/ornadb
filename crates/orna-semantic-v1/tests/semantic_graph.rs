@@ -6051,7 +6051,6 @@ fn shadowed_paired_checkpoint_parameters_keep_their_innermost_pins() {
         );
     }
 }
-
 #[test]
 fn paired_checkpoint_lists_preserve_field_specific_pin_maps() {
     let source = include_str!("fixtures/historical-paired-checkpoint-field-map-storm.orna");
@@ -6156,7 +6155,6 @@ fn paired_checkpoint_lists_preserve_field_specific_pin_maps() {
         }
     }
 }
-
 #[test]
 fn paired_reproduction_checkpoint_types_stay_stable_across_interleaved_analyses() {
     const FUNCTION: &str =
