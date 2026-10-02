@@ -319,6 +319,82 @@ fn module_upgrade_projects() -> (
     )
 }
 
+fn snapshot_matrix_projects() -> (TempDir, Vec<LoadedProject>, Vec<String>) {
+    let directory = tempfile::tempdir().unwrap();
+    let project_path = directory.path().join("project");
+    fs::create_dir_all(&project_path).unwrap();
+    fs::write(
+        project_path.join("main.orna"),
+        include_str!("fixtures/snapshot-matrix-project.orna"),
+    )
+    .unwrap();
+    fs::write(
+        project_path.join("snapshot_app.orna"),
+        include_str!("fixtures/module-upgrade-app.orna"),
+    )
+    .unwrap();
+    git_output_at(&project_path, &["init", "--quiet"]);
+    for (key, value) in [
+        ("user.email", "kieran@drewett.dev"),
+        ("user.name", "kierandrewett"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git_output_at(&project_path, &["config", key, value]);
+    }
+    fs::write(
+        project_path.join(".gitmodules"),
+        "[submodule \"std\"]\n\tpath = stdlib/std\n\turl = https://example.invalid/ornadb-std.git\n",
+    )
+    .unwrap();
+
+    let standard_path = project_path.join("stdlib/std");
+    fs::create_dir_all(&standard_path).unwrap();
+    initialize_repository(&standard_path).unwrap();
+    fs::write(
+        standard_path.join("main.orna"),
+        include_str!("fixtures/snapshot-matrix-std-main.orna"),
+    )
+    .unwrap();
+    let math_versions = [
+        include_str!("fixtures/module-upgrade-std-v1.orna"),
+        include_str!("fixtures/module-upgrade-std-v2.orna"),
+        include_str!("fixtures/module-upgrade-std-v3.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-v5.orna"),
+        include_str!("fixtures/module-upgrade-std-v6.orna"),
+    ];
+
+    let mut parent_snapshots = Vec::with_capacity(math_versions.len());
+    let mut standard_snapshots = Vec::with_capacity(math_versions.len());
+    for (index, math_source) in math_versions.into_iter().enumerate() {
+        fs::write(standard_path.join("math.orna"), math_source).unwrap();
+        commit_directory(
+            &standard_path,
+            &format!("real math body snapshot v{}", index + 1),
+        );
+        let standard_snapshot = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+        parent_snapshots.push(capture_standard_gitlink(
+            &project_path,
+            &standard_snapshot,
+            &format!("capture real math snapshot v{}", index + 1),
+        ));
+        standard_snapshots.push(standard_snapshot);
+    }
+
+    let repository = Repository::discover(&project_path).unwrap();
+    let loader = ProjectLoader::default();
+    let projects = parent_snapshots
+        .iter()
+        .map(|snapshot| {
+            let snapshot = repository.resolve_snapshot(snapshot).unwrap();
+            loader
+                .load_committed_snapshot(&repository, &snapshot)
+                .unwrap()
+        })
+        .collect();
+    (directory, projects, standard_snapshots)
+}
+
 fn write_module_chain_version(
     standard_path: &Path,
     math: &str,
@@ -896,33 +972,27 @@ fn imported_project_module_executes_under_each_captured_standard_snapshot() {
 
 #[test]
 fn stepwise_snapshot_replay_matrix_retains_values_after_each_upgrade() {
-    let (
-        _directory,
-        project_v1,
-        project_v2,
-        project_v3,
-        project_v4,
-        project_v5,
-        project_v6,
-        snapshots,
-    ) = module_upgrade_projects();
-    let projects = [
-        &project_v1,
-        &project_v2,
-        &project_v3,
-        &project_v4,
-        &project_v5,
-        &project_v6,
-    ];
-    let expected_values = [8, 107, 1007, 1007, 10007, 100007];
+    let (_directory, projects, snapshots) = snapshot_matrix_projects();
+    let expected_values = [8, 107, 1007, 10007, 100007, 1000007];
     let mut retained_sessions = Vec::new();
 
+    assert_eq!(projects.len(), expected_values.len());
+    assert!(snapshots.windows(2).all(|pair| pair[0] != pair[1]));
     for (upgrade_index, (project, expected)) in projects.iter().zip(expected_values).enumerate() {
         assert_eq!(
             project.standard_profile().unwrap().snapshot(),
             &snapshots[upgrade_index],
             "upgrade v{} must use its committed std gitlink",
             upgrade_index + 1
+        );
+        assert_eq!(
+            project
+                .standard_sources()
+                .iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>(),
+            ["std/main.orna", "std/math.orna"],
+            "matrix snapshots contain only the real imported math body"
         );
         let mut session = admitted_snapshot_app_session(project);
         assert_eq!(
