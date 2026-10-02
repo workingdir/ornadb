@@ -4491,6 +4491,32 @@ fn paired_depth_storm_chained_rebinds_preserve_followup_stability() {
 }
 
 #[test]
+fn paired_depth_storm_chained_rebinds_reject_followup_pair_mixing() {
+    let source = include_str!("fixtures/historical-paired-depth-storm-chained-rebind-stability-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-depth-storm-chained-rebind-stability-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "follow-up terminal pins must remain distinct across paired rebind storms: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
