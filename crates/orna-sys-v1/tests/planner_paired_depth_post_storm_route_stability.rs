@@ -516,6 +516,14 @@ fn unknown_byte_route_serialization_derives_labels_from_typed_paths() {
         output_bytes: None,
     };
 
+    assert_eq!(
+        route.input_scope_label(),
+        "root/storm1/storm_stage_output1/storm2/branch1/limit1"
+    );
+    assert_eq!(
+        route.output_scope_label(),
+        "root/storm1/storm_stage_output1/storm2/branch1/limit1/rebind1/cascade1"
+    );
     let serialized = serde_json::to_value(route).expect("unknown-byte route serializes");
     assert_eq!(
         serialized["input_scope"],
