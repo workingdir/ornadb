@@ -20123,6 +20123,42 @@ fn paired_restore_waves_reject_logical_duplicates_across_submission_modes() {
 }
 
 #[test]
+fn paired_whole_plan_conflict_precedes_invalid_fragment_classification() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let repeated_key = fixture_rows
+        .iter()
+        .find(|row| row.key == string("a/child/deep"))
+        .expect("the in-crate depth fixture supplies the repeated tombstone")
+        .key
+        .clone();
+    let whole_plan = SequencedBranchMergePlan {
+        order: 2,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: vec![(id(1), repeated_key)],
+    };
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history.submit(&whole_plan).unwrap().is_empty());
+    let before_conflict = history.clone();
+
+    for (fragment, fragment_count) in [(0, 0), (1, 1)] {
+        assert_eq!(
+            history.submit_depth_merge_fragment(2, fragment, fragment_count, &[]),
+            Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+            "a pending whole plan owns its submission mode even when fragment metadata is invalid",
+        );
+        assert_eq!(history, before_conflict);
+    }
+}
+
+#[test]
 fn paired_depth_storm_tombstone_history_stabilizes_across_restore_waves() {
     let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
         .split("\n\n")
