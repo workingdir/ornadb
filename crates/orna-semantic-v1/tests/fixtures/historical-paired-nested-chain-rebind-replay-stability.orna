@@ -1,0 +1,101 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn cascade_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+            };
+
+pub fn pair_at(left_root: sys.SnapshotRef, right_root: sys.SnapshotRef) =
+    (cascade_at(left_root), cascade_at(right_root));
+pub fn forwarded_pair(left_root: sys.SnapshotRef, right_root: sys.SnapshotRef) =
+    pair_at(left_root, right_root);
+pub fn chained_pair(left_root: sys.SnapshotRef, right_root: sys.SnapshotRef) =
+    forwarded_pair(left_root, right_root);
+
+// Replay saved paired closures after decoy storms at root, bridge, and leaf depth.
+pub fn paired_nested_chain_rebind_replay_stays_stable() {
+    let roots_saved = chained_pair(sys.snapshot("HEAD~360"), sys.snapshot("HEAD~350"));
+    let roots_rolling = roots_saved;
+    roots_rolling = chained_pair(sys.snapshot("HEAD~359"), sys.snapshot("HEAD~349"));
+    roots_rolling = chained_pair(sys.snapshot("HEAD~358"), sys.snapshot("HEAD~348"));
+    roots_rolling = chained_pair(sys.snapshot("HEAD~357"), sys.snapshot("HEAD~347"));
+    roots_rolling = roots_saved;
+    let roots_replayed = roots_rolling;
+
+    let (left_root_first, right_root_first) = roots_saved;
+    let (left_root_replayed, right_root_replayed) = roots_replayed;
+
+    let bridges_saved = (
+        left_root_first(sys.snapshot("HEAD~320")),
+        right_root_first(sys.snapshot("HEAD~310")),
+    );
+    let bridges_rolling = bridges_saved;
+    bridges_rolling = (
+        left_root_replayed(sys.snapshot("HEAD~319")),
+        right_root_replayed(sys.snapshot("HEAD~309")),
+    );
+    bridges_rolling = (
+        left_root_replayed(sys.snapshot("HEAD~318")),
+        right_root_replayed(sys.snapshot("HEAD~308")),
+    );
+    bridges_rolling = (
+        left_root_replayed(sys.snapshot("HEAD~317")),
+        right_root_replayed(sys.snapshot("HEAD~307")),
+    );
+    bridges_rolling = bridges_saved;
+    let bridges_replayed = bridges_rolling;
+
+    let (left_bridge_first, right_bridge_first) = bridges_saved;
+    let (left_bridge_replayed, right_bridge_replayed) = bridges_replayed;
+
+    let leaves_saved = (
+        left_bridge_first(sys.snapshot("HEAD~280")),
+        right_bridge_first(sys.snapshot("HEAD~270")),
+    );
+    let leaves_rolling = leaves_saved;
+    leaves_rolling = (
+        left_bridge_replayed(sys.snapshot("HEAD~279")),
+        right_bridge_replayed(sys.snapshot("HEAD~269")),
+    );
+    leaves_rolling = (
+        left_bridge_replayed(sys.snapshot("HEAD~278")),
+        right_bridge_replayed(sys.snapshot("HEAD~268")),
+    );
+    leaves_rolling = (
+        left_bridge_replayed(sys.snapshot("HEAD~277")),
+        right_bridge_replayed(sys.snapshot("HEAD~267")),
+    );
+    leaves_rolling = leaves_saved;
+    let leaves_replayed = leaves_rolling;
+
+    let (left_leaf_first, right_leaf_first) = leaves_saved;
+    let (left_leaf_replayed, right_leaf_replayed) = leaves_replayed;
+    let left_first = left_leaf_first(sys.snapshot("HEAD~240"));
+    let right_first = right_leaf_first(sys.snapshot("HEAD~230"));
+    let left_replayed = left_leaf_replayed(sys.snapshot("HEAD~240"));
+    let right_replayed = right_leaf_replayed(sys.snapshot("HEAD~230"));
+
+    {
+        left: {
+            root: [left_first.root, left_replayed.root, chained_factory(sys.snapshot("HEAD~360"))],
+            bridge: [left_first.bridge, left_replayed.bridge, chained_factory(sys.snapshot("HEAD~320"))().read],
+            leaf: [left_first.leaf, left_replayed.leaf, chained_factory(sys.snapshot("HEAD~280"))().read],
+            terminal: [left_first.terminal, left_replayed.terminal, chained_factory(sys.snapshot("HEAD~240"))().read()],
+        },
+        right: {
+            root: [right_first.root, right_replayed.root, chained_factory(sys.snapshot("HEAD~350"))],
+            bridge: [right_first.bridge, right_replayed.bridge, chained_factory(sys.snapshot("HEAD~310"))().read],
+            leaf: [right_first.leaf, right_replayed.leaf, chained_factory(sys.snapshot("HEAD~270"))().read],
+            terminal: [right_first.terminal, right_replayed.terminal, chained_factory(sys.snapshot("HEAD~230"))().read()],
+        },
+    }
+}
