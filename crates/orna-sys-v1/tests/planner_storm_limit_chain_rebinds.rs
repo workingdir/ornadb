@@ -29,8 +29,8 @@ const REBIND_CAP_DEPTH_GAPS_FIXTURE: &str =
     include_str!("fixtures/planner_storm_rebind_cap_depth_gaps.orna");
 const REBIND_CAP_HANDOFFS_FIXTURE: &str =
     include_str!("fixtures/planner_storm_rebind_cap_handoffs.orna");
-const REBIND_CAP_HANDOFF_ESTIMATES_FIXTURE: &str =
-    include_str!("fixtures/planner_storm_rebind_cap_handoff_estimates.orna");
+const REBIND_CAP_HANDOFF_SCOPES_FIXTURE: &str =
+    include_str!("fixtures/planner_storm_rebind_cap_handoff_scopes.orna");
 
 fn branch(
     limits: &[u64],
@@ -1306,7 +1306,7 @@ fn unknown_row_byte_caps_report_rebind_handoffs_by_nested_depth() {
 
 #[test]
 fn unknown_row_byte_caps_report_handoff_estimates_by_nested_depth() {
-    let parsed = orna_syntax_v1::parse_module(REBIND_CAP_HANDOFF_ESTIMATES_FIXTURE);
+    let parsed = orna_syntax_v1::parse_module(REBIND_CAP_HANDOFF_SCOPES_FIXTURE);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
     assert_eq!(parsed.value.items.len(), 2);
 
