@@ -1574,3 +1574,74 @@ fn incremental_transitive_upgrade_pins_capture_cumulative_module_sources() {
         "ORNA-REPL-STANDARD"
     );
 }
+
+#[test]
+fn stepwise_transitive_replay_retains_prior_pins_after_each_upgrade() {
+    let (_directory, projects, snapshots) = incremental_transitive_upgrade_projects();
+    let expected_results = [20, 47, 92, 128, 146, 155];
+    let replay_source = include_str!("fixtures/module-chain-call-replay.orna");
+    let mut retained_sessions = Vec::new();
+
+    for (index, project) in projects.iter().enumerate() {
+        assert_eq!(
+            project.standard_profile().unwrap().snapshot(),
+            &snapshots[index]
+        );
+        let mut current = AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            current.submit(include_str!("fixtures/module-chain-use-replay.orna")),
+            Ok(None)
+        );
+        assert_eq!(
+            current.submit(replay_source),
+            Ok(Some(ints(&[expected_results[index]])))
+        );
+        retained_sessions.push(current);
+
+        for (session, expected) in retained_sessions.iter_mut().zip(&expected_results) {
+            assert_eq!(session.submit(replay_source), Ok(Some(ints(&[*expected]))));
+        }
+    }
+
+    let mut clones = retained_sessions.iter().cloned().collect::<Vec<_>>();
+    for index in (0..clones.len()).rev() {
+        assert_eq!(
+            clones[index].submit(replay_source),
+            Ok(Some(ints(&[expected_results[index]])))
+        );
+    }
+
+    for (index, path) in [
+        "std/chain/leaf.orna",
+        "std/math.orna",
+        "std/collection.orna",
+        "std/chain/bridge.orna",
+        "std/chain/entry.orna",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut mixed_sources = projects[index].standard_sources().to_vec();
+        let next_source = standard_source(&projects[index + 1], path).to_owned();
+        mixed_sources
+            .iter_mut()
+            .find(|(source_path, _)| source_path == path)
+            .unwrap()
+            .1 = next_source;
+        assert_eq!(
+            AdmittedReplSession::from_loaded_project(
+                &projects[index],
+                mixed_sources,
+                Limits::default(),
+            )
+            .unwrap_err()
+            .code(),
+            "ORNA-REPL-STANDARD"
+        );
+    }
+}
