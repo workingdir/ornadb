@@ -1377,6 +1377,22 @@ fn unknown_row_byte_caps_report_handoff_estimates_by_nested_depth() {
             Some(&PlanDetail::Text("1:1040>260;2:1040>520".to_owned())),
         ]
     );
+    assert_eq!(
+        filters
+            .iter()
+            .map(|filter| filter
+                .details()
+                .get("limit_chain_rebind_byte_cap_handoff_scopes_by_depth"))
+            .collect::<Vec<_>>(),
+        vec![
+            Some(&PlanDetail::Text(
+                "1:root/branch1/limit1/rebind1/cascade1=2048>512,root/branch1/limit1/rebind1/cascade2=512>128,root/branch1/limit2/rebind2/cascade1=128>32;2:root/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=2048>1024,root/branch1/limit1/rebind1/cascade2/branch1/limit1/rebind1/cascade1=512>256,root/branch1/limit2/rebind2/cascade1/branch1/limit1/rebind1/cascade1=128>64".to_owned()
+            )),
+            Some(&PlanDetail::Text(
+                "1:root/branch1/limit1/rebind1/cascade1=1040>260;2:root/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=1040>520".to_owned()
+            )),
+        ]
+    );
 }
 
 #[test]
