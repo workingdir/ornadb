@@ -520,6 +520,7 @@ impl PackageResolver {
         Ok(ReboundPathResolution {
             final_session,
             retained_sessions: retained,
+            retained_wave_lengths: vec![1],
         })
     }
 
@@ -542,9 +543,15 @@ impl PackageResolver {
             retained_sessions.append(&mut retained);
             current = next;
         }
+        let retained_wave_lengths = if retained_sessions.is_empty() {
+            Vec::new()
+        } else {
+            vec![retained_sessions.len()]
+        };
         Ok(ReboundPathResolution {
             final_session: current,
             retained_sessions,
+            retained_wave_lengths,
         })
     }
 
@@ -559,12 +566,19 @@ impl PackageResolver {
     ) -> Result<ReboundPathResolution, AttachmentError> {
         let extension =
             self.resolve_nested_rebind_path(previous.final_session(), replacements)?;
-        let (final_session, mut retained_sessions) = extension.into_parts();
+        let ReboundPathResolution {
+            final_session,
+            mut retained_sessions,
+            retained_wave_lengths: extension_wave_lengths,
+        } = extension;
         let mut all_retained = previous.retained_sessions.clone();
         all_retained.append(&mut retained_sessions);
+        let mut retained_wave_lengths = previous.retained_wave_lengths.clone();
+        retained_wave_lengths.extend(extension_wave_lengths);
         Ok(ReboundPathResolution {
             final_session,
             retained_sessions: all_retained,
+            retained_wave_lengths,
         })
     }
 
@@ -660,6 +674,7 @@ impl PackageResolver {
 pub struct ReboundPathResolution {
     final_session: AttachedDatabaseSession,
     retained_sessions: Vec<AttachedDatabaseSession>,
+    retained_wave_lengths: Vec<usize>,
 }
 
 impl ReboundPathResolution {
@@ -671,6 +686,15 @@ impl ReboundPathResolution {
     /// Snapshots retained before each replacement, in path order.
     pub fn retained_sessions(&self) -> &[AttachedDatabaseSession] {
         &self.retained_sessions
+    }
+
+    /// Snapshots retained by one resolution wave, in the order they were
+    /// captured. The reference fixes exact historical pins but does not define
+    /// how paired rebind snapshots are grouped; v1 keeps each call's boundary.
+    pub fn retained_wave(&self, wave: usize) -> Option<&[AttachedDatabaseSession]> {
+        let length = *self.retained_wave_lengths.get(wave)?;
+        let start = self.retained_wave_lengths[..wave].iter().sum::<usize>();
+        self.retained_sessions.get(start..start + length)
     }
 
     /// Takes ownership of the final closure and every retained route snapshot.
