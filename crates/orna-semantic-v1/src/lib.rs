@@ -16177,8 +16177,15 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
         Type::Applied { base, arguments: values }
             if base == "sys.SnapshotRefContext"
                 && let [Type::Named(selector)] = values.as_slice()
-                && let Some(parameter) = selector.strip_prefix("selector:parameter:")
-                && !shadowed_parameters.contains(parameter) =>
+                && let Some((parameter, captured)) = selector
+                    .strip_prefix("selector:capture:parameter:")
+                    .map(|parameter| (parameter, true))
+                    .or_else(|| {
+                        selector
+                            .strip_prefix("selector:parameter:")
+                            .map(|parameter| (parameter, false))
+                    })
+                && (captured || !shadowed_parameters.contains(parameter)) =>
         {
             let argument_index = parameter_names
                 .and_then(|names| names.iter().position(|name| name == parameter))
@@ -16470,9 +16477,10 @@ fn call_argument_snapshot_context(
 }
 
 /// A typed `SnapshotRef` parameter has no concrete identity while its body is
-/// summarized. Key it by parameter name so each caller can specialize the key
-/// from its resolved argument; uncontextualized non-parameter references stay
-/// generic because this semantic pass cannot infer their runtime pin.
+/// summarized. Parameter references use a caller-specialized key; local aliases
+/// use a capture key so same-named nested parameters cannot retarget them.
+/// Uncontextualized non-parameter references stay generic because this semantic
+/// pass cannot infer their runtime pin.
 fn specialize_snapshot_ref_parameter(
     expression: &Expr,
     snapshot: &Type,
@@ -16488,7 +16496,9 @@ fn specialize_snapshot_ref_parameter(
                 .is_some_and(|symbol| symbol.kind == SymbolKind::Parameter)
                 && snapshot == &Type::Named("sys.SnapshotRef".into()) =>
         {
-            contextual_snapshot_ref(&format!("selector:parameter:{text}"))
+            // Preserve the captured binding separately from same-named
+            // parameters introduced by callbacks returned from this scope.
+            contextual_snapshot_ref(&format!("selector:capture:parameter:{text}"))
         }
         Expr::Group { inner, .. } => specialize_snapshot_ref_parameter(inner, snapshot, local),
         _ => snapshot.clone(),
