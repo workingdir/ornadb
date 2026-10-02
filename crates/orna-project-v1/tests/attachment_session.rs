@@ -4391,6 +4391,371 @@ fn later_ancestor_storm_keeps_chained_closure_rebinds_on_their_own_pins() {
 }
 
 #[test]
+fn repeated_storm_cascade_selects_each_terminal_alias_from_its_chain() {
+    let package_source = include_str!("fixtures/attach-package.orna");
+    let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
+    let aliases = [
+        "archive",
+        "archive_copy",
+        "archive_copy_archive",
+        "archive_copy_archive_archive",
+    ];
+    let depth_count = aliases.len() - 1;
+    let candidate_count = 2;
+    let candidate_marker = |depth: usize, variant: usize| 100 + depth * 10 + variant;
+    let terminal_marker = |variant: usize| 200 + variant;
+
+    let original_commits = aliases
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            write_package_snapshot(
+                shared_dir.path(),
+                package_source,
+                &format!("{}", 10 + index),
+                None,
+                &format!("original cascade alias {index}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let terminal_commits: Vec<String> = (0..candidate_count)
+        .map(|variant| {
+            write_package_snapshot(
+                shared_dir.path(),
+                package_source,
+                &format!("{}", terminal_marker(variant)),
+                None,
+                &format!("storm cascade terminal {variant}"),
+            )
+        })
+        .collect();
+
+    let mut replacement_commits: Vec<Vec<String>> = (0..depth_count)
+        .map(|_| vec![String::new(); candidate_count])
+        .collect();
+    for depth in (0..depth_count).rev() {
+        for variant in 0..candidate_count {
+            let child_variant = 1 - variant;
+            let child_index = depth + 1;
+            let child_commit = if child_index < depth_count {
+                &replacement_commits[child_index][child_variant]
+            } else {
+                &terminal_commits[child_variant]
+            };
+            let manifest = format!("{} {child_commit}\n", aliases[child_index]);
+            replacement_commits[depth][variant] = write_package_snapshot(
+                shared_dir.path(),
+                package_source,
+                &format!("{}", candidate_marker(depth, variant)),
+                Some(&manifest),
+                &format!("depth {depth} cascade candidate {variant}"),
+            );
+        }
+    }
+
+    let loader = ProjectLoader::default();
+    let replacement_pins: Vec<Vec<PinnedDatabase>> = (0..depth_count)
+        .map(|depth| {
+            (0..candidate_count)
+                .map(|variant| {
+                    PinnedDatabase::resolve(
+                        aliases[depth],
+                        shared_repository.clone(),
+                        &replacement_commits[depth][variant],
+                        loader,
+                    )
+                    .unwrap()
+                })
+                .collect()
+        })
+        .collect();
+    let root_manifest = aliases
+        .iter()
+        .zip(&original_commits)
+        .map(|(alias, commit)| format!("{alias} {commit}\n"))
+        .collect::<String>();
+    let (_root_dir, root_repository, root_commit) = repository(&[
+        ("main.orna", include_str!("fixtures/attach-primary.orna")),
+        (PACKAGE_PIN_MANIFEST_PATH, &root_manifest),
+    ]);
+    let primary = PinnedDatabase::resolve("app", root_repository, &root_commit, loader).unwrap();
+    let resolver = PackageResolver::new(
+        aliases
+            .iter()
+            .map(|alias| ((*alias).to_owned(), shared_repository.clone())),
+        loader,
+    )
+    .unwrap();
+    let mut root_session = resolver.resolve_for_parent(primary).unwrap();
+    let original_root = root_session.clone();
+    let mut retained_root_pins: Vec<Option<PinnedDatabase>> =
+        (0..candidate_count).map(|_| None).collect();
+
+    for variant in [0, 1, 0] {
+        root_session.detach_database(aliases[0]).unwrap();
+        root_session
+            .attach_database(replacement_pins[0][variant].clone())
+            .unwrap();
+        retained_root_pins[variant]
+            .get_or_insert_with(|| root_session.database(aliases[0]).unwrap().clone());
+        assert_module_route(
+            &root_session,
+            "archive.orna",
+            &format!("= {}", candidate_marker(0, variant)),
+        );
+        for (index, alias) in aliases[1..].iter().enumerate() {
+            assert_eq!(
+                root_session
+                    .database(alias)
+                    .unwrap()
+                    .pin()
+                    .commit()
+                    .as_str(),
+                original_commits[index + 1]
+            );
+        }
+    }
+
+    let mut old_outer = resolver
+        .resolve_for_parent(retained_root_pins[0].as_ref().unwrap().clone())
+        .unwrap();
+    assert_module_route(
+        &old_outer,
+        "main.orna",
+        &format!("= {}", candidate_marker(0, 0)),
+    );
+    assert_eq!(
+        old_outer
+            .database(aliases[1])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        replacement_commits[1][1]
+    );
+    let mut retained_middle_pins: Vec<Option<PinnedDatabase>> =
+        (0..candidate_count).map(|_| None).collect();
+    for variant in [0, 1, 0] {
+        old_outer.detach_database(aliases[1]).unwrap();
+        old_outer
+            .attach_database(replacement_pins[1][variant].clone())
+            .unwrap();
+        retained_middle_pins[variant]
+            .get_or_insert_with(|| old_outer.database(aliases[1]).unwrap().clone());
+        assert_module_route(
+            &old_outer,
+            &format!("{}.orna", aliases[1]),
+            &format!("= {}", candidate_marker(1, variant)),
+        );
+    }
+    let mut old_middle = resolver
+        .resolve_for_parent(retained_middle_pins[0].as_ref().unwrap().clone())
+        .unwrap();
+    assert_module_route(
+        &old_middle,
+        "main.orna",
+        &format!("= {}", candidate_marker(1, 0)),
+    );
+    assert_eq!(
+        old_middle
+            .database(aliases[2])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        replacement_commits[2][1]
+    );
+    let mut retained_old_deep_pins: Vec<Option<PinnedDatabase>> =
+        (0..candidate_count).map(|_| None).collect();
+    for variant in [1, 0, 1] {
+        old_middle.detach_database(aliases[2]).unwrap();
+        old_middle
+            .attach_database(replacement_pins[2][variant].clone())
+            .unwrap();
+        retained_old_deep_pins[variant]
+            .get_or_insert_with(|| old_middle.database(aliases[2]).unwrap().clone());
+    }
+    let old_terminal = resolver
+        .resolve_for_parent(retained_old_deep_pins[1].as_ref().unwrap().clone())
+        .unwrap();
+    assert_module_route(
+        &old_terminal,
+        "main.orna",
+        &format!("= {}", candidate_marker(2, 1)),
+    );
+    assert_eq!(
+        old_terminal
+            .database(aliases[3])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        terminal_commits[0]
+    );
+    assert_module_route(
+        &old_terminal,
+        &format!("{}.orna", aliases[3]),
+        &format!("= {}", terminal_marker(0)),
+    );
+
+    for variant in [1, 0, 1] {
+        root_session.detach_database(aliases[0]).unwrap();
+        root_session
+            .attach_database(replacement_pins[0][variant].clone())
+            .unwrap();
+        assert_module_route(
+            &root_session,
+            "archive.orna",
+            &format!("= {}", candidate_marker(0, variant)),
+        );
+        for (index, alias) in aliases[1..].iter().enumerate() {
+            assert_eq!(
+                root_session
+                    .database(alias)
+                    .unwrap()
+                    .pin()
+                    .commit()
+                    .as_str(),
+                original_commits[index + 1]
+            );
+        }
+    }
+    assert_module_route(&root_session, "archive.orna", "= 101");
+    assert_module_route(&original_root, "archive.orna", "= 10");
+
+    let mut latest_outer = resolver
+        .resolve_for_parent(retained_root_pins[1].as_ref().unwrap().clone())
+        .unwrap();
+    assert_module_route(
+        &latest_outer,
+        "main.orna",
+        &format!("= {}", candidate_marker(0, 1)),
+    );
+    assert_eq!(
+        latest_outer
+            .database(aliases[1])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        replacement_commits[1][0]
+    );
+    let latest_outer_snapshot = latest_outer.clone();
+    let mut latest_middle_pin = None;
+    for variant in [1, 0, 1] {
+        latest_outer.detach_database(aliases[1]).unwrap();
+        latest_outer
+            .attach_database(replacement_pins[1][variant].clone())
+            .unwrap();
+        latest_middle_pin = Some(latest_outer.database(aliases[1]).unwrap().clone());
+        assert_module_route(
+            &latest_outer,
+            &format!("{}.orna", aliases[1]),
+            &format!("= {}", candidate_marker(1, variant)),
+        );
+    }
+    assert_eq!(
+        latest_outer_snapshot
+            .database(aliases[1])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        replacement_commits[1][0]
+    );
+    let mut latest_middle = resolver
+        .resolve_for_parent(latest_middle_pin.unwrap())
+        .unwrap();
+    assert_module_route(
+        &latest_middle,
+        "main.orna",
+        &format!("= {}", candidate_marker(1, 1)),
+    );
+    assert_eq!(
+        latest_middle
+            .database(aliases[2])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        replacement_commits[2][0]
+    );
+    let mut latest_deep_pin = None;
+    for variant in [0, 1, 0] {
+        latest_middle.detach_database(aliases[2]).unwrap();
+        latest_middle
+            .attach_database(replacement_pins[2][variant].clone())
+            .unwrap();
+        latest_deep_pin = Some(latest_middle.database(aliases[2]).unwrap().clone());
+        assert_module_route(
+            &latest_middle,
+            &format!("{}.orna", aliases[2]),
+            &format!("= {}", candidate_marker(2, variant)),
+        );
+    }
+    let latest_terminal = resolver
+        .resolve_for_parent(latest_deep_pin.unwrap())
+        .unwrap();
+    assert_module_route(
+        &latest_terminal,
+        "main.orna",
+        &format!("= {}", candidate_marker(2, 0)),
+    );
+    assert_eq!(
+        latest_terminal
+            .database(aliases[3])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        terminal_commits[1]
+    );
+    assert_module_route(
+        &latest_terminal,
+        &format!("{}.orna", aliases[3]),
+        &format!("= {}", terminal_marker(1)),
+    );
+
+    for variant in 0..candidate_count {
+        let retained_middle = resolver
+            .resolve_for_parent(retained_middle_pins[variant].as_ref().unwrap().clone())
+            .unwrap();
+        assert_module_route(
+            &retained_middle,
+            "main.orna",
+            &format!("= {}", candidate_marker(1, variant)),
+        );
+        assert_eq!(
+            retained_middle
+                .database(aliases[2])
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            replacement_commits[2][1 - variant]
+        );
+
+        let retained_deep = resolver
+            .resolve_for_parent(retained_old_deep_pins[variant].as_ref().unwrap().clone())
+            .unwrap();
+        assert_module_route(
+            &retained_deep,
+            "main.orna",
+            &format!("= {}", candidate_marker(2, variant)),
+        );
+        assert_eq!(
+            retained_deep
+                .database(aliases[3])
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            terminal_commits[1 - variant]
+        );
+    }
+}
+
+#[test]
 fn deep_rebind_chain_uses_exact_parent_aliases_at_each_depth() {
     let package_source = include_str!("fixtures/attach-package.orna");
     let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);

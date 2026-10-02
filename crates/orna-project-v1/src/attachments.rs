@@ -281,6 +281,10 @@ impl PackageResolver {
     /// descendant storms do not become fallback pins for a newly selected
     /// ancestor candidate. Where the reference is silent, v1 gives precedence
     /// to the exact pin passed to each closure expansion.
+    /// A storm cascade is resolved edge by edge from that pin: selecting a new
+    /// ancestor starts a fresh descendant chain, and the terminal route follows
+    /// the final pin chosen at every edge. Pins retained from an earlier
+    /// cascade continue to resolve their own terminal routes.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
