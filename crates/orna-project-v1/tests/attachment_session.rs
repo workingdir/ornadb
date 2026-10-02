@@ -9798,7 +9798,7 @@ fn short_alias_rebound_to_long_pin_keeps_longer_nested_routes() {
 }
 
 #[test]
-fn paired_depth_storms_preserve_rebound_sibling_terminal_routes() {
+fn paired_depth_storm_rebinds_keep_sibling_terminal_routes_consistent() {
     let package_source = include_str!("fixtures/attach-package.orna");
     let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
     let aliases = [
@@ -10337,6 +10337,103 @@ fn paired_depth_storms_preserve_rebound_sibling_terminal_routes() {
             final_deep_variants[sibling],
         );
     }
+
+    let mut reopened_terminals: Vec<AttachedDatabaseSession> = later_terminal_closures
+        .into_iter()
+        .map(Option::unwrap)
+        .collect();
+    let reopened_manifest_snapshots = reopened_terminals.clone();
+    let mut selected_reopened_variants = later_deep_variants.clone();
+    let mut reopened_terminal_snapshots = Vec::new();
+    for (sibling, variant) in [(0, 1), (1, 0), (0, 0), (1, 1), (0, 1)] {
+        rebind(
+            &mut reopened_terminals[sibling],
+            aliases[3],
+            &terminal_pins[variant],
+        );
+        selected_reopened_variants[sibling] = variant;
+        reopened_terminal_snapshots.push((sibling, variant, reopened_terminals[sibling].clone()));
+
+        for branch in 0..sibling_count {
+            let selected = selected_reopened_variants[branch];
+            assert_pin(
+                &reopened_terminals[branch],
+                aliases[3],
+                &terminal_commits[selected],
+            );
+            assert_route(
+                &reopened_terminals[branch],
+                &format!("{}.orna", aliases[3]),
+                3,
+                0,
+                selected,
+            );
+            assert_route(
+                &reopened_terminals[branch],
+                "main.orna",
+                2,
+                branch,
+                later_deep_variants[branch],
+            );
+        }
+    }
+
+    for sibling in 0..sibling_count {
+        assert_pin(
+            &reopened_manifest_snapshots[sibling],
+            aliases[3],
+            &terminal_commits[later_deep_variants[sibling]],
+        );
+        assert_route(
+            &reopened_manifest_snapshots[sibling],
+            &format!("{}.orna", aliases[3]),
+            3,
+            0,
+            later_deep_variants[sibling],
+        );
+        assert_route(
+            &reopened_manifest_snapshots[sibling],
+            "main.orna",
+            2,
+            sibling,
+            later_deep_variants[sibling],
+        );
+        assert_pin(
+            &terminal_closures[sibling],
+            aliases[3],
+            &terminal_commits[selected_terminal_variants[sibling]],
+        );
+        assert_route(
+            &terminal_closures[sibling],
+            &format!("{}.orna", aliases[3]),
+            3,
+            0,
+            selected_terminal_variants[sibling],
+        );
+    }
+    for (sibling, variant, snapshot) in reopened_terminal_snapshots {
+        assert_pin(&snapshot, aliases[3], &terminal_commits[variant]);
+        assert_route(&snapshot, &format!("{}.orna", aliases[3]), 3, 0, variant);
+        assert_route(
+            &snapshot,
+            "main.orna",
+            2,
+            sibling,
+            later_deep_variants[sibling],
+        );
+    }
+    assert_pin(
+        &reopened_terminals[0],
+        aliases[3],
+        &terminal_commits[selected_reopened_variants[0]],
+    );
+    assert_pin(
+        &reopened_terminals[1],
+        aliases[3],
+        &terminal_commits[selected_reopened_variants[1]],
+    );
+    assert_route(&reopened_terminals[0], &format!("{}.orna", aliases[3]), 3, 0, 1);
+    assert_route(&reopened_terminals[1], &format!("{}.orna", aliases[3]), 3, 0, 1);
     assert_pin(&parent, aliases[1], &middle_commits[0][0]);
     assert_route(&parent, &format!("{}.orna", aliases[1]), 1, 0, 0);
 }
