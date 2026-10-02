@@ -568,6 +568,24 @@ impl PackageResolver {
         })
     }
 
+    /// Resolves independently rebound paths for sibling parent snapshots.
+    /// Each input plan is `(parent, replacements)`; results keep input order
+    /// and each route retains its own pre-rebind sessions. No partial batch is
+    /// returned if any sibling path fails. Where sibling event ordering is
+    /// unspecified, v1 resolves every path from its own exact pins.
+    pub fn resolve_sibling_rebind_paths(
+        &self,
+        paths: &[(&AttachedDatabaseSession, &[PinnedDatabase])],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(parent, replacements)| {
+                self.resolve_nested_rebind_path(parent, replacements)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
     /// Resolves a chain of exact aliases from a retained session snapshot.
     /// Each edge is selected from the session opened at the preceding edge;
     /// a failure leaves the caller's snapshot untouched.
