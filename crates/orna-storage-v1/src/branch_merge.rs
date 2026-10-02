@@ -218,6 +218,72 @@ pub struct BranchMergePlan {
     pub report: BranchMergeReport,
 }
 
+/// Buffers selected successful plans and releases them in paired lineage order,
+/// independent of the order in which concurrent workers finish.
+///
+/// Callers assign each commit position before dispatching its merge work and
+/// submit only the selected successful plan for that position. A failed or
+/// conflicted attempt does not consume a position; its retry reuses that
+/// position. A later plan may finish first, but it is held until every earlier
+/// position is submitted. Each returned plan remains one atomic paired step,
+/// so adapters can persist its tables together and append its table-local
+/// deltas without replaying or re-sorting earlier history. The sequencer does
+/// not perform durable commits; adapters must enact returned plans in order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePlanSequencer {
+    next_order: Option<u64>,
+    pending: BTreeMap<u64, BranchMergePlan>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BranchMergePlanSequenceError {
+    /// The order has already been submitted or released.
+    DuplicateOrStale { order: u64 },
+    /// All representable commit positions have been released.
+    OrderExhausted,
+}
+
+impl BranchMergePlanSequencer {
+    /// Starts a sequence at the next commit position following the caller's
+    /// already-persisted prefix.
+    pub fn new(first_order: u64) -> Self {
+        Self { next_order: Some(first_order), pending: BTreeMap::new() }
+    }
+
+    /// Submits one selected successful plan. Returns the newly contiguous
+    /// lineage prefix, which must be enacted in the returned order.
+    #[must_use = "released plans must be enacted in lineage order"]
+    pub fn submit(
+        &mut self,
+        order: u64,
+        plan: &BranchMergePlan,
+    ) -> Result<Vec<BranchMergePlan>, BranchMergePlanSequenceError> {
+        let Some(next_order) = self.next_order else {
+            return Err(BranchMergePlanSequenceError::OrderExhausted);
+        };
+        if order < next_order || self.pending.contains_key(&order) {
+            return Err(BranchMergePlanSequenceError::DuplicateOrStale { order });
+        }
+
+        self.pending.insert(order, plan.clone());
+        let mut ready = Vec::new();
+        while let Some(next_order) = self.next_order {
+            let Some(plan) = self.pending.remove(&next_order) else {
+                break;
+            };
+            ready.push(plan);
+            self.next_order = next_order.checked_add(1);
+        }
+        Ok(ready)
+    }
+
+    /// Returns the next lineage position that must arrive before any later
+    /// buffered plans can be released.
+    pub fn next_order(&self) -> Option<u64> {
+        self.next_order
+    }
+}
+
 /// Computes a complete semantic merge plan or returns bounded conflict facts.
 /// It never writes files, advances refs, or mutates input snapshots.
 ///
@@ -294,7 +360,10 @@ pub struct BranchMergePlan {
 /// restore or tombstone delta never becomes another wave's implicit input.
 /// Worker completion order is not history order: callers sequence selected
 /// successful deltas by their committed base lineage and append each only
-/// after that wave commits.
+/// after that wave commits. `BranchMergePlanSequencer` buffers a later
+/// successful plan until its earlier lineage positions arrive, then returns
+/// complete paired plans in the order adapters must enact them. A failed or
+/// conflicted attempt leaves its position available for a retry.
 /// Across several successors, each append preserves the entire committed
 /// prefix; a wave-local plan never replaces or truncates its ancestors' events.
 /// A paired plan is one lineage step across its tables: commit both table
