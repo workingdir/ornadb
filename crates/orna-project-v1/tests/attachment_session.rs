@@ -11829,6 +11829,93 @@ fn paired_terminal_depth_waves_retain_pre_and_between_routes() {
     ));
     assert_pin(left_history.final_session(), aliases[2], &terminal_base);
     assert_pin(right_history.final_session(), aliases[2], &terminal_base);
+
+    let left_repeat_pair = [
+        resolve_pin(aliases[2], &terminal_right),
+        resolve_pin(aliases[3], &leaves[3]),
+    ];
+    let right_repeat_pair = [
+        resolve_pin(aliases[2], &terminal_left),
+        resolve_pin(aliases[3], &leaves[4]),
+    ];
+    let repeated = resolver
+        .extend_sibling_terminal_pair_paths_from_waves(&[
+            (&reopened.routes()[0], 1, 1, &left_repeat_pair),
+            (&reopened.routes()[1], 1, 1, &right_repeat_pair),
+        ])
+        .unwrap();
+    assert_eq!(repeated.routes().len(), 2);
+    for (
+        route,
+        deep,
+        terminal,
+        prior_leaf,
+        final_leaf,
+        deep_marker,
+        terminal_marker,
+        prior_leaf_marker,
+        final_marker,
+    ) in [
+        (
+            &repeated.routes()[0],
+            &deep_left,
+            &terminal_right,
+            &leaves[2],
+            &leaves[3],
+            "601",
+            "712",
+            "702",
+            "703",
+        ),
+        (
+            &repeated.routes()[1],
+            &deep_right,
+            &terminal_left,
+            &leaves[1],
+            &leaves[4],
+            "602",
+            "711",
+            "701",
+            "704",
+        ),
+    ] {
+        assert_eq!(route.retained_wave(0).unwrap().len(), 2);
+        assert_eq!(route.retained_wave(1).unwrap().len(), 2);
+        let repeated_wave = route.retained_wave(2).unwrap();
+        assert_eq!(repeated_wave.len(), 2);
+        assert_pin(&repeated_wave[0], aliases[1], deep);
+        assert_pin(&repeated_wave[0], aliases[2], &terminal_base);
+        assert_module_route(
+            &repeated_wave[0],
+            "main.orna",
+            &format!("= {deep_marker}"),
+        );
+        assert_pin(&repeated_wave[1], aliases[2], terminal);
+        assert_pin(&repeated_wave[1], aliases[3], prior_leaf);
+        assert_module_route(
+            &repeated_wave[1],
+            "main.orna",
+            &format!("= {terminal_marker}"),
+        );
+        assert_module_route(
+            &repeated_wave[1],
+            "archive_copy_archive_archive.orna",
+            &format!("= {prior_leaf_marker}"),
+        );
+        assert_pin(route.final_session(), aliases[3], final_leaf);
+        assert_module_route(
+            route.final_session(),
+            "main.orna",
+            &format!("= {final_marker}"),
+        );
+    }
+    assert!(matches!(
+        resolver.extend_sibling_terminal_pair_paths_from_waves(&[
+            (&reopened.routes()[0], 1, 1, &left_repeat_pair),
+            (&reopened.routes()[1], usize::MAX, 0, &right_repeat_pair),
+        ]),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
 }
 
 fn assert_module_route(session: &AttachedDatabaseSession, path: &str, source_marker: &str) {
