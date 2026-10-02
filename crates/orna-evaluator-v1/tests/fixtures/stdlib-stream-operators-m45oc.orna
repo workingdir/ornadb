@@ -1,0 +1,14 @@
+[
+    streams.buffer(streams.from_list([1, 2, 3], "buffer-source"), 2),
+    streams.merge([
+        streams.from_list([1, 3], "left-source"),
+        streams.from_list([2, 4, 6], "right-source")
+    ]),
+    streams.throttle(streams.from_list([7, 8, 9], "throttle-source"), 1.s, "drop"),
+    streams.debounce(streams.from_list([7, 8, 9], "debounce-source"), 1.s, "latest"),
+    streams.retry(
+        streams.from_list([10, 11], "retry-source"),
+        { max_attempts: 3, initial_delay: 0.s, max_delay: 1.s }
+    ),
+    streams.recover(streams.from_list([12, 13], "recover-source"), (failure: Error) => 0)
+]
