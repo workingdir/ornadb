@@ -1,7 +1,7 @@
 default: check
 
 # Run the default local fmt/build/lint/non-ignored test/rustdoc gate.
-check: fixture-audit fmt build lint test rustdoc-check
+check: fixture-audit fmt build lint test sys-artifact-ci rustdoc-check
 
 # Reject external reference paths and a checkout-local reference tree.
 fixture-audit:
