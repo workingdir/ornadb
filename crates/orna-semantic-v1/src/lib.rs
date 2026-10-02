@@ -16421,6 +16421,11 @@ fn specialize_dynamic_parameter_snapshot_contexts(
         let Some(actual) = argument_types.get(argument_index) else {
             continue;
         };
+        // A destructured parameter is one callback argument. Do not partially
+        // bind earlier tuple pins if a later nested component is incompatible.
+        if matches!(formal, Type::Tuple(_)) && !types_match(formal, actual) {
+            continue;
+        }
         collect_snapshot_binder_contexts(formal, actual, &mut binder_contexts);
     }
     specialize_dynamic_parameter_snapshot_contexts_scoped(
