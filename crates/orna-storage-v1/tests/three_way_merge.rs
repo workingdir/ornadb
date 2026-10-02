@@ -15926,6 +15926,54 @@ fn tombstone_chain_load_inputs(
     }
 }
 
+fn paired_tombstone_chain_load_inputs(
+    first_table_split: bool,
+    first_left_keeps_even: bool,
+    second_left_keeps_even: bool,
+) -> (
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    FixtureRows,
+) {
+    let (mut base, mut left, mut right, mut source) =
+        tombstone_chain_load_inputs(first_table_split, first_left_keeps_even, false);
+    let (mut paired_base, mut paired_left, mut paired_right, paired_source) =
+        tombstone_chain_load_inputs(!first_table_split, second_left_keeps_even, false);
+
+    let mut second_table = paired_base.schema.tables[0].clone();
+    second_table.id = id(2);
+    second_table.name = "PairedContact".into();
+    for snapshot in [&mut base, &mut left, &mut right] {
+        snapshot.schema.tables.push(second_table.clone());
+    }
+
+    for (primary, paired) in [
+        (&mut base, &mut paired_base),
+        (&mut left, &mut paired_left),
+        (&mut right, &mut paired_right),
+    ] {
+        let mut manifest = paired.tables.remove(&id(1)).expect("paired table manifest exists");
+        for segment in &mut manifest.segments {
+            let mut locator = b"paired-".to_vec();
+            locator.extend_from_slice(&segment.locator);
+            segment.locator = locator;
+        }
+        primary.tables.insert(id(2), manifest);
+    }
+
+    for ((side, locator), mut rows) in paired_source.rows {
+        let mut paired_locator = b"paired-".to_vec();
+        paired_locator.extend_from_slice(&locator);
+        for row in &mut rows {
+            row.table = id(2);
+        }
+        source.rows.insert((side, paired_locator), rows);
+    }
+
+    (base, left, right, source)
+}
+
 fn flattened_row_tombstones(plan: &BranchMergePlan) -> Vec<CanonicalValue> {
     plan.tables[&id(1)]
         .segments
@@ -15946,6 +15994,27 @@ fn flattened_live_row_keys(plan: &BranchMergePlan) -> Vec<CanonicalValue> {
                 .iter()
                 .map(|row| row.key.clone())
                 .collect::<Vec<_>>(),
+            other => panic!("expected materialized chain rows, got {other:?}"),
+        })
+        .collect()
+}
+
+fn table_row_tombstones(plan: &BranchMergePlan, table: ObjectId) -> Vec<CanonicalValue> {
+    let mut tombstones = Vec::new();
+    for segment in &plan.tables[&table].segments {
+        if let MergedSegment::Rows { tombstones: segment_tombstones, .. } = segment {
+            tombstones.extend(segment_tombstones.iter().cloned());
+        }
+    }
+    tombstones
+}
+
+fn table_live_row_keys(plan: &BranchMergePlan, table: ObjectId) -> Vec<CanonicalValue> {
+    plan.tables[&table]
+        .segments
+        .iter()
+        .flat_map(|segment| match segment {
+            MergedSegment::Rows { rows, .. } => rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>(),
             other => panic!("expected materialized chain rows, got {other:?}"),
         })
         .collect()
@@ -17039,6 +17108,125 @@ fn sustained_concurrent_chain_budget_stops_do_not_disturb_tombstone_order() {
 
     assert_eq!(complete_loads, 36);
     assert_eq!(capped_loads, 12);
+}
+
+#[test]
+fn sustained_paired_depth_merges_keep_chain_order_isolated() {
+    // The reference leaves concurrent scheduling open. Pin each table's
+    // nested chain order while opposite split and whole-table layouts run
+    // together, including one-row-short scans beside complete peers.
+    const LOADS_PER_WAVE: usize = 8;
+    const WAVES: usize = 6;
+    let expected_tombstones = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .into_iter()
+    .map(string)
+    .collect::<Vec<_>>();
+    let expected_live_rows = vec![string("z")];
+    let mut complete_loads = 0;
+    let mut capped_loads = 0;
+
+    for wave in 0..WAVES {
+        let start = Arc::new(Barrier::new(LOADS_PER_WAVE));
+        let mut workers = Vec::with_capacity(LOADS_PER_WAVE);
+        for load in 0..LOADS_PER_WAVE {
+            let first_table_split = (wave + load) % 2 == 0;
+            let capped = (wave + load) % 4 == 0;
+            let (base, left, right, mut source) = paired_tombstone_chain_load_inputs(
+                first_table_split,
+                (wave + load) % 3 == 0,
+                (wave + load) % 3 != 0,
+            );
+            if (wave + load) % 3 == 1 {
+                for rows in source.rows.values_mut() {
+                    rows.reverse();
+                }
+            }
+            let gate = Arc::clone(&start);
+            workers.push(std::thread::spawn(move || {
+                let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+                let row_cap = if capped { 29 } else { 30 };
+                let result = merge_three_way_snapshots(
+                    &base,
+                    &left,
+                    &right,
+                    &mut source,
+                    BranchMergeBudget { max_rows_examined: row_cap, max_conflicts: 0 },
+                );
+                (result, capped, first_table_split)
+            }));
+        }
+
+        for worker in workers {
+            let (result, capped, first_table_split) =
+                worker.join().expect("paired-depth worker completes");
+            if capped {
+                let Err(BranchMergeError::BudgetExceeded { report }) = result else {
+                    panic!("a one-row-short paired scan cannot return either partial table plan")
+                };
+                assert_eq!(report.rows_examined, 30);
+                assert_eq!(report.conflicts_lower_bound, 0);
+                assert!(report.affected_tables.contains(&id(2)));
+                capped_loads += 1;
+            } else {
+                let plan = result.expect("an exact-budget peer remains independent");
+                assert_eq!(plan.report.rows_examined, 30);
+                assert_eq!(table_row_tombstones(&plan, id(1)), expected_tombstones);
+                assert_eq!(table_row_tombstones(&plan, id(2)), expected_tombstones);
+                assert_eq!(table_live_row_keys(&plan, id(1)), expected_live_rows);
+                assert_eq!(table_live_row_keys(&plan, id(2)), expected_live_rows);
+                assert_eq!(
+                    plan.tables[&id(1)].segments.len(),
+                    if first_table_split { 7 } else { 1 },
+                );
+                assert_eq!(
+                    plan.tables[&id(2)].segments.len(),
+                    if first_table_split { 1 } else { 7 },
+                );
+                complete_loads += 1;
+            }
+        }
+    }
+
+    assert_eq!(complete_loads, 36);
+    assert_eq!(capped_loads, 12);
+}
+
+#[test]
+fn paired_depth_chains_keep_identical_keys_table_local() {
+    let (base, left, right, mut source) = paired_tombstone_chain_load_inputs(true, true, false);
+    let plan = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 30, max_conflicts: 0 },
+    )
+    .expect("paired tables with identical primary keys merge independently");
+    let expected_tombstones = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .into_iter()
+    .map(string)
+    .collect::<Vec<_>>();
+
+    assert_eq!(plan.tables.keys().copied().collect::<Vec<_>>(), [id(1), id(2)]);
+    assert_eq!(plan.report.rows_examined, 30);
+    for table in [id(1), id(2)] {
+        assert_eq!(table_row_tombstones(&plan, table), expected_tombstones);
+        assert_eq!(table_live_row_keys(&plan, table), vec![string("z")]);
+    }
 }
 
 #[test]
