@@ -530,6 +530,28 @@ impl AttachedDatabaseSession {
         Ok(())
     }
 
+    /// Atomically replaces one attached alias with a new immutable pin and
+    /// returns the previous pin for later use as a retained closure root.
+    /// Matching is by the new pin's exact alias; sibling aliases are unchanged.
+    /// The alias must already be attached, and failures leave the session as-is.
+    pub fn rebind_database(
+        &mut self,
+        database: PinnedDatabase,
+    ) -> Result<PinnedDatabase, AttachmentError> {
+        let name = checked_name(database.pin.name.clone())?;
+        if name == "sys" {
+            return Err(AttachmentError::SystemDatabaseCannotAttach);
+        }
+        if name == self.primary.pin.name {
+            return Err(AttachmentError::DuplicateAttachment);
+        }
+        let current = self
+            .attached
+            .get_mut(&name)
+            .ok_or(AttachmentError::AttachmentNotFound)?;
+        Ok(std::mem::replace(current, database))
+    }
+
     /// Detaches an optional database alias from subsequent session lookups.
     /// The primary and implementation-provided `sys` facility are not
     /// detachable. The reference does not define live detach timing; v1 drops
