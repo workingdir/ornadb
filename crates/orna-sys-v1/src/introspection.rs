@@ -586,8 +586,22 @@ pub struct DisjunctStormBranchDescription {
     pub nested_limits: Vec<u64>,
     /// Ordered AND terms evaluated in this branch after its limits.
     pub conjunct_count: u64,
+    /// Nested cascades rebound after one-based positions in `nested_limits`.
+    /// List entries must be ordered by position; entries at one position run
+    /// in declaration order. Each cascade consumes current branch rows, and
+    /// its output feeds the next limit in the chain.
+    pub limit_rebinds: Vec<DisjunctStormLimitRebindDescription>,
     /// Nested disjunct storms evaluated against this branch's filtered output.
     pub nested_storms: Vec<DisjunctStormCascadeDescription>,
+}
+
+/// A group of cascades rebound at a specific point in a branch-local limit chain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisjunctStormLimitRebindDescription {
+    /// One-based position in the enclosing branch's `nested_limits` chain.
+    pub after_limit: usize,
+    /// Cascades to run in declaration order after this limit.
+    pub storms: Vec<DisjunctStormCascadeDescription>,
 }
 
 /// A disjunct storm stage with independently described branch pipelines.
@@ -1056,14 +1070,17 @@ pub fn explain_query_with_disjunct_storm_chain(
 /// nested limit chains and conjunct counts.
 ///
 /// ORNA-PLAN does not specify estimates for branch-local limit chains inside
-/// nested disjunctions. This adapter applies each branch's limits and 50%-per-
-/// conjunct fallback independently, combines branch matches in declaration
-/// order without counting more rows or bytes than the stage input, and feeds
-/// that result to the next storm. Since `sys.PlanNodeKind` has no union node,
-/// each storm is one aggregate filter node whose details retain the exact
-/// branch chains; this avoids presenting sibling limits as a false serial
-/// pipeline. The query-level predicate must be absent because every stage
-/// supplies its own predicate.
+/// nested disjunctions or where nested cascades rebind within those chains.
+/// This adapter applies each branch's limits and 50%-per-conjunct fallback
+/// independently, combines branch matches in declaration order without
+/// counting more rows or bytes than the stage input, and feeds that result to
+/// the next storm. An explicit rebind runs just after its one-based limit
+/// position and feeds its output to the following limit. Since
+/// `sys.PlanNodeKind` has no union node, each storm is one aggregate filter
+/// node whose details retain the exact branch chains and rebind points; this
+/// avoids presenting sibling limits as a false serial pipeline. The
+/// query-level predicate must be absent because every stage supplies its own
+/// predicate.
 pub fn explain_query_with_disjunct_storm_branch_limit_chains(
     query: &QueryPlanDescription,
     storms: &[DisjunctStormCascadeDescription],
@@ -1397,9 +1414,29 @@ fn disjunct_storm_cascade_shape_counts<'a>(
             if branch.nested_limits.is_empty() || branch.conjunct_count == 0 {
                 return Err(ExplainError::InvalidExpression);
             }
-            operators = operators.saturating_add(branch.nested_limits.len());
+            operators = operators
+                .saturating_add(branch.nested_limits.len())
+                .saturating_add(branch.limit_rebinds.len());
             expressions = expressions.saturating_add(
                 usize::try_from(branch.conjunct_count).unwrap_or(usize::MAX),
+            );
+            let mut previous_rebind_position = 0;
+            for rebind in &branch.limit_rebinds {
+                if rebind.after_limit == 0
+                    || rebind.after_limit > branch.nested_limits.len()
+                    || rebind.after_limit < previous_rebind_position
+                    || rebind.storms.is_empty()
+                {
+                    return Err(ExplainError::InvalidExpression);
+                }
+                previous_rebind_position = rebind.after_limit;
+            }
+            pending.extend(
+                branch
+                    .limit_rebinds
+                    .iter()
+                    .flat_map(|rebind| rebind.storms.iter())
+                    .map(|nested| (nested, depth.saturating_add(1))),
             );
             pending.extend(
                 branch
@@ -1959,6 +1996,37 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             .iter()
             .flat_map(|branch| disjunct_storm_predicates(&branch.nested_storms))
             .collect::<Vec<_>>();
+        let limit_chain_rebind_shapes = storm
+            .branches
+            .iter()
+            .enumerate()
+            .flat_map(|(branch_index, branch)| {
+                branch.limit_rebinds.iter().map(move |rebind| {
+                    format!(
+                        "{}@{}:{}",
+                        branch_index + 1,
+                        rebind.after_limit,
+                        rebind
+                            .storms
+                            .iter()
+                            .map(disjunct_storm_shape_text)
+                            .collect::<Vec<_>>()
+                            .join(">")
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        let limit_chain_rebind_predicates = storm
+            .branches
+            .iter()
+            .flat_map(|branch| {
+                branch
+                    .limit_rebinds
+                    .iter()
+                    .flat_map(|rebind| disjunct_storm_predicates(&rebind.storms))
+            })
+            .collect::<Vec<_>>();
         let mut details = BTreeMap::from([
             (
                 "selectivity_assumption".to_owned(),
@@ -1980,6 +2048,14 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             (
                 "nested_cascade_predicates".to_owned(),
                 PlanDetail::Expressions(nested_cascade_predicates),
+            ),
+            (
+                "limit_chain_rebind_shapes".to_owned(),
+                PlanDetail::Text(limit_chain_rebind_shapes),
+            ),
+            (
+                "limit_chain_rebind_predicates".to_owned(),
+                PlanDetail::Expressions(limit_chain_rebind_predicates),
             ),
             (
                 "expansion_work".to_owned(),
@@ -2447,6 +2523,23 @@ fn disjunct_storm_shape_text(storm: &DisjunctStormCascadeDescription) -> String 
                 .map(u64::to_string)
                 .collect::<Vec<_>>()
                 .join(",");
+            let rebinds = branch
+                .limit_rebinds
+                .iter()
+                .map(|rebind| {
+                    format!(
+                        "@{}={}",
+                        rebind.after_limit,
+                        rebind
+                            .storms
+                            .iter()
+                            .map(disjunct_storm_shape_text)
+                            .collect::<Vec<_>>()
+                            .join(">")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("");
             let nested = branch
                 .nested_storms
                 .iter()
@@ -2454,13 +2547,20 @@ fn disjunct_storm_shape_text(storm: &DisjunctStormCascadeDescription) -> String 
                 .collect::<Vec<_>>()
                 .join(">");
             if nested.is_empty() {
-                format!("{}:[{}]/{}", index + 1, limits, branch.conjunct_count)
-            } else {
                 format!(
-                    "{}:[{}]/{}{{{}}}",
+                    "{}:[{}]/{}{}",
                     index + 1,
                     limits,
                     branch.conjunct_count,
+                    rebinds
+                )
+            } else {
+                format!(
+                    "{}:[{}]/{}{}{{{}}}",
+                    index + 1,
+                    limits,
+                    branch.conjunct_count,
+                    rebinds,
                     nested
                 )
             }
@@ -2477,6 +2577,9 @@ fn disjunct_storm_predicates(storms: &[DisjunctStormCascadeDescription]) -> Vec<
         predicates.push(storm.predicate.clone());
         for branch in storm.branches.iter().rev() {
             pending.extend(branch.nested_storms.iter().rev());
+            for rebind in branch.limit_rebinds.iter().rev() {
+                pending.extend(rebind.storms.iter().rev());
+            }
         }
     }
     predicates
@@ -2495,7 +2598,7 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
 
     for branch in branches {
         let mut branch_cardinality = input;
-        for limit in &branch.nested_limits {
+        for (limit_index, limit) in branch.nested_limits.iter().enumerate() {
             match (work, branch_cardinality.rows) {
                 (Some(total), Some(limit_work)) => match total.checked_add(limit_work) {
                     Some(total) => work = Some(total),
@@ -2508,6 +2611,32 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
                 (None, _) => {}
             }
             branch_cardinality = limit_cardinality(branch_cardinality, *limit);
+            for rebind in branch
+                .limit_rebinds
+                .iter()
+                .filter(|rebind| rebind.after_limit == limit_index + 1)
+            {
+                for rebind_storm in &rebind.storms {
+                    let (rebound, rebound_work, rebound_overflowed) =
+                        disjunct_storm_branch_cascade_cardinality_and_work(
+                            branch_cardinality,
+                            &rebind_storm.branches,
+                        );
+                    overflowed |= rebound_overflowed;
+                    match (work, rebound_work) {
+                        (Some(total), Some(rebound_work)) => match total.checked_add(rebound_work) {
+                            Some(total) => work = Some(total),
+                            None => {
+                                work = None;
+                                overflowed = true;
+                            }
+                        },
+                        (Some(_), None) => work = None,
+                        (None, _) => {}
+                    }
+                    branch_cardinality = rebound;
+                }
+            }
         }
 
         let (mut branch_output, branch_work) =
