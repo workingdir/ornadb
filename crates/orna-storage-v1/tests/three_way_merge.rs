@@ -19901,9 +19901,9 @@ fn concurrent_uneven_depth_restore_retries_isolate_failed_attempts() {
 }
 
 #[test]
-fn concurrent_paired_restore_retries_keep_commit_order_across_uneven_storm_waves() {
+fn concurrent_paired_restore_plans_preserve_three_wave_commit_lineage() {
     const RETRIES_PER_WAVE: usize = 4;
-    const WAVES: usize = 2;
+    const WAVES: usize = 3;
     let storm_template = parse_fixture(TOMBSTONE_RECOVERY_STORM, RowKeyKind::Explicit);
     let storm_rows = TOMBSTONE_STORM_KEYS
         .iter()
@@ -19921,10 +19921,22 @@ fn concurrent_paired_restore_retries_keep_commit_order_across_uneven_storm_waves
         .iter()
         .find(|row| row.key == string("b"))
         .expect("the paired-chain fixture includes anchor b");
+    let storm_b = storm_rows
+        .iter()
+        .find(|row| row.key == string("root/child/deep/storm/b"))
+        .expect("the storm fixture includes descendant b");
+    let storm_e = storm_rows
+        .iter()
+        .find(|row| row.key == string("root/child/deep/storm/e"))
+        .expect("the storm fixture includes descendant e");
+    let anchor_deep = anchor_rows
+        .iter()
+        .find(|row| row.key == string("a/child/deep"))
+        .expect("the paired-chain fixture includes the deep anchor");
 
-    // Wave two starts from the committed first-wave base; wave three starts
-    // from the committed wave-two live rows. Their simultaneous attempts must
-    // never borrow each other's candidate deltas or restore rows.
+    // Each following group represents the live paired rows after its
+    // predecessor committed. Their simultaneous plans retain those separate
+    // bases and lineage prefixes.
     let wave_two_storm_base = [storm_z.clone()];
     let wave_two_anchor_base = anchor_rows
         .iter()
@@ -19941,9 +19953,22 @@ fn concurrent_paired_restore_retries_keep_commit_order_across_uneven_storm_waves
         .filter(|row| row.key != string("b"))
         .cloned()
         .collect::<Vec<_>>();
+    let wave_four_storm_base = storm_rows
+        .iter()
+        .filter(|row| row.key != string("root/child/deep/storm/b")
+            && row.key != string("root/child/deep/storm/e"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let wave_four_anchor_base = anchor_rows
+        .iter()
+        .filter(|row| row.key != string("a/child/deep"))
+        .cloned()
+        .collect::<Vec<_>>();
     assert_eq!(wave_two_anchor_base.len(), 4);
     assert_eq!(wave_three_storm_base.len(), TOMBSTONE_STORM_KEYS.len() - 1);
     assert_eq!(wave_three_anchor_base.len(), 6);
+    assert_eq!(wave_four_storm_base.len(), TOMBSTONE_STORM_KEYS.len() - 2);
+    assert_eq!(wave_four_anchor_base.len(), 6);
 
     let wave_two_deletes = ["b", "z"];
     let wave_three_deletes = [
@@ -19951,6 +19976,7 @@ fn concurrent_paired_restore_retries_keep_commit_order_across_uneven_storm_waves
         "root/child/deep/storm/b",
         "root/child/deep/storm/e",
     ];
+    let wave_four_deletes = ["b", "c", "root/child/deep/storm/a", "root/child/deep/storm/d"];
     let storm_restores = storm_rows
         .iter()
         .filter(|row| row.key != string("z"))
@@ -19973,12 +19999,23 @@ fn concurrent_paired_restore_retries_keep_commit_order_across_uneven_storm_waves
                         .chain(anchor_restores.iter().cloned().map(|row| (id(2), row)))
                         .collect::<Vec<_>>(),
                 )
-            } else {
+            } else if wave == 1 {
                 (
                     &wave_three_storm_base[..],
                     &wave_three_anchor_base[..],
                     &wave_three_deletes[..],
                     vec![(id(1), storm_z.clone()), (id(2), anchor_b.clone())],
+                )
+            } else {
+                (
+                    &wave_four_storm_base[..],
+                    &wave_four_anchor_base[..],
+                    &wave_four_deletes[..],
+                    vec![
+                        (id(1), storm_b.clone()),
+                        (id(1), storm_e.clone()),
+                        (id(2), anchor_deep.clone()),
+                    ],
                 )
             };
             let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
@@ -20027,7 +20064,11 @@ fn concurrent_paired_restore_retries_keep_commit_order_across_uneven_storm_waves
             }
 
             let gate = Arc::clone(&start);
-            let fail_after_rows = if retry == 0 { 5 } else { usize::MAX };
+            let fail_after_rows = if retry == 0 {
+                if wave == 2 { 4 } else { 5 }
+            } else {
+                usize::MAX
+            };
             workers.push(std::thread::spawn(move || {
                 let mut source = BarrierFailOnTableAfterRowsFixtureRows {
                     source: FailOnTableAfterRowsFixtureRows {
@@ -20084,6 +20125,22 @@ fn concurrent_paired_restore_retries_keep_commit_order_across_uneven_storm_waves
     ]
     .map(string);
     let anchor_wave_three_live = ["a", "a/child", "b", "c", "d", "zz"].map(string);
+    let storm_wave_four_delta =
+        ["root/child/deep/storm/a", "root/child/deep/storm/d"].map(string);
+    let anchor_wave_four_delta = ["b", "c"].map(string);
+    let storm_wave_four_live = [
+        "a",
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/storm/b",
+        "root/child/deep/storm/c",
+        "root/child/deep/storm/e",
+        "root/child/deep/storm/f",
+        "z",
+    ]
+    .map(string);
+    let anchor_wave_four_live = ["a", "a/child", "a/child/deep", "d", "zz"].map(string);
     let mut failures_by_wave = [0; WAVES];
     let mut successes_by_wave = [0; WAVES];
     let mut selected_wave_plans: [Option<BranchMergePlan>; WAVES] =
@@ -20106,7 +20163,7 @@ fn concurrent_paired_restore_retries_keep_commit_order_across_uneven_storm_waves
                 Err(error) => panic!("only the injected wave failure is expected: {error:?}"),
                 Ok(_) => panic!("a failed paired retry must not publish a candidate plan"),
             }
-            assert_eq!(source.rows_delivered, 5);
+            assert_eq!(source.rows_delivered, if wave == 2 { 4 } else { 5 });
             assert_eq!(
                 source.failed_at.as_ref().map(|(table, side, _)| (*table, *side)),
                 Some((id(2), MergeSide::Left)),
@@ -20114,7 +20171,11 @@ fn concurrent_paired_restore_retries_keep_commit_order_across_uneven_storm_waves
             assert!(source.source.visited.iter().any(|(_, locator)| {
                 locator.starts_with(format!("concurrent-paired-storm-wave-{wave}-retry-{retry}-table-0-").as_bytes())
             }));
-            let restored_key = if wave == 0 { "a" } else { "b" };
+            let restored_key = match wave {
+                0 => "a",
+                1 => "b",
+                _ => "a/child/deep",
+            };
             assert!(source.rows_seen.contains(&string(restored_key)));
             failures_by_wave[wave] += 1;
             continue;
@@ -20127,11 +20188,16 @@ fn concurrent_paired_restore_retries_keep_commit_order_across_uneven_storm_waves
             assert_eq!(table_row_tombstones(&plan, id(2)), anchor_wave_two_delta);
             assert_eq!(table_live_row_keys(&plan, id(1)), storm_wave_two_live);
             assert_eq!(table_live_row_keys(&plan, id(2)), anchor_wave_two_live);
-        } else {
+        } else if wave == 1 {
             assert_eq!(table_row_tombstones(&plan, id(1)), storm_wave_three_delta);
             assert_eq!(table_row_tombstones(&plan, id(2)), anchor_wave_three_delta);
             assert_eq!(table_live_row_keys(&plan, id(1)), storm_wave_three_live);
             assert_eq!(table_live_row_keys(&plan, id(2)), anchor_wave_three_live);
+        } else {
+            assert_eq!(table_row_tombstones(&plan, id(1)), storm_wave_four_delta);
+            assert_eq!(table_row_tombstones(&plan, id(2)), anchor_wave_four_delta);
+            assert_eq!(table_live_row_keys(&plan, id(1)), storm_wave_four_live);
+            assert_eq!(table_live_row_keys(&plan, id(2)), anchor_wave_four_live);
         }
         for (table, mut row) in restore_rows {
             row.table = table;
@@ -20153,9 +20219,9 @@ fn concurrent_paired_restore_retries_keep_commit_order_across_uneven_storm_waves
             selected_wave_plans[wave] = Some(plan);
         }
     }
-    assert_eq!(failures_by_wave, [1, 1]);
+    assert_eq!(failures_by_wave, [1; WAVES]);
     assert_eq!(successes_by_wave, [RETRIES_PER_WAVE - 1; WAVES]);
-    assert_eq!(first_observed_wave, Some(1));
+    assert_eq!(first_observed_wave, Some(2));
 
     let wave_two = selected_wave_plans[0]
         .take()
@@ -20163,12 +20229,16 @@ fn concurrent_paired_restore_retries_keep_commit_order_across_uneven_storm_waves
     let wave_three = selected_wave_plans[1]
         .take()
         .expect("one successful plan represents the committed third wave");
+    let wave_four = selected_wave_plans[2]
+        .take()
+        .expect("one successful plan represents the committed fourth wave");
     let mut storm_history = TOMBSTONE_STORM_KEYS[..TOMBSTONE_STORM_KEYS.len() - 1]
         .iter()
         .map(|key| string(key))
         .collect::<Vec<_>>();
     storm_history.extend(table_row_tombstones(&wave_two, id(1)));
     storm_history.extend(table_row_tombstones(&wave_three, id(1)));
+    storm_history.extend(table_row_tombstones(&wave_four, id(1)));
     assert_eq!(
         storm_history,
         [
@@ -20185,6 +20255,8 @@ fn concurrent_paired_restore_retries_keep_commit_order_across_uneven_storm_waves
             "z",
             "root/child/deep/storm/b",
             "root/child/deep/storm/e",
+            "root/child/deep/storm/a",
+            "root/child/deep/storm/d",
         ]
         .map(string),
         "a later wave observed first still appends after its committed predecessor",
@@ -20194,10 +20266,11 @@ fn concurrent_paired_restore_retries_keep_commit_order_across_uneven_storm_waves
         .to_vec();
     anchor_history.extend(table_row_tombstones(&wave_two, id(2)));
     anchor_history.extend(table_row_tombstones(&wave_three, id(2)));
+    anchor_history.extend(table_row_tombstones(&wave_four, id(2)));
     assert_eq!(
         anchor_history,
-        ["a", "a/child", "a/child/deep", "b", "a/child/deep"].map(string),
-        "restored anchor deletion is ordered after the restore wave",
+        ["a", "a/child", "a/child/deep", "b", "a/child/deep", "b", "c"].map(string),
+        "restored anchor deletions remain after their committed restore waves",
     );
 }
 
