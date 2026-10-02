@@ -1,0 +1,9 @@
+union(
+    union(
+        sys.Storage | filter(value => value >= 1),
+        sys.Storage | filter(value => value >= 1)
+    ),
+    sys.Storage | filter(value => value >= 1)
+)
+| filter(value => value >= 2)
+| count()
