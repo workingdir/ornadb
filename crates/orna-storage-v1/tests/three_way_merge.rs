@@ -30,6 +30,7 @@ const TOMBSTONE_DEPTH_SHALLOW: &str = include_str!("fixtures/merge-tombstone-dep
 const TOMBSTONE_DEPTH_MIDDLE: &str = include_str!("fixtures/merge-tombstone-depth-middle.orna");
 const TOMBSTONE_DEPTH_DEEP: &str = include_str!("fixtures/merge-tombstone-depth-deep.orna");
 const TOMBSTONE_CHAIN: &str = include_str!("fixtures/merge-tombstone-chain.orna");
+const TOMBSTONE_DELTA_RESTORES: &str = include_str!("fixtures/merge-tombstone-delta-restores.orna");
 const TOMBSTONE_PAIRED_CHAIN: &str = include_str!("fixtures/merge-tombstone-paired-chain.orna");
 const TOMBSTONE_RECOVERY_STORM: &str = include_str!("fixtures/merge-tombstone-recovery-storm.orna");
 const TOMBSTONE_STORM_KEYS: &[&str] = &[
@@ -16077,12 +16078,35 @@ fn paired_chained_storm_inputs(
     ThreeWaySnapshot,
     FixtureRows,
 ) {
+    paired_chained_storm_inputs_by_table(
+        &[base_rows, base_rows],
+        left_deleted,
+        right_deleted,
+        layout,
+        reverse_rows,
+        locator_prefix,
+    )
+}
+
+fn paired_chained_storm_inputs_by_table(
+    base_rows_by_table: &[&[KeyedRow]; 2],
+    left_deleted: &[&str],
+    right_deleted: &[&str],
+    layout: usize,
+    reverse_rows: bool,
+    locator_prefix: &str,
+) -> (
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    FixtureRows,
+) {
     let mut base_tables = BTreeMap::new();
     let mut left_tables = BTreeMap::new();
     let mut right_tables = BTreeMap::new();
     let mut source = FixtureRows::default();
     for (table_index, table) in [id(1), id(2)].into_iter().enumerate() {
-        let mut table_rows = base_rows.to_vec();
+        let mut table_rows = base_rows_by_table[table_index].to_vec();
         for row in &mut table_rows {
             row.table = table;
         }
@@ -16169,6 +16193,31 @@ fn paired_chained_storm_inputs(
         checkpoints: BTreeMap::new(),
     };
     (base, left, right, source)
+}
+
+fn add_chained_storm_fixture_rows(
+    snapshot: &ThreeWaySnapshot,
+    source: &mut FixtureRows,
+    side: MergeSide,
+    table: ObjectId,
+    rows: &[KeyedRow],
+) {
+    let manifest = snapshot.tables.get(&table).expect("paired table manifest exists");
+    for row in rows {
+        let mut row = row.clone();
+        row.table = table;
+        let encoded_key = row.key.encode().expect("fixture keys remain encodable");
+        let segment = manifest
+            .segments
+            .iter()
+            .find(|segment| segment.range.contains(&encoded_key))
+            .expect("the fixture key belongs to a paired depth range");
+        source
+            .rows
+            .entry((side, segment.locator.clone()))
+            .or_default()
+            .push(row);
+    }
 }
 
 fn paired_distinct_depth_chain_inputs(
@@ -17836,6 +17885,211 @@ fn recovery_storms_keep_tombstone_order_across_chained_paired_merges() {
         );
         assert_eq!(table_live_row_keys(&wave_three, table), final_live);
     }
+}
+
+#[test]
+fn paired_depth_delta_storms_restore_then_redelete_exact_keys() {
+    // MERGE-1 leaves cross-plan tombstone history open. Each paired table
+    // commits only its current wave's delta: a restored key is live without
+    // replaying its earlier delete, and deleting it again records a new event.
+    let fixture_rows = TOMBSTONE_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let restored_rows = TOMBSTONE_DELTA_RESTORES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_rows.len(), 7);
+    assert_eq!(restored_rows.len(), 2);
+    assert_eq!(restored_rows[0].key, string("root"));
+    assert_eq!(restored_rows[1].key, string("root/child"));
+
+    let (base, left, right, mut source) = paired_chained_storm_inputs(
+        &fixture_rows,
+        &["root"],
+        &["root/child"],
+        0,
+        false,
+        "delta-history-wave-one",
+    );
+    let wave_one = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 38, max_conflicts: 0 },
+    )
+    .expect("the first paired depth wave commits its initial deletes");
+    let first_delta = ["root", "root/child"].map(string);
+    let first_live = [
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+        "z",
+    ]
+    .map(string);
+    for table in [id(1), id(2)] {
+        assert_eq!(table_row_tombstones(&wave_one, table), first_delta);
+        assert_eq!(table_live_row_keys(&wave_one, table), first_live);
+    }
+
+    let wave_two_base = table_live_rows(&wave_one, id(1));
+    const RECOVERY_RETRIES: usize = 8;
+    let start = Arc::new(Barrier::new(RECOVERY_RETRIES));
+    let mut workers = Vec::with_capacity(RECOVERY_RETRIES);
+    for retry in 0..RECOVERY_RETRIES {
+        let (base, left, right, mut source) = paired_chained_storm_inputs(
+            &wave_two_base,
+            &["root/child/deep"],
+            &["root/child/deep/leaf"],
+            retry % 2,
+            false,
+            "delta-history-wave-two",
+        );
+        add_chained_storm_fixture_rows(
+            &left,
+            &mut source,
+            MergeSide::Left,
+            id(1),
+            &[restored_rows[0].clone()],
+        );
+        add_chained_storm_fixture_rows(
+            &right,
+            &mut source,
+            MergeSide::Right,
+            id(2),
+            &[restored_rows[1].clone()],
+        );
+        if retry % 2 == 1 {
+            for rows in source.rows.values_mut() {
+                rows.reverse();
+            }
+        }
+        let gate = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+            let plan = merge_three_way_snapshots(
+                &base,
+                &left,
+                &right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 28, max_conflicts: 0 },
+            )
+            .expect("each restored-key retry fits its private exact budget");
+            plan
+        }));
+    }
+
+    let second_delta = ["root/child/deep", "root/child/deep/leaf"].map(string);
+    let table_one_live = [
+        "root",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+        "z",
+    ]
+    .map(string);
+    let table_two_live = [
+        "root/child",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+        "z",
+    ]
+    .map(string);
+    let mut recovered_wave = None;
+    for worker in workers {
+        let plan = worker.join().expect("restored-key retry worker completes");
+        assert_eq!(plan.report.rows_examined, 28);
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        assert_eq!(table_row_tombstones(&plan, id(1)), second_delta);
+        assert_eq!(table_row_tombstones(&plan, id(2)), second_delta);
+        assert_eq!(table_live_row_keys(&plan, id(1)), table_one_live);
+        assert_eq!(table_live_row_keys(&plan, id(2)), table_two_live);
+        let mut expected_root = restored_rows[0].clone();
+        expected_root.table = id(1);
+        let mut expected_child = restored_rows[1].clone();
+        expected_child.table = id(2);
+        assert!(table_live_rows(&plan, id(1)).contains(&expected_root));
+        assert!(table_live_rows(&plan, id(2)).contains(&expected_child));
+        if recovered_wave.is_none() {
+            recovered_wave = Some(plan);
+        }
+    }
+    let wave_two = recovered_wave.expect("at least one paired recovery retry completes");
+
+    let table_one_base = table_live_rows(&wave_two, id(1));
+    let table_two_base = table_live_rows(&wave_two, id(2));
+    let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+        &[&table_one_base, &table_two_base],
+        &["root", "root/child/deep/leaf/twig"],
+        &["root/child", "root/child/deep/leaf/twig/bud"],
+        1,
+        true,
+        "delta-history-wave-three",
+    );
+    let wave_three = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 18, max_conflicts: 0 },
+    )
+    .expect("the final paired wave emits new deletes for restored exact keys");
+    let table_one_final_delta = [
+        "root",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .map(string);
+    let table_two_final_delta = [
+        "root/child",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .map(string);
+    for (table, expected_delta) in [
+        (id(1), table_one_final_delta),
+        (id(2), table_two_final_delta),
+    ] {
+        assert_eq!(table_row_tombstones(&wave_three, table), expected_delta);
+        assert_eq!(table_live_row_keys(&wave_three, table), vec![string("z")]);
+    }
+
+    let mut table_one_history = table_row_tombstones(&wave_one, id(1));
+    table_one_history.extend(table_row_tombstones(&wave_two, id(1)));
+    table_one_history.extend(table_row_tombstones(&wave_three, id(1)));
+    assert_eq!(
+        table_one_history,
+        [
+            "root",
+            "root/child",
+            "root/child/deep",
+            "root/child/deep/leaf",
+            "root",
+            "root/child/deep/leaf/twig",
+            "root/child/deep/leaf/twig/bud",
+        ]
+        .map(string),
+        "committed deltas append in wave order, including a re-delete after restore",
+    );
+    let mut table_two_history = table_row_tombstones(&wave_one, id(2));
+    table_two_history.extend(table_row_tombstones(&wave_two, id(2)));
+    table_two_history.extend(table_row_tombstones(&wave_three, id(2)));
+    assert_eq!(
+        table_two_history,
+        [
+            "root",
+            "root/child",
+            "root/child/deep",
+            "root/child/deep/leaf",
+            "root/child",
+            "root/child/deep/leaf/twig",
+            "root/child/deep/leaf/twig/bud",
+        ]
+        .map(string),
+        "each paired table retains its own ordered delete history",
+    );
 }
 
 #[test]
