@@ -1035,6 +1035,50 @@ pub fn explain_query_with_input_limit_disjunct_conjunct_chain(
     )
 }
 
+/// Explains nested input limits, disjunct expansion, a nested limit chain,
+/// and then a left-to-right conjunct chain followed by the query's outer
+/// limit and any additional limits.
+///
+/// Input limits run after source and join work, before disjunct expansion.
+/// Each expanded disjunct is charged against the capped input; the nested
+/// disjunct limits run after expansion and charge their immediate input. The
+/// conjunct chain runs after those limits and charges each term for rows
+/// surviving earlier terms. ORNA-PLAN leaves these estimate choices
+/// unspecified, so this adapter uses independent 50% selectivity per OR arm
+/// and left-to-right 50% selectivity per conjunct. Earlier work remains
+/// charged when later limits reduce the estimated rows. At least one input
+/// limit, one disjunct, one post-expansion limit, and one conjunct are
+/// required. `query.predicate` describes the disjunction and
+/// `conjunct_predicate` describes the later AND chain.
+pub fn explain_query_with_input_disjunct_limit_conjunct_chain(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    nested_input_limits: &[u64],
+    nested_disjunct_limits: &[u64],
+    conjunct_predicate: ExpressionRef,
+    conjunct_count: u64,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0
+        || nested_input_limits.is_empty()
+        || nested_disjunct_limits.is_empty()
+        || conjunct_count == 0
+        || query.predicate.is_none()
+    {
+        return Err(ExplainError::InvalidExpression);
+    }
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        Some(conjunct_count),
+        None,
+        nested_input_limits,
+        nested_disjunct_limits,
+        Some(&conjunct_predicate),
+        additional_limits,
+    )
+}
+
 /// Explains an expanded disjunction, a nested limit chain, and then a
 /// left-to-right conjunct chain followed by the query's outer limit and any
 /// additional limits.
