@@ -407,6 +407,10 @@ impl PackageResolver {
     /// each sibling's own event order leaves both final routes unchanged.
     /// v1 treats the sibling sessions as independent; retained snapshots
     /// continue to use their manifest-selected terminal pins.
+    /// Repeating the same post-storm terminal rebind wave stabilizes each
+    /// sibling on its own final pin while snapshots from earlier waves retain
+    /// the route they captured. The reference is silent on repeated waves, so
+    /// v1 applies the exact-pin rule independently on every rebind.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
