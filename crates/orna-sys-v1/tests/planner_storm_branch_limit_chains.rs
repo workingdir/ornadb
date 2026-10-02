@@ -10,6 +10,7 @@ fn branch(limits: &[u64], conjuncts: u64) -> DisjunctStormBranchDescription {
     DisjunctStormBranchDescription {
         nested_limits: limits.to_vec(),
         conjunct_count: conjuncts,
+        nested_storms: Vec::new(),
     }
 }
 
