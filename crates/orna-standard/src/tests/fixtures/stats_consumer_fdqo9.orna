@@ -1,0 +1,40 @@
+use std.stats as stats_ops;
+
+pub fn stats_surface_contract(
+    rows: [Int],
+    bins: [(Int, Int)],
+    points: [(Instant, Int)]
+): Bool {
+    stats_ops.sum(rows) == 0
+        && case stats_ops.min(rows) {
+            Some(value): value == 0,
+            null: true,
+        }
+        && case stats_ops.max(rows) {
+            Some(value): value == 0,
+            null: true,
+        }
+        && case stats_ops.range(rows) {
+            Some(value): value == 0,
+            null: true,
+        }
+        && stats_ops.mode(rows) == [0]
+        && case stats_ops.variance(rows) {
+            Some(value): value == 0,
+            null: true,
+        }
+        && case stats_ops.standard_deviation(rows) {
+            Some(value): value == 0,
+            null: true,
+        }
+        && stats_ops.histogram(rows, bins, include_final_upper: true) == [0]
+        && case stats_ops.rate(points) {
+            Some(value): value == 0,
+            null: true,
+        }
+        && stats_ops.derivative(points) == points
+        && case stats_ops.integrate(points) {
+            Some(value): value == 0,
+            null: true,
+        }
+}
