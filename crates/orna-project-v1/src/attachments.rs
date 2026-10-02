@@ -518,6 +518,35 @@ impl PackageResolver {
     }
 }
 
+/// The terminal session and route snapshots retained while resolving a
+/// sequence of nested alias rebinds.
+///
+/// `retained_sessions` is ordered from the original parent through each
+/// intermediate closure, with one snapshot recorded before each replacement.
+/// The final session is the closure reached after the last replacement.
+#[derive(Clone, Debug)]
+pub struct ReboundPathResolution {
+    final_session: AttachedDatabaseSession,
+    retained_sessions: Vec<AttachedDatabaseSession>,
+}
+
+impl ReboundPathResolution {
+    /// The closure reached after all requested replacements.
+    pub fn final_session(&self) -> &AttachedDatabaseSession {
+        &self.final_session
+    }
+
+    /// Snapshots retained before each replacement, in path order.
+    pub fn retained_sessions(&self) -> &[AttachedDatabaseSession] {
+        &self.retained_sessions
+    }
+
+    /// Takes ownership of the final closure and every retained route snapshot.
+    pub fn into_parts(self) -> (AttachedDatabaseSession, Vec<AttachedDatabaseSession>) {
+        (self.final_session, self.retained_sessions)
+    }
+}
+
 /// A primary database and zero or more read-only, commit-pinned attachments.
 #[derive(Clone, Debug)]
 pub struct AttachedDatabaseSession {
