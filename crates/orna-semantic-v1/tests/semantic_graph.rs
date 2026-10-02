@@ -3965,6 +3965,32 @@ fn concurrent_tuple_pin_callbacks_keep_paired_depth_identities_after_rebind() {
 }
 
 #[test]
+fn concurrent_tuple_pin_callbacks_reject_cross_lane_rebind_mixing() {
+    let source = include_str!("fixtures/historical-concurrent-paired-tuple-pin-rebind-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-concurrent-paired-tuple-pin-rebind-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "parallel callbacks restored from opposite tuple lanes must not collapse to one pin identity: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn tuple_pin_cascade_paired_depths_reject_cross_pair_mixing_after_storm_rebinds() {
     let source = include_str!("fixtures/historical-tuple-pin-cascade-paired-depth-storm-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
