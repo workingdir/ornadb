@@ -17245,6 +17245,11 @@ fn type_contains_valid_pinned_snapshot_identity(ty: &Type) -> bool {
 /// local rebinding; permit it when the only differences are selector contexts
 /// on pinned snapshot values. Saved aliases retain their original identities.
 fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
+    if !checkpoint_snapshot_maps_are_valid(expected)
+        || !checkpoint_snapshot_maps_are_valid(actual)
+    {
+        return false;
+    }
     if expected == actual {
         return true;
     }
