@@ -5,7 +5,8 @@ use orna_evolution_v1::{
 };
 use orna_foundation_v1::OvbRaw;
 use orna_storage_v1::{
-    BranchMergeBudget, BranchMergeConflict, BranchMergeError, BranchMergePlan, BranchRowSource,
+    BranchMergeBudget, BranchMergeConflict, BranchMergeError, BranchMergePlan,
+    BranchMergeTombstoneEvent, BranchRowSource,
     BranchMergePlanSequenceError, BranchMergePlanSequencer, BranchMergeTombstoneHistory,
     BranchMergeTombstoneHistoryError, KeyRange, MergeSide, MergedSegment, RowSegmentManifest,
     SequencedBranchMergePlan, TableManifest, ThreeWaySnapshot, merge_three_way_snapshots,
@@ -20476,6 +20477,106 @@ fn paired_append_preserves_mixed_mode_priority_through_pending_wave_release() {
         }),
         "unoccupied future positions remain strict out-of-order errors",
     );
+}
+
+#[test]
+fn paired_mixed_mode_priority_survives_interleaved_depth_wave_release() {
+    let fixture_keys = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .map(|row| row.key.clone())
+        .collect::<Vec<_>>();
+    let (first_key, middle_key, last_key) = (
+        fixture_keys[0].clone(),
+        fixture_keys[1].clone(),
+        fixture_keys[2].clone(),
+    );
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history
+        .submit_depth_merge_fragment(2, 0, 2, &[(id(1), last_key.clone())])
+        .unwrap()
+        .is_empty());
+    assert!(history
+        .submit(&whole_plan(1, vec![middle_key.clone()]))
+        .unwrap()
+        .is_empty());
+    assert!(history
+        .submit_depth_merge_fragment(0, 0, 2, &[(id(1), first_key.clone())])
+        .unwrap()
+        .is_empty());
+
+    let before_pending_conflicts = history.clone();
+    assert_eq!(
+        history.submit(&whole_plan(0, vec![first_key.clone(), first_key.clone()])),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 0 }),
+        "mixed-mode priority beats invalid duplicate content at the first pending wave",
+    );
+    assert_eq!(
+        history.submit_depth_merge_fragment(1, 3, 0, &[]),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "mixed-mode priority beats invalid fragment metadata at an adjacent whole-plan wave",
+    );
+    assert_eq!(
+        history.submit(&whole_plan(2, vec![last_key.clone(), last_key.clone()])),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "mixed-mode priority remains local to the later pending depth wave",
+    );
+    assert_eq!(history, before_pending_conflicts);
+
+    assert_eq!(
+        history.submit_depth_merge_fragment(0, 1, 2, &[]).unwrap(),
+        vec![
+            BranchMergeTombstoneEvent {
+                order: 0,
+                table: id(1),
+                key: first_key.clone(),
+            },
+            BranchMergeTombstoneEvent {
+                order: 1,
+                table: id(1),
+                key: middle_key,
+            },
+        ],
+        "releasing the first split wave drains the adjacent whole-plan wave in lineage order",
+    );
+    assert_eq!(
+        history.submit_depth_merge_fragment(2, 1, 2, &[]).unwrap(),
+        vec![BranchMergeTombstoneEvent {
+            order: 2,
+            table: id(1),
+            key: last_key.clone(),
+        }],
+        "the next split wave waits until its own final fragment arrives",
+    );
+
+    let before_released_conflicts = history.clone();
+    assert_eq!(
+        history.submit(&whole_plan(0, vec![first_key.clone(), first_key.clone()])),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 0 }),
+        "the first split wave keeps its mode after the interleaved release",
+    );
+    assert_eq!(
+        history.submit_depth_merge_fragment(1, 0, 0, &[]),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "the intervening whole-plan wave keeps its mode after release",
+    );
+    assert_eq!(
+        history.submit(&whole_plan(2, vec![last_key.clone(), last_key])),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "the later split wave keeps its mode after release",
+    );
+    assert_eq!(history, before_released_conflicts);
 }
 
 #[test]
