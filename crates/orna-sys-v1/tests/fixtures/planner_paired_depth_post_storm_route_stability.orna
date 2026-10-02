@@ -41,8 +41,8 @@ pub fn paired_depth_post_storm_routes() = PlannerPairedDepthPostStormRouteStabil
                         PlannerPairedDepthPostStormRouteStability
                             | take(3)
                             | filter(row => row.sixth)
+                    )
             )
-    )
     )
     | union(
         PlannerPairedDepthPostStormRouteStability
