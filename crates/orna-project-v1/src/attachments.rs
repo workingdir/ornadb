@@ -388,6 +388,11 @@ impl PackageResolver {
     /// interleaving produces the same per-sibling pin and module-route pairs.
     /// v1 makes independent sibling route updates order-stable, while keeping
     /// each earlier closure snapshot tied to its original selected pins.
+    /// Across repeated paired depth storms, distinct sibling middle and deep
+    /// pins may reconverge on a shared terminal pin. The reference is silent
+    /// on this sequence, so v1 derives each route from its exact selected pin.
+    /// Each session's modules follow the pins in that snapshot; later sibling
+    /// rebinds do not refresh or retarget earlier sessions.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
