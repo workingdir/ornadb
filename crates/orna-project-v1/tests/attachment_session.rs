@@ -3619,6 +3619,322 @@ fn repeated_closure_rebinds_select_each_storm_chain_edge() {
 }
 
 #[test]
+fn retained_closure_branches_keep_precedence_across_repeated_storm_chains() {
+    let package_source = include_str!("fixtures/attach-package.orna");
+    let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
+    let aliases = [
+        "archive",
+        "archive_copy",
+        "archive_copy_archive",
+        "archive_copy_archive_archive",
+    ];
+    let candidate_count = 2;
+    let loader = ProjectLoader::default();
+    let root_marker = |root: usize| 100 + root;
+    let middle_marker = |root: usize, middle: usize| 200 + root * 10 + middle;
+    let middle_sibling_marker = |root: usize, middle: usize| 300 + root * 10 + middle;
+    let terminal_marker = |root: usize, middle: usize| 400 + root * 10 + middle;
+    let outer_sibling_marker = |root: usize, sibling: usize| 500 + root * 10 + sibling;
+
+    let original_commits = aliases
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            write_package_snapshot(
+                shared_dir.path(),
+                package_source,
+                &format!("{}", 10 + index),
+                None,
+                &format!("original storm-chain alias {index}"),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let terminal_commits: Vec<Vec<String>> = (0..candidate_count)
+        .map(|root| {
+            (0..candidate_count)
+                .map(|middle| {
+                    write_package_snapshot(
+                        shared_dir.path(),
+                        package_source,
+                        &format!("{}", terminal_marker(root, middle)),
+                        None,
+                        &format!("root {root} middle {middle} terminal"),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    let middle_sibling_commits: Vec<Vec<String>> = (0..candidate_count)
+        .map(|root| {
+            (0..candidate_count)
+                .map(|middle| {
+                    write_package_snapshot(
+                        shared_dir.path(),
+                        package_source,
+                        &format!("{}", middle_sibling_marker(root, middle)),
+                        None,
+                        &format!("root {root} middle {middle} retained sibling"),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    let middle_commits: Vec<Vec<String>> = (0..candidate_count)
+        .map(|root| {
+            (0..candidate_count)
+                .map(|middle| {
+                    let manifest = format!(
+                        "{} {}\n{} {}\n",
+                        aliases[2],
+                        terminal_commits[root][middle],
+                        aliases[3],
+                        middle_sibling_commits[root][middle],
+                    );
+                    write_package_snapshot(
+                        shared_dir.path(),
+                        package_source,
+                        &format!("{}", middle_marker(root, middle)),
+                        Some(&manifest),
+                        &format!("root {root} middle candidate {middle}"),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    let outer_sibling_commits: Vec<Vec<String>> = (0..candidate_count)
+        .map(|root| {
+            (0..aliases.len() - 1)
+                .map(|sibling| {
+                    write_package_snapshot(
+                        shared_dir.path(),
+                        package_source,
+                        &format!("{}", outer_sibling_marker(root, sibling)),
+                        None,
+                        &format!("root {root} outer sibling {sibling}"),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    let root_commits: Vec<String> = (0..candidate_count)
+        .map(|root| {
+            let manifest = format!(
+                "{} {}\n{} {}\n{} {}\n",
+                aliases[1],
+                middle_commits[root][0],
+                aliases[2],
+                outer_sibling_commits[root][0],
+                aliases[3],
+                outer_sibling_commits[root][1],
+            );
+            write_package_snapshot(
+                shared_dir.path(),
+                package_source,
+                &format!("{}", root_marker(root)),
+                Some(&manifest),
+                &format!("outer storm-chain candidate {root}"),
+            )
+        })
+        .collect();
+    let root_pins: Vec<PinnedDatabase> = root_commits
+        .iter()
+        .map(|commit| {
+            PinnedDatabase::resolve(aliases[0], shared_repository.clone(), commit, loader).unwrap()
+        })
+        .collect();
+    let middle_pins: Vec<Vec<PinnedDatabase>> = (0..candidate_count)
+        .map(|root| {
+            (0..candidate_count)
+                .map(|middle| {
+                    PinnedDatabase::resolve(
+                        aliases[1],
+                        shared_repository.clone(),
+                        &middle_commits[root][middle],
+                        loader,
+                    )
+                    .unwrap()
+                })
+                .collect()
+        })
+        .collect();
+
+    let root_manifest = aliases
+        .iter()
+        .zip(&original_commits)
+        .map(|(alias, commit)| format!("{alias} {commit}\n"))
+        .collect::<String>();
+    let (_root_dir, root_repository, root_commit) = repository(&[
+        ("main.orna", include_str!("fixtures/attach-primary.orna")),
+        (PACKAGE_PIN_MANIFEST_PATH, &root_manifest),
+    ]);
+    let primary = PinnedDatabase::resolve("app", root_repository, &root_commit, loader).unwrap();
+    let resolver = PackageResolver::new(
+        aliases
+            .iter()
+            .map(|alias| ((*alias).to_owned(), shared_repository.clone())),
+        loader,
+    )
+    .unwrap();
+    let mut root_session = resolver.resolve_for_parent(primary).unwrap();
+    let original_root_session = root_session.clone();
+    let mut retained_root_pins: Vec<Option<PinnedDatabase>> =
+        (0..candidate_count).map(|_| None).collect();
+
+    for root in [0, 1, 0, 1] {
+        root_session.detach_database(aliases[0]).unwrap();
+        root_session
+            .attach_database(root_pins[root].clone())
+            .unwrap();
+        retained_root_pins[root]
+            .get_or_insert_with(|| root_session.database(aliases[0]).unwrap().clone());
+
+        assert_module_route(
+            &root_session,
+            "archive.orna",
+            &format!("= {}", root_marker(root)),
+        );
+        for (index, alias) in aliases[1..].iter().enumerate() {
+            assert_eq!(
+                root_session
+                    .database(alias)
+                    .unwrap()
+                    .pin()
+                    .commit()
+                    .as_str(),
+                original_commits[index + 1]
+            );
+            assert_module_route(
+                &root_session,
+                &format!("{alias}.orna"),
+                &format!("= {}", 11 + index),
+            );
+        }
+    }
+    assert_module_route(&original_root_session, "archive.orna", "= 10");
+    assert_module_route(&root_session, "archive.orna", "= 101");
+
+    for root in 0..candidate_count {
+        let outer = resolver
+            .resolve_for_parent(retained_root_pins[root].take().unwrap())
+            .unwrap();
+        assert_module_route(&outer, "main.orna", &format!("= {}", root_marker(root)));
+        assert_eq!(
+            outer.database(aliases[1]).unwrap().pin().commit().as_str(),
+            middle_commits[root][0]
+        );
+        assert_module_route(
+            &outer,
+            &format!("{}.orna", aliases[1]),
+            &format!("= {}", middle_marker(root, 0)),
+        );
+        for sibling in 0..aliases.len() - 2 {
+            assert_eq!(
+                outer
+                    .database(aliases[sibling + 2])
+                    .unwrap()
+                    .pin()
+                    .commit()
+                    .as_str(),
+                outer_sibling_commits[root][sibling]
+            );
+            assert_module_route(
+                &outer,
+                &format!("{}.orna", aliases[sibling + 2]),
+                &format!("= {}", outer_sibling_marker(root, sibling)),
+            );
+        }
+
+        let original_outer = outer.clone();
+        let mut nested = outer;
+        let mut retained_middle_pins: Vec<Option<PinnedDatabase>> =
+            (0..candidate_count).map(|_| None).collect();
+        for middle in [1, 0, 1, 0] {
+            nested.detach_database(aliases[1]).unwrap();
+            nested
+                .attach_database(middle_pins[root][middle].clone())
+                .unwrap();
+            retained_middle_pins[middle]
+                .get_or_insert_with(|| nested.database(aliases[1]).unwrap().clone());
+
+            assert_module_route(
+                &nested,
+                &format!("{}.orna", aliases[1]),
+                &format!("= {}", middle_marker(root, middle)),
+            );
+            for sibling in 0..aliases.len() - 2 {
+                assert_eq!(
+                    nested
+                        .database(aliases[sibling + 2])
+                        .unwrap()
+                        .pin()
+                        .commit()
+                        .as_str(),
+                    outer_sibling_commits[root][sibling]
+                );
+                assert_module_route(
+                    &nested,
+                    &format!("{}.orna", aliases[sibling + 2]),
+                    &format!("= {}", outer_sibling_marker(root, sibling)),
+                );
+            }
+        }
+        assert_eq!(
+            original_outer
+                .database(aliases[1])
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            middle_commits[root][0]
+        );
+        assert_module_route(
+            &original_outer,
+            &format!("{}.orna", aliases[1]),
+            &format!("= {}", middle_marker(root, 0)),
+        );
+
+        for middle in 0..candidate_count {
+            let descendant = resolver
+                .resolve_for_parent(retained_middle_pins[middle].take().unwrap())
+                .unwrap();
+            assert_module_route(
+                &descendant,
+                "main.orna",
+                &format!("= {}", middle_marker(root, middle)),
+            );
+            for (alias_index, commit, marker) in [
+                (
+                    2,
+                    &terminal_commits[root][middle],
+                    terminal_marker(root, middle),
+                ),
+                (
+                    3,
+                    &middle_sibling_commits[root][middle],
+                    middle_sibling_marker(root, middle),
+                ),
+            ] {
+                assert_eq!(
+                    descendant
+                        .database(aliases[alias_index])
+                        .unwrap()
+                        .pin()
+                        .commit()
+                        .as_str(),
+                    *commit
+                );
+                assert_module_route(
+                    &descendant,
+                    &format!("{}.orna", aliases[alias_index]),
+                    &format!("= {marker}"),
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn deep_rebind_chain_uses_exact_parent_aliases_at_each_depth() {
     let package_source = include_str!("fixtures/attach-package.orna");
     let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
