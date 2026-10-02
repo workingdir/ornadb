@@ -4615,6 +4615,29 @@ fn paired_depth_storm_followup_continuation_chains_reject_cross_pair_mixing() {
 }
 
 #[test]
+fn paired_followup_continuation_checkpoints_verify_nested_storm_rebinds() {
+    let source = include_str!("fixtures/historical-paired-depth-storm-followup-continuation-verification.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-depth-storm-followup-continuation-verification.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "saved and restored roots, bridges, leaves, and terminal values must remain consistent throughout both nested follow-up chains: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
