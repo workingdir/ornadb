@@ -1,0 +1,1 @@
+time_ops.resolve_local("2024-10-27T01:30:00", "Europe/London", ambiguous: "reject")

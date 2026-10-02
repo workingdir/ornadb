@@ -1,0 +1,3 @@
+use std.regex as regex;
+
+pub fn regex_dialect(): Str = regex.dialect_version();

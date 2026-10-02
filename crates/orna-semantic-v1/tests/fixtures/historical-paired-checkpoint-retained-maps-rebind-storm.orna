@@ -1,0 +1,68 @@
+pub fn left_saved_first() = (pin: sys.SnapshotRef) => {
+    snapshot: sys.snapshot(pin),
+};
+pub fn left_saved_second() = (pin: sys.SnapshotRef) => {
+    snapshot: sys.snapshot(pin),
+};
+pub fn left_storm_first() = (pin: sys.SnapshotRef) => {
+    snapshot: sys.snapshot(pin),
+};
+pub fn left_storm_second() = (pin: sys.SnapshotRef) => {
+    snapshot: sys.snapshot(pin),
+};
+pub fn left_followup_first() = (pin: sys.SnapshotRef) => {
+    snapshot: sys.snapshot(pin),
+};
+pub fn left_followup_second() = (pin: sys.SnapshotRef) => {
+    snapshot: sys.snapshot(pin),
+};
+
+pub fn right_saved_first() = (pin: sys.SnapshotRef) => {
+    snapshot: sys.snapshot(pin),
+};
+pub fn right_saved_second() = (pin: sys.SnapshotRef) => {
+    snapshot: sys.snapshot(pin),
+};
+pub fn right_storm_first() = (pin: sys.SnapshotRef) => {
+    snapshot: sys.snapshot(pin),
+};
+pub fn right_storm_second() = (pin: sys.SnapshotRef) => {
+    snapshot: sys.snapshot(pin),
+};
+pub fn right_followup_first() = (pin: sys.SnapshotRef) => {
+    snapshot: sys.snapshot(pin),
+};
+pub fn right_followup_second() = (pin: sys.SnapshotRef) => {
+    snapshot: sys.snapshot(pin),
+};
+
+pub fn paired_checkpoint_retained_maps_across_rebind_storms() {
+    let left_saved = [left_saved_first(), left_saved_second()];
+    let left_rolling = left_saved;
+    left_rolling = [left_storm_first(), left_storm_second()];
+    left_rolling = [left_followup_first(), left_followup_second()];
+    let left_after_storm = left_rolling;
+    left_rolling = left_saved;
+    let left_restored = left_rolling;
+
+    let right_saved = [right_saved_first(), right_saved_second()];
+    let right_rolling = right_saved;
+    right_rolling = [right_storm_first(), right_storm_second()];
+    right_rolling = [right_followup_first(), right_followup_second()];
+    let right_after_storm = right_rolling;
+    right_rolling = right_saved;
+    let right_restored = right_rolling;
+
+    {
+        left: {
+            saved: left_saved,
+            after_storm: left_after_storm,
+            restored: left_restored,
+        },
+        right: {
+            saved: right_saved,
+            after_storm: right_after_storm,
+            restored: right_restored,
+        },
+    }
+}

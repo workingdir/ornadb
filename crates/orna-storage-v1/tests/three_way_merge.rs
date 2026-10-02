@@ -5,7 +5,8 @@ use orna_evolution_v1::{
 };
 use orna_foundation_v1::OvbRaw;
 use orna_storage_v1::{
-    BranchMergeBudget, BranchMergeConflict, BranchMergeError, BranchMergePlan,
+    BranchMergeBudget, BranchMergeConflict, BranchMergeDepthFragmentRecovery,
+    BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
     BranchMergeTombstoneEvent, BranchRowSource,
     BranchMergePlanSequenceError, BranchMergePlanSequencer, BranchMergeTombstoneHistory,
     BranchMergeTombstoneHistoryError, KeyRange, MergeSide, MergedSegment, RowSegmentManifest,
@@ -20778,6 +20779,906 @@ fn paired_append_queue_recovers_after_uneven_wave_restarts() {
     assert_eq!(history.events()[4].key, fixture_key("a/child/deep/leaf"));
     assert_eq!(history.events()[5].key, fixture_key("root/child/deep/leaf/twig"));
     assert_eq!(history.next_order(), Some(5));
+}
+
+#[test]
+fn paired_wave_recovery_is_atomic_across_uneven_append_storms() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(0, 0, 4, &[(id(1), fixture_key("a"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(0, 2, 4, &[(id(1), fixture_key("z"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 1, 3, &[(id(1), fixture_key("root/child/deep"))])
+        .unwrap();
+    history.append(&whole_plan(2, vec![fixture_key("a/child/deep/leaf")])).unwrap();
+    history
+        .append(&whole_plan(3, vec![fixture_key("root/child/deep/leaf/twig")]))
+        .unwrap();
+    history.append(&whole_plan(4, Vec::new())).unwrap();
+    assert!(history.events().is_empty());
+
+    let before_failed_recovery = history.clone();
+    assert_eq!(
+        history.restart_depth_merge_waves(&[]),
+        Err(BranchMergeTombstoneHistoryError::EmptyDepthWaveRestartBatch),
+    );
+    assert_eq!(
+        history.restart_depth_merge_waves(&[(1, 2), (0, 0)]),
+        Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+            fragment: 0,
+            fragment_count: 0,
+        }),
+        "batch validation follows lineage order rather than caller order",
+    );
+    assert_eq!(
+        history.restart_depth_merge_waves(&[(0, 2), (0, 3)]),
+        Err(BranchMergeTombstoneHistoryError::DuplicateDepthWaveRestart { order: 0 }),
+    );
+    assert_eq!(
+        history.restart_depth_merge_waves(&[(0, 2), (3, 2)]),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 3 }),
+        "a later whole-plan append aborts the earlier wave restart in the same batch",
+    );
+    assert_eq!(
+        history.restart_depth_merge_waves(&[(0, 2), (5, 2)]),
+        Err(BranchMergeTombstoneHistoryError::NoIncompleteDepthWave { order: 5 }),
+    );
+    assert_eq!(history, before_failed_recovery);
+
+    history.restart_depth_merge_waves(&[(1, 2), (0, 2)]).unwrap();
+    assert_eq!(history.next_order(), Some(0));
+    assert!(history.events().is_empty());
+    assert!(history
+        .submit_depth_merge_fragment(0, 1, 2, &[(id(1), fixture_key("a/child/deep"))])
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        history
+            .submit_depth_merge_fragment(0, 0, 2, &[(id(1), fixture_key("a"))])
+            .unwrap()
+            .iter()
+            .map(|event| event.order)
+            .collect::<Vec<_>>(),
+        [0, 0],
+    );
+    assert!(history
+        .submit_depth_merge_fragment(1, 1, 2, &[(id(1), fixture_key("root/child/deep"))])
+        .unwrap()
+        .is_empty());
+    let released_storm = history
+        .submit_depth_merge_fragment(1, 0, 2, &[(id(1), fixture_key("root/child"))])
+        .unwrap();
+    assert_eq!(
+        released_storm.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [1, 1, 2, 3],
+    );
+    assert_eq!(
+        history.events().iter().map(|event| event.order).collect::<Vec<_>>(),
+        [0, 0, 1, 1, 2, 3],
+    );
+    assert_eq!(history.next_order(), Some(5));
+}
+
+#[test]
+fn paired_wave_recovery_and_append_batch_roll_back_together() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(0, 0, 4, &[(id(1), fixture_key("a"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(0, 2, 4, &[(id(1), fixture_key("z"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 1, 3, &[(id(1), fixture_key("root/child/deep"))])
+        .unwrap();
+    history.append(&whole_plan(2, vec![fixture_key("a/child/deep/leaf")])).unwrap();
+    history
+        .append(&whole_plan(3, vec![fixture_key("root/child/deep/leaf/twig")]))
+        .unwrap();
+    history.append(&whole_plan(4, Vec::new())).unwrap();
+    assert!(history.events().is_empty());
+
+    let before_failed_batch = history.clone();
+    assert_eq!(
+        history.restart_depth_merge_waves_with_appends(
+            &[(1, 2), (0, 2)],
+            &[
+                whole_plan(5, vec![fixture_key("root/child/deep/leaf/twig/bud")]),
+                whole_plan(7, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]),
+            ],
+        ),
+        Err(BranchMergeTombstoneHistoryError::OutOfOrder {
+            expected: 6,
+            actual: 7,
+        }),
+        "a bad later append rolls back earlier queued plans and every wave restart",
+    );
+    assert_eq!(history, before_failed_batch);
+
+    history
+        .restart_depth_merge_waves_with_appends(
+            &[(1, 2), (0, 2)],
+            &[
+                whole_plan(6, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]),
+                whole_plan(5, vec![fixture_key("root/child/deep/leaf/twig/bud")]),
+            ],
+        )
+        .unwrap();
+    assert_eq!(history.next_order(), Some(0));
+    assert!(history.events().is_empty());
+    assert!(history
+        .submit_depth_merge_fragment(0, 1, 2, &[(id(1), fixture_key("a/child/deep"))])
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        history
+            .submit_depth_merge_fragment(0, 0, 2, &[(id(1), fixture_key("a"))])
+            .unwrap()
+            .iter()
+            .map(|event| event.order)
+            .collect::<Vec<_>>(),
+        [0, 0],
+    );
+    assert!(history
+        .submit_depth_merge_fragment(1, 1, 2, &[(id(1), fixture_key("root/child/deep"))])
+        .unwrap()
+        .is_empty());
+    let released_storm = history
+        .submit_depth_merge_fragment(1, 0, 2, &[(id(1), fixture_key("root/child"))])
+        .unwrap();
+    assert_eq!(
+        released_storm.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [1, 1, 2, 3, 5, 6],
+        "the recovered prefix releases prior and newly appended transactions together",
+    );
+    assert_eq!(
+        history.events().iter().map(|event| event.order).collect::<Vec<_>>(),
+        [0, 0, 1, 1, 2, 3, 5, 6],
+    );
+    assert_eq!(
+        history.events()[6].key,
+        fixture_key("root/child/deep/leaf/twig/bud"),
+    );
+    assert_eq!(
+        history.events()[7].key,
+        fixture_key("root/child/deep/leaf/twig/bud/seed"),
+    );
+    assert_eq!(history.next_order(), Some(7));
+}
+
+#[test]
+fn paired_wave_recovery_batches_replacement_fragments_and_appends() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+    let recovery = |order, fragment_count, fragments| BranchMergeDepthWaveRecovery {
+        order,
+        fragment_count,
+        fragments,
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(0, 0, 4, &[(id(1), fixture_key("a"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(0, 2, 4, &[(id(1), fixture_key("z"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 1, 3, &[(id(1), fixture_key("root/child/deep"))])
+        .unwrap();
+    history.append(&whole_plan(2, vec![fixture_key("a/child/deep/leaf")])).unwrap();
+    history
+        .append(&whole_plan(3, vec![fixture_key("root/child/deep/leaf/twig")]))
+        .unwrap();
+    history.append(&whole_plan(4, Vec::new())).unwrap();
+    assert!(history.events().is_empty());
+
+    let before_failed_recovery = history.clone();
+    let invalid_recoveries = [
+        recovery(
+            0,
+            2,
+            BTreeMap::from([
+                (0, vec![(id(1), fixture_key("a"))]),
+                (1, vec![(id(1), fixture_key("a/child/deep"))]),
+            ]),
+        ),
+        recovery(1, 1, BTreeMap::from([(1, vec![(id(1), fixture_key("root/child"))])])),
+    ];
+    assert_eq!(
+        history.recover_depth_merge_waves_with_appends(
+            &invalid_recoveries,
+            &[
+                whole_plan(6, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]),
+                whole_plan(5, vec![fixture_key("root/child/deep/leaf/twig/bud")]),
+            ],
+        ),
+        Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+            fragment: 1,
+            fragment_count: 1,
+        }),
+        "a replacement-fragment failure discards restart, release, and append mutations",
+    );
+    assert_eq!(history, before_failed_recovery);
+
+    let replacement_recoveries = [
+        recovery(
+            0,
+            2,
+            BTreeMap::from([
+                (0, vec![(id(1), fixture_key("a"))]),
+                (1, vec![(id(1), fixture_key("a/child/deep"))]),
+            ]),
+        ),
+        recovery(
+            1,
+            1,
+            BTreeMap::from([(
+                0,
+                vec![
+                    (id(1), fixture_key("root/child")),
+                    (id(1), fixture_key("root/child/deep")),
+                ],
+            )]),
+        ),
+    ];
+    let released_storm = history
+        .recover_depth_merge_waves_with_appends(
+            &replacement_recoveries,
+            &[
+                whole_plan(6, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]),
+                whole_plan(5, vec![fixture_key("root/child/deep/leaf/twig/bud")]),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        released_storm.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [0, 0, 1, 1, 2, 3, 5, 6],
+        "committed recovery returns events only after all replacement waves and appends succeed",
+    );
+    assert_eq!(
+        history.events().iter().map(|event| event.order).collect::<Vec<_>>(),
+        [0, 0, 1, 1, 2, 3, 5, 6],
+    );
+    assert_eq!(
+        history.events()[6].key,
+        fixture_key("root/child/deep/leaf/twig/bud"),
+    );
+    assert_eq!(
+        history.events()[7].key,
+        fixture_key("root/child/deep/leaf/twig/bud/seed"),
+    );
+    assert_eq!(history.next_order(), Some(7));
+}
+
+#[test]
+fn paired_wave_fragment_recovery_retains_siblings_and_append_queue() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+    let fragment = |order, fragment, fragment_count, key| BranchMergeDepthFragmentRecovery {
+        order,
+        fragment,
+        fragment_count,
+        tombstones: vec![(id(1), fixture_key(key))],
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(0, 0, 4, &[(id(1), fixture_key("a"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(0, 2, 4, &[(id(1), fixture_key("z"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 1, 3, &[(id(1), fixture_key("root/child/deep"))])
+        .unwrap();
+    history
+        .append(&whole_plan(2, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]))
+        .unwrap();
+    history
+        .append(&whole_plan(3, vec![fixture_key("root/child/deep/leaf/twig/bud")]))
+        .unwrap();
+    history.append(&whole_plan(4, Vec::new())).unwrap();
+
+    let before_failed_recovery = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(&[], &[]),
+        Err(BranchMergeTombstoneHistoryError::EmptyDepthFragmentRecoveryBatch),
+    );
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[fragment(0, 2, 4, "a/child/deep"), fragment(0, 2, 4, "z")],
+            &[whole_plan(5, vec![fixture_key("z")])],
+        ),
+        Err(BranchMergeTombstoneHistoryError::DuplicateDepthFragmentRecovery {
+            order: 0,
+            fragment: 2,
+        }),
+    );
+    assert_eq!(history, before_failed_recovery);
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[
+                fragment(1, 1, 2, "root/child"),
+                fragment(0, 3, 4, "a/child/deep/leaf"),
+                fragment(0, 2, 4, "a/child/deep"),
+                fragment(0, 1, 4, "a/child"),
+            ],
+            &[whole_plan(5, vec![fixture_key("z")])],
+        ),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 1,
+            expected: 3,
+            actual: 2,
+        }),
+        "a later wave mismatch rolls back earlier fragment replacements, release, and append",
+    );
+    assert_eq!(history, before_failed_recovery);
+
+    let released_storm = history
+        .recover_depth_merge_fragments_with_appends(
+            &[
+                fragment(1, 2, 3, "root/child/deep/leaf/twig"),
+                fragment(0, 1, 4, "a/child"),
+                fragment(1, 0, 3, "root"),
+                fragment(0, 3, 4, "a/child/deep/leaf"),
+                fragment(1, 1, 3, "root/child"),
+                fragment(0, 2, 4, "a/child/deep"),
+            ],
+            &[whole_plan(5, vec![fixture_key("z")])],
+        )
+        .unwrap();
+    assert_eq!(
+        released_storm.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [0, 0, 0, 0, 1, 1, 1, 2, 3, 5],
+    );
+    assert_eq!(
+        history.events().iter().map(|event| event.order).collect::<Vec<_>>(),
+        [0, 0, 0, 0, 1, 1, 1, 2, 3, 5],
+    );
+    assert_eq!(history.events()[0].key, fixture_key("a"));
+    assert_eq!(history.events()[1].key, fixture_key("a/child"));
+    assert_eq!(history.events()[2].key, fixture_key("a/child/deep"));
+    assert_eq!(history.events()[3].key, fixture_key("a/child/deep/leaf"));
+    assert_eq!(history.events()[4].key, fixture_key("root"));
+    assert_eq!(history.events()[5].key, fixture_key("root/child"));
+    assert_eq!(history.events()[6].key, fixture_key("root/child/deep/leaf/twig"));
+    assert_eq!(history.events()[9].key, fixture_key("z"));
+    assert_eq!(history.next_order(), Some(6));
+}
+
+#[test]
+fn paired_wave_fragment_recovery_retries_appends_without_duplicate_chain_events() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+    let fragment = |order, fragment, fragment_count, key| BranchMergeDepthFragmentRecovery {
+        order,
+        fragment,
+        fragment_count,
+        tombstones: vec![(id(1), fixture_key(key))],
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(0, 0, 4, &[(id(1), fixture_key("a"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(0, 2, 4, &[(id(1), fixture_key("z"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 1, 3, &[(id(1), fixture_key("root/child/deep"))])
+        .unwrap();
+    history
+        .append(&whole_plan(2, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]))
+        .unwrap();
+    history
+        .append(&whole_plan(3, vec![fixture_key("root/child/deep/leaf/twig/bud")]))
+        .unwrap();
+    history.append(&whole_plan(4, Vec::new())).unwrap();
+    history
+        .append(&whole_plan(5, vec![fixture_key("z"), fixture_key("a")]))
+        .unwrap();
+
+    let before_changed_queued_retry = history.clone();
+    assert_eq!(
+        history.append(&whole_plan(5, vec![fixture_key("a"), fixture_key("z")])),
+        Err(BranchMergeTombstoneHistoryError::OutOfOrder {
+            expected: 6,
+            actual: 5,
+        }),
+        "standalone append keeps strict ordering for a reused queue position",
+    );
+    assert_eq!(history, before_changed_queued_retry);
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[fragment(0, 1, 4, "a/child")],
+            &[whole_plan(5, vec![fixture_key("root")])],
+        ),
+        Err(BranchMergeTombstoneHistoryError::AppendRetryMismatch { order: 5 }),
+        "a changed queued delta aborts the accompanying fragment repair",
+    );
+    assert_eq!(history, before_changed_queued_retry);
+
+    let released = history
+        .recover_depth_merge_fragments_with_appends(
+            &[
+                fragment(1, 2, 3, "root/child/deep/leaf/twig"),
+                fragment(0, 1, 4, "a/child"),
+                fragment(1, 0, 3, "root"),
+                fragment(0, 3, 4, "a/child/deep/leaf"),
+                fragment(1, 1, 3, "root/child"),
+                fragment(0, 2, 4, "a/child/deep"),
+            ],
+            &[
+                whole_plan(5, vec![fixture_key("a"), fixture_key("z")]),
+                whole_plan(6, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]),
+                whole_plan(5, vec![fixture_key("z"), fixture_key("a")]),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        released.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [0, 0, 0, 0, 1, 1, 1, 2, 3, 5, 5, 6],
+    );
+    assert_eq!(history.events(), released.as_slice());
+    assert_eq!(history.events()[9].key, fixture_key("a"));
+    assert_eq!(history.events()[10].key, fixture_key("z"));
+    assert_eq!(history.events()[11].key, fixture_key("root/child/deep/leaf/twig/bud/seed"));
+    assert_eq!(history.next_order(), Some(7));
+
+    history
+        .submit_depth_merge_fragment(7, 0, 2, &[(id(1), fixture_key("root"))])
+        .unwrap();
+    let before_changed_committed_retry = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[fragment(7, 1, 2, "root/child")],
+            &[
+                whole_plan(4, Vec::new()),
+                whole_plan(6, vec![fixture_key("root/child/deep/leaf/twig/bud")]),
+                whole_plan(8, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]),
+            ],
+        ),
+        Err(BranchMergeTombstoneHistoryError::AppendRetryMismatch { order: 6 }),
+        "a changed committed delta rolls back an empty retry, the next append, and fragment recovery",
+    );
+    assert_eq!(history, before_changed_committed_retry);
+
+    let released_tail = history
+        .recover_depth_merge_fragments_with_appends(
+            &[fragment(7, 1, 2, "root/child")],
+            &[
+                whole_plan(4, Vec::new()),
+                whole_plan(6, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]),
+                whole_plan(6, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]),
+                whole_plan(8, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        released_tail.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [7, 7, 8],
+    );
+    assert_eq!(history.events().len(), 15);
+    assert_eq!(history.events()[12].key, fixture_key("root"));
+    assert_eq!(history.events()[13].key, fixture_key("root/child"));
+    assert_eq!(
+        history.events()[14].key,
+        fixture_key("root/child/deep/leaf/twig/bud/seed"),
+    );
+    assert_eq!(history.next_order(), Some(9));
+}
+
+#[test]
+fn paired_wave_fragment_recovery_deduplicates_appends_across_uneven_fragments() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+    let fragment = |order, fragment, fragment_count, key| BranchMergeDepthFragmentRecovery {
+        order,
+        fragment,
+        fragment_count,
+        tombstones: vec![(id(1), fixture_key(key))],
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(0, 0, 4, &[(id(1), fixture_key("a"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 0, 3, &[(id(1), fixture_key("root"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 1, 3, &[(id(1), fixture_key("root/child"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(
+            1,
+            2,
+            3,
+            &[(id(1), fixture_key("root/child/deep/leaf/twig"))],
+        )
+        .unwrap();
+    history
+        .append(&whole_plan(2, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]))
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(3, 0, 2, &[(id(1), fixture_key("z"))])
+        .unwrap();
+
+    let before_incomplete_retry = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[fragment(0, 1, 4, "a/child")],
+            &[
+                whole_plan(
+                    1,
+                    vec![
+                        fixture_key("root"),
+                        fixture_key("root/child"),
+                        fixture_key("root/child/deep/leaf/twig"),
+                    ],
+                ),
+                whole_plan(3, vec![fixture_key("z")]),
+            ],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 3 }),
+        "an incomplete later wave is not accepted as a whole-plan replay",
+    );
+    assert_eq!(history, before_incomplete_retry);
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[fragment(1, 1, 3, "root/child")],
+            &[whole_plan(1, vec![fixture_key("root/child")])],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a batch replacing fragments at the same order cannot also claim a whole-plan retry",
+    );
+    assert_eq!(history, before_incomplete_retry);
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[fragment(0, 1, 4, "a/child")],
+            &[whole_plan(1, vec![fixture_key("z")])],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a changed cross-mode delta remains a conflict",
+    );
+    assert_eq!(history, before_incomplete_retry);
+
+    let released = history
+        .recover_depth_merge_fragments_with_appends(
+            &[
+                fragment(0, 1, 4, "a/child"),
+                fragment(0, 2, 4, "a/child/deep"),
+                fragment(0, 3, 4, "a/child/deep/leaf"),
+            ],
+            &[whole_plan(
+                1,
+                vec![
+                    fixture_key("root/child/deep/leaf/twig"),
+                    fixture_key("root/child"),
+                    fixture_key("root"),
+                ],
+            )],
+        )
+        .unwrap();
+    assert_eq!(
+        released.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [0, 0, 0, 0, 1, 1, 1, 2],
+    );
+    assert_eq!(history.events(), released.as_slice());
+    assert_eq!(history.events()[4].key, fixture_key("root"));
+    assert_eq!(history.events()[5].key, fixture_key("root/child"));
+    assert_eq!(history.events()[6].key, fixture_key("root/child/deep/leaf/twig"));
+    assert_eq!(history.next_order(), Some(3));
+
+    let before_changed_committed_retry = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[fragment(3, 1, 2, "root/child")],
+            &[
+                whole_plan(1, vec![fixture_key("z")]),
+                whole_plan(4, vec![fixture_key("root/child/deep/leaf/twig/bud")]),
+            ],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a changed retry against a committed depth chain rolls back the next wave and append",
+    );
+    assert_eq!(history, before_changed_committed_retry);
+
+    let released_tail = history
+        .recover_depth_merge_fragments_with_appends(
+            &[fragment(3, 1, 2, "root/child")],
+            &[
+                whole_plan(
+                    1,
+                    vec![
+                        fixture_key("root"),
+                        fixture_key("root/child"),
+                        fixture_key("root/child/deep/leaf/twig"),
+                    ],
+                ),
+                whole_plan(4, vec![fixture_key("root/child/deep/leaf/twig/bud")]),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        released_tail.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [3, 3, 4],
+    );
+    assert_eq!(history.events().iter().filter(|event| event.order == 1).count(), 3);
+    assert_eq!(history.events()[8].key, fixture_key("root/child"));
+    assert_eq!(history.events()[9].key, fixture_key("z"));
+    assert_eq!(
+        history.events()[10].key,
+        fixture_key("root/child/deep/leaf/twig/bud"),
+    );
+    assert_eq!(history.next_order(), Some(5));
+}
+
+#[test]
+fn paired_recovery_retry_identity_tracks_results_across_uneven_row_segments() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let make_step = |order, split_rows, generation, change_row| {
+        let mut rows = fixture_rows[..fixture_rows.len() - 1].to_vec();
+        if change_row {
+            rows[0].fields.insert(id(2), string("changed paired row"));
+        }
+        let tombstone = fixture_key("z");
+        let segments = if split_rows {
+            let boundary = fixture_rows[4].key.encode().unwrap();
+            vec![
+                MergedSegment::Rows {
+                    range: KeyRange::new(None, Some(boundary.clone())).unwrap(),
+                    rows: rows[..4].to_vec(),
+                    tombstones: Vec::new(),
+                },
+                MergedSegment::Rows {
+                    range: KeyRange::new(Some(boundary), None).unwrap(),
+                    rows: rows[4..].to_vec(),
+                    tombstones: vec![tombstone.clone()],
+                },
+            ]
+        } else {
+            vec![MergedSegment::Rows {
+                range: KeyRange::all(),
+                rows,
+                tombstones: vec![tombstone.clone()],
+            }]
+        };
+        let mut report = orna_storage_v1::BranchMergeReport::default();
+        report.rows_examined = if split_rows { 99 } else { 10 };
+        SequencedBranchMergePlan {
+            order,
+            plan: BranchMergePlan {
+                schema: schema(true, FieldType::Str),
+                tables: BTreeMap::from([(
+                    id(1),
+                    orna_storage_v1::MergedTable {
+                        id: id(1),
+                        whole_table_reuse: None,
+                        segments,
+                    },
+                )]),
+                checkpoints: BTreeMap::from([(
+                    b"stream".to_vec(),
+                    CheckpointGeneration {
+                        generation,
+                        position: Some(b"position-1".to_vec()),
+                    },
+                )]),
+                report,
+            },
+            ordered_row_tombstones: vec![(id(1), tombstone)],
+        }
+    };
+    let repair = |fragment, tombstone: Option<&str>| BranchMergeDepthFragmentRecovery {
+        order: 0,
+        fragment,
+        fragment_count: 2,
+        tombstones: tombstone
+            .map(|key| vec![(id(1), fixture_key(key))])
+            .unwrap_or_default(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history.submit_depth_merge_fragment(0, 0, 2, &[]).unwrap();
+    history.append(&make_step(1, false, 1, false)).unwrap();
+    let before_changed_queued_retry = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[repair(1, None)],
+            &[make_step(1, true, 2, false)],
+        ),
+        Err(BranchMergeTombstoneHistoryError::AppendRetryMismatch { order: 1 }),
+        "same tombstones with a changed checkpoint are not the same paired plan",
+    );
+    assert_eq!(history, before_changed_queued_retry);
+
+    let released = history
+        .recover_depth_merge_fragments_with_appends(
+            &[repair(1, None)],
+            &[make_step(1, true, 1, false)],
+        )
+        .unwrap();
+    assert_eq!(
+        released,
+        vec![BranchMergeTombstoneEvent {
+            order: 1,
+            table: id(1),
+            key: fixture_key("z"),
+        }],
+        "equivalent materialized rows deduplicate across different depth partitions",
+    );
+    history.submit_depth_merge_fragment(2, 0, 2, &[]).unwrap();
+
+    let before_changed_committed_retry = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[BranchMergeDepthFragmentRecovery {
+                order: 2,
+                fragment: 1,
+                fragment_count: 2,
+                tombstones: Vec::new(),
+            }],
+            &[make_step(1, false, 1, true)],
+        ),
+        Err(BranchMergeTombstoneHistoryError::AppendRetryMismatch { order: 1 }),
+        "same checkpoint and tombstones with a changed materialized row are not identical",
+    );
+    assert_eq!(history, before_changed_committed_retry);
+
+    history
+        .recover_depth_merge_fragments_with_appends(
+            &[BranchMergeDepthFragmentRecovery {
+                order: 2,
+                fragment: 1,
+                fragment_count: 2,
+                tombstones: Vec::new(),
+            }],
+            &[make_step(1, true, 1, false)],
+        )
+        .unwrap();
+    assert_eq!(history.next_order(), Some(3));
 }
 
 #[test]
