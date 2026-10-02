@@ -5747,6 +5747,94 @@ fn omitted_sibling_preserves_width_of_paired_tuple_rebinds() {
 }
 
 #[test]
+fn unknown_paired_width_suppresses_sibling_pin_promotion() {
+    let source = include_str!(
+        "fixtures/historical-unknown-paired-width-rebind-suppression.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-unknown-paired-width-rebind-suppression.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_UNRESOLVED),
+        "the unknown paired leaf must be reported during recovery"
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_unknown_width_does_not_promote_siblings")
+        })
+        .expect("unknown paired-width fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_unknown_width_does_not_promote_siblings"].ty
+    else {
+        panic!("paired-width proof must be a function");
+    };
+    let Type::Record(stages) = result.as_ref() else {
+        panic!("paired-width proof must retain its computed result record: {result:?}");
+    };
+    for stage in ["saved", "suppressed"] {
+        let value = stages.get(stage).expect("computed capture list");
+        let Type::List(element) = value else {
+            panic!("{stage} must remain a computed historical list: {value:?}");
+        };
+        let Type::Record(checkpoint) = element.as_ref() else {
+            panic!("{stage} must retain the computed checkpoint record: {element:?}");
+        };
+        assert!(
+            matches!(checkpoint.get("capture"), Some(Type::Applied { base, .. }) if base == "sys.HistoricalCallable"),
+            "{stage} must return its real historical callable value: {checkpoint:?}"
+        );
+        assert_canonical_snapshot_context_maps(value);
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(value, &mut contexts);
+        if stage == "saved" {
+            assert_eq!(
+                contexts,
+                ["HEAD~60", "HEAD~59", "HEAD~58", "HEAD~57", "HEAD~56"]
+                    .map(|selector| format!("selector:{selector}"))
+                    .into_iter()
+                    .collect(),
+                "a fully paired call must promote all five supplied identities"
+            );
+        } else {
+            let symbolic_pins = contexts
+                .iter()
+                .filter(|context| context.starts_with("selector:dynamic-call:"))
+                .count();
+            assert_eq!(
+                symbolic_pins, 4,
+                "an unknown leaf suppresses all four paired identities: {contexts:?}"
+            );
+            assert_eq!(contexts.len(), 5, "paired width must be retained: {contexts:?}");
+            assert!(
+                contexts.contains("selector:HEAD~46"),
+                "the independent terminal pin still binds concretely: {contexts:?}"
+            );
+            assert!(
+                !contexts.iter().any(|context| {
+                    ["HEAD~50", "HEAD~49", "HEAD~48"].iter().any(|selector| {
+                        context == &format!("selector:{selector}")
+                    })
+                }),
+                "no valid sibling identity may be promoted across an unknown pair width: {contexts:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn missing_outer_tuple_keeps_sibling_pins_symbolic_across_later_depths() {
     let source =
         include_str!("fixtures/historical-missing-outer-tuple-preserves-sibling-pins.orna");
