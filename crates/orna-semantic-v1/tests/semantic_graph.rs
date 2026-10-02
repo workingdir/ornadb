@@ -4468,6 +4468,29 @@ fn paired_depth_storm_chained_reproductions_reject_cross_pair_mixing() {
 }
 
 #[test]
+fn paired_depth_storm_chained_rebinds_preserve_followup_stability() {
+    let source = include_str!("fixtures/historical-paired-depth-storm-chained-rebind-stability.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-depth-storm-chained-rebind-stability.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "restored and freshly reproduced follow-up chains must remain consistent after their own root, bridge, and leaf rebind storms: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
