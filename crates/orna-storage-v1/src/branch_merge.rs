@@ -1001,7 +1001,10 @@ impl BranchMergeTombstoneHistory {
     /// not being replaced in this batch. Incomplete or changed waves remain
     /// conflicts. A changed paired result at that order fails with
     /// [`BranchMergeTombstoneHistoryError::AppendRetryMismatch`]. Standalone
-    /// [`Self::append`] remains strict and rejects reused positions.
+    /// [`Self::append`] remains strict and rejects reused positions. When a
+    /// retry plan carries tombstones, its exact projection must match the
+    /// separately supplied delta even for unbound fragment waves. Legacy
+    /// projection-only plans with no embedded tombstones remain supported.
     pub fn recover_depth_merge_fragments_with_appends(
         &mut self,
         recoveries: &[BranchMergeDepthFragmentRecovery],
@@ -1061,15 +1064,16 @@ impl BranchMergeTombstoneHistory {
                 .pending_plan_identities
                 .get(&step.order)
                 .or_else(|| self.committed_plan_identities.get(&step.order));
+            let projection_only_legacy_plan = identity.is_none() && plan_tombstones.is_empty();
+            let paired_projection_matches = projection_only_legacy_plan
+                || (!has_duplicate_tombstones_in_wave(&plan_tombstones)
+                    && same_tombstone_encoding_delta(
+                        &plan_tombstones,
+                        &step.ordered_row_tombstones,
+                    ));
             if !replaces_same_order
                 && !has_duplicate_tombstones_in_wave(&step.ordered_row_tombstones)
-                && identity.is_none_or(|_| {
-                    !has_duplicate_tombstones_in_wave(&plan_tombstones)
-                        && same_tombstone_encoding_delta(
-                            &plan_tombstones,
-                            &step.ordered_row_tombstones,
-                        )
-                })
+                && paired_projection_matches
             {
                 let existing = match self.pending_deltas.get(&step.order) {
                     Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
