@@ -1,0 +1,12 @@
+io.path.normalize("assets//images/./icon.svg") == "assets/images/icon.svg" &&
+io.path.normalise("assets/icons/../logo.svg") == "assets/logo.svg" &&
+io.path.join("assets/images", "../logo.svg") == "assets/logo.svg" &&
+io.path.is_absolute("/etc/passwd") == true &&
+io.path.components("assets/logo.svg") == ["assets", "logo.svg"] &&
+io.path.basename("assets/archive.tar.gz") == first(["archive.tar.gz"]) &&
+io.path.dirname("assets/archive.tar.gz") == first(["assets"]) &&
+io.path.dirname("logo.svg") == first(["."]) &&
+io.path.extension("assets/archive.tar.gz") == first(["gz"]) &&
+io.path.extension("assets/.config") == null &&
+io.path.stem("assets/archive.tar.gz") == first(["archive.tar"]) &&
+io.path.normalize("") == "."
