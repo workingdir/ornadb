@@ -10489,6 +10489,122 @@ fn paired_depth_storm_rebinds_keep_sibling_terminal_routes_consistent() {
         );
     }
 
+    let retained_post_storm_terminals = forward_terminals.clone();
+    let mut repeated_post_storm_terminals = forward_terminals.clone();
+    let post_storm_events = [(0, 1), (1, 0), (0, 0), (1, 1)];
+    let mut selected_post_storm_variants = vec![0, 1];
+    let mut repeated_post_storm_snapshots = Vec::new();
+    for wave in 0..2 {
+        for (sibling, variant) in post_storm_events {
+            rebind(
+                &mut repeated_post_storm_terminals[sibling],
+                aliases[3],
+                &terminal_pins[variant],
+            );
+            selected_post_storm_variants[sibling] = variant;
+            repeated_post_storm_snapshots.push((
+                wave,
+                sibling,
+                variant,
+                repeated_post_storm_terminals[sibling].clone(),
+            ));
+
+            for branch in 0..sibling_count {
+                let selected = selected_post_storm_variants[branch];
+                assert_pin(
+                    &repeated_post_storm_terminals[branch],
+                    aliases[3],
+                    &terminal_commits[selected],
+                );
+                assert_route(
+                    &repeated_post_storm_terminals[branch],
+                    &format!("{}.orna", aliases[3]),
+                    3,
+                    0,
+                    selected,
+                );
+                assert_route(
+                    &repeated_post_storm_terminals[branch],
+                    "main.orna",
+                    2,
+                    branch,
+                    later_deep_variants[branch],
+                );
+            }
+        }
+        assert_eq!(selected_post_storm_variants, vec![0, 1]);
+    }
+    for event_index in 0..post_storm_events.len() {
+        let (_, first_sibling, first_variant, first_snapshot) =
+            &repeated_post_storm_snapshots[event_index];
+        let (_, second_sibling, second_variant, second_snapshot) =
+            &repeated_post_storm_snapshots[event_index + post_storm_events.len()];
+        assert_eq!(first_sibling, second_sibling);
+        assert_eq!(first_variant, second_variant);
+        assert_pin(
+            first_snapshot,
+            aliases[3],
+            &terminal_commits[*first_variant],
+        );
+        assert_pin(
+            second_snapshot,
+            aliases[3],
+            &terminal_commits[*second_variant],
+        );
+        assert_route(
+            first_snapshot,
+            &format!("{}.orna", aliases[3]),
+            3,
+            0,
+            *first_variant,
+        );
+        assert_route(
+            second_snapshot,
+            &format!("{}.orna", aliases[3]),
+            3,
+            0,
+            *second_variant,
+        );
+    }
+    for (_, sibling, variant, snapshot) in repeated_post_storm_snapshots {
+        assert_pin(&snapshot, aliases[3], &terminal_commits[variant]);
+        assert_route(&snapshot, &format!("{}.orna", aliases[3]), 3, 0, variant);
+        assert_route(
+            &snapshot,
+            "main.orna",
+            2,
+            sibling,
+            later_deep_variants[sibling],
+        );
+    }
+    let stable_post_storm_variants = [0, 1];
+    for sibling in 0..sibling_count {
+        assert_pin(
+            &retained_post_storm_terminals[sibling],
+            aliases[3],
+            &terminal_commits[stable_post_storm_variants[sibling]],
+        );
+        assert_route(
+            &retained_post_storm_terminals[sibling],
+            &format!("{}.orna", aliases[3]),
+            3,
+            0,
+            stable_post_storm_variants[sibling],
+        );
+        assert_pin(
+            &reopened_manifest_snapshots[sibling],
+            aliases[3],
+            &terminal_commits[later_deep_variants[sibling]],
+        );
+        assert_route(
+            &reopened_manifest_snapshots[sibling],
+            &format!("{}.orna", aliases[3]),
+            3,
+            0,
+            later_deep_variants[sibling],
+        );
+    }
+
     assert_pin(&parent, aliases[1], &middle_commits[0][0]);
     assert_route(&parent, &format!("{}.orna", aliases[1]), 1, 0, 0);
 }
