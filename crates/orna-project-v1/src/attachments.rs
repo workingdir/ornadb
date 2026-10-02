@@ -585,9 +585,10 @@ impl PackageResolver {
     /// history returned by `retained_sessions()`. This keeps post-storm
     /// closure work rooted in the exact intermediate pins captured earlier.
     /// The reference is silent on reopening these historical routes; v1 uses
-    /// the flattened index to select the exact snapshot. Any snapshots
-    /// produced by the new call form another retained wave. A missing index
-    /// or failed closure returns no new route.
+    /// the flattened index to select the exact snapshot and retains the
+    /// superseded final route as its own wave. Any snapshots produced by the
+    /// new call form another retained wave. A missing index or failed closure
+    /// returns no new route.
     pub fn extend_nested_rebind_path_from_retained(
         &self,
         previous: &ReboundPathResolution,
@@ -599,13 +600,14 @@ impl PackageResolver {
             .get(retained_session)
             .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
         let extension = self.resolve_nested_rebind_path(parent, replacements)?;
-        Ok(Self::append_rebound_extension(previous, extension))
+        Ok(Self::append_retained_rebound_extension(previous, extension))
     }
 
     /// Continues a route from a snapshot selected by retained wave and
     /// position within that wave. The reference does not define reopening
     /// between waves; v1 resolves from the exact selected pins and appends the
-    /// new snapshots as another wave. Invalid wave or snapshot positions and
+    /// superseded final route as its own wave before appending the new
+    /// snapshots as another wave. Invalid wave or snapshot positions and
     /// failed closures return no new route.
     pub fn extend_nested_rebind_path_from_wave(
         &self,
@@ -619,7 +621,7 @@ impl PackageResolver {
             .and_then(|sessions| sessions.get(snapshot))
             .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
         let extension = self.resolve_nested_rebind_path(parent, replacements)?;
-        Ok(Self::append_rebound_extension(previous, extension))
+        Ok(Self::append_retained_rebound_extension(previous, extension))
     }
 
     fn append_rebound_extension(
@@ -642,6 +644,28 @@ impl PackageResolver {
         }
     }
 
+    fn append_retained_rebound_extension(
+        previous: &ReboundPathResolution,
+        extension: ReboundPathResolution,
+    ) -> ReboundPathResolution {
+        let ReboundPathResolution {
+            final_session,
+            mut retained_sessions,
+            retained_wave_lengths: extension_wave_lengths,
+        } = extension;
+        let mut all_retained = previous.retained_sessions.clone();
+        all_retained.push(previous.final_session.clone());
+        all_retained.append(&mut retained_sessions);
+        let mut retained_wave_lengths = previous.retained_wave_lengths.clone();
+        retained_wave_lengths.push(1);
+        retained_wave_lengths.extend(extension_wave_lengths);
+        ReboundPathResolution {
+            final_session,
+            retained_sessions: all_retained,
+            retained_wave_lengths,
+        }
+    }
+
     /// Extends a post-storm route with two ordered terminal-depth rebinds.
     /// The prior history stays intact and the new pair is exposed together in
     /// the last retained wave. A failure leaves `previous` unchanged.
@@ -656,7 +680,8 @@ impl PackageResolver {
     /// Extends a route with a terminal-depth pair from one of its retained
     /// snapshots. This is useful after a rebind storm has resolved a deeper
     /// closure and callers need to continue from an earlier exact route.
-    /// Prior snapshots stay in order, followed by the selected root and the
+    /// Prior snapshots stay in order; the previous final route is then
+    /// retained as its own wave, followed by the selected root and
     /// intermediate route captured by the new pair. The input route remains
     /// unchanged if either replacement or closure fails.
     pub fn extend_nested_terminal_pair_from_retained(
