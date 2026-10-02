@@ -106,6 +106,8 @@ pub const REFERENCE_STANDARD_RESULT_PATH_V1: &str = "std/result.orna";
 pub const REFERENCE_STANDARD_LIST_PATH_V1: &str = "std/list.orna";
 pub const REFERENCE_STANDARD_MAP_PATH_V1: &str = "std/map.orna";
 pub const REFERENCE_STANDARD_SET_PATH_V1: &str = "std/set.orna";
+pub const REFERENCE_STANDARD_IO_PATH_V1: &str = "std/io/main.orna";
+pub const REFERENCE_STANDARD_FS_PATH_V1: &str = "std/io/fs.orna";
 
 const REFERENCE_STANDARD_MATH_SOURCE_V1: &str = include_str!("../../../stdlib/std/math.orna");
 const REFERENCE_STANDARD_COLLECTION_SOURCE_V1: &str =
@@ -128,13 +130,15 @@ const REFERENCE_STANDARD_RESULT_SOURCE_V1: &str = include_str!("../../../stdlib/
 const REFERENCE_STANDARD_LIST_SOURCE_V1: &str = include_str!("../../../stdlib/std/list.orna");
 const REFERENCE_STANDARD_MAP_SOURCE_V1: &str = include_str!("../../../stdlib/std/map.orna");
 const REFERENCE_STANDARD_SET_SOURCE_V1: &str = include_str!("../../../stdlib/std/set.orna");
+const REFERENCE_STANDARD_IO_SOURCE_V1: &str = include_str!("../../../stdlib/std/io/main.orna");
+const REFERENCE_STANDARD_FS_SOURCE_V1: &str = include_str!("../../../stdlib/std/io/fs.orna");
 
 /// Source units for the Orna 1.0.0 reference standard dependency.
 ///
 /// This is the current source-backed standard boundary. The retained `orna.std/1`–
 /// `orna.std/11` APIs below model older, explicitly versioned snapshots.
 #[must_use]
-pub fn reference_standard_sources_v1() -> [(String, String); 16] {
+pub fn reference_standard_sources_v1() -> [(String, String); 18] {
     [
         (
             REFERENCE_STANDARD_MATH_PATH_V1.into(),
@@ -199,6 +203,14 @@ pub fn reference_standard_sources_v1() -> [(String, String); 16] {
         (
             REFERENCE_STANDARD_SET_PATH_V1.into(),
             REFERENCE_STANDARD_SET_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_IO_PATH_V1.into(),
+            REFERENCE_STANDARD_IO_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_FS_PATH_V1.into(),
+            REFERENCE_STANDARD_FS_SOURCE_V1.into(),
         ),
     ]
 }
