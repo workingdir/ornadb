@@ -290,6 +290,11 @@ impl PackageResolver {
     /// Earlier terminal candidates and the manifest-selected snapshot remain
     /// independently resolvable; v1 applies the same last-pin rule at this
     /// final edge when the reference does not specify terminal rebind storms.
+    /// Apply that rule separately to every retained closure branch: a terminal
+    /// alias storm follows the exact terminal pin selected through that
+    /// branch's ancestor manifests, and cannot retarget a same-named terminal
+    /// route in another branch. Reopening a retained ancestor starts its own
+    /// terminal route chain from that pin's manifest.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
