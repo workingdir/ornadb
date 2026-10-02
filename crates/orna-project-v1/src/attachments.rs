@@ -268,6 +268,13 @@ impl PackageResolver {
     /// the next closure uses its final selected pin's manifest. Since the
     /// reference is silent on repeated storms across nested chains, v1 does
     /// not overlay manifests from earlier candidates or ancestor sessions.
+    /// A pin retained from an earlier outer storm can still be expanded after
+    /// later storms; its own manifest starts that closure branch. Rebinding a
+    /// descendant in one expanded branch cannot retarget another retained
+    /// branch, and expanding a selected descendant uses only that pin's
+    /// manifest rather than carrying forward the ancestor's prefix siblings.
+    /// This keeps precedence stable across repeated storms at multiple closure
+    /// depths, including when those storms finish in different candidates.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
