@@ -600,7 +600,10 @@ pub struct DisjunctStormBranchDescription {
 pub struct DisjunctStormLimitRebindDescription {
     /// One-based position in the enclosing branch's `nested_limits` chain.
     pub after_limit: usize,
-    /// Cascades to run in declaration order after this limit.
+    /// Cascades to run in declaration order after this limit. The first uses
+    /// the branch rows and bytes after the limit; each later cascade uses the
+    /// previous cascade's bounded output, which ultimately feeds the next
+    /// limit in the enclosing branch.
     pub storms: Vec<DisjunctStormCascadeDescription>,
 }
 
@@ -2065,6 +2068,13 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
                 "storm_stage_input_scope".to_owned(),
                 PlanDetail::Text(
                     "query_input_then_previous_stage_bounded_rows_and_bytes".to_owned(),
+                ),
+            ),
+            (
+                "limit_chain_rebind_stage_input_scope".to_owned(),
+                PlanDetail::Text(
+                    "post_limit_branch_input_then_previous_rebind_stage_bounded_rows_and_bytes"
+                        .to_owned(),
                 ),
             ),
             (
