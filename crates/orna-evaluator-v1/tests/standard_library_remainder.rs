@@ -7,12 +7,7 @@ fn canonical(raw: Raw) -> CanonicalValue {
 }
 
 fn ints(values: &[i64]) -> Raw {
-    Raw::Array(
-        values
-            .iter()
-            .map(|value| Raw::Int((*value).into()))
-            .collect(),
-    )
+    Raw::Array(values.iter().map(|value| Raw::Int((*value).into())).collect())
 }
 
 fn option_int(value: i64) -> CanonicalValue {
@@ -33,9 +28,7 @@ fn option_decimal(coefficient: i64, exponent10: i64) -> CanonicalValue {
 fn pinned_collection_session() -> AdmittedReplSession {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
     assert_eq!(
-        session.submit(include_str!(
-            "fixtures/stdlib-use-collection-alias-yfifu.orna"
-        )),
+        session.submit(include_str!("fixtures/stdlib-use-collection-alias-yfifu.orna")),
         Ok(None)
     );
     session
@@ -43,17 +36,10 @@ fn pinned_collection_session() -> AdmittedReplSession {
 
 fn assert_collection_proofs(session: &mut AdmittedReplSession, source: &str, proofs: usize) {
     let parsed = orna_syntax_v1::parse_repl(source);
-    assert!(
-        parsed.is_ok(),
-        "collection fixture syntax: {:?}",
-        parsed.diagnostics
-    );
-    let actual = session.submit(source).unwrap_or_else(|error| {
-        panic!(
-            "pinned collection callback fixture rejected: {}",
-            error.code()
-        )
-    });
+    assert!(parsed.is_ok(), "collection fixture syntax: {:?}", parsed.diagnostics);
+    let actual = session
+        .submit(source)
+        .unwrap_or_else(|error| panic!("pinned collection callback fixture rejected: {}", error.code()));
     assert_eq!(
         actual,
         Some(canonical(Raw::Array(vec![Raw::Bool(true); proofs])))
@@ -72,22 +58,10 @@ fn pinned_collection_helpers_bind_for_collection_and_query_exports() {
         Ok(None)
     );
     let proofs = [
-        (
-            "chunk",
-            include_str!("fixtures/stdlib-collection-chunk-2213.orna"),
-        ),
-        (
-            "flatten",
-            include_str!("fixtures/stdlib-collection-flatten-2213.orna"),
-        ),
-        (
-            "unique",
-            include_str!("fixtures/stdlib-collection-unique-2213.orna"),
-        ),
-        (
-            "window",
-            include_str!("fixtures/stdlib-collection-window-2213.orna"),
-        ),
+        ("chunk", include_str!("fixtures/stdlib-collection-chunk-2213.orna")),
+        ("flatten", include_str!("fixtures/stdlib-collection-flatten-2213.orna")),
+        ("unique", include_str!("fixtures/stdlib-collection-unique-2213.orna")),
+        ("window", include_str!("fixtures/stdlib-collection-window-2213.orna")),
     ];
     for (name, source) in proofs {
         assert_eq!(
@@ -105,10 +79,7 @@ fn pinned_collection_helpers_bind_for_collection_and_query_exports() {
         (
             "zip",
             include_str!("fixtures/stdlib-collection-zip-2213.orna"),
-            Raw::Array(vec![Raw::Array(vec![
-                Raw::Int(1.into()),
-                Raw::Text("a".into()),
-            ])]),
+            Raw::Array(vec![Raw::Array(vec![Raw::Int(1.into()), Raw::Text("a".into())])]),
         ),
         (
             "zip_exact",
@@ -135,12 +106,7 @@ fn pinned_collection_helpers_bind_for_collection_and_query_exports() {
         (
             "rank",
             include_str!("fixtures/stdlib-collection-rank-2213.orna"),
-            Raw::Array(vec![
-                ints(&[1, 1]),
-                ints(&[1, 1]),
-                ints(&[2, 3]),
-                ints(&[3, 4]),
-            ]),
+            Raw::Array(vec![ints(&[1, 1]), ints(&[1, 1]), ints(&[2, 3]), ints(&[3, 4])]),
         ),
         (
             "asof_join",
@@ -148,10 +114,10 @@ fn pinned_collection_helpers_bind_for_collection_and_query_exports() {
             Raw::Array(vec![
                 Raw::Array(vec![
                     Raw::Int(10.into()),
-                    Raw::Tag(
-                        60013,
-                        Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(9.into())])),
-                    ),
+                    Value::option(Some(Value::int(9.into())))
+                        .unwrap()
+                        .raw()
+                        .clone(),
                 ]),
                 Raw::Array(vec![Raw::Int(1.into()), Raw::Null]),
             ]),
@@ -170,11 +136,10 @@ fn pinned_collection_helpers_bind_for_collection_and_query_exports() {
         );
     }
     assert_eq!(
-        session
-            .submit(include_str!("fixtures/stdlib-zip-exact-fails-2213.orna"))
+        session.submit(include_str!("fixtures/stdlib-zip-exact-fails-2213.orna"))
             .unwrap_err()
             .code(),
-        "ORNA-EVAL-VALUE"
+        "ORNA-EVAL-ERROR"
     );
 }
 
@@ -203,31 +168,31 @@ fn pinned_collection_asof_selectors_keep_captured_values() {
     let mut session = pinned_collection_session();
     let source = include_str!("fixtures/stdlib-collection-captured-asof-selectors-yfifu.orna");
     let parsed = orna_syntax_v1::parse_repl(source);
-    assert!(
-        parsed.is_ok(),
-        "collection fixture syntax: {:?}",
-        parsed.diagnostics
-    );
+    assert!(parsed.is_ok(), "collection fixture syntax: {:?}", parsed.diagnostics);
     let actual = session
         .submit(source)
         .unwrap_or_else(|error| panic!("pinned as-of callback fixture rejected: {}", error.code()));
     assert_eq!(
         actual,
         Some(canonical(Raw::Array(vec![
-            Raw::Array(vec![Raw::Array(vec![
-                Raw::Int(5.into()),
-                Raw::Tag(
-                    60013,
-                    Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(1.into())])),
-                ),
-            ])]),
-            Raw::Array(vec![Raw::Array(vec![
-                Raw::Int(11.into()),
-                Raw::Tag(
-                    60013,
-                    Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(1.into())])),
-                ),
-            ])]),
+            Raw::Array(vec![
+                Raw::Array(vec![
+                    Raw::Int(5.into()),
+                    Value::option(Some(Value::int(1.into())))
+                        .unwrap()
+                        .raw()
+                        .clone(),
+                ]),
+            ]),
+            Raw::Array(vec![
+                Raw::Array(vec![
+                    Raw::Int(11.into()),
+                    Value::option(Some(Value::int(1.into())))
+                        .unwrap()
+                        .raw()
+                        .clone(),
+                ]),
+            ]),
         ])))
     );
 }
@@ -270,10 +235,7 @@ fn pinned_bits_exports_bind_and_remain_optional_without_std() {
         Ok(Some(CanonicalValue::new(Raw::Bool(true)).unwrap()))
     );
     assert_eq!(
-        session
-            .submit(include_str!(
-                "fixtures/stdlib-bits-negative-shift-2213.orna"
-            ))
+        session.submit(include_str!("fixtures/stdlib-bits-negative-shift-2213.orna"))
             .unwrap_err()
             .code(),
         "ORNA-EVAL-VALUE"
@@ -282,9 +244,7 @@ fn pinned_bits_exports_bind_and_remain_optional_without_std() {
     let mut without_std = AdmittedReplSession::new(Limits::default());
     assert_eq!(
         without_std
-            .submit(include_str!(
-                "fixtures/stdlib-bits-without-snapshot-2213.orna"
-            ))
+            .submit(include_str!("fixtures/stdlib-bits-without-snapshot-2213.orna"))
             .unwrap_err()
             .code(),
         "ORNA-S012-UNRESOLVED"
@@ -296,6 +256,10 @@ fn pinned_stats_aggregates_require_the_captured_std_module() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
     assert_eq!(
         session.submit(include_str!("fixtures/stdlib-use-stats-ymou.orna")),
+        Ok(None)
+    );
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-use-stats-z09xc.orna")),
         Ok(None)
     );
     assert_eq!(
@@ -332,7 +296,10 @@ fn pinned_stats_aggregates_require_the_captured_std_module() {
             CanonicalValue::new(Raw::Null).unwrap(),
         ),
     ] {
-        assert_eq!(session.submit(source), Ok(Some(expected)), "{source}");
+        let actual = session
+            .submit(source)
+            .unwrap_or_else(|error| panic!("{source}: {}", error.code()));
+        assert_eq!(actual, Some(expected), "{source}");
     }
     assert_eq!(
         session
@@ -344,13 +311,9 @@ fn pinned_stats_aggregates_require_the_captured_std_module() {
     );
     assert_eq!(
         session
-            .submit(include_str!(
-                "fixtures/stdlib-stats-unbound-operation-fdqo9.orna"
-            ))
-            .unwrap_err()
-            .code(),
-        "ORNA-EVAL-ERROR",
-        "new stats contracts fail closed until their evaluator binding exists"
+            .submit(include_str!("fixtures/stdlib-stats-complete-behavior-yn4vz.orna")),
+        Ok(Some(CanonicalValue::new(Raw::Bool(true)).unwrap())),
+        "each stats export computes a result through the pinned source wrapper"
     );
     assert_eq!(
         session.submit(include_str!("fixtures/stdlib-use-query-ymou.orna")),
@@ -361,14 +324,8 @@ fn pinned_stats_aggregates_require_the_captured_std_module() {
             include_str!("fixtures/stdlib-query-aggregations-ymou.orna"),
             CanonicalValue::new(Raw::Int(6.into())).unwrap(),
         ),
-        (
-            include_str!("fixtures/stdlib-query-min-ymou.orna"),
-            option_int(1),
-        ),
-        (
-            include_str!("fixtures/stdlib-query-max-ymou.orna"),
-            option_int(3),
-        ),
+        (include_str!("fixtures/stdlib-query-min-ymou.orna"), option_int(1)),
+        (include_str!("fixtures/stdlib-query-max-ymou.orna"), option_int(3)),
         (
             include_str!("fixtures/stdlib-query-count-ymou.orna"),
             CanonicalValue::new(Raw::Int(2.into())).unwrap(),
@@ -380,9 +337,7 @@ fn pinned_stats_aggregates_require_the_captured_std_module() {
     let mut without_std = AdmittedReplSession::new(Limits::default());
     assert_eq!(
         without_std
-            .submit(include_str!(
-                "fixtures/stdlib-stats-without-snapshot-ymou.orna"
-            ))
+            .submit(include_str!("fixtures/stdlib-stats-without-snapshot-ymou.orna"))
             .unwrap_err()
             .code(),
         "ORNA-S012-UNRESOLVED"

@@ -10,6 +10,10 @@ use serde::Deserialize;
 
 const GENERATED_HOST_OPERATIONS: &str =
     include_str!(concat!(env!("OUT_DIR"), "/system_host_operations.json"));
+const GENERATED_HOST_OPERATIONS_SCHEMA: &str = include_str!(concat!(
+    env!("OUT_DIR"),
+    "/system_host_operations.schema.json"
+));
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct HostOperationDescriptor {
@@ -106,6 +110,11 @@ pub fn system_host_operation_registry() -> &'static SystemHostOperationRegistry 
 /// Exact canonical bytes embedded from the build-time host-operation registry.
 pub fn system_host_operation_registry_json() -> &'static str {
     GENERATED_HOST_OPERATIONS
+}
+
+/// Deterministic JSON Schema embedded alongside the generated host registry.
+pub fn system_host_operation_registry_schema_json() -> &'static str {
+    GENERATED_HOST_OPERATIONS_SCHEMA
 }
 
 /// A validated snapshot of explicitly approved host environment names.

@@ -1,0 +1,50 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn paired_omission_wave() =
+    ((outer_left, outer_left_sibling): (sys.SnapshotRef, sys.SnapshotRef),
+     (outer_right, outer_right_sibling): (sys.SnapshotRef, sys.SnapshotRef)) =>
+        ((middle_left, middle_left_sibling): (sys.SnapshotRef, sys.SnapshotRef),
+         (middle_right, middle_right_sibling): (sys.SnapshotRef, sys.SnapshotRef)) =>
+            (terminal_pin: sys.SnapshotRef) => [
+                { pin: outer_left, capture: factory_at(outer_left) },
+                { pin: outer_left_sibling, capture: factory_at(outer_left_sibling) },
+                { pin: outer_right, capture: factory_at(outer_right) },
+                { pin: outer_right_sibling, capture: factory_at(outer_right_sibling) },
+                { pin: middle_left, capture: factory_at(middle_left) },
+                { pin: middle_left_sibling, capture: factory_at(middle_left_sibling) },
+                { pin: middle_right, capture: factory_at(middle_right) },
+                { pin: middle_right_sibling, capture: factory_at(middle_right_sibling) },
+                { pin: terminal_pin, capture: factory_at(terminal_pin) },
+            ];
+
+pub fn omitted_sibling_waves_keep_pair_identities() {
+    let wave = paired_omission_wave();
+    let complete_middle = wave(
+        (sys.snapshot("HEAD~120"), sys.snapshot("HEAD~119")),
+        (sys.snapshot("HEAD~118"), sys.snapshot("HEAD~117")),
+    );
+    let complete = complete_middle(
+        (sys.snapshot("HEAD~116"), sys.snapshot("HEAD~115")),
+        (sys.snapshot("HEAD~114"), sys.snapshot("HEAD~113")),
+    )(sys.snapshot("HEAD~112"));
+
+    // Omitting a required sibling suppresses that whole paired wave. A later
+    // complete inner wave still binds its own tuple slots independently.
+    let outer_suppressed = wave((sys.snapshot("HEAD~100"), sys.snapshot("HEAD~99")));
+    let outer_rebound = outer_suppressed(
+        (sys.snapshot("HEAD~90"), sys.snapshot("HEAD~89")),
+        (sys.snapshot("HEAD~88"), sys.snapshot("HEAD~87")),
+    )(sys.snapshot("HEAD~86"));
+
+    let middle_suppressed = complete_middle(
+        (sys.snapshot("HEAD~80"), sys.snapshot("HEAD~79")),
+    );
+    let middle_rebound = middle_suppressed(sys.snapshot("HEAD~76"));
+
+    {
+        complete: complete,
+        outer_suppressed: outer_rebound,
+        middle_suppressed: middle_rebound,
+    }
+}

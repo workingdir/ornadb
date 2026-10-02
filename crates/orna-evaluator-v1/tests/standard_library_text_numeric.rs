@@ -17,10 +17,25 @@ fn pinned_text_and_numeric_modules_expose_their_documented_behaviour() {
     ] {
         assert_eq!(session.submit(import), Ok(None));
     }
+    let actual = session
+        .submit(include_str!("fixtures/stdlib-text-numeric-z09xc.orna"))
+        .unwrap_or_else(|error| panic!("text/numeric fixture failed: {}", error.code()));
+    assert_eq!(actual, Some(bool_value(true)));
+}
+
+#[test]
+fn pinned_statistics_exports_compute_all_aggregate_and_series_results() {
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-text-numeric-z09xc.orna")),
-        Ok(Some(bool_value(true)))
+        session.submit(include_str!("fixtures/stdlib-use-stats-z09xc.orna")),
+        Ok(None)
     );
+    let actual = session
+        .submit(include_str!(
+            "fixtures/stdlib-stats-complete-behavior-yn4vz.orna"
+        ))
+        .unwrap_or_else(|error| panic!("statistics behavior fixture failed: {}", error.code()));
+    assert_eq!(actual, Some(bool_value(true)));
 }
 
 #[test]
