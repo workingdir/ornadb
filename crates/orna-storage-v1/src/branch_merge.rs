@@ -341,11 +341,14 @@ enum BranchMergeTombstoneSubmissionMode {
 }
 
 type PairedRetryPlanSignature = (u64, [u8; 32], Vec<(ObjectId, CanonicalValue)>);
+type DepthFragmentRetrySignature = (u64, usize, usize, [u8; 32]);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AppliedDepthFragmentRetryTransaction {
     bindings: Vec<PairedRetryPlanSignature>,
-    recoveries: Vec<BranchMergeDepthFragmentRecovery>,
+    // Preserve the depth label and canonical delta identity while allowing
+    // set-equivalent tombstones in a fragment to arrive in another order.
+    recoveries: Vec<DepthFragmentRetrySignature>,
     appends: Vec<PairedRetryPlanSignature>,
 }
 
@@ -369,8 +372,18 @@ impl AppliedDepthFragmentRetryTransaction {
             signatures.sort_unstable_by_key(|(order, _, _)| *order);
             signatures
         };
-        let mut recoveries = recoveries.to_vec();
-        recoveries.sort_unstable_by_key(|recovery| (recovery.order, recovery.fragment));
+        let mut recoveries = recoveries
+            .iter()
+            .map(|recovery| {
+                (
+                    recovery.order,
+                    recovery.fragment,
+                    recovery.fragment_count,
+                    depth_fragment_retry_identity(&recovery.tombstones),
+                )
+            })
+            .collect::<Vec<_>>();
+        recoveries.sort_unstable();
         Self {
             bindings: plan_signatures(bindings),
             recoveries,
@@ -386,7 +399,7 @@ impl AppliedDepthFragmentRetryTransaction {
             || self
                 .recoveries
                 .iter()
-                .any(|recovery| recovery.order == order)
+                .any(|recovery| recovery.0 == order)
     }
 }
 
@@ -885,6 +898,10 @@ impl BranchMergeTombstoneHistory {
     /// callers that need separate transactions can use the constituent APIs.
     /// A successful equivalent request can be retried: it returns no new
     /// events and leaves the already-committed result unchanged.
+    /// Recovery receipt identity includes each fragment's order, index, count,
+    /// and canonical tombstone delta. Tombstone ordering inside one fragment
+    /// does not change the receipt identity because released deltas are
+    /// normalized by table and key.
     /// Before changing paired identities, the batch checks fragment-count
     /// labels against every buffered wave in lineage order. This lets a stale
     /// label in an earlier wave remain visible even if a later binding would
