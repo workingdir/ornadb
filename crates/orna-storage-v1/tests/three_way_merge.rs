@@ -20422,6 +20422,63 @@ fn paired_append_keeps_mixed_mode_priority_after_wave_release() {
 }
 
 #[test]
+fn paired_append_preserves_mixed_mode_priority_through_pending_wave_release() {
+    let fixture_key = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .find(|row| row.key == string("a/child/deep"))
+        .expect("the in-crate depth fixture supplies a tombstone key")
+        .key
+        .clone();
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+    let invalid_whole_plan =
+        whole_plan(2, vec![fixture_key.clone(), fixture_key.clone()]);
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(2, 0, 2, &[(id(1), fixture_key)])
+        .unwrap();
+    let before_pending_conflict = history.clone();
+    assert_eq!(
+        history.append(&invalid_whole_plan),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "append checks a buffered future mode before its out-of-order result",
+    );
+    assert_eq!(history, before_pending_conflict);
+
+    history.submit_depth_merge_fragment(2, 1, 2, &[]).unwrap();
+    history.append(&whole_plan(0, Vec::new())).unwrap();
+    let released = history.append(&whole_plan(1, Vec::new()));
+    assert_eq!(released, Ok(()));
+    let before_released_conflict = history.clone();
+    assert_eq!(
+        history.append(&invalid_whole_plan),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "append preserves the same conflict after the depth wave is released",
+    );
+    assert_eq!(history, before_released_conflict);
+
+    let mut unoccupied_history = BranchMergeTombstoneHistory::new(0);
+    assert_eq!(
+        unoccupied_history.append(&whole_plan(2, Vec::new())),
+        Err(BranchMergeTombstoneHistoryError::OutOfOrder {
+            expected: 0,
+            actual: 2,
+        }),
+        "unoccupied future positions remain strict out-of-order errors",
+    );
+}
+
+#[test]
 fn paired_depth_storm_tombstone_history_stabilizes_across_restore_waves() {
     let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
         .split("\n\n")
