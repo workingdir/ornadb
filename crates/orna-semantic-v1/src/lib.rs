@@ -6245,6 +6245,86 @@ fn infer_local_generic_call(
     })
 }
 
+/// Codec decoders take their generic result type through the language's
+/// `as: T` type-witness argument. That argument is syntax, not a runtime
+/// value, so remove it before checking the codec's ordinary data/options
+/// parameters and use it as the call result type.
+fn infer_codec_decode_call(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let path = qualified_path(callee)?;
+    let root = *path.first()?;
+    if local.contains_key(root) {
+        return None;
+    }
+    let resolved = if root == "std" {
+        if !scope.modules.contains_key("std") {
+            return None;
+        }
+        path.iter().map(|part| (*part).to_owned()).collect::<Vec<_>>()
+    } else {
+        let namespace = scope.modules.get(root)?;
+        namespace
+            .0
+            .iter()
+            .cloned()
+            .chain(path[1..].iter().map(|part| (*part).to_owned()))
+            .collect::<Vec<_>>()
+    };
+    let operation = match resolved.join(".").as_str() {
+        "std.encoding.json.decode" => (Type::Text, false),
+        "std.encoding.json.decode_with_options" => (Type::Text, true),
+        "std.encoding.orna.decode" => (Type::Text, false),
+        "std.encoding.ovb.decode" => (Type::Named("std.BINARY_LARGE_OBJECT".into()), false),
+        _ => return None,
+    };
+
+    let mut witness = None;
+    let mut input = None;
+    let mut saw_options = false;
+    let mut positional_seen = false;
+    let mut effects = EffectSummary::default();
+    for argument in arguments {
+        match argument.name.as_deref() {
+            Some("as") if witness.is_none() => {
+                witness = start_type_witness(&argument.value, scope);
+                if witness.is_none() {
+                    diagnostics.push(diag(DIAG_TYPE, "codec result type witness is not a known static type"));
+                }
+            }
+            Some("input") if input.is_none() => {
+                let inferred = infer_contextual(&argument.value, &operation.0, scope, local, diagnostics);
+                effects.join(&inferred.effects);
+                input = Some(inferred.ty);
+            }
+            Some("ignore_unknown_fields") if operation.1 && !saw_options => {
+                let inferred = infer_contextual(&argument.value, &Type::Bool, scope, local, diagnostics);
+                effects.join(&inferred.effects);
+                saw_options = true;
+            }
+            None if input.is_none() && !positional_seen => {
+                let inferred = infer_contextual(&argument.value, &operation.0, scope, local, diagnostics);
+                effects.join(&inferred.effects);
+                input = Some(inferred.ty);
+                positional_seen = true;
+            }
+            _ => diagnostics.push(diag(DIAG_TYPE, "codec decode arguments do not match the documented signature")),
+        }
+    }
+    let Some(witness) = witness else {
+        diagnostics.push(diag(DIAG_TYPE, "codec decode requires an explicit `as: T` type witness"));
+        return Some(Inferred { ty: Type::Error, effects });
+    };
+    if input.is_none() {
+        diagnostics.push(diag(DIAG_TYPE, "codec decode requires an input value"));
+    }
+    Some(Inferred { ty: witness, effects })
+}
+
 /// Validate transfer statements after ordinary expression inference. `for` and
 /// `while` are the only loop forms this semantic slice gives a result type, so
 /// their nearest-loop break value is statically constrained to that result.
@@ -7554,6 +7634,11 @@ fn infer(
             }
             if let Some(inferred) =
                 infer_table_operation(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
+                infer_codec_decode_call(callee, arguments, scope, local, diagnostics)
             {
                 return inferred;
             }
