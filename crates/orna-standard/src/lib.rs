@@ -129,6 +129,7 @@ pub const REFERENCE_STANDARD_TYPE_UTILS_PATH_V1: &str = "std/type_utils.orna";
 pub const REFERENCE_STANDARD_PATTERN_PATH_V1: &str = "std/pattern.orna";
 pub const REFERENCE_STANDARD_ITERATOR_PATH_V1: &str = "std/iterator.orna";
 pub const REFERENCE_STANDARD_LAZY_PATH_V1: &str = "std/lazy.orna";
+pub const REFERENCE_STANDARD_VIEWS_PATH_V1: &str = "std/views.orna";
 
 const REFERENCE_STANDARD_MATH_SOURCE_V1: &str = include_str!("../../../stdlib/std/math.orna");
 const REFERENCE_STANDARD_COLLECTION_SOURCE_V1: &str =
@@ -187,13 +188,14 @@ const REFERENCE_STANDARD_PATTERN_SOURCE_V1: &str =
 const REFERENCE_STANDARD_ITERATOR_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/iterator.orna");
 const REFERENCE_STANDARD_LAZY_SOURCE_V1: &str = include_str!("../../../stdlib/std/lazy.orna");
+const REFERENCE_STANDARD_VIEWS_SOURCE_V1: &str = include_str!("../../../stdlib/std/views.orna");
 
 /// Source units for the Orna 1.0.0 reference standard dependency.
 ///
 /// This is the current source-backed standard boundary. The retained `orna.std/1`–
 /// `orna.std/11` APIs below model older, explicitly versioned snapshots.
 #[must_use]
-pub fn reference_standard_sources_v1() -> [(String, String); 39] {
+pub fn reference_standard_sources_v1() -> [(String, String); 40] {
     [
         (
             REFERENCE_STANDARD_MATH_PATH_V1.into(),
@@ -350,6 +352,10 @@ pub fn reference_standard_sources_v1() -> [(String, String); 39] {
         (
             REFERENCE_STANDARD_LAZY_PATH_V1.into(),
             REFERENCE_STANDARD_LAZY_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_VIEWS_PATH_V1.into(),
+            REFERENCE_STANDARD_VIEWS_SOURCE_V1.into(),
         ),
     ]
 }
