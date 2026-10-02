@@ -19928,34 +19928,108 @@ fn duplicate_tombstones_are_scoped_to_each_concurrent_fragment_wave() {
         .submit_depth_merge_fragment(2, 0, 2, &repeated_tombstone)
         .unwrap();
     history
-        .submit_depth_merge_fragment(1, 0, 2, &repeated_tombstone)
+        .submit_depth_merge_fragment(1, 0, 1, &[])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(0, 0, 1, &repeated_tombstone)
         .unwrap();
     let before_duplicate = history.clone();
     assert_eq!(
         history.submit_depth_merge_fragment(2, 1, 2, &repeated_tombstone),
         Err(BranchMergeTombstoneHistoryError::DuplicateTombstone { order: 2 }),
-        "same-wave duplicates are rejected even with another restore wave buffered",
+        "same-wave duplicates are rejected while a clean restore separates other waves",
     );
     assert_eq!(history, before_duplicate, "rejected fragments leave every wave untouched");
-
-    history.submit_depth_merge_fragment(1, 1, 2, &[]).unwrap();
-    let emitted = history.submit_depth_merge_fragment(0, 0, 1, &[]).unwrap();
-    assert_eq!(
-        emitted.iter().map(|event| (event.order, event.key.clone())).collect::<Vec<_>>(),
-        [(1, repeated_key.clone())],
-        "the same key at another lineage position remains an independent delete event",
-    );
-    assert_eq!(history.next_order(), Some(2));
 
     let emitted = history
         .submit_depth_merge_fragment(2, 1, 2, &[(id(1), distinct_key.clone())])
         .unwrap();
-    assert_eq!(emitted.len(), 2, "the corrected fragment completes only its own wave");
+    assert_eq!(emitted.len(), 2, "the final fragment releases its wave");
     assert!(emitted.iter().any(|event| event.key == repeated_key));
     assert!(emitted.iter().any(|event| event.key == distinct_key));
-    assert!(history.events().iter().any(|event| event.order == 1 && event.table == id(1)));
-    assert!(history.events().iter().any(|event| event.order == 2 && event.table == id(1)));
+    let repeated_orders = history
+        .events()
+        .iter()
+        .filter(|event| event.table == id(1) && event.key == repeated_key)
+        .map(|event| event.order)
+        .collect::<Vec<_>>();
+    assert_eq!(repeated_orders, [0, 2], "the empty restore wave permits a later re-delete");
     assert_eq!(history.next_order(), Some(3));
+}
+
+#[test]
+fn paired_restore_waves_reject_pending_logical_tombstone_duplicates() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    assert!(fixture_rows.iter().any(|row| row.key == string("a/child/deep")));
+    assert!(fixture_rows.iter().any(|row| row.key == string("z")));
+
+    // The storage key comparator accepts both ordinary arrays and the tagged
+    // tuple encoding as the same logical one-component key. Their canonical
+    // bytes differ, so duplicate detection must use key comparison.
+    let components = vec![OvbRaw::Text("a/child/deep".into())];
+    let array_key = CanonicalValue::new(OvbRaw::Array(components.clone())).unwrap();
+    let tuple_key = CanonicalValue::new(OvbRaw::Tag(
+        60015,
+        Box::new(OvbRaw::Array(components)),
+    ))
+    .unwrap();
+    assert_ne!(array_key, tuple_key);
+    assert_eq!(
+        orna_foundation_v1::compare_primary_keys(&array_key, &tuple_key),
+        Ok(std::cmp::Ordering::Equal),
+    );
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(2, 0, 2, &[(id(1), array_key.clone())])
+        .unwrap();
+    let before_cross_wave_duplicate = history.clone();
+    assert_eq!(
+        history.submit_depth_merge_fragment(1, 0, 1, &[(id(1), tuple_key.clone())]),
+        Err(BranchMergeTombstoneHistoryError::ConcurrentDuplicateTombstone {
+            first_order: 1,
+            second_order: 2,
+        }),
+        "different pending restore waves cannot both claim one logical tombstone",
+    );
+    assert_eq!(history, before_cross_wave_duplicate);
+
+    assert_eq!(
+        history.submit_depth_merge_fragment(2, 1, 2, &[(id(1), tuple_key.clone())]),
+        Err(BranchMergeTombstoneHistoryError::DuplicateTombstone { order: 2 }),
+        "one wave also rejects alternate canonical encodings of its key",
+    );
+    assert_eq!(history, before_cross_wave_duplicate);
+
+    history
+        .submit_depth_merge_fragment(1, 0, 1, &[(id(1), string("root"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(2, 1, 2, &[(id(1), string("z"))])
+        .unwrap();
+    let emitted = history.submit_depth_merge_fragment(0, 0, 1, &[]).unwrap();
+    assert_eq!(emitted.len(), 3, "releasing the missing prefix drains ready waves");
+    assert_eq!(history.next_order(), Some(3));
+
+    let emitted = history
+        .submit_depth_merge_fragment(3, 0, 1, &[(id(1), tuple_key.clone())])
+        .unwrap();
+    assert_eq!(emitted.len(), 1, "a later released position may record a new event");
+    let repeated_orders = history
+        .events()
+        .iter()
+        .filter(|event| {
+            event.table == id(1)
+                && orna_foundation_v1::compare_primary_keys(&event.key, &array_key)
+                    == Ok(std::cmp::Ordering::Equal)
+        })
+        .map(|event| event.order)
+        .collect::<Vec<_>>();
+    assert_eq!(repeated_orders, [2, 3]);
+    assert_eq!(history.next_order(), Some(4));
 }
 
 #[test]
