@@ -1,0 +1,4 @@
+pub table Account(id: Int) {
+    identity: (Int, Str)?,
+    assert all_unique(account => account.identity);
+}

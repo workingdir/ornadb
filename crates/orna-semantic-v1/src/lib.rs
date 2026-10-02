@@ -13111,7 +13111,31 @@ fn infer_success_pipeline(
 }
 
 fn is_default_float_equality_type(ty: &Type) -> bool {
-    matches!(ty, Type::Float) || matches!(ty, Type::Applied { base, .. } if base == "Float")
+    match ty {
+        Type::Float => true,
+        Type::Applied { base, arguments } => {
+            base == "Float" || arguments.iter().any(is_default_float_equality_type)
+        }
+        Type::List(element) | Type::Optional(element) | Type::Range(element) => {
+            is_default_float_equality_type(element)
+        }
+        Type::Tuple(elements) => elements.iter().any(is_default_float_equality_type),
+        Type::Record(fields) => fields.values().any(is_default_float_equality_type),
+        Type::MoneyPerUnit { currency, unit } => {
+            is_default_float_equality_type(currency) || is_default_float_equality_type(unit)
+        }
+        Type::Relation(_) | Type::Stream(_) | Type::Function { .. } => false,
+        Type::Int
+        | Type::Decimal
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null
+        | Type::Named(_)
+        | Type::Bottom
+        | Type::Error => false,
+    }
 }
 
 fn infer_recovery_pipeline(
@@ -16689,13 +16713,42 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                     || contains_type_error(actual)
                     || !types_match(formal, actual))
         });
+    let paired_direct_binders = formal_parameters
+        .iter()
+        .filter_map(|formal| snapshot_ref_context_key(formal).and_then(snapshot_ref_binder_id))
+        .collect::<BTreeSet<_>>();
+    let incomplete_paired_direct_rebind = paired_direct_binders.len() > 1
+        && formal_parameters
+            .iter()
+            .enumerate()
+            .any(|(parameter_index, formal)| {
+                if snapshot_ref_context_key(formal)
+                    .and_then(snapshot_ref_binder_id)
+                    .is_none()
+                {
+                    return false;
+                }
+                let Some(argument_index) = call_argument_index_for_position(
+                    parameter_names,
+                    parameter_index,
+                    arguments,
+                ) else {
+                    return false;
+                };
+                argument_types
+                    .get(argument_index)
+                    .is_none_or(|actual| !is_contextual_snapshot_ref(actual))
+            });
     // The reference specifies pin identity but leaves recovery after a call
     // that cannot reach the callee unspecified. Treat its binding wave
     // transactionally:
     // a malformed tuple at any depth in an argument signature, or any missing
     // required argument, must not rebind otherwise valid siblings captured by
-    // the returned callable. Omitted defaults are valid.
-    let suppress_rebinding = nonreturning_argument || incomplete_argument;
+    // the returned callable. Paired direct pin parameters share that wave too;
+    // an unknown sibling must not promote the other pin alone. Omitted defaults
+    // are valid.
+    let suppress_rebinding =
+        nonreturning_argument || incomplete_argument || incomplete_paired_direct_rebind;
     if !suppress_rebinding {
         for (parameter_index, formal) in formal_parameters.iter().enumerate() {
             let Some(argument_index) = call_argument_index_for_position(
@@ -17566,6 +17619,45 @@ fn tuple_checkpoint_promotion_matches(left: &[Type], right: &[Type]) -> bool {
             .iter()
             .zip(right)
             .all(|(left, right)| checkpoint_pin_map_widths_match(left, right))
+        && tuple_checkpoint_compaction_fold_preserves_pin_identity(left, right)
+}
+
+/// A folded tuple map must not invent cross-slot identity by unioning maps
+/// from opposite rows. The reference does not define that compaction case;
+/// only promote when every identity shared after the fold was shared within
+/// at least one input row.
+fn tuple_checkpoint_compaction_fold_preserves_pin_identity(
+    left: &[Type],
+    right: &[Type],
+) -> bool {
+    let mut pin_maps = Vec::new();
+    for (left, right) in left.iter().zip(right) {
+        if !collect_corresponding_snapshot_context_maps(left, right, &mut pin_maps) {
+            return false;
+        }
+    }
+
+    pin_maps.iter().enumerate().all(|(index, (left, right))| {
+        let folded = left.union(right).cloned().collect::<BTreeSet<_>>();
+        pin_maps[index + 1..]
+            .iter()
+            .all(|(other_left, other_right)| {
+                let folded_other = other_left
+                    .union(other_right)
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let shared_before = left
+                    .intersection(other_left)
+                    .chain(right.intersection(other_right))
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let shared_after = folded
+                    .intersection(&folded_other)
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                shared_after == shared_before
+            })
+    })
 }
 
 fn checkpoint_pin_map_widths_match(left: &Type, right: &Type) -> bool {
@@ -18624,10 +18716,52 @@ fn infer_table_assertion(
     let mut local = BTreeMap::new();
     insert_local_binding(name, row.clone(), &mut local, diagnostics);
     let inferred = infer(body, scope, &local, diagnostics);
-    let valid = text == "all_unique" || inferred.ty == Type::Bool;
+    let valid = match text.as_str() {
+        "every" => inferred.ty == Type::Bool,
+        "all_unique" => is_lawful_all_unique_key_type(&inferred.ty),
+        _ => unreachable!("table predicate constructors were matched above"),
+    };
+    if text == "all_unique" && inferred.ty != Type::Error && !valid {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "all_unique selector must return a lawful equality key; Float and noncanonical values are not valid keys",
+        ));
+    }
     Inferred {
         ty: if valid { Type::Bool } else { Type::Error },
         effects: inferred.effects,
+    }
+}
+
+/// `all_unique` compares complete canonical selected values. Function and
+/// relation values have no stable value identity, and default Float equality
+/// is intentionally unavailable; nested keys inherit those restrictions.
+fn is_lawful_all_unique_key_type(ty: &Type) -> bool {
+    match ty {
+        Type::Error => false,
+        Type::Float => false,
+        Type::Applied { base, arguments } => {
+            base != "Float" && arguments.iter().all(is_lawful_all_unique_key_type)
+        }
+        Type::List(element) | Type::Optional(element) => {
+            is_lawful_all_unique_key_type(element)
+        }
+        Type::Tuple(elements) => elements.iter().all(is_lawful_all_unique_key_type),
+        Type::Record(fields) => fields.values().all(is_lawful_all_unique_key_type),
+        Type::Range(_)
+        | Type::Relation(_)
+        | Type::Stream(_)
+        | Type::Function { .. }
+        | Type::MoneyPerUnit { .. } => false,
+        Type::Int
+        | Type::Decimal
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null
+        | Type::Named(_)
+        | Type::Bottom => true,
     }
 }
 
@@ -19731,6 +19865,56 @@ mod tests {
         assert_ne!(
             left, right,
             "suppression must keep same-named paired pin slots at distinct widths"
+        );
+    }
+
+    #[test]
+    fn unknown_direct_pair_sibling_suppresses_valid_pin_promotion() {
+        let left = contextual_snapshot_ref(
+            "selector:binder:pair.orna@10..18:parameter:left_pin",
+        );
+        let right = contextual_snapshot_ref(
+            "selector:binder:pair.orna@20..28:parameter:right_pin",
+        );
+        let result = Type::Record(BTreeMap::from([
+            ("left".into(), left.clone()),
+            ("right".into(), right.clone()),
+        ]));
+        let arguments = (0..2)
+            .map(|index| orna_syntax_v1::Argument {
+                name: None,
+                value: Expr::Name {
+                    text: format!("pair_pin_{index}"),
+                    span: SyntaxSpan::new(40 + index * 12, 48 + index * 12),
+                },
+                span: SyntaxSpan::new(40 + index * 12, 48 + index * 12),
+            })
+            .collect::<Vec<_>>();
+
+        let specialized = specialize_dynamic_parameter_snapshot_contexts(
+            &result,
+            &[left, right],
+            &BTreeSet::new(),
+            None,
+            &arguments,
+            &[contextual_snapshot_ref("selector:HEAD~12"), Type::Error],
+            &BTreeMap::new(),
+            &SyntaxSpan::new(30, 68),
+            None,
+        );
+
+        let mut contexts = BTreeSet::new();
+        collect_test_snapshot_contexts(&specialized, &mut contexts);
+        assert_eq!(contexts.len(), 2, "both pins must remain represented: {contexts:?}");
+        assert!(
+            contexts
+                .iter()
+                .all(|context| context.starts_with("selector:dynamic-call:")),
+            "an unknown pair sibling must suppress every sibling promotion: {contexts:?}"
+        );
+        assert!(
+            !contexts.iter().any(|context| context.contains("HEAD~12")),
+            "the valid sibling must not be promoted independently: {contexts:?}"
         );
     }
 
