@@ -1,0 +1,27 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn returning_to_old_bundle_pin_keeps_middle_pin_distinct() {
+    let current = {
+        left: chained_factory(sys.snapshot("HEAD~30")),
+        right: forwarded_factory(sys.snapshot("HEAD~30")),
+    };
+    current = {
+        left: chained_factory(sys.snapshot("HEAD~20")),
+        right: forwarded_factory(sys.snapshot("HEAD~20")),
+    };
+    let middle = current;
+    current = {
+        left: chained_factory(sys.snapshot("HEAD~10")),
+        right: forwarded_factory(sys.snapshot("HEAD~10")),
+    };
+    current = {
+        left: chained_factory(sys.snapshot("HEAD~30")),
+        right: forwarded_factory(sys.snapshot("HEAD~30")),
+    };
+    [middle.left, current.left]
+}
