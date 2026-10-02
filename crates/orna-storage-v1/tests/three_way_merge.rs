@@ -19209,6 +19209,237 @@ fn paired_unequal_depth_restore_storms_rebuild_table_local_chains() {
 }
 
 #[test]
+fn paired_depth_storm_restore_retries_preserve_uneven_chain_history() {
+    // A deep storm chain is paired with a shorter anchor chain. After both
+    // chains' deletions are committed, a restore wave also deletes surviving
+    // keys; failure after the peer has read a restore row must not leak either
+    // table's candidate or replay the older storm tombstones on retry.
+    let storm_template = parse_fixture(TOMBSTONE_RECOVERY_STORM, RowKeyKind::Explicit);
+    let storm_rows = TOMBSTONE_STORM_KEYS
+        .iter()
+        .map(|key| rekey_row(&storm_template, key))
+        .collect::<Vec<_>>();
+    let anchor_rows = TOMBSTONE_PAIRED_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let storm_restores = storm_rows
+        .iter()
+        .filter(|row| row.key != string("z"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let anchor_restores = anchor_rows.iter().take(3).cloned().collect::<Vec<_>>();
+    assert_eq!(storm_rows.len(), TOMBSTONE_STORM_KEYS.len());
+    assert_eq!(storm_restores.len(), TOMBSTONE_STORM_KEYS.len() - 1);
+    assert_eq!(anchor_restores.len(), 3);
+
+    let wave_one_deletes = [
+        "a",
+        "a/child",
+        "a/child/deep",
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/storm/a",
+        "root/child/deep/storm/b",
+        "root/child/deep/storm/c",
+        "root/child/deep/storm/d",
+        "root/child/deep/storm/e",
+        "root/child/deep/storm/f",
+    ];
+    let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+        &[&storm_rows, &anchor_rows],
+        &wave_one_deletes,
+        &wave_one_deletes,
+        0,
+        false,
+        "uneven-depth-storm-wave-one",
+    );
+    let wave_one = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 40, max_conflicts: 0 },
+    )
+    .expect("the setup wave commits the deep storm and short-chain tombstones");
+    let first_storm_delta = TOMBSTONE_STORM_KEYS[..TOMBSTONE_STORM_KEYS.len() - 1]
+        .iter()
+        .map(|key| string(key))
+        .collect::<Vec<_>>();
+    let first_anchor_delta = ["a", "a/child", "a/child/deep"].map(string);
+    assert_eq!(table_row_tombstones(&wave_one, id(1)), first_storm_delta);
+    assert_eq!(table_row_tombstones(&wave_one, id(2)), first_anchor_delta);
+    assert_eq!(table_live_row_keys(&wave_one, id(1)), vec![string("z")]);
+    assert_eq!(
+        table_live_row_keys(&wave_one, id(2)),
+        ["b", "c", "d", "zz"].map(string),
+    );
+
+    let table_one_base = table_live_rows(&wave_one, id(1));
+    let table_two_base = table_live_rows(&wave_one, id(2));
+    let second_wave_deletes = ["b", "z"];
+    let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+        &[&table_one_base, &table_two_base],
+        &second_wave_deletes,
+        &second_wave_deletes,
+        0,
+        false,
+        "uneven-depth-storm-wave-two-failed",
+    );
+    for row in &storm_restores {
+        add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(1), &[row.clone()]);
+        add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(1), &[row.clone()]);
+    }
+    for row in &anchor_restores {
+        add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(2), &[row.clone()]);
+        add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(2), &[row.clone()]);
+    }
+    let mut interrupted = FailOnTableAfterRowsFixtureRows {
+        source,
+        table: id(2),
+        side: MergeSide::Left,
+        fail_after_rows: 4,
+        rows_delivered: 0,
+        rows_seen: Vec::new(),
+        failed_at: None,
+    };
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: 80, max_conflicts: 0 },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed after a partial row prefix".into(),
+        }),
+    );
+    assert_eq!(interrupted.rows_delivered, 4);
+    assert!(interrupted.rows_seen.contains(&string("a")));
+    assert_eq!(
+        interrupted.failed_at.as_ref().map(|(table, side, _)| (*table, *side)),
+        Some((id(2), MergeSide::Left)),
+    );
+    assert!(interrupted.source.visited.iter().any(|(_, locator)| {
+        locator.starts_with(b"uneven-depth-storm-wave-two-failed-table-0-")
+    }));
+
+    const RETRIES: usize = 8;
+    let start = Arc::new(Barrier::new(RETRIES));
+    let mut workers = Vec::with_capacity(RETRIES);
+    for retry in 0..RETRIES {
+        let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+            &[&table_one_base, &table_two_base],
+            &second_wave_deletes,
+            &second_wave_deletes,
+            retry % 2,
+            false,
+            "uneven-depth-storm-wave-two-recovered",
+        );
+        for row in &storm_restores {
+            add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(1), &[row.clone()]);
+            add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(1), &[row.clone()]);
+        }
+        for row in &anchor_restores {
+            add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(2), &[row.clone()]);
+            add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(2), &[row.clone()]);
+        }
+        if retry >= RETRIES / 2 {
+            for rows in source.rows.values_mut() {
+                rows.reverse();
+            }
+        }
+        let reverse_branches = retry % 2 == 1;
+        if reverse_branches {
+            let original_rows = std::mem::take(&mut source.rows);
+            source.rows = original_rows
+                .into_iter()
+                .map(|((side, locator), rows)| {
+                    let side = match side {
+                        MergeSide::Left => MergeSide::Right,
+                        MergeSide::Right => MergeSide::Left,
+                        MergeSide::Base => MergeSide::Base,
+                    };
+                    ((side, locator), rows)
+                })
+                .collect();
+        }
+        let gate = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+            let (merge_left, merge_right) = if reverse_branches {
+                (&right, &left)
+            } else {
+                (&left, &right)
+            };
+            merge_three_way_snapshots(
+                &base,
+                merge_left,
+                merge_right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 80, max_conflicts: 0 },
+            )
+            .expect("uneven depth-storm restores retry within their private budget")
+        }));
+    }
+
+    let expected_storm_keys = TOMBSTONE_STORM_KEYS[..TOMBSTONE_STORM_KEYS.len() - 1]
+        .iter()
+        .map(|key| string(key))
+        .collect::<Vec<_>>();
+    let expected_anchor_keys = ["a", "a/child", "a/child/deep", "c", "d", "zz"].map(string);
+    let second_storm_delta = ["z"].map(string);
+    let second_anchor_delta = ["b"].map(string);
+    let mut selected_retry = None;
+    for worker in workers {
+        let plan = worker.join().expect("depth-storm restore retry completes");
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        assert_eq!(table_row_tombstones(&plan, id(1)), second_storm_delta);
+        assert_eq!(table_row_tombstones(&plan, id(2)), second_anchor_delta);
+        assert_eq!(table_live_row_keys(&plan, id(1)), expected_storm_keys);
+        assert_eq!(table_live_row_keys(&plan, id(2)), expected_anchor_keys);
+        assert_ne!(
+            match &plan.tables[&id(1)].segments[0] {
+                MergedSegment::Rows { range, .. } => range,
+                other => panic!("deep storm split must materialize: {other:?}"),
+            },
+            match &plan.tables[&id(2)].segments[0] {
+                MergedSegment::Rows { range, .. } => range,
+                other => panic!("short paired-chain split must materialize: {other:?}"),
+            },
+            "the two chain shapes keep different split boundaries",
+        );
+        for row in &storm_restores {
+            let mut expected = row.clone();
+            expected.table = id(1);
+            assert!(table_live_rows(&plan, id(1)).contains(&expected));
+        }
+        for row in &anchor_restores {
+            let mut expected = row.clone();
+            expected.table = id(2);
+            assert!(table_live_rows(&plan, id(2)).contains(&expected));
+        }
+        if selected_retry.is_none() {
+            selected_retry = Some(plan);
+        }
+    }
+    let selected = selected_retry.expect("at least one depth-storm restore retry completes");
+    let expected_storm_history = TOMBSTONE_STORM_KEYS
+        .iter()
+        .map(|key| string(key))
+        .collect::<Vec<_>>();
+    let expected_anchor_history = ["a", "a/child", "a/child/deep", "b"].map(string);
+    let mut storm_history = table_row_tombstones(&wave_one, id(1));
+    storm_history.extend(table_row_tombstones(&selected, id(1)));
+    let mut anchor_history = table_row_tombstones(&wave_one, id(2));
+    anchor_history.extend(table_row_tombstones(&selected, id(2)));
+    assert_eq!(storm_history, expected_storm_history);
+    assert_eq!(anchor_history, expected_anchor_history);
+}
+
+#[test]
 fn unequal_depth_paired_chain_read_failure_discards_partial_order() {
     let (base, left, right, source) = paired_distinct_depth_chain_inputs(true, true, false);
     let mut interrupted = FailAfterRowsFixtureRows {
