@@ -1,0 +1,45 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn checkpoint(pin: sys.SnapshotRef) = {
+    capture: factory_at(pin),
+};
+
+pub fn tuple_checkpoint_promotion_is_suppressed_on_width_drift() {
+    let checkpoints = [
+        (
+            [
+                checkpoint(sys.snapshot("HEAD~90")),
+                checkpoint(sys.snapshot("HEAD~89")),
+            ],
+            factory_at(sys.snapshot("HEAD~88")),
+        ),
+        (
+            [
+                checkpoint(sys.snapshot("HEAD~87")),
+                checkpoint(sys.snapshot("HEAD~86")),
+            ],
+            factory_at(sys.snapshot("HEAD~85")),
+        ),
+    ];
+    let saved = checkpoints;
+    let candidate = [
+        (
+            [
+                checkpoint(sys.snapshot("HEAD~80")),
+                checkpoint(sys.snapshot("HEAD~79")),
+            ],
+            factory_at(sys.snapshot("HEAD~78")),
+        ),
+        (
+            [checkpoint(sys.snapshot("HEAD~77"))],
+            factory_at(sys.snapshot("HEAD~76")),
+        ),
+    ];
+    checkpoints = candidate;
+    {
+        saved: saved,
+        checkpoint: checkpoints,
+        candidate: candidate,
+    }
+}

@@ -1,0 +1,14 @@
+pub table Note {
+    text: Str = "generated",
+}
+
+pub fn main() {
+    let inserted = Note.insert({});
+    assert inserted.id == 5;
+    assert inserted.text == "generated";
+
+    let upserted = Note.upsert({ text: "supplied" });
+    assert upserted.id == 6;
+    assert upserted.text == "supplied";
+    upserted
+}
