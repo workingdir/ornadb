@@ -962,6 +962,7 @@ impl PackageResolver {
         replacement_waves: &[[PinnedDatabase; 2]],
     ) -> Result<ReboundPathResolution, AttachmentError> {
         checkpoint.validate_depth_identity()?;
+        previous.validate_depth_label(&checkpoint.depth_label)?;
 
         let mut route = previous.clone();
         let mut retained_checkpoint_labels = Vec::new();
