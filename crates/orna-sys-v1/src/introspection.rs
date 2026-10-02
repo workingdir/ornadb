@@ -2968,7 +2968,8 @@ fn byte_cap_scope_path_label(path: &[PlanByteCapScopeSegment]) -> String {
     for segment in path {
         let label = match segment {
             PlanByteCapScopeSegment::StormStage { index } => format!("storm{index}"),
-            PlanByteCapScopeSegment::StormStageOutput { .. } => "output".to_owned(),
+            // Preserve the typed producer-stage identity in rendered paths.
+            PlanByteCapScopeSegment::StormStageOutput { index } => format!("output{index}"),
             PlanByteCapScopeSegment::Branch { index } => format!("branch{index}"),
             PlanByteCapScopeSegment::Limit { position } => format!("limit{position}"),
             PlanByteCapScopeSegment::BranchOutput { index } => format!("branch_output{index}"),
