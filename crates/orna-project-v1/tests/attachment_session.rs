@@ -10951,7 +10951,11 @@ fn atomic_rebind_preserves_retained_routes_through_paired_depths() {
     assert_module_route(&parent, "archive.orna", "= 502");
     assert_pin(&retained_parent, aliases[0], &middle_before_commit);
     assert_module_route(&retained_parent, "archive.orna", "= 501");
-    assert_pin(&previous_middle, aliases[0], &middle_before_commit);
+    assert_eq!(previous_middle.pin().name(), aliases[0]);
+    assert_eq!(
+        previous_middle.pin().commit().as_str(),
+        middle_before_commit.as_str()
+    );
 
     let mut retained_middle = resolver
         .resolve_nested_for_alias(&retained_parent, aliases[0])
@@ -10965,7 +10969,11 @@ fn atomic_rebind_preserves_retained_routes_through_paired_depths() {
         .unwrap();
     assert_pin(&retained_middle, aliases[1], &deep_after_commit);
     assert_module_route(&retained_middle, "archive_copy.orna", "= 602");
-    assert_pin(&retained_deep, aliases[1], &deep_before_commit);
+    assert_eq!(retained_deep.pin().name(), aliases[1]);
+    assert_eq!(
+        retained_deep.pin().commit().as_str(),
+        deep_before_commit.as_str()
+    );
 
     let retained_terminal = resolver.resolve_for_parent(retained_deep).unwrap();
     assert_pin(
