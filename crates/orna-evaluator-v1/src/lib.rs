@@ -48,7 +48,7 @@ pub use repl::{ReplSession, parse_admitted_repl};
 /// crate verifies its pinned profile before either boundary admits an import.
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
-pub fn reference_standard_sources() -> [(String, String); 40] {
+pub fn reference_standard_sources() -> [(String, String); 42] {
     orna_standard::reference_standard_sources_v1()
 }
 
@@ -3620,6 +3620,9 @@ impl Context<'_, '_> {
                     Ok(Value::Relation(plan))
                 }
                 "count" | "first" | "last" | "one" | "every" | "exists" | "sum" | "min" | "max" => {
+                    // Keep adjacent filters compiled as one cascade until
+                    // terminal demand begins, then push the batch once.
+                    let plan = plan.flush_filter_cascade();
                     self.observe_relation(&plan, name, &ordered[1..], depth)
                 }
                 _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
@@ -9316,6 +9319,124 @@ mod tests {
                 RelationStage::Map(right_map),
                 RelationStage::Filter(vec![outer_first, outer_second]),
             ]
+        );
+    }
+
+    #[test]
+    fn relation_plan_pushes_ordered_cascade_through_zero_drop_unknown_union_storm() {
+        let left_first = Value::Bool(true);
+        let right_map = Value::Int(7.into());
+        let right_first = Value::Bool(false);
+        let outer_first = Value::Bool(false);
+        let outer_second = Value::Bool(true);
+        let left = RelationPlan::new("Known".into())
+            .with_stage(RelationStage::Filter(vec![left_first.clone()]));
+        let unknown_left = RelationPlan::new("UnknownLeft".into())
+            .with_stage(RelationStage::Map(right_map.clone()));
+        let unknown_right = RelationPlan::new("UnknownRight".into())
+            .with_stage(RelationStage::Filter(vec![right_first.clone()]));
+        let plan = RelationPlan::union(left, RelationPlan::union(unknown_left, unknown_right))
+            .with_stage(RelationStage::Drop(0))
+            .with_stage(RelationStage::Filter(vec![outer_first.clone()]))
+            .with_stage(RelationStage::Filter(vec![outer_second.clone()]))
+            .with_stage(RelationStage::Take(2));
+
+        assert_eq!(plan.stages, vec![RelationStage::Take(2)]);
+        let (left, right) = plan.source_union.as_ref().unwrap();
+        assert_eq!(
+            left.stages,
+            vec![RelationStage::Filter(vec![
+                left_first,
+                outer_first.clone(),
+                outer_second.clone(),
+            ])]
+        );
+        let (unknown_left, unknown_right) = right.source_union.as_ref().unwrap();
+        assert_eq!(
+            unknown_left.stages,
+            vec![
+                RelationStage::Map(right_map),
+                RelationStage::Filter(vec![outer_first.clone(), outer_second.clone()]),
+            ]
+        );
+        assert_eq!(
+            unknown_right.stages,
+            vec![RelationStage::Filter(vec![
+                right_first,
+                outer_first,
+                outer_second,
+            ])]
+        );
+    }
+
+    #[test]
+    fn relation_plan_batches_adjacent_filters_before_unknown_union_storm_flush() {
+        let existing = Value::Bool(true);
+        let transform = Value::Int(7.into());
+        let first = Value::Bool(false);
+        let second = Value::Bool(true);
+        let third = Value::Int(3.into());
+        let plan = RelationPlan::union(
+            RelationPlan::new("Known".into())
+                .with_stage(RelationStage::Filter(vec![existing.clone()])),
+            RelationPlan::union(
+                RelationPlan::new("UnknownMapped".into())
+                    .with_stage(RelationStage::Map(transform.clone())),
+                RelationPlan::union(
+                    RelationPlan::new("UnknownLeft".into())
+                        .with_stage(RelationStage::Filter(vec![existing.clone()])),
+                    RelationPlan::new("UnknownRight".into()),
+                ),
+            ),
+        )
+        .with_stage(RelationStage::Drop(0))
+        .with_stage(RelationStage::Filter(vec![first.clone()]))
+        .with_stage(RelationStage::Filter(vec![second.clone()]))
+        .with_stage(RelationStage::Filter(vec![third.clone()]));
+
+        assert_eq!(
+            plan.stages,
+            vec![RelationStage::Filter(vec![
+                first.clone(),
+                second.clone(),
+                third.clone(),
+            ])],
+            "adjacent filters compile into one pending cascade before tree traversal"
+        );
+        let flushed = plan.flush_filter_cascade();
+        assert!(flushed.stages.is_empty());
+        let (known, storm) = flushed.source_union.as_ref().unwrap();
+        assert_eq!(
+            known.stages,
+            vec![RelationStage::Filter(vec![
+                existing.clone(),
+                first.clone(),
+                second.clone(),
+                third.clone(),
+            ])]
+        );
+        let (mapped, nested) = storm.source_union.as_ref().unwrap();
+        assert_eq!(
+            mapped.stages,
+            vec![
+                RelationStage::Map(transform),
+                RelationStage::Filter(vec![first.clone(), second.clone(), third.clone()]),
+            ],
+            "an intervening map remains before the pending cascade"
+        );
+        let (unknown_left, unknown_right) = nested.source_union.as_ref().unwrap();
+        assert_eq!(
+            unknown_left.stages,
+            vec![RelationStage::Filter(vec![
+                existing,
+                first.clone(),
+                second.clone(),
+                third.clone(),
+            ])]
+        );
+        assert_eq!(
+            unknown_right.stages,
+            vec![RelationStage::Filter(vec![first, second, third])]
         );
     }
 

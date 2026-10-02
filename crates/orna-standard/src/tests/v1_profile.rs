@@ -25,6 +25,7 @@ use crate::{
     REFERENCE_STANDARD_PATTERN_PATH_V1,
     REFERENCE_STANDARD_ITERATOR_PATH_V1, REFERENCE_STANDARD_LAZY_PATH_V1,
     REFERENCE_STANDARD_VIEWS_PATH_V1,
+    REFERENCE_STANDARD_INTROSPECTION_PATH_V1, REFERENCE_STANDARD_REFLECTION_PATH_V1,
     reference_standard_catalogue_v1,
     reference_standard_profile_v1, reference_standard_sources_v1,
 };
@@ -46,6 +47,8 @@ fn pinned_std_entrypoint_imports_optional_content_modules() {
     assert!(entrypoint.lines().any(|line| line.trim() == "use iterator;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use lazy;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use views;"));
+    assert!(entrypoint.lines().any(|line| line.trim() == "use introspection;"));
+    assert!(entrypoint.lines().any(|line| line.trim() == "use reflection;"));
 }
 
 #[test]
@@ -87,6 +90,36 @@ fn pinned_collection_views_and_slices_typecheck_as_an_ordinary_std_module() {
     let consumer = include_str!("fixtures/v1_views_consumer_wc6kr.orna");
     let analysis = analyze_with_catalogue(
         &[ModuleInput::new("views_consumer.orna", consumer)],
+        &catalogue,
+    );
+    assert!(
+        analysis.is_ok(),
+        "{}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+}
+
+#[test]
+fn pinned_reflection_and_introspection_modules_typecheck_as_ordinary_std_modules() {
+    let sources = reference_standard_sources_v1();
+    for (index, path) in [
+        (40, REFERENCE_STANDARD_INTROSPECTION_PATH_V1),
+        (41, REFERENCE_STANDARD_REFLECTION_PATH_V1),
+    ] {
+        assert_eq!(sources[index].0, path);
+        let parsed = orna_syntax_v1::parse_module_with_file(&sources[index].1, path);
+        assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
+    }
+    let catalogue = reference_standard_catalogue_v1()
+        .expect("reflection and introspection resolve against the mandatory sys surface");
+    let consumer = include_str!("fixtures/v1_reflection_consumer_y3xo7.orna");
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("reflection_consumer.orna", consumer)],
         &catalogue,
     );
     assert!(
@@ -544,7 +577,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
-    assert_eq!(sources.len(), 40);
+    assert_eq!(sources.len(), 42);
     assert_eq!(sources[34].0, REFERENCE_STANDARD_GENERICS_PATH_V1);
     for declaration in [
         "pub fn identity<T>(value: T): T",
@@ -678,6 +711,49 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[39].1.contains(contract), "missing std.views contract `{contract}`");
     }
+    assert_eq!(sources[40].0, REFERENCE_STANDARD_INTROSPECTION_PATH_V1);
+    for declaration in [
+        "pub fn metadata<T>(value: T): sys.ValueMetadata<T>",
+        "pub fn resolve_object(",
+        "pub fn resolve_function(",
+        "pub fn describe(object: sys.ObjectRef): sys.ObjectDescription",
+        "pub fn source(object: sys.ObjectRef): sys.SourceDocument",
+        "pub fn file_source(file: sys.FileRef): sys.SourceDocument",
+        "pub fn history(object: sys.ObjectRef): Relation<sys.Revision>",
+        "pub fn file_history(file: sys.FileRef): Relation<sys.FileVersion>",
+        "pub fn dependencies(",
+        "pub fn dependents(",
+        "pub fn explain_function(function: sys.FunctionRef): sys.Plan",
+        "pub fn explain_query<T>(query: Query<T>): sys.Plan",
+        "pub fn explain_diagnostic(diagnostic: sys.Diagnostic): sys.Explanation",
+    ] {
+        assert!(sources[40].1.contains(declaration), "missing std.introspection declaration `{declaration}`");
+    }
+    assert_eq!(sources[41].0, REFERENCE_STANDARD_REFLECTION_PATH_V1);
+    for declaration in [
+        "pub fn invoke_as<T>(",
+        "pub fn invoke_value(",
+        "pub fn start_as<T>(",
+        "pub fn start_value(",
+        "pub fn await_result<T>(",
+        "pub fn cancel<T>(",
+    ] {
+        assert!(sources[41].1.contains(declaration), "missing std.reflection declaration `{declaration}`");
+    }
+    let reflection_contract_text = sources[41]
+        .1
+        .lines()
+        .map(|line| line.trim().trim_start_matches("//").trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    for contract in [
+        "wrappers do not evaluate source text",
+        "The result witness is explicit and checked before target effects",
+        "Asynchronous starts use a separate transaction by default",
+        "A timeout does not cancel the child",
+    ] {
+        assert!(reflection_contract_text.contains(contract), "missing std.reflection contract `{contract}`");
+    }
     assert_eq!(sources[19].0, REFERENCE_STANDARD_ERROR_PATH_V1);
     assert!(sources[19].1.contains("pub fn make(code: Str, message: Str): Error"));
     assert!(sources[19]
@@ -767,6 +843,8 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         (REFERENCE_STANDARD_ITERATOR_PATH_V1, 37),
         (REFERENCE_STANDARD_LAZY_PATH_V1, 38),
         (REFERENCE_STANDARD_VIEWS_PATH_V1, 39),
+        (REFERENCE_STANDARD_INTROSPECTION_PATH_V1, 40),
+        (REFERENCE_STANDARD_REFLECTION_PATH_V1, 41),
     ] {
         let mut changed_source = sources[source_index].1.clone();
         changed_source.push_str("\n// changed after the captured snapshot\n");

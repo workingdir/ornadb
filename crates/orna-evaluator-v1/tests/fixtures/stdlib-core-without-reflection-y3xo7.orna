@@ -1,0 +1,1 @@
+fn core_without_reflection(): Bool = (20 + 22) == 42;

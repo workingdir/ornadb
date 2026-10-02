@@ -324,9 +324,14 @@ enum BranchMergeTombstoneSubmissionMode {
 /// Submission positions are classified centrally. Exhaustion takes priority;
 /// accepted and duplicate-retry positions keep their mode through release.
 /// `submit` and fragment submission classify replays of accepted positions as
-/// stale and cross-mode retries as conflicts. `append` preserves its strict
-/// `OutOfOrder` result for same-mode or unoccupied position mismatches but
-/// checks known cross-mode conflicts first. Unrecorded stale order precedes
+/// stale and cross-mode retries as conflicts. `append` writes at the first
+/// unoccupied position after the contiguous buffered prefix, so whole paired
+/// plans can queue behind an incomplete depth wave without crossing a gap. It
+/// preserves its strict `OutOfOrder` result for same-mode or unoccupied
+/// position mismatches but checks known cross-mode conflicts first. Failed
+/// appends are atomic: a cross-position duplicate does not retain the
+/// retry-mode reservation that `submit` and fragment submission keep.
+/// Unrecorded stale order precedes
 /// buffered and retry-mode checks, and mixed-mode conflicts precede
 /// fragment-index or tombstone-content validation.
 /// Concurrent completions may arrive out of order; future deltas wait until
@@ -353,19 +358,29 @@ impl BranchMergeTombstoneHistory {
         }
     }
 
-    /// Appends one plan emitted by [`BranchMergePlanSequencer`] at its next
-    /// lineage position. Empty deltas still consume their paired plan order.
+    /// Appends one plan emitted by [`BranchMergePlanSequencer`] after the
+    /// contiguous positions already buffered or released. Whole plans may
+    /// queue behind incomplete depth waves, but cannot skip an unbuffered
+    /// position. Empty deltas still consume their paired plan order. A
+    /// rejected append leaves all history, including retry-mode state,
+    /// unchanged.
     pub fn append(
         &mut self,
         step: &SequencedBranchMergePlan,
     ) -> Result<(), BranchMergeTombstoneHistoryError> {
-        let Some(expected) = self.next_order else {
+        let Some(mut expected) = self.next_order else {
             return Err(BranchMergeTombstoneHistoryError::OrderExhausted);
         };
         self.classify_submission_mode_conflict(
             step.order,
             BranchMergeTombstoneSubmissionMode::WholePlan,
         )?;
+        while self.pending_deltas.contains_key(&expected) {
+            let Some(next) = expected.checked_add(1) else {
+                return Err(BranchMergeTombstoneHistoryError::OrderExhausted);
+            };
+            expected = next;
+        }
         if step.order != expected {
             return Err(BranchMergeTombstoneHistoryError::OutOfOrder {
                 expected,
@@ -373,7 +388,10 @@ impl BranchMergeTombstoneHistory {
             });
         }
 
-        self.submit(step).map(|_| ())
+        let mut candidate = self.clone();
+        candidate.submit(step)?;
+        *self = candidate;
+        Ok(())
     }
 
     /// Submits a completed paired plan, buffering future lineage positions
