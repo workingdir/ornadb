@@ -323,6 +323,10 @@ impl FilterBatch {
             chunks
         })
     }
+
+    fn values(&self) -> impl Iterator<Item = &Value> {
+        self.chunks().iter().flat_map(|chunk| chunk.iter())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -355,11 +359,17 @@ pub(super) enum RelationStage {
 }
 
 impl RelationStage {
-    fn filter_values(&self) -> Option<Vec<&Value>> {
-        match self {
-            Self::Filter(predicates) => Some(predicates.iter().collect()),
-            Self::SharedFilter(batch) => {
-                Some(batch.chunks().iter().flat_map(|chunk| chunk.iter()).collect())
+    fn filter_values_equal(left: &Self, right: &Self) -> Option<bool> {
+        match (left, right) {
+            (Self::Filter(left), Self::Filter(right)) => Some(left == right),
+            (Self::Filter(left), Self::SharedFilter(right)) => {
+                Some(left.iter().eq(right.values()))
+            }
+            (Self::SharedFilter(left), Self::Filter(right)) => {
+                Some(left.values().eq(right.iter()))
+            }
+            (Self::SharedFilter(left), Self::SharedFilter(right)) => {
+                Some(left.values().eq(right.values()))
             }
             _ => None,
         }
@@ -368,8 +378,8 @@ impl RelationStage {
 
 impl PartialEq for RelationStage {
     fn eq(&self, other: &Self) -> bool {
-        if let (Some(left), Some(right)) = (self.filter_values(), other.filter_values()) {
-            return left == right;
+        if let Some(equal) = Self::filter_values_equal(self, other) {
+            return equal;
         }
         match (self, other) {
             (Self::Map(left), Self::Map(right))
