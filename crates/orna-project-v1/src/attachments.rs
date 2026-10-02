@@ -813,6 +813,27 @@ impl PackageResolver {
         Ok(route)
     }
 
+    /// Continues a nested terminal-pair chain from a saved handoff checkpoint.
+    /// The first pair uses the checkpoint's exact attached pins even when
+    /// `previous` has since gone through another rebind cascade; later pairs
+    /// continue from their latest handoff. The reference is silent on replaying
+    /// retained routes across cascades, so v1 records the checkpoint route in
+    /// the new history and keeps the input route unchanged on failure.
+    pub fn extend_nested_terminal_pair_chain_from_checkpoint(
+        &self,
+        previous: &ReboundPathResolution,
+        checkpoint: &ReboundPathCheckpoint,
+        replacement_waves: &[[PinnedDatabase; 2]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let Some((first, remaining)) = replacement_waves.split_first() else {
+            return Ok(previous.clone());
+        };
+        let extension =
+            self.resolve_nested_rebind_path(&checkpoint.handoff, first.as_slice())?;
+        let route = Self::append_retained_rebound_extension(previous, extension);
+        self.extend_nested_terminal_pair_chain(&route, remaining)
+    }
+
     /// Resolves independently rebound paths for sibling parent snapshots.
     /// Each input plan is `(parent, replacements)`; results keep input order
     /// and each route retains its own pre-rebind sessions. No partial batch is
@@ -1060,9 +1081,39 @@ impl ReboundPathResolution {
         self.retained_sessions.get(start..start + length)
     }
 
+    /// Saves one exact handoff route for replay after later rebinding
+    /// cascades. The checkpoint owns the selected session, so extending or
+    /// restoring another route cannot change its primary or attached pins.
+    pub fn handoff_checkpoint(
+        &self,
+        wave: usize,
+        snapshot: usize,
+    ) -> Result<ReboundPathCheckpoint, AttachmentError> {
+        let handoff = self
+            .retained_wave(wave)
+            .and_then(|snapshots| snapshots.get(snapshot))
+            .cloned()
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+        Ok(ReboundPathCheckpoint { handoff })
+    }
+
     /// Takes ownership of the final closure and every retained route snapshot.
     pub fn into_parts(self) -> (AttachedDatabaseSession, Vec<AttachedDatabaseSession>) {
         (self.final_session, self.retained_sessions)
+    }
+}
+
+/// An immutable copy of a retained nested route, suitable for replay after a
+/// later route has been extended or rebound.
+#[derive(Clone, Debug)]
+pub struct ReboundPathCheckpoint {
+    handoff: AttachedDatabaseSession,
+}
+
+impl ReboundPathCheckpoint {
+    /// The exact primary and attached pins saved at this handoff.
+    pub fn handoff(&self) -> &AttachedDatabaseSession {
+        &self.handoff
     }
 }
 
