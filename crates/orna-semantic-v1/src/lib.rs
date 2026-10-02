@@ -7583,6 +7583,7 @@ fn infer(
                         specialize_dynamic_parameter_snapshot_contexts(
                             &result,
                             &parameters,
+                            &default_parameters,
                             parameter_names.as_deref(),
                             arguments,
                             &values,
@@ -16530,6 +16531,7 @@ fn snapshot_selector_context(
 fn specialize_dynamic_parameter_snapshot_contexts(
     ty: &Type,
     formal_parameters: &[Type],
+    default_parameters: &BTreeSet<usize>,
     parameter_names: Option<&[String]>,
     arguments: &[orna_syntax_v1::Argument],
     argument_types: &[Type],
@@ -16541,7 +16543,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
     let nonreturning_argument = argument_types
         .iter()
         .any(contains_nonreturning_aggregate_component);
-    let malformed_tuple_argument = formal_parameters
+    let incomplete_tuple_argument = formal_parameters
         .iter()
         .enumerate()
         .any(|(parameter_index, formal)| {
@@ -16553,7 +16555,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 parameter_index,
                 arguments,
             ) else {
-                return false;
+                return !default_parameters.contains(&parameter_index);
             };
             let Some(actual) = argument_types.get(argument_index) else {
                 return true;
@@ -16564,9 +16566,9 @@ fn specialize_dynamic_parameter_snapshot_contexts(
         });
     // The reference specifies pin identity but leaves recovery after a failed
     // tuple call unspecified. Treat the call's binding wave transactionally:
-    // a malformed tuple must not rebind otherwise valid scalar or tuple
-    // siblings captured by the returned callable.
-    let suppress_rebinding = nonreturning_argument || malformed_tuple_argument;
+    // a malformed or missing required tuple must not rebind otherwise valid
+    // siblings captured by the returned callable. Omitted defaults are valid.
+    let suppress_rebinding = nonreturning_argument || incomplete_tuple_argument;
     if !suppress_rebinding {
         for (parameter_index, formal) in formal_parameters.iter().enumerate() {
             let Some(argument_index) = call_argument_index_for_position(
@@ -16592,8 +16594,8 @@ fn specialize_dynamic_parameter_snapshot_contexts(
         }
     }
 
-    // A call with a non-returning argument or malformed tuple never reaches the
-    // callee. Keep its result symbolic instead of leaking sibling pins.
+    // A call with a non-returning argument or incomplete required tuple never
+    // reaches the callee. Keep its result symbolic instead of leaking sibling pins.
     let (parameter_names, arguments, argument_types) = if suppress_rebinding {
         (None, &[][..], &[][..])
     } else {
