@@ -3204,6 +3204,34 @@ fn closure_identity_returns_with_its_pin_after_rebinding_round_trips() {
 }
 
 #[test]
+fn closure_identity_round_trips_do_not_merge_intermediate_pins() {
+    let source = include_str!(
+        "fixtures/historical-pinned-closure-chain-rebind-round-trip-mixed.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-rebind-round-trip-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "round-tripping to an older pin must not merge an intermediate closure: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
