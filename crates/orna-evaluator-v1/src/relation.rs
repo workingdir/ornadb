@@ -276,7 +276,8 @@ pub(super) struct RelationPlan {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum RelationStage {
-    Filter(Value),
+    /// Adjacent filters, evaluated in order and short-circuited per input row.
+    Filter(Vec<Value>),
     Map(Value),
     /// Lazily expands each upstream value through a transform returning a
     /// finite `List`, preserving source and inner order.
@@ -397,7 +398,16 @@ impl RelationPlan {
     }
 
     pub(super) fn with_stage(mut self, stage: RelationStage) -> Self {
-        self.stages.push(stage);
+        match stage {
+            RelationStage::Filter(mut predicates) => {
+                if let Some(RelationStage::Filter(previous)) = self.stages.last_mut() {
+                    previous.append(&mut predicates);
+                } else {
+                    self.stages.push(RelationStage::Filter(predicates));
+                }
+            }
+            stage => self.stages.push(stage),
+        }
         self
     }
 }
