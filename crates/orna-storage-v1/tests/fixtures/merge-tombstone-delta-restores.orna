@@ -1,0 +1,11 @@
+{
+  id: "root",
+  name: "Root restored",
+  city: "Bristol",
+}
+
+{
+  id: "root/child",
+  name: "Child restored",
+  city: "Leeds",
+}
