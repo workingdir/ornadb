@@ -18322,6 +18322,69 @@ fn paired_depth_chain_restore_conflicts_keep_order_when_branches_swap() {
     .expect("the setup wave commits the same prior chain tombstones");
     let next_base_rows = table_live_rows(&deleted, id(1));
 
+    // The first table will have discovered its create conflict before the
+    // second table's base scan fails. That prefix must remain unobservable.
+    let (base, left, right, mut source) = paired_chained_storm_inputs(
+        &next_base_rows,
+        &[],
+        &[],
+        0,
+        false,
+        "branch-symmetric-restore-failed-wave",
+    );
+    add_chained_storm_fixture_rows(
+        &left,
+        &mut source,
+        MergeSide::Left,
+        id(1),
+        &[conflicting_restores[0].clone()],
+    );
+    add_chained_storm_fixture_rows(
+        &right,
+        &mut source,
+        MergeSide::Right,
+        id(1),
+        &[conflicting_restores[1].clone()],
+    );
+    add_chained_storm_fixture_rows(
+        &left,
+        &mut source,
+        MergeSide::Left,
+        id(2),
+        &[conflicting_restores[2].clone()],
+    );
+    add_chained_storm_fixture_rows(
+        &right,
+        &mut source,
+        MergeSide::Right,
+        id(2),
+        &[conflicting_restores[3].clone()],
+    );
+    let mut interrupted = FailAfterRowsFixtureRows {
+        source,
+        fail_after_rows: 17,
+        rows_delivered: 0,
+        failed_at: None,
+    };
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: 64, max_conflicts: 8 },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed after a partial row prefix".into(),
+        }),
+    );
+    assert_eq!(interrupted.rows_delivered, 17);
+    assert_eq!(
+        interrupted.failed_at.as_ref().map(|(table, side, _)| (*table, *side)),
+        Some((id(2), MergeSide::Left)),
+        "failure follows the first table's conflict but prevents returning it",
+    );
+
     const RETRIES: usize = 8;
     let start = Arc::new(Barrier::new(RETRIES));
     let mut workers = Vec::with_capacity(RETRIES);
