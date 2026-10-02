@@ -448,6 +448,10 @@ fn unknown_byte_handoffs_retain_prior_stage_output_paths() {
             serde_json::to_value(&routes[0]).expect("real planner handoff route serializes");
         assert_eq!(serialized_route["input_scope"], expected_input_scope);
         assert_eq!(serialized_route["output_scope"], expected_output_scope);
+        assert_eq!(
+            serialized_route["paired_scope_label"],
+            format!("{expected_input_scope}=>{expected_output_scope}")
+        );
 
         let filter = explained
             .nodes()
@@ -540,6 +544,10 @@ fn unknown_byte_route_serialization_derives_labels_from_typed_paths() {
     assert_eq!(
         serialized["output_scope"],
         "root/storm1/storm_stage_output1/storm2/branch1/limit1/rebind1/cascade1"
+    );
+    assert_eq!(
+        serialized["paired_scope_label"],
+        "root/storm1/storm_stage_output1/storm2/branch1/limit1=>root/storm1/storm_stage_output1/storm2/branch1/limit1/rebind1/cascade1"
     );
     assert_eq!(
         serialized["input_path"][1],
