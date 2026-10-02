@@ -1,0 +1,18 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn checkpoint(pin: sys.SnapshotRef) = {
+    factory: factory_at(pin),
+};
+
+pub fn pinned_map_width_mismatch_rebind_is_rejected() {
+    let rolling = [
+        checkpoint(sys.snapshot("HEAD~12")),
+        checkpoint(sys.snapshot("HEAD~11")),
+    ];
+    rolling = [
+        checkpoint(sys.snapshot("HEAD~10")),
+        checkpoint(sys.snapshot("HEAD~9")),
+        checkpoint(sys.snapshot("HEAD~8")),
+    ];
+}

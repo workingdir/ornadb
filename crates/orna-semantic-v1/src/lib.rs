@@ -5910,6 +5910,29 @@ fn constrain_generic_type(
             constrain_generic_type(expected, actual, generic_names, substitutions, diagnostics)
         }
         (
+            Type::Function {
+                parameters: expected_parameters,
+                result: expected_result,
+                ..
+            },
+            Type::Function {
+                parameters: actual_parameters,
+                result: actual_result,
+                ..
+            },
+        ) if expected_parameters.len() == actual_parameters.len() => {
+            for (expected, actual) in expected_parameters.iter().zip(actual_parameters) {
+                constrain_generic_type(expected, actual, generic_names, substitutions, diagnostics);
+            }
+            constrain_generic_type(
+                expected_result,
+                actual_result,
+                generic_names,
+                substitutions,
+                diagnostics,
+            );
+        }
+        (
             Type::Applied {
                 base: expected_base,
                 arguments: expected_arguments,
@@ -7362,6 +7385,30 @@ fn infer(
                 && !scope.names.contains_key("error")
             {
                 return infer_error_call(arguments, scope, local, diagnostics);
+            }
+            if matches!(callee.as_ref(), Expr::Name { text, .. } if text == "Some")
+                && !local.contains_key("Some")
+                && !scope.names.contains_key("Some")
+            {
+                if let [argument] = arguments.as_slice()
+                    && argument.name.is_none()
+                {
+                    let value = infer(&argument.value, scope, local, diagnostics);
+                    return Inferred {
+                        ty: Type::Optional(Box::new(value.ty)),
+                        effects: value.effects,
+                    };
+                }
+                let mut effects = EffectSummary::default();
+                for argument in arguments {
+                    let value = infer(&argument.value, scope, local, diagnostics);
+                    effects.join(&value.effects);
+                }
+                diagnostics.push(diag(DIAG_TYPE, "Some requires exactly one positional value"));
+                return Inferred {
+                    ty: Type::Error,
+                    effects,
+                };
             }
             if qualified_path(callee)
                 .as_deref()
@@ -10045,16 +10092,6 @@ fn infer_finite_list_collection(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
-    if operation == "bucket_by" {
-        diagnostics.push(diag(
-            DIAG_TYPE,
-            "bucket_by requires a relation with an explicit time source",
-        ));
-        return Inferred {
-            ty: Type::Error,
-            effects: input.map_or_else(EffectSummary::default, |input| input.effects),
-        };
-    }
     if matches!(
         operation,
         "chunk"
@@ -10069,6 +10106,7 @@ fn infer_finite_list_collection(
             | "split_when"
             | "rank"
             | "asof_join"
+            | "bucket_by"
     ) {
         return infer_finite_list_helper_collection(
             operation,
@@ -10279,6 +10317,7 @@ fn infer_finite_list_helper_collection(
         "group_by" | "rank" => &["values", "key"],
         "window" => &["values", "size", "step"],
         "asof_join" => &["left", "right", "time", "by"],
+        "bucket_by" => &["rows", "period", "zone"],
         _ => unreachable!("finite-list helper was checked"),
     };
     let pipeline = input.is_some();
@@ -10488,6 +10527,17 @@ fn infer_finite_list_helper_collection(
                 first.clone(),
                 Type::Optional(Box::new(first)),
             ])))
+        }
+        "bucket_by" => {
+            let time_shape = matches!(&first, Type::Instant)
+                || matches!(&first, Type::Record(fields) if fields.get("time") == Some(&Type::Instant));
+            if !time_shape && first != Type::Error {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "bucket_by requires Instant values or rows with an Instant time field",
+                ));
+            }
+            Type::List(Box::new(Type::List(Box::new(first))))
         }
         _ => unreachable!("finite-list helper was checked"),
     };
@@ -14302,6 +14352,28 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
                         && actual_unit.rsplit('.').next() == Some("kWh")
             )
         }
+        (
+            Type::Function {
+                parameters: expected_parameters,
+                default_parameters: expected_defaults,
+                result: expected_result,
+                ..
+            },
+            Type::Function {
+                parameters: actual_parameters,
+                default_parameters: actual_defaults,
+                result: actual_result,
+                ..
+            },
+        ) => {
+            expected_parameters.len() == actual_parameters.len()
+                && expected_defaults == actual_defaults
+                && expected_parameters
+                    .iter()
+                    .zip(actual_parameters)
+                    .all(|(expected, actual)| types_match(expected, actual))
+                && types_match(expected_result, actual_result)
+        }
         _ => false,
     }
 }
@@ -16703,8 +16775,15 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                     // also forwards the context already carried by its argument.
                     ty.clone()
                 } else {
+                    // An omitted sibling suppresses the entire binding wave.
+                    // Keep separate same-named tuple slots separate in the
+                    // resulting symbolic pin map by carrying their formal
+                    // binder identity alongside the shared call site.
+                    let binder_identity = binder
+                        .map(|binder| format!(":formal-binder:{binder}"))
+                        .unwrap_or_default();
                     contextual_snapshot_ref(&format!(
-                        "selector:dynamic-call:{}:{}..{}:parameter:{parameter}",
+                        "selector:dynamic-call:{}:{}..{}:parameter:{parameter}{binder_identity}",
                         call_span.file.as_deref().unwrap_or("<unknown>"),
                         call_span.start,
                         call_span.end,
@@ -16757,6 +16836,43 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                 )),
             }
         },
+        // The reference leaves checkpoint-map recovery after a failed call
+        // unspecified. Rebind each stored selector as its original pin slot
+        // so an omitted sibling cannot collapse same-named paired binders.
+        Type::Applied {
+            base,
+            arguments: map_arguments,
+        }
+            if base == "semantic.SnapshotContextMap"
+                && is_snapshot_context_map_shape(ty) =>
+        {
+            let mut merged: Option<Type> = None;
+            for selector in map_arguments {
+                let Type::Named(selector) = selector else {
+                    return ty.clone();
+                };
+                let context = contextual_snapshot_ref(selector);
+                let context = specialize_dynamic_parameter_snapshot_contexts_scoped(
+                    &context,
+                    parameter_names,
+                    arguments,
+                    argument_types,
+                    local,
+                    call_span,
+                    historical_context,
+                    shadowed_parameters,
+                    binder_contexts,
+                );
+                merged = Some(match merged {
+                    Some(previous) => match merge_snapshot_context_map(&previous, &context) {
+                        Some(merged) => merged,
+                        None => return ty.clone(),
+                    },
+                    None => context,
+                });
+            }
+            merged.unwrap_or_else(|| ty.clone())
+        }
         Type::List(element) => Type::List(Box::new(
             specialize_dynamic_parameter_snapshot_contexts_scoped(
                 element,
@@ -17296,8 +17412,12 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
             && actual_base == "sys.HistoricalCallable" =>
         {
             match (expected_arguments.as_slice(), actual_arguments.as_slice()) {
-                ([_, expected_callable], [_, actual_callable]) => {
-                    pinned_snapshot_shape_matches(expected_callable, actual_callable)
+                ([expected_snapshot, expected_callable], [actual_snapshot, actual_callable]) => {
+                    // The captured context is part of the callable's pin-map
+                    // shape: rebinding may replace selectors, but must retain
+                    // the same number of captured pins.
+                    pinned_snapshot_shape_matches(expected_snapshot, actual_snapshot)
+                        && pinned_snapshot_shape_matches(expected_callable, actual_callable)
                 }
                 _ => false,
             }
@@ -17361,6 +17481,7 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
         }
         (Type::Tuple(expected), Type::Tuple(actual)) => {
             expected.len() == actual.len()
+                && tuple_pin_identity_topology_matches(expected, actual)
                 && expected
                     .iter()
                     .zip(actual)
@@ -17401,6 +17522,180 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
                 && pinned_snapshot_shape_matches(expected_unit, actual_unit)
         }
         _ => false,
+    }
+}
+
+/// A tuple rebind may rename snapshot selectors, but it must keep the
+/// cross-slot identity relationships intact. Compare selector overlap for
+/// corresponding pin maps after traversing the tuple's structural shape. The
+/// reference defines historical pinning but is silent on local tuple rebinds
+/// across checkpoint compaction; preserving overlap prevents compaction from
+/// splitting one pin identity or folding distinct tuple pins together.
+fn tuple_pin_identity_topology_matches(expected: &[Type], actual: &[Type]) -> bool {
+    let mut pin_maps = Vec::new();
+    for (expected, actual) in expected.iter().zip(actual) {
+        if !collect_corresponding_snapshot_context_maps(expected, actual, &mut pin_maps) {
+            return false;
+        }
+    }
+
+    pin_maps.iter().enumerate().all(|(index, (expected, actual))| {
+        expected.len() == actual.len()
+            && pin_maps[index + 1..]
+                .iter()
+                .all(|(other_expected, other_actual)| {
+                    expected.intersection(other_expected).count()
+                        == actual.intersection(other_actual).count()
+                })
+    })
+}
+
+fn collect_corresponding_snapshot_context_maps(
+    expected: &Type,
+    actual: &Type,
+    into: &mut Vec<(BTreeSet<String>, BTreeSet<String>)>,
+) -> bool {
+    // Generic SnapshotRef formals have no concrete checkpoint identity to
+    // preserve. Bottom leaves likewise represent values that were not made.
+    if expected == &Type::Named("sys.SnapshotRef".into())
+        || actual == &Type::Named("sys.SnapshotRef".into())
+        || matches!(expected, Type::Bottom)
+        || matches!(actual, Type::Bottom)
+    {
+        return true;
+    }
+    if is_contextual_snapshot_ref(expected) || is_contextual_snapshot_ref(actual) {
+        let (
+            Type::Applied {
+                arguments: expected,
+                ..
+            },
+            Type::Applied {
+                arguments: actual,
+                ..
+            },
+        ) = (expected, actual)
+        else {
+            return false;
+        };
+        let (Some(Type::Named(expected)), Some(Type::Named(actual))) =
+            (expected.first(), actual.first())
+        else {
+            return false;
+        };
+        into.push((
+            BTreeSet::from([expected.clone()]),
+            BTreeSet::from([actual.clone()]),
+        ));
+        return true;
+    }
+    if is_snapshot_context_map_shape(expected) || is_snapshot_context_map_shape(actual) {
+        let (
+            Type::Applied {
+                arguments: expected,
+                ..
+            },
+            Type::Applied {
+                arguments: actual,
+                ..
+            },
+        ) = (expected, actual)
+        else {
+            return false;
+        };
+        let selectors = |arguments: &[Type]| {
+            arguments
+                .iter()
+                .filter_map(|argument| match argument {
+                    Type::Named(selector) => Some(selector.clone()),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        let expected = selectors(expected);
+        let actual = selectors(actual);
+        if expected.len() != actual.len() {
+            return false;
+        }
+        into.push((expected, actual));
+        return true;
+    }
+
+    match (expected, actual) {
+        (Type::List(expected), Type::List(actual))
+        | (Type::Range(expected), Type::Range(actual))
+        | (Type::Relation(expected), Type::Relation(actual))
+        | (Type::Stream(expected), Type::Stream(actual))
+        | (Type::Optional(expected), Type::Optional(actual)) => {
+            collect_corresponding_snapshot_context_maps(expected, actual, into)
+        }
+        (Type::Tuple(expected), Type::Tuple(actual)) if expected.len() == actual.len() => {
+            expected.iter().zip(actual).all(|(expected, actual)| {
+                collect_corresponding_snapshot_context_maps(expected, actual, into)
+            })
+        }
+        (Type::Record(expected), Type::Record(actual)) if expected.len() == actual.len() => {
+            expected.iter().all(|(name, expected)| {
+                actual.get(name).is_some_and(|actual| {
+                    collect_corresponding_snapshot_context_maps(expected, actual, into)
+                })
+            })
+        }
+        (
+            Type::Function {
+                parameters: expected_parameters,
+                result: expected_result,
+                ..
+            },
+            Type::Function {
+                parameters: actual_parameters,
+                result: actual_result,
+                ..
+            },
+        ) if expected_parameters.len() == actual_parameters.len() => {
+            expected_parameters
+                .iter()
+                .zip(actual_parameters)
+                .all(|(expected, actual)| {
+                    collect_corresponding_snapshot_context_maps(expected, actual, into)
+                })
+                && collect_corresponding_snapshot_context_maps(
+                    expected_result,
+                    actual_result,
+                    into,
+                )
+        }
+        (
+            Type::Applied {
+                base: expected_base,
+                arguments: expected_arguments,
+            },
+            Type::Applied {
+                base: actual_base,
+                arguments: actual_arguments,
+            },
+        ) if expected_base == actual_base && expected_arguments.len() == actual_arguments.len() => {
+            expected_arguments
+                .iter()
+                .zip(actual_arguments)
+                .all(|(expected, actual)| {
+                    collect_corresponding_snapshot_context_maps(expected, actual, into)
+                })
+        }
+        (
+            Type::MoneyPerUnit {
+                currency: expected_currency,
+                unit: expected_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: actual_currency,
+                unit: actual_unit,
+            },
+        ) => {
+            collect_corresponding_snapshot_context_maps(expected_currency, actual_currency, into)
+                && collect_corresponding_snapshot_context_maps(expected_unit, actual_unit, into)
+        }
+        _ => true,
     }
 }
 
@@ -19289,6 +19584,114 @@ fn diag(code: &'static str, message: impl Into<String>) -> Diagnostic {
 mod tests {
     use super::*;
     #[test]
+    fn suppressed_paired_rebind_keeps_same_named_tuple_pins_distinct() {
+        let left_selector = "selector:binder:pair.orna@10..18:parameter:selected";
+        let right_selector = "selector:binder:pair.orna@20..28:parameter:selected";
+        let formal_pair = Type::Tuple(vec![
+            contextual_snapshot_ref(left_selector),
+            contextual_snapshot_ref(right_selector),
+        ]);
+        let result = Type::Record(BTreeMap::from([
+            ("left".into(), contextual_snapshot_ref(left_selector)),
+            ("right".into(), contextual_snapshot_ref(right_selector)),
+            (
+                "paired_map".into(),
+                Type::Applied {
+                    base: "semantic.SnapshotContextMap".into(),
+                    arguments: vec![
+                        Type::Named(left_selector.into()),
+                        Type::Named(right_selector.into()),
+                    ],
+                },
+            ),
+        ]));
+        let call_span = SyntaxSpan::new(40, 72);
+        let arguments = vec![orna_syntax_v1::Argument {
+            name: None,
+            value: Expr::Name {
+                text: "pins".into(),
+                span: SyntaxSpan::new(48, 52),
+            },
+            span: SyntaxSpan::new(48, 52),
+        }];
+
+        let specialized = specialize_dynamic_parameter_snapshot_contexts(
+            &result,
+            &[formal_pair, Type::Text],
+            &BTreeSet::new(),
+            None,
+            &arguments,
+            &[Type::Tuple(vec![
+                contextual_snapshot_ref("selector:HEAD~2"),
+                contextual_snapshot_ref("selector:HEAD~1"),
+            ])],
+            &BTreeMap::new(),
+            &call_span,
+            None,
+        );
+        let Type::Record(fields) = specialized else {
+            panic!("suppressed paired rebind must retain its record result");
+        };
+        let mut left = BTreeSet::new();
+        collect_test_snapshot_contexts(&fields["left"], &mut left);
+        let mut right = BTreeSet::new();
+        collect_test_snapshot_contexts(&fields["right"], &mut right);
+        assert_eq!(left.len(), 1, "left pin slot must retain one identity: {left:?}");
+        assert_eq!(right.len(), 1, "right pin slot must retain one identity: {right:?}");
+        assert!(
+            left.iter().next().is_some_and(|selector| selector.contains("pair.orna@10..18")),
+            "the left symbolic pin must keep its formal binder: {left:?}"
+        );
+        assert!(
+            right.iter().next().is_some_and(|selector| selector.contains("pair.orna@20..28")),
+            "the right symbolic pin must keep its formal binder: {right:?}"
+        );
+        let Type::Applied {
+            base,
+            arguments: paired_map,
+        } = &fields["paired_map"]
+        else {
+            panic!("the suppressed paired checkpoint must retain a context map");
+        };
+        assert_eq!(base, "semantic.SnapshotContextMap");
+        assert_eq!(
+            paired_map.len(),
+            2,
+            "the paired symbolic map must retain its formal width: {paired_map:?}"
+        );
+        assert!(is_snapshot_context_map_shape(&fields["paired_map"]));
+        assert_ne!(
+            left, right,
+            "suppression must keep same-named paired pin slots at distinct widths"
+        );
+    }
+
+    fn collect_test_snapshot_contexts(ty: &Type, into: &mut BTreeSet<String>) {
+        if let Some(selector) = snapshot_ref_context_key(ty) {
+            into.insert(selector.to_owned());
+            return;
+        }
+        match ty {
+            Type::Record(fields) => {
+                for field in fields.values() {
+                    collect_test_snapshot_contexts(field, into);
+                }
+            }
+            Type::Tuple(elements) => {
+                for element in elements {
+                    collect_test_snapshot_contexts(element, into);
+                }
+            }
+            Type::Applied { arguments, .. } => {
+                for argument in arguments {
+                    collect_test_snapshot_contexts(argument, into);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
     fn checkpoint_rebinds_require_canonical_snapshot_selector_maps() {
         let first = Type::Applied {
             base: "semantic.SnapshotContextMap".into(),
@@ -19307,9 +19710,9 @@ mod tests {
         let wider = Type::Applied {
             base: "semantic.SnapshotContextMap".into(),
             arguments: vec![
-                Type::Named("selector:HEAD~6".into()),
-                Type::Named("selector:HEAD~5".into()),
                 Type::Named("selector:HEAD~4".into()),
+                Type::Named("selector:HEAD~5".into()),
+                Type::Named("selector:HEAD~6".into()),
             ],
         };
         let malformed = Type::Applied {
@@ -19355,6 +19758,31 @@ mod tests {
         assert!(type_contains_pinned_snapshot_identity(&first));
         assert!(pinned_snapshot_rebind_compatible(&first, &second));
         assert!(!pinned_snapshot_rebind_compatible(&first, &wider));
+        let terminal_factory = Type::Function {
+            parameters: vec![],
+            parameter_names: Some(vec![]),
+            default_parameters: BTreeSet::new(),
+            result: Box::new(Type::Named("domain.Factory".into())),
+        };
+        let first_pinned_factory = historical_callable_type(&first, &terminal_factory);
+        let second_pinned_factory = historical_callable_type(&second, &terminal_factory);
+        let wider_pinned_factory = historical_callable_type(&wider, &terminal_factory);
+        assert!(pinned_snapshot_shape_matches(
+            &first_pinned_factory,
+            &second_pinned_factory
+        ));
+        assert!(!pinned_snapshot_shape_matches(
+            &first_pinned_factory,
+            &wider_pinned_factory
+        ));
+        assert!(pinned_snapshot_rebind_compatible(
+            &first_pinned_factory,
+            &second_pinned_factory
+        ));
+        assert!(!pinned_snapshot_rebind_compatible(
+            &first_pinned_factory,
+            &wider_pinned_factory
+        ));
         assert!(!is_snapshot_context_map_shape(&malformed));
         assert!(!types_match(&malformed, &malformed));
         assert!(!types_match(&malformed, &Type::Bottom));

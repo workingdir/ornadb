@@ -28,9 +28,39 @@ use crate::{
     REFERENCE_STANDARD_ITERATOR_PATH_V1, REFERENCE_STANDARD_LAZY_PATH_V1,
     REFERENCE_STANDARD_VIEWS_PATH_V1,
     REFERENCE_STANDARD_INTROSPECTION_PATH_V1, REFERENCE_STANDARD_REFLECTION_PATH_V1,
+    REFERENCE_STANDARD_ALGORITHM_PATH_V1,
     reference_standard_catalogue_v1,
     reference_standard_profile_v1, reference_standard_sources_v1,
 };
+
+#[test]
+fn pinned_algorithm_module_is_part_of_the_captured_std_snapshot() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_ALGORITHM_PATH_V1)
+        .expect("the pinned source bundle includes std.algorithm");
+    assert_eq!(
+        index, 46,
+        "the new std source appends to preserve old indexes"
+    );
+    assert_eq!(path, REFERENCE_STANDARD_ALGORITHM_PATH_V1);
+    for declaration in [
+        "pub fn lower_bound<T, K>",
+        "pub fn upper_bound<T, K>",
+        "pub fn binary_search<T, K>",
+        "pub fn is_sorted_by<T, K>",
+        "pub fn stable_sort_by<T, K>",
+    ] {
+        assert!(source.contains(declaration), "missing {declaration}");
+    }
+    reference_standard_profile_v1()
+        .verify_source(path, source)
+        .expect("algorithm source bytes are recorded by the captured std profile");
+    reference_standard_catalogue_v1()
+        .expect("algorithm imports resolve in the captured standard catalogue");
+}
 
 #[test]
 fn pinned_std_entrypoint_imports_optional_content_modules() {
@@ -728,7 +758,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
-    assert_eq!(sources.len(), 47);
+    assert_eq!(sources.len(), 48);
     assert_eq!(sources[34].0, REFERENCE_STANDARD_GENERICS_PATH_V1);
     for declaration in [
         "pub fn identity<T>(value: T): T",
