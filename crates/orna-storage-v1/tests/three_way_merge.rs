@@ -20674,6 +20674,113 @@ fn paired_append_storms_queue_behind_uneven_depth_waves_in_lineage_order() {
 }
 
 #[test]
+fn paired_append_queue_recovers_after_uneven_wave_restarts() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(0, 0, 4, &[(id(1), fixture_key("a"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(0, 1, 4, &[(id(1), fixture_key("z"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 1, 3, &[(id(1), fixture_key("root/child/deep"))])
+        .unwrap();
+    history.append(&whole_plan(2, vec![fixture_key("a/child/deep/leaf")])).unwrap();
+    history
+        .append(&whole_plan(3, vec![fixture_key("root/child/deep/leaf/twig")]))
+        .unwrap();
+    history.append(&whole_plan(4, Vec::new())).unwrap();
+    assert!(history.events().is_empty());
+
+    let before_invalid_restart = history.clone();
+    assert_eq!(
+        history.restart_depth_merge_wave(0, 0),
+        Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+            fragment: 0,
+            fragment_count: 0,
+        }),
+        "a recovery must declare at least one replacement fragment",
+    );
+    assert_eq!(history, before_invalid_restart);
+    assert_eq!(
+        history.restart_depth_merge_wave(3, 2),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 3 }),
+        "a whole-plan append cannot be restarted as a depth wave",
+    );
+    assert_eq!(history, before_invalid_restart);
+    assert_eq!(
+        history.restart_depth_merge_wave(5, 2),
+        Err(BranchMergeTombstoneHistoryError::NoIncompleteDepthWave { order: 5 }),
+    );
+    assert_eq!(history, before_invalid_restart);
+
+    history.restart_depth_merge_wave(0, 2).unwrap();
+    history.restart_depth_merge_wave(1, 2).unwrap();
+    assert_eq!(history.next_order(), Some(0));
+    assert!(history.events().is_empty());
+    assert!(history
+        .submit_depth_merge_fragment(0, 1, 2, &[(id(1), fixture_key("a/child/deep"))])
+        .unwrap()
+        .is_empty());
+    let first_wave = history
+        .submit_depth_merge_fragment(0, 0, 2, &[(id(1), fixture_key("a"))])
+        .unwrap();
+    assert_eq!(first_wave.iter().map(|event| event.order).collect::<Vec<_>>(), [0, 0]);
+
+    assert!(history
+        .submit_depth_merge_fragment(
+            1,
+            1,
+            2,
+            &[(id(1), fixture_key("root/child/deep"))],
+        )
+        .unwrap()
+        .is_empty());
+    let recovered_queue = history
+        .submit_depth_merge_fragment(1, 0, 2, &[(id(1), fixture_key("root/child"))])
+        .unwrap();
+    assert_eq!(
+        recovered_queue.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [1, 1, 2, 3],
+        "restarted uneven waves release their queued transaction storm in order",
+    );
+    assert_eq!(
+        history.events().iter().map(|event| event.order).collect::<Vec<_>>(),
+        [0, 0, 1, 1, 2, 3],
+    );
+    assert_eq!(history.events()[0].key, fixture_key("a"));
+    assert_eq!(history.events()[1].key, fixture_key("a/child/deep"));
+    assert_eq!(history.events()[2].key, fixture_key("root/child"));
+    assert_eq!(history.events()[3].key, fixture_key("root/child/deep"));
+    assert_eq!(history.events()[4].key, fixture_key("a/child/deep/leaf"));
+    assert_eq!(history.events()[5].key, fixture_key("root/child/deep/leaf/twig"));
+    assert_eq!(history.next_order(), Some(5));
+}
+
+#[test]
 fn paired_mixed_mode_priority_survives_interleaved_depth_wave_release() {
     let fixture_keys = TOMBSTONE_DEPTH_COMMIT_ORDER
         .split("\n\n")
