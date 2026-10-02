@@ -1,0 +1,33 @@
+pub table PlannerStormRebindCapHandoffScopes(id: Int) {
+    first: Bool,
+    second: Bool,
+    third: Bool,
+    leaf: Bool,
+}
+pub fn rebind_cap_handoff_scopes() = PlannerStormRebindCapHandoffScopes
+    | take(100)
+    | union(
+        PlannerStormRebindCapHandoffScopes
+            | take(100)
+            | union(
+                PlannerStormRebindCapHandoffScopes | take(80) | filter(row => row.leaf),
+                PlannerStormRebindCapHandoffScopes | take(80) | filter(row => row.leaf)
+            )
+            | take(50)
+            | union(
+                PlannerStormRebindCapHandoffScopes | take(40) | filter(row => row.leaf),
+                PlannerStormRebindCapHandoffScopes | take(40) | filter(row => row.leaf)
+            )
+            | filter(row => row.second),
+        PlannerStormRebindCapHandoffScopes | take(20) | filter(row => row.first)
+    )
+    | union(
+        PlannerStormRebindCapHandoffScopes
+            | take(30)
+            | union(
+                PlannerStormRebindCapHandoffScopes | take(40) | filter(row => row.leaf),
+                PlannerStormRebindCapHandoffScopes | take(40) | filter(row => row.leaf)
+            )
+            | filter(row => row.third),
+        PlannerStormRebindCapHandoffScopes | take(10) | filter(row => row.first)
+    );
