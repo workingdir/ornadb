@@ -5779,6 +5779,109 @@ fn omitted_sibling_preserves_width_of_paired_tuple_rebinds() {
 }
 
 #[test]
+fn omitted_rebind_preserves_each_sibling_pin_identity_label() {
+    let source = include_str!("fixtures/historical-omitted-rebind-sibling-pin-labels.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-omitted-rebind-sibling-pin-labels.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "only the call omitting its required right sibling should be rejected: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("omitted_rebind_keeps_sibling_labels_separate")
+        })
+        .expect("omitted sibling-label fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["omitted_rebind_keeps_sibling_labels_separate"].ty
+    else {
+        panic!("omitted sibling-label proof must export a function");
+    };
+    let Type::Record(stages) = result.as_ref() else {
+        panic!("omitted sibling-label proof must retain its stage record: {result:?}");
+    };
+
+    let stage = |name: &str| {
+        let Type::Record(fields) = stages.get(name).expect("computed stage") else {
+            panic!("{name} must remain a computed sibling record");
+        };
+        fields
+    };
+    let pin_contexts = |fields: &BTreeMap<String, Type>, name: &str| {
+        let value = fields.get(name).expect("sibling pin field");
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(value, &mut contexts);
+        assert_eq!(
+            contexts.len(),
+            1,
+            "{name} must keep one pin identity: {contexts:?}"
+        );
+        contexts.into_iter().next().expect("one sibling identity")
+    };
+
+    let complete = stage("complete");
+    for (pin, capture, selector) in [
+        ("left_pin", "left_capture", "selector:HEAD~100"),
+        ("right_pin", "right_capture", "selector:HEAD~99"),
+    ] {
+        let pin_identity = pin_contexts(complete, pin);
+        let capture_identity = pin_contexts(complete, capture);
+        assert_eq!(pin_identity, selector, "complete {pin}");
+        assert_eq!(capture_identity, pin_identity, "complete {capture}");
+    }
+
+    let omitted = stage("omitted");
+    for capture in ["left_capture", "right_capture"] {
+        assert!(
+            matches!(omitted.get(capture), Some(Type::Applied { base, .. }) if base == "sys.HistoricalCallable"),
+            "{capture} must retain its computed historical callable value"
+        );
+    }
+    let left_identity = pin_contexts(omitted, "left_pin");
+    let left_capture_identity = pin_contexts(omitted, "left_capture");
+    let right_identity = pin_contexts(omitted, "right_pin");
+    let right_capture_identity = pin_contexts(omitted, "right_capture");
+    assert_eq!(left_identity, left_capture_identity);
+    assert_eq!(right_identity, right_capture_identity);
+    assert_ne!(
+        left_identity, right_identity,
+        "omitting a sibling must not collapse distinct formal pin labels"
+    );
+    for identity in [&left_identity, &right_identity] {
+        assert!(
+            identity.contains("selector:dynamic-call:"),
+            "omitted sibling labels remain symbolic: {identity}"
+        );
+        assert!(
+            identity.contains(":formal-binder:"),
+            "each symbolic label retains its source binder: {identity}"
+        );
+    }
+}
+
+#[test]
 fn unknown_paired_width_suppresses_sibling_pin_promotion() {
     let source = include_str!(
         "fixtures/historical-unknown-paired-width-rebind-suppression.orna"
