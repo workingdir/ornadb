@@ -17272,8 +17272,12 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
             && actual_base == "sys.HistoricalCallable" =>
         {
             match (expected_arguments.as_slice(), actual_arguments.as_slice()) {
-                ([_, expected_callable], [_, actual_callable]) => {
-                    pinned_snapshot_shape_matches(expected_callable, actual_callable)
+                ([expected_snapshot, expected_callable], [actual_snapshot, actual_callable]) => {
+                    // The captured context is part of the callable's pin-map
+                    // shape: rebinding may replace selectors, but must retain
+                    // the same number of captured pins.
+                    pinned_snapshot_shape_matches(expected_snapshot, actual_snapshot)
+                        && pinned_snapshot_shape_matches(expected_callable, actual_callable)
                 }
                 _ => false,
             }
@@ -19241,9 +19245,9 @@ mod tests {
         let wider = Type::Applied {
             base: "semantic.SnapshotContextMap".into(),
             arguments: vec![
-                Type::Named("selector:HEAD~6".into()),
-                Type::Named("selector:HEAD~5".into()),
                 Type::Named("selector:HEAD~4".into()),
+                Type::Named("selector:HEAD~5".into()),
+                Type::Named("selector:HEAD~6".into()),
             ],
         };
         let malformed = Type::Applied {
@@ -19289,6 +19293,31 @@ mod tests {
         assert!(type_contains_pinned_snapshot_identity(&first));
         assert!(pinned_snapshot_rebind_compatible(&first, &second));
         assert!(!pinned_snapshot_rebind_compatible(&first, &wider));
+        let terminal_factory = Type::Function {
+            parameters: vec![],
+            parameter_names: Some(vec![]),
+            default_parameters: BTreeSet::new(),
+            result: Box::new(Type::Named("domain.Factory".into())),
+        };
+        let first_pinned_factory = historical_callable_type(&first, &terminal_factory);
+        let second_pinned_factory = historical_callable_type(&second, &terminal_factory);
+        let wider_pinned_factory = historical_callable_type(&wider, &terminal_factory);
+        assert!(pinned_snapshot_shape_matches(
+            &first_pinned_factory,
+            &second_pinned_factory
+        ));
+        assert!(!pinned_snapshot_shape_matches(
+            &first_pinned_factory,
+            &wider_pinned_factory
+        ));
+        assert!(pinned_snapshot_rebind_compatible(
+            &first_pinned_factory,
+            &second_pinned_factory
+        ));
+        assert!(!pinned_snapshot_rebind_compatible(
+            &first_pinned_factory,
+            &wider_pinned_factory
+        ));
         assert!(!is_snapshot_context_map_shape(&malformed));
         assert!(!types_match(&malformed, &malformed));
         assert!(!types_match(&malformed, &Type::Bottom));
