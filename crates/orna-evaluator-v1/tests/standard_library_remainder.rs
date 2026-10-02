@@ -111,7 +111,13 @@ fn pinned_collection_helpers_bind_for_collection_and_query_exports() {
         (
             "asof_join",
             include_str!("fixtures/stdlib-collection-asof-join-2213.orna"),
-            Raw::Array(vec![ints(&[10, 11])]),
+            Raw::Array(vec![Raw::Array(vec![
+                Raw::Int(10.into()),
+                Value::option(Some(Value::int(9.into())))
+                    .unwrap()
+                    .raw()
+                    .clone(),
+            ])]),
         ),
         (
             "split_when",
@@ -130,7 +136,7 @@ fn pinned_collection_helpers_bind_for_collection_and_query_exports() {
         session.submit(include_str!("fixtures/stdlib-zip-exact-fails-2213.orna"))
             .unwrap_err()
             .code(),
-        "ORNA-EVAL-VALUE"
+        "ORNA-EVAL-ERROR"
     );
 }
 
@@ -166,8 +172,24 @@ fn pinned_collection_asof_selectors_keep_captured_values() {
     assert_eq!(
         actual,
         Some(canonical(Raw::Array(vec![
-            Raw::Array(vec![ints(&[5, 1])]),
-            Raw::Array(vec![ints(&[11, 1])]),
+            Raw::Array(vec![
+                Raw::Array(vec![
+                    Raw::Int(5.into()),
+                    Value::option(Some(Value::int(1.into())))
+                        .unwrap()
+                        .raw()
+                        .clone(),
+                ]),
+            ]),
+            Raw::Array(vec![
+                Raw::Array(vec![
+                    Raw::Int(11.into()),
+                    Value::option(Some(Value::int(1.into())))
+                        .unwrap()
+                        .raw()
+                        .clone(),
+                ]),
+            ]),
         ])))
     );
 }
@@ -208,6 +230,10 @@ fn pinned_stats_aggregates_require_the_captured_std_module() {
         Ok(None)
     );
     assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-use-stats-z09xc.orna")),
+        Ok(None)
+    );
+    assert_eq!(
         session.submit(include_str!("fixtures/stdlib-stats-empty-list-ymou.orna")),
         Ok(None)
     );
@@ -241,7 +267,10 @@ fn pinned_stats_aggregates_require_the_captured_std_module() {
             CanonicalValue::new(Raw::Null).unwrap(),
         ),
     ] {
-        assert_eq!(session.submit(source), Ok(Some(expected)), "{source}");
+        let actual = session
+            .submit(source)
+            .unwrap_or_else(|error| panic!("{source}: {}", error.code()));
+        assert_eq!(actual, Some(expected), "{source}");
     }
     assert_eq!(
         session
@@ -253,11 +282,9 @@ fn pinned_stats_aggregates_require_the_captured_std_module() {
     );
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-stats-unbound-operation-fdqo9.orna"))
-            .unwrap_err()
-            .code(),
-        "ORNA-EVAL-ERROR",
-        "new stats contracts fail closed until their evaluator binding exists"
+            .submit(include_str!("fixtures/stdlib-stats-complete-behavior-yn4vz.orna")),
+        Ok(Some(CanonicalValue::new(Raw::Bool(true)).unwrap())),
+        "each stats export computes a result through the pinned source wrapper"
     );
     assert_eq!(
         session.submit(include_str!("fixtures/stdlib-use-query-ymou.orna")),
