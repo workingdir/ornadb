@@ -6144,6 +6144,101 @@ fn paired_pin_identities_survive_omissions_at_outer_and_middle_depths() {
 }
 
 #[test]
+fn paired_omission_folds_preserve_rebound_depth_labels() {
+    let source = include_str!("fixtures/historical-paired-omission-fold-depth-labels.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-omission-fold-depth-labels.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "only the fold that would merge distinct depth labels is rejected: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_omission_fold_depth_labels")
+        })
+        .expect("paired omission-fold fixture module");
+    let summary = format!(
+        "{:?}",
+        module.symbols["paired_omission_fold_depth_labels"].ty
+    );
+    for selector in [
+        "HEAD~850", "HEAD~840", "HEAD~830", "HEAD~820", "HEAD~810", "HEAD~800", "HEAD~700",
+        "HEAD~690", "HEAD~680", "HEAD~670", "HEAD~660", "HEAD~650",
+    ] {
+        assert!(
+            summary.contains(&format!("selector:{selector}")),
+            "a completed paired depth must retain {selector}: {summary}"
+        );
+    }
+    for selector in ["HEAD~780", "HEAD~770", "HEAD~740", "HEAD~730"] {
+        assert!(
+            !summary.contains(selector),
+            "a failed paired omission fold must not promote {selector}: {summary}"
+        );
+    }
+
+    let Type::Function { result, .. } = &module.symbols["safe_paired_omission_fold"].ty else {
+        panic!("safe omission fold must be an executable function");
+    };
+    let Type::List(element) = result.as_ref() else {
+        panic!("safe omission fold must return real tuple values: {result:?}");
+    };
+    let Type::Tuple(pins) = element.as_ref() else {
+        panic!("safe omission fold must preserve both tuple slots: {element:?}");
+    };
+    fn pin_context(ty: &Type) -> &Type {
+        let Type::Applied { base, arguments } = ty else {
+            panic!("folded tuple slots must stay historical callables: {ty:?}");
+        };
+        assert_eq!(base, "sys.HistoricalCallable");
+        let [pin, _] = arguments.as_slice() else {
+            panic!("historical callable must retain its computed pin: {arguments:?}");
+        };
+        pin
+    }
+    assert_eq!(
+        pin_context(&pins[0]),
+        &Type::Applied {
+            base: "sys.SnapshotRefContext".into(),
+            arguments: vec![Type::Named("selector:HEAD~500".into())],
+        },
+        "the omitted first slot keeps its earlier real pin label"
+    );
+    assert_eq!(
+        pin_context(&pins[1]),
+        &Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:HEAD~501".into()),
+                Type::Named("selector:HEAD~502".into()),
+            ],
+        },
+        "the live second slot keeps both depth labels without absorbing the omitted slot"
+    );
+}
+
+#[test]
 fn unknown_direct_pair_sibling_suppresses_pin_promotion() {
     let source = include_str!(
         "fixtures/historical-direct-paired-pin-rebind-suppression.orna"

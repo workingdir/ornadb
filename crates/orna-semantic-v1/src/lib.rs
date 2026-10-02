@@ -9501,6 +9501,15 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
     if !checkpoint_snapshot_maps_are_valid(left) || !checkpoint_snapshot_maps_are_valid(right) {
         return None;
     }
+    // Bottom contributes no value to a collection fold. Keep the concrete
+    // sibling type when the other row omitted that slot; tuple promotion has
+    // already checked that doing so cannot collapse distinct pin identities.
+    if matches!(left, Type::Bottom) {
+        return Some(right.clone());
+    }
+    if matches!(right, Type::Bottom) {
+        return Some(left.clone());
+    }
     if is_snapshot_context_type(left) || is_snapshot_context_type(right) {
         if !is_snapshot_context_map_shape(left) || !is_snapshot_context_map_shape(right) {
             return None;
@@ -10142,19 +10151,50 @@ fn infer_finite_list_collection_call(
                 | "union" | "count" | "first" | "one" | "sum" | "min" | "max"
                 | "every" | "exists" | "chunk" | "flatten" | "partition" | "zip"
                 | "zip_exact" | "unique" | "group_by" | "pairs" | "window"
-                | "split_when" | "rank" | "asof_join"
+                | "split_when" | "rank" | "asof_join" | "bucket_by"
         ),
         _ => standard_collection_module_operation(callee, scope, local).is_some(),
     };
     if portable_collection_call && let Some(argument) = arguments
         .iter()
         .find(|argument| argument.name.as_deref() == Some("rows"))
+        .or_else(|| {
+            arguments
+                .iter()
+                .find(|argument| argument.name.as_deref() == Some("values"))
+        })
+        .or_else(|| {
+            arguments
+                .iter()
+                .find(|argument| argument.name.as_deref() == Some("left"))
+        })
         .or_else(|| arguments.first())
     {
         let mut probe_diagnostics = Vec::new();
         let inferred = infer(&argument.value, scope, local, &mut probe_diagnostics);
         if matches!(inferred.ty, Type::Relation(_)) {
-            return None;
+            let operation = standard_collection_module_operation(callee, scope, local)
+                .or_else(|| path.first().copied());
+            if !operation.is_some_and(|operation| {
+                matches!(
+                    operation,
+                    "chunk"
+                        | "flatten"
+                        | "partition"
+                        | "zip"
+                        | "zip_exact"
+                        | "unique"
+                        | "group_by"
+                        | "pairs"
+                        | "window"
+                        | "split_when"
+                        | "rank"
+                        | "asof_join"
+                        | "bucket_by"
+                )
+            }) {
+                return None;
+            }
         }
     }
     let operation = match path.as_slice() {
@@ -10490,9 +10530,17 @@ fn infer_finite_list_helper_collection(
         ));
     }
 
+    let relation_input = matches!(values.first().and_then(Option::as_ref), Some(Type::Relation(_)));
+    let container = |element: Type| {
+        if relation_input {
+            Type::Relation(Box::new(element))
+        } else {
+            Type::List(Box::new(element))
+        }
+    };
     let list_element = |index: usize, name: &str, diagnostics: &mut Vec<Diagnostic>| {
         match values.get(index).and_then(Option::as_ref) {
-            Some(Type::List(element)) => element.as_ref().clone(),
+            Some(Type::List(element) | Type::Relation(element)) => element.as_ref().clone(),
             Some(Type::Error) | None => Type::Error,
             Some(_) => {
                 diagnostics.push(diag(
@@ -10513,10 +10561,10 @@ fn infer_finite_list_helper_collection(
             {
                 diagnostics.push(diag(DIAG_TYPE, "chunk size must be positive"));
             }
-            Type::List(Box::new(Type::List(Box::new(first))))
+            container(Type::List(Box::new(first)))
         }
         "flatten" => match first {
-            Type::List(inner) => Type::List(inner),
+            Type::List(inner) => container(*inner),
             Type::Error => Type::Error,
             _ => {
                 diagnostics.push(diag(DIAG_TYPE, "flatten requires a list of finite lists"));
@@ -10537,16 +10585,29 @@ fn infer_finite_list_helper_collection(
             }
             if operation == "partition" {
                 Type::Tuple(vec![
-                    Type::List(Box::new(first.clone())),
-                    Type::List(Box::new(first)),
+                    container(first.clone()),
+                    container(first),
                 ])
             } else {
-                Type::List(Box::new(Type::List(Box::new(first))))
+                container(Type::List(Box::new(first)))
             }
         }
         "zip" | "zip_exact" => {
+            let right_is_relation = matches!(
+                values.get(1).and_then(Option::as_ref),
+                Some(Type::Relation(_))
+            );
+            if right_is_relation != relation_input {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!("std.collection {operation} inputs must use the same collection kind"),
+                ));
+            }
             let right = list_element(1, "right input", diagnostics);
-            Type::List(Box::new(Type::Tuple(vec![first, right])))
+            if operation == "zip_exact" {
+                effects.may_fail = true;
+            }
+            container(Type::Tuple(vec![first, right]))
         }
         "unique" => {
             if is_default_float_equality_type(&first) {
@@ -10556,10 +10617,10 @@ fn infer_finite_list_helper_collection(
                 ));
                 Type::Error
             } else {
-                Type::List(Box::new(first))
+                container(first)
             }
         }
-        "pairs" => Type::List(Box::new(Type::Tuple(vec![first.clone(), first]))),
+        "pairs" => container(Type::Tuple(vec![first.clone(), first])),
         "group_by" | "rank" => {
             let key_type = if let Some(index) = slots.get(1).and_then(|slot| *slot) {
                 let callback = infer_finite_list_callback(
@@ -10582,12 +10643,12 @@ fn infer_finite_list_helper_collection(
                 ));
             }
             if operation == "group_by" {
-                Type::List(Box::new(Type::Tuple(vec![
+                container(Type::Tuple(vec![
                     key_type,
                     Type::List(Box::new(first)),
-                ])))
+                ]))
             } else {
-                Type::List(Box::new(Type::Tuple(vec![first, Type::Int])))
+                container(Type::Tuple(vec![first, Type::Int]))
             }
         }
         "window" => {
@@ -10600,7 +10661,7 @@ fn infer_finite_list_helper_collection(
                     diagnostics.push(diag(DIAG_TYPE, "window size and step must be positive"));
                 }
             }
-            Type::List(Box::new(Type::List(Box::new(first))))
+            container(Type::List(Box::new(first)))
         }
         "asof_join" => {
             let right = list_element(1, "right input", diagnostics);
@@ -10624,10 +10685,20 @@ fn infer_finite_list_helper_collection(
                     }
                 }
             }
-            Type::List(Box::new(Type::Tuple(vec![
+            let right_is_relation = matches!(
+                values.get(1).and_then(Option::as_ref),
+                Some(Type::Relation(_))
+            );
+            if right_is_relation != relation_input {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "std.collection asof_join inputs must use the same collection kind",
+                ));
+            }
+            container(Type::Tuple(vec![
                 first.clone(),
                 Type::Optional(Box::new(first)),
-            ])))
+            ]))
         }
         "bucket_by" => {
             let time_shape = matches!(&first, Type::Instant)
@@ -10638,7 +10709,7 @@ fn infer_finite_list_helper_collection(
                     "bucket_by requires Instant values or rows with an Instant time field",
                 ));
             }
-            Type::List(Box::new(Type::List(Box::new(first))))
+            container(Type::List(Box::new(first)))
         }
         _ => unreachable!("finite-list helper was checked"),
     };
@@ -11767,6 +11838,31 @@ fn infer_relation_collection_pipeline(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
+    if matches!(
+        operation,
+        "chunk"
+            | "flatten"
+            | "partition"
+            | "zip"
+            | "zip_exact"
+            | "unique"
+            | "group_by"
+            | "pairs"
+            | "window"
+            | "split_when"
+            | "rank"
+            | "asof_join"
+            | "bucket_by"
+    ) {
+        return infer_finite_list_helper_collection(
+            operation,
+            Some(input),
+            arguments,
+            scope,
+            local,
+            diagnostics,
+        );
+    }
     let Type::Relation(element) = input.ty else {
         unreachable!("qualified relation pipeline is selected for Relation<T>")
     };
@@ -17872,11 +17968,21 @@ fn collect_corresponding_snapshot_context_maps(
     into: &mut Vec<(BTreeSet<String>, BTreeSet<String>)>,
 ) -> bool {
     // Generic SnapshotRef formals have no concrete checkpoint identity to
-    // preserve. Bottom leaves likewise represent values that were not made.
+    // preserve. A Bottom on one side of a compaction fold is different: its
+    // sibling slot still exists, so retain an empty map for that side. The
+    // empty map lets the fold detect when a live pin from the other row would
+    // make two previously distinct depth labels overlap.
+    if matches!(expected, Type::Bottom) && matches!(actual, Type::Bottom) {
+        return true;
+    }
+    if matches!(expected, Type::Bottom) {
+        return collect_snapshot_context_maps_from_omitted_value(actual, true, into);
+    }
+    if matches!(actual, Type::Bottom) {
+        return collect_snapshot_context_maps_from_omitted_value(expected, false, into);
+    }
     if expected == &Type::Named("sys.SnapshotRef".into())
         || actual == &Type::Named("sys.SnapshotRef".into())
-        || matches!(expected, Type::Bottom)
-        || matches!(actual, Type::Bottom)
     {
         return true;
     }
@@ -18010,6 +18116,69 @@ fn collect_corresponding_snapshot_context_maps(
         ) => {
             collect_corresponding_snapshot_context_maps(expected_currency, actual_currency, into)
                 && collect_corresponding_snapshot_context_maps(expected_unit, actual_unit, into)
+        }
+        _ => true,
+    }
+}
+
+fn collect_snapshot_context_maps_from_omitted_value(
+    value: &Type,
+    omitted_on_left: bool,
+    into: &mut Vec<(BTreeSet<String>, BTreeSet<String>)>,
+) -> bool {
+    if matches!(value, Type::Bottom) || value == &Type::Named("sys.SnapshotRef".into()) {
+        return true;
+    }
+    if is_contextual_snapshot_ref(value) || is_snapshot_context_map_shape(value) {
+        let Type::Applied { arguments, .. } = value else {
+            return false;
+        };
+        let selectors = arguments
+            .iter()
+            .filter_map(|argument| match argument {
+                Type::Named(selector) => Some(selector.clone()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        if selectors.is_empty() {
+            return false;
+        }
+        let empty = BTreeSet::new();
+        into.push(if omitted_on_left {
+            (empty, selectors)
+        } else {
+            (selectors, empty)
+        });
+        return true;
+    }
+
+    match value {
+        Type::List(value)
+        | Type::Range(value)
+        | Type::Relation(value)
+        | Type::Stream(value)
+        | Type::Optional(value) => {
+            collect_snapshot_context_maps_from_omitted_value(value, omitted_on_left, into)
+        }
+        Type::Record(fields) => fields.values().all(|value| {
+            collect_snapshot_context_maps_from_omitted_value(value, omitted_on_left, into)
+        }),
+        Type::Tuple(elements) => elements.iter().all(|value| {
+            collect_snapshot_context_maps_from_omitted_value(value, omitted_on_left, into)
+        }),
+        Type::Applied { arguments, .. } => arguments.iter().all(|value| {
+            collect_snapshot_context_maps_from_omitted_value(value, omitted_on_left, into)
+        }),
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters.iter().all(|value| {
+                collect_snapshot_context_maps_from_omitted_value(value, omitted_on_left, into)
+            }) && collect_snapshot_context_maps_from_omitted_value(result, omitted_on_left, into)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            collect_snapshot_context_maps_from_omitted_value(currency, omitted_on_left, into)
+                && collect_snapshot_context_maps_from_omitted_value(unit, omitted_on_left, into)
         }
         _ => true,
     }
@@ -20383,6 +20552,31 @@ mod tests {
         assert!(!pinned_snapshot_rebind_compatible(
             &nested_malformed,
             &nested_malformed
+        ));
+    }
+
+    #[test]
+    fn paired_omission_folds_do_not_collapse_distinct_depth_labels() {
+        let pin = |selector: &str| contextual_snapshot_ref(selector);
+        let before = [Type::Tuple(vec![
+            pin("selector:HEAD~depth-a"),
+            pin("selector:HEAD~depth-b"),
+        ])];
+        let after = [Type::Tuple(vec![Type::Bottom, pin("selector:HEAD~depth-a")])];
+
+        assert!(checkpoint_pin_map_widths_match(&before[0], &after[0]));
+        assert!(
+            !tuple_checkpoint_compaction_fold_preserves_pin_identity(&before, &after),
+            "an omitted first slot must not hide the later fold merging depth-a with depth-b"
+        );
+
+        let stable_after = [Type::Tuple(vec![
+            Type::Bottom,
+            pin("selector:HEAD~depth-c"),
+        ])];
+        assert!(tuple_checkpoint_compaction_fold_preserves_pin_identity(
+            &before,
+            &stable_after
         ));
     }
 

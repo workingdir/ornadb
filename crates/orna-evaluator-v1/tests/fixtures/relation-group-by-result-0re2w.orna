@@ -1,0 +1,1 @@
+std.collection.group_by(rows, value => value % 10)
