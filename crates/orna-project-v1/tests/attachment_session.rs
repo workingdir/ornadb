@@ -12035,6 +12035,63 @@ fn paired_terminal_depth_waves_retain_pre_and_between_routes() {
         ),
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
+
+    let next_shared_terminal_pair = [
+        resolve_pin(aliases[2], &terminal_right),
+        resolve_pin(aliases[3], &leaves[4]),
+    ];
+    let extended_convergence = resolver
+        .extend_sibling_terminal_pair_wave(&converged, next_shared_terminal_pair.clone())
+        .unwrap();
+    assert_eq!(extended_convergence.routes().len(), 2);
+    for (route, deep_marker) in [
+        (&extended_convergence.routes()[0], "601"),
+        (&extended_convergence.routes()[1], "602"),
+    ] {
+        assert_eq!(route.retained_wave(0).unwrap().len(), 2);
+        assert_eq!(route.retained_wave(1).unwrap().len(), 1);
+        assert_eq!(route.retained_wave(2).unwrap().len(), 2);
+        assert_eq!(route.retained_wave(3).unwrap().len(), 1);
+        assert_eq!(route.retained_wave(4).unwrap().len(), 2);
+        let displaced_convergence = route.retained_wave(5).unwrap();
+        assert_eq!(displaced_convergence.len(), 1);
+        assert_pin(&displaced_convergence[0], aliases[3], &leaves[3]);
+        assert_module_route(&displaced_convergence[0], "main.orna", "= 703");
+        let continued_pair = route.retained_wave(6).unwrap();
+        assert_eq!(continued_pair.len(), 2);
+        assert_pin(&continued_pair[0], aliases[2], &terminal_base);
+        assert_module_route(
+            &continued_pair[0],
+            "main.orna",
+            &format!("= {deep_marker}"),
+        );
+        assert_pin(&continued_pair[1], aliases[2], &terminal_right);
+        assert_pin(&continued_pair[1], aliases[3], &leaves[2]);
+        assert_module_route(&continued_pair[1], "main.orna", "= 712");
+        assert_module_route(
+            &continued_pair[1],
+            "archive_copy_archive_archive.orna",
+            "= 702",
+        );
+        assert_pin(route.final_session(), aliases[3], &leaves[4]);
+        assert_module_route(route.final_session(), "main.orna", "= 704");
+    }
+    for route in converged.routes() {
+        assert_pin(route.final_session(), aliases[3], &leaves[3]);
+        assert_module_route(route.final_session(), "main.orna", "= 703");
+    }
+    let invalid_shared_terminal_pair = [
+        resolve_pin(aliases[2], &terminal_right),
+        resolve_pin("unavailable", &leaves[4]),
+    ];
+    assert!(matches!(
+        resolver.extend_sibling_terminal_pair_wave(&converged, invalid_shared_terminal_pair),
+        Err(AttachmentError::AttachmentNotFound)
+    ));
+    for route in converged.routes() {
+        assert_pin(route.final_session(), aliases[3], &leaves[3]);
+        assert_module_route(route.final_session(), "main.orna", "= 703");
+    }
 }
 
 fn assert_module_route(session: &AttachedDatabaseSession, path: &str, source_marker: &str) {
