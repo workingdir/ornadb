@@ -68,3 +68,29 @@ pub fn paired_nested_tuple_bottom_wave_atomicity(failure: Error) {
         },
     }
 }
+
+pub fn paired_nested_tuple_bottom_terminal_wave_atomicity(failure: Error) {
+    let left_root = nested_tuple_wave(sys.snapshot("HEAD~500"));
+    let right_root = nested_tuple_wave(sys.snapshot("HEAD~490"));
+    let left_middle = left_root((sys.snapshot("HEAD~450"), (sys.snapshot("HEAD~440"), sys.snapshot("HEAD~430"))));
+    let right_middle = right_root((sys.snapshot("HEAD~420"), (sys.snapshot("HEAD~410"), sys.snapshot("HEAD~400"))));
+    let left_inner = left_middle((sys.snapshot("HEAD~380"), (sys.snapshot("HEAD~370"), sys.snapshot("HEAD~360"))));
+    let right_inner = right_middle((sys.snapshot("HEAD~350"), (sys.snapshot("HEAD~340"), sys.snapshot("HEAD~330"))));
+
+    // Put Bottom at the deepest callback wave, after two valid paired waves.
+    let left_values = left_inner((sys.snapshot("HEAD~320"), (sys.snapshot("HEAD~310"), fail(failure))));
+    let right_values = right_inner((sys.snapshot("HEAD~290"), (sys.snapshot("HEAD~280"), sys.snapshot("HEAD~270"))));
+
+    {
+        left: {
+            outer: std.concurrent.parallel([() => left_values.outer_selected, () => left_values.outer_selected]),
+            middle: std.concurrent.parallel([() => left_values.middle_selected, () => left_values.middle_selected]),
+            terminal: std.concurrent.parallel([() => left_values.terminal_selected, () => left_values.terminal_selected]),
+        },
+        right: {
+            outer: std.concurrent.parallel([() => right_values.outer_selected, () => right_values.outer_selected]),
+            middle: std.concurrent.parallel([() => right_values.middle_selected, () => right_values.middle_selected]),
+            terminal: std.concurrent.parallel([() => right_values.terminal_selected, () => right_values.terminal_selected]),
+        },
+    }
+}
