@@ -1,0 +1,16 @@
+use std.io.process as process;
+use std.io.environment as environment;
+
+pub fn run_tool() = process.run(
+    "tool",
+    ["--version"],
+    ".",
+    [],
+    null,
+    null,
+    4096,
+);
+
+pub fn optional_environment_value(name: Str) = environment.get(name);
+
+pub fn required_environment_value(name: Str) = environment.require(name);
