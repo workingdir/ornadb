@@ -4076,6 +4076,29 @@ fn paired_nested_closure_chains_reject_cross_chain_leaf_mixing() {
 }
 
 #[test]
+fn paired_nested_closure_chain_depth_storms_preserve_each_captured_pin() {
+    let source = include_str!("fixtures/historical-paired-nested-closure-chain-depth-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-closure-chain-depth-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired nested closure chains must preserve root pins through the first storm and captured bridge pins through the second: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
