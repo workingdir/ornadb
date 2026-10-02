@@ -766,11 +766,26 @@ impl PlanByteCapHandoffRoute {
         )
     }
 
+    /// Returns the canonical labels as an explicitly named input/output pair.
+    fn named_scope_labels(&self) -> PlanByteCapScopeLabels {
+        let (input, output) = self.scope_labels();
+        PlanByteCapScopeLabels { input, output }
+    }
+
     /// Returns the canonical input-to-output scope label for this route.
     pub fn paired_scope_label(&self) -> String {
         let (input_scope, output_scope) = self.scope_labels();
         format!("{input_scope}=>{output_scope}")
     }
+}
+
+/// Serialized canonical byte-cap handoff labels with explicit input/output names.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct PlanByteCapScopeLabels {
+    /// Label derived from the route's typed input ancestry.
+    pub input: String,
+    /// Label derived from the route's typed output ancestry.
+    pub output: String,
 }
 
 impl Serialize for PlanByteCapHandoffRoute {
@@ -780,7 +795,7 @@ impl Serialize for PlanByteCapHandoffRoute {
     where
         S: serde::Serializer,
     {
-        let mut route = serializer.serialize_struct("PlanByteCapHandoffRoute", 8)?;
+        let mut route = serializer.serialize_struct("PlanByteCapHandoffRoute", 9)?;
         route.serialize_field("depth", &self.depth)?;
         route.serialize_field("input_path", &self.input_path)?;
         route.serialize_field("output_path", &self.output_path)?;
@@ -788,6 +803,7 @@ impl Serialize for PlanByteCapHandoffRoute {
         route.serialize_field("input_scope", &input_scope)?;
         route.serialize_field("output_scope", &output_scope)?;
         route.serialize_field("paired_scope_label", &self.paired_scope_label())?;
+        route.serialize_field("scope_labels", &self.named_scope_labels())?;
         route.serialize_field("input_bytes", &self.input_bytes)?;
         route.serialize_field("output_bytes", &self.output_bytes)?;
         route.end()
@@ -821,6 +837,36 @@ pub enum PlanByteCapScopeSegment {
     NestedStorm { index: usize },
     /// The bounded output of a one-based nested storm within a branch.
     NestedStormOutput { index: usize },
+}
+
+impl PlanByteCapScopeSegment {
+    /// Returns the canonical display component for this typed scope segment.
+    ///
+    /// ORNA-PLAN specifies typed planner ancestry but does not prescribe its
+    /// text spelling. The local stable mapping is `StormStage` to `stormN`,
+    /// `StormStageOutput` to `storm_stage_outputN`, `Branch` to `branchN`,
+    /// `Limit` to `limitN`, `BranchOutput` to `branch_outputN`, `Rebind` to
+    /// `rebindN`, `Cascade` to `cascadeN`, `RebindCascadeOutput` to
+    /// `rebind_outputP_C`, `NestedStorm` to `nestedN`, and
+    /// `NestedStormOutput` to `nested_outputN`. `N` is a one-based index or
+    /// position; `P_C` is the rebind position and cascade index. The typed
+    /// segment remains authoritative when a display stem is abbreviated.
+    pub fn scope_component_label(&self) -> String {
+        match self {
+            Self::StormStage { index } => format!("storm{index}"),
+            Self::StormStageOutput { index } => format!("storm_stage_output{index}"),
+            Self::Branch { index } => format!("branch{index}"),
+            Self::Limit { position } => format!("limit{position}"),
+            Self::BranchOutput { index } => format!("branch_output{index}"),
+            Self::Rebind { position } => format!("rebind{position}"),
+            Self::Cascade { index } => format!("cascade{index}"),
+            Self::RebindCascadeOutput { position, index } => {
+                format!("rebind_output{position}_{index}")
+            }
+            Self::NestedStorm { index } => format!("nested{index}"),
+            Self::NestedStormOutput { index } => format!("nested_output{index}"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -3034,28 +3080,8 @@ fn rebind_byte_cap_handoff_route_records(
 fn byte_cap_scope_path_label(path: &[PlanByteCapScopeSegment]) -> String {
     let mut scope = "root".to_owned();
     for segment in path {
-        let label = match segment {
-            PlanByteCapScopeSegment::StormStage { index } => format!("storm{index}"),
-            // ORNA-PLAN does not prescribe labels; preserve the complete typed
-            // segment name and producer index so it cannot read as a nested output.
-            PlanByteCapScopeSegment::StormStageOutput { index } => {
-                format!("storm_stage_output{index}")
-            }
-            PlanByteCapScopeSegment::Branch { index } => format!("branch{index}"),
-            PlanByteCapScopeSegment::Limit { position } => format!("limit{position}"),
-            PlanByteCapScopeSegment::BranchOutput { index } => format!("branch_output{index}"),
-            PlanByteCapScopeSegment::Rebind { position } => format!("rebind{position}"),
-            PlanByteCapScopeSegment::Cascade { index } => format!("cascade{index}"),
-            PlanByteCapScopeSegment::RebindCascadeOutput { position, index } => {
-                format!("rebind_output{position}_{index}")
-            }
-            PlanByteCapScopeSegment::NestedStorm { index } => format!("nested{index}"),
-            PlanByteCapScopeSegment::NestedStormOutput { index } => {
-                format!("nested_output{index}")
-            }
-        };
         scope.push('/');
-        scope.push_str(&label);
+        scope.push_str(&segment.scope_component_label());
     }
     scope
 }
@@ -3815,6 +3841,41 @@ mod byte_cap_handoff_route_scope_tests {
     use super::*;
 
     #[test]
+    fn scope_component_labels_preserve_each_typed_segment() {
+        let segments = [
+            (PlanByteCapScopeSegment::StormStage { index: 2 }, "storm2"),
+            (
+                PlanByteCapScopeSegment::StormStageOutput { index: 3 },
+                "storm_stage_output3",
+            ),
+            (PlanByteCapScopeSegment::Branch { index: 4 }, "branch4"),
+            (PlanByteCapScopeSegment::Limit { position: 5 }, "limit5"),
+            (
+                PlanByteCapScopeSegment::BranchOutput { index: 6 },
+                "branch_output6",
+            ),
+            (PlanByteCapScopeSegment::Rebind { position: 7 }, "rebind7"),
+            (PlanByteCapScopeSegment::Cascade { index: 8 }, "cascade8"),
+            (
+                PlanByteCapScopeSegment::RebindCascadeOutput {
+                    position: 9,
+                    index: 10,
+                },
+                "rebind_output9_10",
+            ),
+            (PlanByteCapScopeSegment::NestedStorm { index: 11 }, "nested11"),
+            (
+                PlanByteCapScopeSegment::NestedStormOutput { index: 12 },
+                "nested_output12",
+            ),
+        ];
+
+        for (segment, expected) in segments {
+            assert_eq!(segment.scope_component_label(), expected);
+        }
+    }
+
+    #[test]
     fn typed_paths_drive_scope_summaries_and_route_fingerprint() {
         let input_path = vec![
             PlanByteCapScopeSegment::StormStage { index: 1 },
@@ -3844,6 +3905,19 @@ mod byte_cap_handoff_route_scope_tests {
             stale_route.paired_scope_label(),
             format!("{input_scope}=>{output_scope}")
         );
+        assert_eq!(
+            stale_route.named_scope_labels(),
+            PlanByteCapScopeLabels {
+                input: input_scope.to_owned(),
+                output: output_scope.clone(),
+            }
+        );
+        let serialized_route = serde_json::to_value(&stale_route).unwrap();
+        assert_eq!(
+            serialized_route["scope_labels"],
+            serde_json::json!({ "input": input_scope, "output": output_scope })
+        );
+        assert!(serialized_route["scope_labels"].is_object());
         assert_eq!(
             rebind_byte_cap_handoff_scopes_by_depth_text(&[stale_route.clone()]),
             format!("2:{output_scope}=?>?")

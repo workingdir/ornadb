@@ -5636,6 +5636,107 @@ fn missing_required_sibling_suppresses_tuple_pin_rebinding() {
 }
 
 #[test]
+fn missing_outer_tuple_keeps_sibling_pins_symbolic_across_later_depths() {
+    let source =
+        include_str!("fixtures/historical-missing-outer-tuple-preserves-sibling-pins.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-missing-outer-tuple-preserves-sibling-pins.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "omitting the required sibling tuple must remain a call error"
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("omitted_outer_tuple_preserves_sibling_pins_across_later_depths")
+        })
+        .expect("nested missing tuple fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["omitted_outer_tuple_preserves_sibling_pins_across_later_depths"].ty
+    else {
+        panic!("nested missing tuple proof must be a function");
+    };
+    let Type::Record(cases) = result.as_ref() else {
+        panic!("nested missing tuple proof must return its incomplete case");
+    };
+    fn assert_real_factory_values(record: &Type) {
+        let Type::Record(fields) = record else {
+            panic!("capture wave must return computed values: {record:?}");
+        };
+        for name in [
+            "left_selected_capture",
+            "left_sibling_capture",
+            "right_selected_capture",
+            "right_sibling_capture",
+            "middle_selected_capture",
+            "middle_sibling_capture",
+            "terminal_capture",
+        ] {
+            let Type::Applied { base, arguments } = fields.get(name).expect("capture field") else {
+                panic!("{name} must be a real historical callable: {fields:?}");
+            };
+            assert_eq!(base, "sys.HistoricalCallable", "{name}");
+            let [pin, Type::Function { result, .. }] = arguments.as_slice() else {
+                panic!("{name} must retain its pin and read result: {arguments:?}");
+            };
+            assert!(
+                matches!(pin, Type::Applied { base, .. } if base == "sys.SnapshotRefContext"),
+                "{name} must retain a computed pin context: {pin:?}"
+            );
+            let Type::Record(read_members) = result.as_ref() else {
+                panic!("{name} must expose its database read result: {result:?}");
+            };
+            assert!(
+                matches!(read_members.get("read"), Some(Type::Applied { base, .. }) if base == "sys.HistoricalCallable"),
+                "{name} must retain its real read callable: {read_members:?}"
+            );
+        }
+    }
+
+    let incomplete = cases.get("incomplete").expect("incomplete nested wave");
+    assert_real_factory_values(incomplete);
+    let mut incomplete_contexts = BTreeSet::new();
+    collect_snapshot_contexts(incomplete, &mut incomplete_contexts);
+    for selector in ["HEAD~900", "HEAD~890"] {
+        assert!(
+            !incomplete_contexts
+                .iter()
+                .any(|context| context.contains(selector)),
+            "the incomplete outer wave leaked {selector} into a sibling capture: {incomplete_contexts:?}"
+        );
+    }
+    let unresolved_outer_pins = incomplete_contexts
+        .iter()
+        .filter(|context| context.starts_with("selector:dynamic-call:"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        unresolved_outer_pins.len(),
+        4,
+        "the missing tuple must leave four distinct outer pins symbolic: {incomplete_contexts:?}"
+    );
+    for selector in ["HEAD~880", "HEAD~870", "HEAD~860"] {
+        assert!(
+            incomplete_contexts.contains(&format!("selector:{selector}")),
+            "later valid depth must still compute pin {selector}: {incomplete_contexts:?}"
+        );
+    }
+
+}
+
+#[test]
 fn concurrent_callback_tuples_reject_cross_lane_identity_mix_after_rebind() {
     let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);

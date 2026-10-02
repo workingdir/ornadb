@@ -181,6 +181,43 @@ fn unknown_nested_storm_routes_retain_bounded_branch_output_ancestry() {
     ]);
     assert_eq!(routes[3].input_path, second_nested_input);
 
+    let route_scope = |path: &[PlanByteCapScopeSegment]| {
+        std::iter::once("root".to_owned())
+            .chain(path.iter().map(PlanByteCapScopeSegment::scope_component_label))
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+    for route in routes {
+        let input_scope = route_scope(&route.input_path);
+        let output_scope = route_scope(&route.output_path);
+        assert_eq!(route.input_scope_label(), input_scope);
+        assert_eq!(route.output_scope_label(), output_scope);
+        assert_eq!(
+            route.paired_scope_label(),
+            format!("{input_scope}=>{output_scope}")
+        );
+        let serialized = serde_json::to_value(route).expect("typed ancestry route serializes");
+        assert_eq!(serialized["input_scope"], input_scope);
+        assert_eq!(serialized["output_scope"], output_scope);
+        assert_eq!(
+            serialized["paired_scope_label"],
+            format!("{input_scope}=>{output_scope}")
+        );
+        assert_eq!(
+            serialized["scope_labels"],
+            serde_json::json!({ "input": input_scope, "output": output_scope })
+        );
+    }
+
+    let first_route = serde_json::to_value(&routes[0]).expect("real route serializes");
+    assert_eq!(
+        first_route["scope_labels"],
+        serde_json::json!({
+            "input": "root/storm1/branch1/limit1",
+            "output": "root/storm1/branch1/limit1/rebind1/cascade1",
+        })
+    );
+
     let serialized = serde_json::to_value(&explained).expect("unknown plan serializes");
     let serialized_filter = serialized["nodes"]
         .as_array()
