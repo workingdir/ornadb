@@ -153,7 +153,7 @@ fn generated_registry_schema_rejects_unknown_fields_and_malformed_failure_codes(
     assert!(
         build_host::validate_host_registry_json(&malformed_code.to_string(), schema)
             .unwrap_err()
-            .contains("invalid host failure code"),
+            .contains("invalid sys failure code"),
         "the published failure-code taxonomy is enforced by the artifact schema"
     );
 

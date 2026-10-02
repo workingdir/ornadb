@@ -12,6 +12,8 @@ use crate::{SystemEffect, TypedValue};
 
 const GENERATED_PROVIDER_ABI: &str =
     include_str!(concat!(env!("OUT_DIR"), "/system_provider_abi.json"));
+const GENERATED_PROVIDER_ABI_SCHEMA: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/system_provider_abi.schema.json"));
 const PROVIDER_FAILURE_CODES: [&str; 3] = [
     "sys.abi.precondition_failed",
     "sys.abi.unavailable",
@@ -587,6 +589,12 @@ pub fn system_dispatch_table() -> &'static SystemDispatchTable {
 #[doc(hidden)]
 pub fn system_provider_abi_json() -> &'static str {
     GENERATED_PROVIDER_ABI
+}
+
+/// JSON Schema generated beside and embedded with the typed provider dispatch
+/// registry. The dev-only conformance exporter emits these exact bytes.
+pub fn system_provider_abi_schema_json() -> &'static str {
+    GENERATED_PROVIDER_ABI_SCHEMA
 }
 
 /// Source-compatible name for consumers that only need provider-role metadata.
