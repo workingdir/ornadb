@@ -295,6 +295,13 @@ impl PackageResolver {
     /// branch's ancestor manifests, and cannot retarget a same-named terminal
     /// route in another branch. Reopening a retained ancestor starts its own
     /// terminal route chain from that pin's manifest.
+    /// Expanding one retained parent pin more than once also creates sibling
+    /// closure branches: storms at paired nested depths remain local to each
+    /// session, and each terminal route follows only its branch's selected
+    /// pins.
+    /// A sibling expanded later from the retained ancestor still starts at
+    /// that ancestor's manifest-selected child; an earlier sibling's terminal
+    /// rebind does not supply a fallback for the late branch.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
