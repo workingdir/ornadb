@@ -1,0 +1,2 @@
+use std.chain.bridge.{map_values};
+pub fn replay(value: Int): [Int] = std.chain.bridge.map_values(value + 1);
