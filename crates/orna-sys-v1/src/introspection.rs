@@ -2132,16 +2132,18 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             rebind_byte_cap_handoff_estimates_by_depth_text(
                 &byte_cap_handoff_estimates_by_depth,
             );
+        let limit_chain_rebind_byte_cap_handoff_route_records =
+            rebind_byte_cap_handoff_route_records(&byte_cap_handoff_estimates_by_depth);
+        // Derive both scoped handoff summaries from the serialized typed routes
+        // so their stage-output labels cannot diverge from route ancestry.
         let limit_chain_rebind_byte_cap_handoff_scopes_by_depth_text =
             rebind_byte_cap_handoff_scopes_by_depth_text(
-                &byte_cap_handoff_estimates_by_depth,
+                &limit_chain_rebind_byte_cap_handoff_route_records,
             );
         let limit_chain_rebind_byte_cap_handoff_routes_by_depth_text =
             rebind_byte_cap_handoff_routes_by_depth_text(
-                &byte_cap_handoff_estimates_by_depth,
+                &limit_chain_rebind_byte_cap_handoff_route_records,
             );
-        let limit_chain_rebind_byte_cap_handoff_route_records =
-            rebind_byte_cap_handoff_route_records(&byte_cap_handoff_estimates_by_depth);
         let has_limit_chain_rebind_byte_cap_handoff_routes =
             !limit_chain_rebind_byte_cap_handoff_route_records.is_empty();
         let limit_chain_rebind_predicates = storm
@@ -2888,58 +2890,47 @@ fn rebind_byte_cap_handoff_estimates_by_depth_text(
 }
 
 fn rebind_byte_cap_handoff_scopes_by_depth_text(
-    estimates: &RebindByteCapHandoffEstimatesByDepth,
+    routes: &[PlanByteCapHandoffRoute],
 ) -> String {
-    estimates
-        .iter()
-        .map(|(depth, handoffs)| {
-            let handoffs = handoffs
-                .iter()
-                .map(|handoff| {
-                    let input_bytes = handoff
-                        .input_bytes
-                        .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
-                    let output_bytes = handoff
-                        .output_bytes
-                        .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
-                    format!(
-                        "{}={input_bytes}>{output_bytes}",
-                        byte_cap_scope_path_label(&handoff.output_path)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("{depth}:{handoffs}")
-        })
+    let mut by_depth = BTreeMap::<usize, Vec<String>>::new();
+    for route in routes {
+        let input_bytes = route
+            .input_bytes
+            .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        let output_bytes = route
+            .output_bytes
+            .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        by_depth.entry(route.depth).or_default().push(format!(
+            "{}={input_bytes}>{output_bytes}",
+            route.output_scope
+        ));
+    }
+    by_depth
+        .into_iter()
+        .map(|(depth, handoffs)| format!("{depth}:{}", handoffs.join(",")))
         .collect::<Vec<_>>()
         .join(";")
 }
 
 fn rebind_byte_cap_handoff_routes_by_depth_text(
-    estimates: &RebindByteCapHandoffEstimatesByDepth,
+    routes: &[PlanByteCapHandoffRoute],
 ) -> String {
-    estimates
-        .iter()
-        .map(|(depth, handoffs)| {
-            let handoffs = handoffs
-                .iter()
-                .map(|handoff| {
-                    let input_bytes = handoff
-                        .input_bytes
-                        .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
-                    let output_bytes = handoff
-                        .output_bytes
-                        .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
-                    format!(
-                        "{}=>{}={input_bytes}>{output_bytes}",
-                        byte_cap_scope_path_label(&handoff.input_path),
-                        byte_cap_scope_path_label(&handoff.output_path)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("{depth}:{handoffs}")
-        })
+    let mut by_depth = BTreeMap::<usize, Vec<String>>::new();
+    for route in routes {
+        let input_bytes = route
+            .input_bytes
+            .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        let output_bytes = route
+            .output_bytes
+            .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        by_depth.entry(route.depth).or_default().push(format!(
+            "{}=>{}={input_bytes}>{output_bytes}",
+            route.input_scope, route.output_scope
+        ));
+    }
+    by_depth
+        .into_iter()
+        .map(|(depth, handoffs)| format!("{depth}:{}", handoffs.join(",")))
         .collect::<Vec<_>>()
         .join(";")
 }
