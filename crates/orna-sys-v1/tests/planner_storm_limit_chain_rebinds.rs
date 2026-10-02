@@ -2338,6 +2338,33 @@ fn typed_handoff_routes_preserve_ancestry_through_unknown_nested_limit_chains() 
     let mut third_nested_second_limit_input = routes[6].output_path.clone();
     third_nested_second_limit_input.push(PlanByteCapScopeSegment::Limit { position: 2 });
     assert_eq!(routes[7].input_path, third_nested_second_limit_input);
+
+    let serialized = serde_json::to_value(&explained).expect("explained plans serialize");
+    let serialized_filter = serialized["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["details"]["disjunct_storm"] == 1)
+        .expect("outer storm is serialized");
+    assert!(serialized_filter.get("estimated_rows").is_none());
+    assert!(serialized_filter.get("estimated_bytes").is_none());
+    let serialized_routes = serialized_filter["details"]
+        ["limit_chain_rebind_byte_cap_handoff_route_records"]
+        .as_array()
+        .expect("typed routes serialize as an array");
+    assert_eq!(serialized_routes.len(), 8);
+    assert!(serialized_routes.iter().all(|route| {
+        route["input_bytes"] == serde_json::Value::Null
+            && route["output_bytes"] == serde_json::Value::Null
+    }));
+    assert!(serialized_routes[7]["input_path"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!({ "kind": "nested_storm_output", "index": 1 })));
+    assert!(serialized_routes[7]["input_path"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!({ "kind": "nested_storm_output", "index": 2 })));
 }
 
 #[test]
