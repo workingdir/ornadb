@@ -1,0 +1,114 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn final_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+            };
+
+pub fn terminal_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+                continuation: final_at(terminal_pin),
+            };
+
+pub fn continuation_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+                continuation: terminal_at(terminal_pin),
+            };
+
+// Cross-pairing the last continuation after two restored depth storms must fail.
+pub fn paired_continuation_reproduction_storms_reject_cross_lane_mixing() {
+    let left_stage_one = continuation_at(sys.snapshot("HEAD~900"))(sys.snapshot("HEAD~860"))(sys.snapshot("HEAD~840"))(sys.snapshot("HEAD~820"));
+    let right_stage_one = continuation_at(sys.snapshot("HEAD~890"))(sys.snapshot("HEAD~850"))(sys.snapshot("HEAD~830"))(sys.snapshot("HEAD~810"));
+    let left_stage_one_reproduced = continuation_at(sys.snapshot("HEAD~900"))(sys.snapshot("HEAD~860"))(sys.snapshot("HEAD~840"))(sys.snapshot("HEAD~820"));
+    let right_stage_one_reproduced = continuation_at(sys.snapshot("HEAD~890"))(sys.snapshot("HEAD~850"))(sys.snapshot("HEAD~830"))(sys.snapshot("HEAD~810"));
+    let left_stage_one_reproduced_again = continuation_at(sys.snapshot("HEAD~900"))(sys.snapshot("HEAD~860"))(sys.snapshot("HEAD~840"))(sys.snapshot("HEAD~820"));
+    let right_stage_one_reproduced_again = continuation_at(sys.snapshot("HEAD~890"))(sys.snapshot("HEAD~850"))(sys.snapshot("HEAD~830"))(sys.snapshot("HEAD~810"));
+
+    let stage_two_roots_saved = (left_stage_one_reproduced_again.continuation, right_stage_one_reproduced.continuation);
+    let stage_two_roots_rolling = stage_two_roots_saved;
+    stage_two_roots_rolling = (terminal_at(sys.snapshot("HEAD~779")), terminal_at(sys.snapshot("HEAD~769")));
+    stage_two_roots_rolling = (terminal_at(sys.snapshot("HEAD~778")), terminal_at(sys.snapshot("HEAD~768")));
+    stage_two_roots_rolling = stage_two_roots_saved;
+    let (left_stage_two_root, right_stage_two_root) = stage_two_roots_rolling;
+
+    let stage_two_bridges_saved = (
+        left_stage_two_root(sys.snapshot("HEAD~780")),
+        right_stage_two_root(sys.snapshot("HEAD~770")),
+    );
+    let stage_two_bridges_rolling = stage_two_bridges_saved;
+    stage_two_bridges_rolling = (
+        left_stage_two_root(sys.snapshot("HEAD~778")),
+        right_stage_two_root(sys.snapshot("HEAD~768")),
+    );
+    stage_two_bridges_rolling = stage_two_bridges_saved;
+    let (left_stage_two_bridge, right_stage_two_bridge) = stage_two_bridges_rolling;
+    let stage_two_leaves_saved = (
+        left_stage_two_bridge(sys.snapshot("HEAD~760")),
+        right_stage_two_bridge(sys.snapshot("HEAD~750")),
+    );
+    let stage_two_leaves_rolling = stage_two_leaves_saved;
+    stage_two_leaves_rolling = (
+        left_stage_two_bridge(sys.snapshot("HEAD~758")),
+        right_stage_two_bridge(sys.snapshot("HEAD~748")),
+    );
+    stage_two_leaves_rolling = stage_two_leaves_saved;
+    let (left_stage_two_leaf, right_stage_two_leaf) = stage_two_leaves_rolling;
+    let left_stage_two_after_storm = left_stage_two_leaf(sys.snapshot("HEAD~740"));
+    let right_stage_two_after_storm = right_stage_two_leaf(sys.snapshot("HEAD~730"));
+
+    let stage_three_roots_saved = (left_stage_two_after_storm.continuation, right_stage_two_after_storm.continuation);
+    let stage_three_roots_rolling = stage_three_roots_saved;
+    stage_three_roots_rolling = (final_at(sys.snapshot("HEAD~699")), final_at(sys.snapshot("HEAD~689")));
+    stage_three_roots_rolling = (final_at(sys.snapshot("HEAD~698")), final_at(sys.snapshot("HEAD~688")));
+    stage_three_roots_rolling = stage_three_roots_saved;
+    let (left_stage_three_root, right_stage_three_root) = stage_three_roots_rolling;
+    let stage_three_bridges_saved = (
+        left_stage_three_root(sys.snapshot("HEAD~700")),
+        right_stage_three_root(sys.snapshot("HEAD~690")),
+    );
+    let stage_three_bridges_rolling = stage_three_bridges_saved;
+    stage_three_bridges_rolling = (
+        left_stage_three_root(sys.snapshot("HEAD~698")),
+        right_stage_three_root(sys.snapshot("HEAD~688")),
+    );
+    stage_three_bridges_rolling = stage_three_bridges_saved;
+    let (left_stage_three_bridge, right_stage_three_bridge) = stage_three_bridges_rolling;
+    let stage_three_leaves_saved = (
+        left_stage_three_bridge(sys.snapshot("HEAD~680")),
+        right_stage_three_bridge(sys.snapshot("HEAD~670")),
+    );
+    let stage_three_leaves_rolling = stage_three_leaves_saved;
+    stage_three_leaves_rolling = (
+        left_stage_three_bridge(sys.snapshot("HEAD~678")),
+        right_stage_three_bridge(sys.snapshot("HEAD~668")),
+    );
+    stage_three_leaves_rolling = stage_three_leaves_saved;
+    let (left_stage_three_leaf, right_stage_three_leaf) = stage_three_leaves_rolling;
+    let left_final = left_stage_three_leaf(sys.snapshot("HEAD~660"));
+    let right_final = right_stage_three_leaf(sys.snapshot("HEAD~650"));
+
+    {
+        cross_pair: [left_final.terminal, right_final.terminal],
+    }
+}

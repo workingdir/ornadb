@@ -6,8 +6,8 @@ use orna_evaluator_v1::{
     NominalDefinition, NominalDefinitions, NominalField, NominalVariant, PureFunction,
     RelationPage, StepBudget, evaluate_expression, evaluate_expression_with_functions,
     evaluate_function, evaluate_parsed, evaluate_parsed_with_nominals, evaluate_repl,
-    evaluate_with_functions_and_nominals, invoke_named, invoke_named_with_effects,
-    invoke_named_with_effects_and_budget, invoke_named_with_nominals,
+    SysHostBindingRegistry, evaluate_with_functions_and_nominals, invoke_named,
+    invoke_named_with_effects, invoke_named_with_effects_and_budget, invoke_named_with_nominals,
 };
 use orna_syntax_v1::{
     lex, AssignmentOperator, AssignmentTarget, Expr, NameSegment, Pattern, RecordField, Statement,
@@ -26,7 +26,13 @@ fn code(result: Result<Value, EvaluationError>) -> String {
 #[test]
 fn std_environment_get_reads_current_and_absent_process_values() {
     let expected = std::env::var("PATH").expect("test process exposes PATH");
+    let absent = "ORNA_TEST_MISSING_6TG7L_20261002";
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    let mut bindings = SysHostBindingRegistry::capture_environment([
+        String::from("PATH"),
+        absent.to_owned(),
+    ])
+    .expect("explicit process environment allowlist is valid");
     assert_eq!(
         session.submit(include_str!(
             "fixtures/repl-inline-use-std-io-environment-6tg7l.orna"
@@ -34,17 +40,19 @@ fn std_environment_get_reads_current_and_absent_process_values() {
         Ok(None)
     );
     assert_eq!(
-        session.submit(include_str!(
-            "fixtures/repl-inline-std-io-environment-get-path-6tg7l.orna"
-        )),
+        session.submit_with_sys_host_bindings(
+            include_str!("fixtures/repl-inline-std-io-environment-get-path-6tg7l.orna"),
+            &mut bindings,
+        ),
         Ok(Some(
             Value::option(Some(Value::new(Raw::Text(expected)).unwrap())).unwrap()
         ))
     );
     assert_eq!(
-        session.submit(include_str!(
-            "fixtures/repl-inline-std-io-environment-get-missing-6tg7l.orna"
-        )),
+        session.submit_with_sys_host_bindings(
+            include_str!("fixtures/repl-inline-std-io-environment-get-missing-6tg7l.orna"),
+            &mut bindings,
+        ),
         Ok(Some(Value::option(None).unwrap()))
     );
 }

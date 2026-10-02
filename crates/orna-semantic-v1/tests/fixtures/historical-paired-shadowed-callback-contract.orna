@@ -1,0 +1,4 @@
+pub fn paired_shadowed_callback_contracts_keep_depth_pin_scope() = (
+    sys.database.as_of(sys.snapshot("HEAD~100")).energy.maker(sys.snapshot("HEAD~80")),
+    sys.database.as_of(sys.snapshot("HEAD~90")).energy.maker(sys.snapshot("HEAD~70")),
+);

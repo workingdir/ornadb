@@ -1368,6 +1368,7 @@ dependencies = [
  "orna-semantic-v1",
  "orna-standard",
  "orna-syntax-v1",
+ "orna-sys-v1",
  "orna-value-v1",
  "tempfile",
  "unicode-normalization",
@@ -1551,6 +1552,7 @@ dependencies = [
  "orna-core",
  "orna-semantic-v1",
  "orna-syntax",
+ "orna-syntax-v1",
 ]
 
 [[package]]

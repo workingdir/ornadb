@@ -1,0 +1,16 @@
+pub table PlannerUnknownStageOutputHandoff(id: Int) {
+    first: Bool,
+    second: Bool,
+    third: Bool,
+}
+
+pub fn unknown_stage_output_handoff() = PlannerUnknownStageOutputHandoff
+    | take(64)
+    | union(
+        PlannerUnknownStageOutputHandoff | take(32) | filter(row => row.first),
+        PlannerUnknownStageOutputHandoff | take(16) | filter(row => row.second)
+    )
+    | union(
+        PlannerUnknownStageOutputHandoff | take(8) | filter(row => row.second),
+        PlannerUnknownStageOutputHandoff | take(4) | filter(row => row.third)
+    );

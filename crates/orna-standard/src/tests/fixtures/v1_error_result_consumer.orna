@@ -1,0 +1,7 @@
+use std.error as errors;
+use std.result;
+
+pub fn make_error(code: Str, message: Str): Error = errors.make(code, message);
+pub fn add_cause(code: Str, message: Str, cause: Error): Error =
+    errors.caused_by(code, message, cause);
+pub fn pass_result(value: result.Result<Int, Str>): result.Result<Int, Str> = value;

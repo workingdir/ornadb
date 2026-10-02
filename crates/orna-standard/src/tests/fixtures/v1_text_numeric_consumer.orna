@@ -1,0 +1,12 @@
+use std.text;
+use std.bits;
+use std.math;
+use std.stats;
+
+pub fn normalised_label(value: Str): Str = text.normalise(value, "NFC");
+pub fn unicode_data_version(): Str = text.unicode_version();
+pub fn mask(value: Int, flags: Int): Int = bits.bit_and(value, flags);
+pub fn bounded(value: Int, lower: Int, upper: Int): Int = math.clamp(value, lower, upper);
+pub fn average(values: [Int]): Int? = stats.mean(values);
+pub fn exact_integer_math(value: Int): Int = math.lcm(math.abs(value), 12);
+pub fn exact_integer_power(value: Int, exponent: Int): Int? = math.pow_nonnegative(value, exponent);
