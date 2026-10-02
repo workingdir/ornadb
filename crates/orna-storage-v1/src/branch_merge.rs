@@ -300,8 +300,9 @@ enum BufferedBranchMergeTombstoneDelta {
 /// overlapping depth fragments. This v1 policy accepts paired plans at their
 /// exact lineage positions, appends table/key-ordered deletions without
 /// deduplicating across waves, and advances through restore-only empty deltas.
-/// Duplicate table/key events within one wave are rejected as overlapping
-/// fragments, while the same key at a later position remains a new event.
+/// Duplicate table/key events within one wave are rejected as soon as the
+/// overlapping fragment arrives, while the same key at a later position
+/// remains a new event.
 /// Concurrent completions may arrive out of order; future deltas wait until
 /// every earlier paired position is present. Split waves wait until every
 /// fragment arrives, then flatten in canonical table/key order atomically.
@@ -419,23 +420,15 @@ impl BranchMergeTombstoneHistory {
             None => {}
         }
 
-        let completes_delta = match self.pending_deltas.get(&order) {
+        let mut combined = match self.pending_deltas.get(&order) {
             Some(BufferedBranchMergeTombstoneDelta::DepthFragments { fragments, .. }) => {
-                fragments.len() + 1 == fragment_count
+                fragments.values().flatten().cloned().collect::<Vec<_>>()
             }
-            _ => fragment_count == 1,
+            _ => Vec::new(),
         };
-        if completes_delta {
-            let mut combined = match self.pending_deltas.get(&order) {
-                Some(BufferedBranchMergeTombstoneDelta::DepthFragments { fragments, .. }) => {
-                    fragments.values().flatten().cloned().collect::<Vec<_>>()
-                }
-                _ => Vec::new(),
-            };
-            combined.extend_from_slice(tombstones);
-            if has_duplicate_tombstones(&combined) {
-                return Err(BranchMergeTombstoneHistoryError::DuplicateTombstone { order });
-            }
+        combined.extend_from_slice(tombstones);
+        if has_duplicate_tombstones(&combined) {
+            return Err(BranchMergeTombstoneHistoryError::DuplicateTombstone { order });
         }
 
         let buffered = self.pending_deltas.entry(order).or_insert_with(|| {
