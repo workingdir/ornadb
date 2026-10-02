@@ -13045,7 +13045,31 @@ fn infer_success_pipeline(
 }
 
 fn is_default_float_equality_type(ty: &Type) -> bool {
-    matches!(ty, Type::Float) || matches!(ty, Type::Applied { base, .. } if base == "Float")
+    match ty {
+        Type::Float => true,
+        Type::Applied { base, arguments } => {
+            base == "Float" || arguments.iter().any(is_default_float_equality_type)
+        }
+        Type::List(element) | Type::Optional(element) | Type::Range(element) => {
+            is_default_float_equality_type(element)
+        }
+        Type::Tuple(elements) => elements.iter().any(is_default_float_equality_type),
+        Type::Record(fields) => fields.values().any(is_default_float_equality_type),
+        Type::MoneyPerUnit { currency, unit } => {
+            is_default_float_equality_type(currency) || is_default_float_equality_type(unit)
+        }
+        Type::Relation(_) | Type::Stream(_) | Type::Function { .. } => false,
+        Type::Int
+        | Type::Decimal
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null
+        | Type::Named(_)
+        | Type::Bottom
+        | Type::Error => false,
+    }
 }
 
 fn infer_recovery_pipeline(
