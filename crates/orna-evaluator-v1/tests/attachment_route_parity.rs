@@ -1,7 +1,10 @@
 use std::{fs, path::Path, process::Command};
 
 use orna_evaluator_v1::{AdmittedReplSession, Limits};
-use orna_project_v1::{AttachmentError, AttachedDatabaseSession, PinnedDatabase, ProjectLoader};
+use orna_project_v1::{
+    AttachmentError, AttachedDatabaseSession, PACKAGE_PIN_MANIFEST_PATH, PackageResolver,
+    PinnedDatabase, ProjectLoader,
+};
 use orna_repository_v1::Repository;
 use orna_value_v1::Value;
 use tempfile::TempDir;
@@ -55,6 +58,25 @@ fn commit_module_source(directory: &Path, logical_path: &str, source: &str) -> S
         directory,
         &["commit", "--quiet", "-m", "advance nested module snapshot"],
     );
+    git(directory, &["rev-parse", "HEAD"])
+}
+
+fn commit_snapshot(
+    directory: &Path,
+    main_source: &str,
+    manifest: Option<&str>,
+    message: &str,
+) -> String {
+    fs::write(directory.join("main.orna"), main_source).unwrap();
+    let manifest_path = directory.join(PACKAGE_PIN_MANIFEST_PATH);
+    if let Some(manifest) = manifest {
+        fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        fs::write(manifest_path, manifest).unwrap();
+    } else if manifest_path.exists() {
+        fs::remove_file(manifest_path).unwrap();
+    }
+    git(directory, &["add", "--all"]);
+    git(directory, &["commit", "--quiet", "-m", message]);
     git(directory, &["rev-parse", "HEAD"])
 }
 
@@ -687,4 +709,170 @@ fn nested_admitted_clones_preserve_archive_pin_identity_after_alias_churn() {
             Ok(Some(Value::int(43.into())))
         );
     }
+}
+
+#[test]
+fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
+    let package_source = include_str!("fixtures/attachment-route-package.orna");
+    let primary_source = include_str!("fixtures/attachment-route-primary.orna");
+    let (package_dir, package_repository, _) = repository(package_source);
+    let aliases = [
+        "archive",
+        "archive_copy",
+        "archive_copy_archive",
+        "archive_copy_archive_archive",
+        "archive_copy_archive_archive_archive",
+    ];
+    let snapshot = |value: &str, manifest: Option<&str>, message: &str| {
+        let source = package_source.replace("42", value);
+        commit_snapshot(package_dir.path(), &source, manifest, message)
+    };
+
+    let leaf_initial = snapshot("93", None, "initial terminal leaf");
+    let leaf_middle = snapshot("94", None, "first pair terminal leaf");
+    let leaf_final = snapshot("96", None, "final terminal leaf");
+    let route_three_initial_manifest = format!("{} {}\n", aliases[4], leaf_initial);
+    let route_three_initial = snapshot(
+        "83",
+        Some(&route_three_initial_manifest),
+        "initial third-depth route",
+    );
+    let route_three_middle_manifest = format!("{} {}\n", aliases[4], leaf_middle);
+    let route_three_middle = snapshot(
+        "84",
+        Some(&route_three_middle_manifest),
+        "first pair third-depth route",
+    );
+    let route_three_final_manifest = format!("{} {}\n", aliases[4], leaf_final);
+    let route_three_final = snapshot(
+        "85",
+        Some(&route_three_final_manifest),
+        "second pair third-depth route",
+    );
+    let terminal_initial_manifest = format!("{} {}\n", aliases[3], route_three_initial);
+    let terminal_initial = snapshot(
+        "80",
+        Some(&terminal_initial_manifest),
+        "initial second-depth route",
+    );
+    let terminal_middle_manifest = format!("{} {}\n", aliases[3], route_three_middle);
+    let terminal_middle = snapshot(
+        "81",
+        Some(&terminal_middle_manifest),
+        "first pair second-depth route",
+    );
+    let deep_initial_manifest = format!("{} {}\n", aliases[2], terminal_initial);
+    let deep_initial = snapshot("70", Some(&deep_initial_manifest), "initial nested route");
+    let middle_manifest = format!("{} {}\n", aliases[1], deep_initial);
+    let middle = snapshot("60", Some(&middle_manifest), "fresh route root");
+
+    let (primary_dir, primary_repository, _) = repository(primary_source);
+    let parent_manifest = format!("{} {}\n", aliases[0], middle);
+    let parent_commit = commit_snapshot(
+        primary_dir.path(),
+        primary_source,
+        Some(&parent_manifest),
+        "primary attachment root",
+    );
+    let loader = ProjectLoader::default();
+    let resolver = PackageResolver::new(
+        aliases
+            .iter()
+            .map(|alias| ((*alias).to_owned(), package_repository.clone())),
+        loader,
+    )
+    .unwrap();
+    let parent = resolver
+        .resolve_for_parent(
+            PinnedDatabase::resolve("app", primary_repository, &parent_commit, loader).unwrap(),
+        )
+        .unwrap();
+    let nested_parent = resolver
+        .resolve_nested_path(&parent, &[aliases[0], aliases[1]])
+        .unwrap();
+    let fresh_route = resolver
+        .resolve_nested_rebind_path(&nested_parent, &[])
+        .unwrap();
+    assert!(fresh_route.retained_sessions().is_empty());
+    let mut initial_evaluator = AdmittedReplSession::from_attached_database_session(
+        fresh_route.final_session(),
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        initial_evaluator.submit(&format!("use {};", aliases[2])),
+        Ok(None)
+    );
+    assert_eq!(
+        initial_evaluator.submit(&format!("{}.package_value()", aliases[2])),
+        Ok(Some(Value::int(80.into())))
+    );
+
+    let first_pair = [
+        PinnedDatabase::resolve(
+            aliases[2],
+            package_repository.clone(),
+            &terminal_middle,
+            loader,
+        )
+        .unwrap(),
+        PinnedDatabase::resolve(
+            aliases[3],
+            package_repository.clone(),
+            &route_three_middle,
+            loader,
+        )
+        .unwrap(),
+    ];
+    let second_pair = [
+        PinnedDatabase::resolve(
+            aliases[3],
+            package_repository.clone(),
+            &route_three_final,
+            loader,
+        )
+        .unwrap(),
+        PinnedDatabase::resolve(
+            aliases[4],
+            package_repository,
+            &leaf_final,
+            loader,
+        )
+        .unwrap(),
+    ];
+    let first_stage = resolver
+        .extend_nested_terminal_pair_chain(&fresh_route, &[first_pair])
+        .unwrap_or_else(|error| panic!("first nested pair failed: {error:?}"));
+    assert_eq!(first_stage.retained_wave(0).unwrap().len(), 2);
+    let mut first_evaluator = AdmittedReplSession::from_attached_database_session(
+        &first_stage.retained_wave(0).unwrap()[1],
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        first_evaluator.submit(&format!("use {};", aliases[3])),
+        Ok(None)
+    );
+    assert_eq!(
+        first_evaluator.submit(&format!("{}.package_value()", aliases[3])),
+        Ok(Some(Value::int(84.into())))
+    );
+
+    let chained = resolver
+        .extend_nested_terminal_pair_chain(&first_stage, &[second_pair])
+        .unwrap_or_else(|error| panic!("continued nested pair failed: {error:?}"));
+
+    let mut evaluator = AdmittedReplSession::from_attached_database_session(
+        &chained.retained_wave(2).unwrap()[1],
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        evaluator.submit(&format!("use {};", aliases[4])),
+        Ok(None)
+    );
+    assert_eq!(
+        evaluator.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(96.into())))
+    );
 }
