@@ -861,6 +861,12 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         .unwrap_or_else(|error| panic!("first nested pair failed: {error:?}"));
     assert_eq!(first_stage.retained_wave(0).unwrap().len(), 2);
     let saved_handoff = first_stage.handoff_checkpoint(0, 0).unwrap();
+    assert_eq!(saved_handoff.depth_label().wave(), 0);
+    assert_eq!(saved_handoff.depth_label().depth(), 0);
+    assert_eq!(
+        saved_handoff.depth_label(),
+        &first_stage.retained_depth_label(0, 0).unwrap()
+    );
     assert_eq!(
         saved_handoff
             .handoff()
@@ -981,7 +987,7 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         .extend_nested_terminal_pair_storm_from_label(
             &first_stage,
             &initial_depth_label,
-            &[first_pair.clone(), same_depth_second_pair],
+            &[first_pair.clone(), same_depth_second_pair.clone()],
         )
         .unwrap_or_else(|error| panic!("fixed-depth pair storm failed: {error:?}"));
     assert_eq!(
@@ -1021,6 +1027,74 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
     let later_cascade = resolver
         .extend_nested_terminal_pair_chain(&first_stage, &[second_pair.clone()])
         .unwrap_or_else(|error| panic!("later nested pair cascade failed: {error:?}"));
+    let checkpoint_storm = resolver
+        .extend_nested_terminal_pair_storm_from_checkpoint(
+            &later_cascade,
+            &saved_handoff,
+            &[first_pair.clone(), same_depth_second_pair],
+        )
+        .unwrap_or_else(|error| panic!("checkpoint pair storm failed: {error:?}"));
+    let pin_route = |session: &AttachedDatabaseSession| {
+        (
+            (
+                session.primary().pin().name().to_owned(),
+                session.primary().pin().commit().as_str().to_owned(),
+            ),
+            session
+                .attached()
+                .map(|(alias, database)| {
+                    (
+                        alias.to_owned(),
+                        database.pin().name().to_owned(),
+                        database.pin().commit().as_str().to_owned(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    for wave in [4, 6] {
+        let retained = checkpoint_storm.retained_wave(wave).unwrap();
+        assert_eq!(pin_route(&retained[0]), pin_route(saved_handoff.handoff()));
+
+        let mut checkpoint_root = AdmittedReplSession::from_attached_database_session(
+            &retained[0],
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(checkpoint_root.submit(&format!("use {};", aliases[2])), Ok(None));
+        assert_eq!(
+            checkpoint_root.submit(&format!("{}.package_value()", aliases[2])),
+            Ok(Some(Value::int(80.into())))
+        );
+
+        let mut after_first_rebind = AdmittedReplSession::from_attached_database_session(
+            &retained[1],
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            after_first_rebind.submit(&format!("use {};", aliases[3])),
+            Ok(None)
+        );
+        assert_eq!(
+            after_first_rebind.submit(&format!("{}.package_value()", aliases[3])),
+            Ok(Some(Value::int(84.into())))
+        );
+    }
+    let mut checkpoint_storm_terminal = AdmittedReplSession::from_attached_database_session(
+        checkpoint_storm.final_session(),
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        checkpoint_storm_terminal.submit(&format!("use {};", aliases[4])),
+        Ok(None)
+    );
+    assert_eq!(
+        checkpoint_storm_terminal.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(96.into())))
+    );
+
     let checkpoint_replay = resolver
         .extend_nested_terminal_pair_chain_from_checkpoint(
             &later_cascade,
