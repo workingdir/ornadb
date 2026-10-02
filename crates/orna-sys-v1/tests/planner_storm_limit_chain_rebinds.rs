@@ -7,6 +7,8 @@ use orna_sys_v1::{
 
 const FIXTURE: &str = include_str!("fixtures/planner_storm_limit_chain_rebinds.orna");
 const BRANCH_CAP_FIXTURE: &str = include_str!("fixtures/planner_storm_rebind_branch_caps.orna");
+const NESTED_BRANCH_CAP_FIXTURE: &str =
+    include_str!("fixtures/planner_storm_nested_rebind_caps.orna");
 
 fn branch(
     limits: &[u64],
@@ -185,7 +187,10 @@ fn rebind_overflow_is_preserved_and_positions_are_validated() {
                     1,
                     vec![
                         rebind(2, vec![storm("expr:later", vec![branch(&[1], 1, vec![])])]),
-                        rebind(1, vec![storm("expr:earlier", vec![branch(&[1], 1, vec![])])]),
+                        rebind(
+                            1,
+                            vec![storm("expr:earlier", vec![branch(&[1], 1, vec![])])]
+                        ),
                     ],
                 )],
             )],
@@ -246,13 +251,95 @@ fn nested_rebind_cascades_stay_inside_each_branch_local_storm_cap() {
     assert_eq!(
         filter.details().get("branch_local_storm_cap_scope"),
         Some(&PlanDetail::Text(
-            "each_cascade_output_capped_to_immediate_input_rows_and_bytes".to_owned()
+            "each_cascade_output_capped_to_immediate_input_rows_and_bytes_at_every_nesting_depth"
+                .to_owned()
         ))
     );
     assert_eq!(
         filter.details().get("limit_chain_rebind_cap_scope"),
         Some(&PlanDetail::Text(
-            "post_limit_branch_rows_and_bytes".to_owned()
+            "post_limit_branch_rows_and_bytes_at_every_rebind_nesting_depth".to_owned()
+        ))
+    );
+}
+
+#[test]
+fn nested_rebind_cascades_keep_caps_isolated_across_each_limit_chain() {
+    let parsed = orna_syntax_v1::parse_module(NESTED_BRANCH_CAP_FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    // Each nested cascade starts from its parent's bounded branch estimate.
+    // Three half-selective arms can request more rows than that local input;
+    // their union stays within the cap before the following limit runs.
+    let deep_storm = storm(
+        "expr:deep-three-arm-storm",
+        (0..3).map(|_| branch(&[90], 1, vec![])).collect(),
+    );
+    let mut middle_branch = branch(&[50, 100], 1, vec![rebind(1, vec![deep_storm.clone()])]);
+    middle_branch.nested_storms.push(storm(
+        "expr:post-rebind-three-arm-storm",
+        (0..3).map(|_| branch(&[90], 1, vec![])).collect(),
+    ));
+    let mut outer_branch = branch(
+        &[6, 100],
+        1,
+        vec![rebind(
+            1,
+            vec![storm(
+                "expr:middle-rebind-storm",
+                vec![
+                    middle_branch,
+                    branch(&[50], 1, vec![]),
+                    branch(&[50], 1, vec![]),
+                ],
+            )],
+        )],
+    );
+    outer_branch.nested_storms.push(storm(
+        "expr:outer-post-limit-storm",
+        (0..3).map(|_| branch(&[90], 1, vec![])).collect(),
+    ));
+
+    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+        &query(Some(100), Some(1_000)),
+        &[storm(
+            "expr:outer-storm",
+            vec![outer_branch, branch(&[20], 1, vec![])],
+        )],
+        &[],
+    )
+    .expect("nested rebinds preserve every enclosing branch cap");
+
+    let filter = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Filter)
+        .expect("storm is represented by an aggregate filter");
+    assert_eq!(filter.estimated_rows(), Some(13));
+    assert_eq!(filter.estimated_bytes(), Some(130));
+    assert_eq!(filter.estimated_work(), Some(346));
+    assert_eq!(
+        filter.details().get("branch_limit_chains"),
+        Some(&PlanDetail::Text("1:[6,100];2:[20]".to_owned()))
+    );
+    assert_eq!(
+        filter.details().get("branch_local_storm_cap_scope"),
+        Some(&PlanDetail::Text(
+            "each_cascade_output_capped_to_immediate_input_rows_and_bytes_at_every_nesting_depth"
+                .to_owned()
+        ))
+    );
+    assert_eq!(
+        filter.details().get("limit_chain_rebind_cap_scope"),
+        Some(&PlanDetail::Text(
+            "post_limit_branch_rows_and_bytes_at_every_rebind_nesting_depth".to_owned()
+        ))
+    );
+    assert_eq!(
+        filter.details().get("limit_chain_rebind_shapes"),
+        Some(&PlanDetail::Text(
+            "1@1:[1:[50,100]/1@1=[1:[90]/1;2:[90]/1;3:[90]/1]{[1:[90]/1;2:[90]/1;3:[90]/1]};2:[50]/1;3:[50]/1]".to_owned()
         ))
     );
 }
@@ -262,9 +349,7 @@ fn overflowing_rebind_work_keeps_the_parent_branch_cap() {
     let source_rows = u64::MAX / 4;
     let overflowing_rebind = storm(
         "expr:wide-rebind-storm",
-        (0..8)
-            .map(|_| branch(&[u64::MAX], 1, vec![]))
-            .collect(),
+        (0..8).map(|_| branch(&[u64::MAX], 1, vec![])).collect(),
     );
     let explained = explain_query_with_disjunct_storm_branch_limit_chains(
         &query(Some(source_rows), Some(0)),
@@ -280,7 +365,10 @@ fn overflowing_rebind_work_keeps_the_parent_branch_cap() {
     )
     .expect("the branch cap and nested work overflow are both retained");
 
-    let rows = explained.root().estimated_rows().expect("known source rows");
+    let rows = explained
+        .root()
+        .estimated_rows()
+        .expect("known source rows");
     assert!(rows > 0);
     assert!(rows <= source_rows);
     assert_eq!(
