@@ -331,8 +331,9 @@ impl FilterBatch {
             .prefixed_batches
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        prefixed_batches.retain(|batch| batch.strong_count() > 0);
-        for batch in prefixed_batches.iter().filter_map(Weak::upgrade) {
+        // Union leaves are visited in order, so a cloned prefix often repeats
+        // the most recent join. Check hot entries before pruning stale ones.
+        for batch in prefixed_batches.iter().rev().filter_map(Weak::upgrade) {
             let FilterBatchNode::Then(previous, suffix) = &batch.node else {
                 continue;
             };
@@ -340,6 +341,7 @@ impl FilterBatch {
                 return batch;
             }
         }
+        prefixed_batches.retain(|batch| batch.strong_count() > 0);
         let batch = Self::followed_by(&Self::from_values(values), next);
         prefixed_batches.push(Arc::downgrade(&batch));
         batch
