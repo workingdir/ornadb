@@ -20249,11 +20249,17 @@ fn paired_tombstone_position_priority_is_shared_by_both_submission_modes() {
         Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 0 }),
         "stale position classification precedes whole-plan content validation",
     );
+    let mut stale_fragment_history = BranchMergeTombstoneHistory::new(0);
+    stale_fragment_history
+        .submit_depth_merge_fragment(0, 0, 1, &[(id(1), fixture_key.clone())])
+        .unwrap();
+    let before_stale_fragment = stale_fragment_history.clone();
     assert_eq!(
-        stale_history.submit_depth_merge_fragment(0, 0, 0, &[(id(1), fixture_key.clone())]),
+        stale_fragment_history.submit_depth_merge_fragment(0, 0, 0, &[(id(1), fixture_key.clone())]),
         Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 0 }),
-        "stale position classification precedes fragment metadata validation",
+        "same-mode stale classification precedes fragment metadata validation",
     );
+    assert_eq!(stale_fragment_history, before_stale_fragment);
     assert_eq!(stale_history, before_stale);
 
     let mut exhausted_history = BranchMergeTombstoneHistory::new(u64::MAX);
@@ -20273,6 +20279,96 @@ fn paired_tombstone_position_priority_is_shared_by_both_submission_modes() {
         "exhaustion classification precedes fragment metadata validation",
     );
     assert_eq!(exhausted_history, before_exhausted);
+}
+
+#[test]
+fn paired_mixed_mode_priority_survives_completed_depth_restore_waves() {
+    let fixture_key = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .find(|row| row.key == string("a/child/deep"))
+        .expect("the in-crate depth fixture supplies a tombstone key")
+        .key
+        .clone();
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+
+    let invalid_whole_plan = || {
+        whole_plan(2, vec![fixture_key.clone(), fixture_key.clone()])
+    };
+    let mut fragment_wave = BranchMergeTombstoneHistory::new(0);
+    fragment_wave
+        .submit_depth_merge_fragment(2, 0, 2, &[(id(1), fixture_key.clone())])
+        .unwrap();
+    let before_pending_conflict = fragment_wave.clone();
+    assert_eq!(
+        fragment_wave.submit(&invalid_whole_plan()),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "a pending fragment wave rejects a whole-plan retry before content validation",
+    );
+    assert_eq!(fragment_wave, before_pending_conflict);
+
+    assert!(fragment_wave
+        .submit_depth_merge_fragment(2, 1, 2, &[])
+        .unwrap()
+        .is_empty());
+    assert!(fragment_wave.submit(&whole_plan(0, Vec::new())).unwrap().is_empty());
+    let released = fragment_wave.submit(&whole_plan(1, Vec::new())).unwrap();
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0].order, 2);
+    let before_released_conflict = fragment_wave.clone();
+    assert_eq!(
+        fragment_wave.submit(&invalid_whole_plan()),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "the accepted fragment mode remains authoritative after its wave is released",
+    );
+    assert_eq!(fragment_wave, before_released_conflict);
+    assert_eq!(
+        fragment_wave.submit_depth_merge_fragment(2, 0, 2, &[]),
+        Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 2 }),
+        "same-mode replay after release remains stale",
+    );
+    assert_eq!(fragment_wave, before_released_conflict);
+
+    let mut whole_plan_wave = BranchMergeTombstoneHistory::new(0);
+    whole_plan_wave
+        .submit(&whole_plan(2, vec![fixture_key.clone()]))
+        .unwrap();
+    assert_eq!(
+        whole_plan_wave.submit_depth_merge_fragment(
+            2,
+            0,
+            0,
+            &[(id(1), fixture_key.clone()), (id(1), fixture_key.clone())],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "the priority is symmetric when a whole-plan wave arrives first",
+    );
+    assert!(whole_plan_wave.submit(&whole_plan(0, Vec::new())).unwrap().is_empty());
+    let released = whole_plan_wave.submit(&whole_plan(1, Vec::new())).unwrap();
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0].order, 2);
+    let before_released_conflict = whole_plan_wave.clone();
+    assert_eq!(
+        whole_plan_wave.submit_depth_merge_fragment(2, 0, 0, &[]),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "the accepted whole-plan mode remains authoritative after release",
+    );
+    assert_eq!(whole_plan_wave, before_released_conflict);
+    assert_eq!(
+        whole_plan_wave.submit(&whole_plan(2, vec![fixture_key])),
+        Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 2 }),
+        "same-mode whole-plan replay after release remains stale",
+    );
+    assert_eq!(whole_plan_wave, before_released_conflict);
 }
 
 #[test]
@@ -20658,7 +20754,12 @@ fn paired_depth_storm_tombstone_history_stabilizes_across_restore_waves() {
             }
         }
     }
-    assert_eq!(reverse_fragment_history, history);
+    assert_eq!(
+        reverse_fragment_history.events(),
+        history.events(),
+        "whole-plan and reverse-fragment delivery produce the same tombstone events",
+    );
+    assert_eq!(reverse_fragment_history.next_order(), history.next_order());
 
     let mut interleaved_fragment_history = BranchMergeTombstoneHistory::new(0);
     let max_fragments = depth_fragments.iter().map(Vec::len).max().unwrap_or_default();
@@ -20676,7 +20777,12 @@ fn paired_depth_storm_tombstone_history_stabilizes_across_restore_waves() {
             }
         }
     }
-    assert_eq!(interleaved_fragment_history, history);
+    assert_eq!(
+        interleaved_fragment_history.events(),
+        history.events(),
+        "whole-plan and interleaved-fragment delivery produce the same tombstone events",
+    );
+    assert_eq!(interleaved_fragment_history.next_order(), history.next_order());
 
     let mut fragment_guards = BranchMergeTombstoneHistory::new(0);
     let guarded_fragments = &depth_fragments[2];
