@@ -7,7 +7,7 @@ fn bool_value(value: bool) -> CanonicalValue {
 }
 
 #[test]
-fn pinned_filesystem_module_imports_and_fails_closed_without_a_host_binding() {
+fn pinned_filesystem_module_requires_a_host_effect_handler() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
         .unwrap_or_else(|error| panic!("reference std failed to load: {}", error.code()));
     assert_eq!(
@@ -19,7 +19,7 @@ fn pinned_filesystem_module_imports_and_fails_closed_without_a_host_binding() {
             .submit(include_str!("fixtures/stdlib-call-io-read-text-t7auz.orna"))
             .unwrap_err()
             .code(),
-        "ORNA-EVAL-ERROR"
+        "ORNA-EVAL-UNSUPPORTED"
     );
 }
 

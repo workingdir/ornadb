@@ -861,8 +861,11 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         .unwrap_or_else(|error| panic!("first nested pair failed: {error:?}"));
     assert_eq!(first_stage.retained_wave(0).unwrap().len(), 2);
     let saved_handoff = first_stage.handoff_checkpoint(0, 0).unwrap();
+    let saved_middle_handoff = first_stage.handoff_checkpoint(0, 1).unwrap();
     assert_eq!(saved_handoff.depth_label().wave(), 0);
     assert_eq!(saved_handoff.depth_label().depth(), 0);
+    assert_eq!(saved_middle_handoff.depth_label().wave(), 0);
+    assert_eq!(saved_middle_handoff.depth_label().depth(), 1);
     assert_eq!(
         saved_handoff.depth_label(),
         &first_stage.retained_depth_label(0, 0).unwrap()
@@ -1099,11 +1102,69 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         .extend_nested_terminal_pair_chain_from_checkpoint(
             &later_cascade,
             &saved_handoff,
-            &[first_pair, second_pair],
+            &[first_pair.clone(), second_pair.clone()],
         )
         .unwrap_or_else(|error| panic!("checkpoint pair cascade failed: {error:?}"));
 
+    let first_checkpoint_waves = [first_pair.clone(), second_pair.clone()];
+    let middle_checkpoint_waves = [second_pair.clone()];
+    let checkpoint_plans = [
+        (&saved_handoff, first_checkpoint_waves.as_slice()),
+        (&saved_middle_handoff, middle_checkpoint_waves.as_slice()),
+    ];
+    let checkpoint_cascades = resolver
+        .extend_nested_terminal_pair_checkpoint_cascades(&later_cascade, &checkpoint_plans)
+        .unwrap_or_else(|error| panic!("nested checkpoint cascades failed: {error:?}"));
+    let first_cascade_root = &checkpoint_cascades.retained_wave(4).unwrap()[0];
+    let first_cascade_label = checkpoint_cascades.retained_depth_label(4, 0).unwrap();
+    assert_eq!(first_cascade_label.wave(), 4);
+    assert_eq!(first_cascade_label.depth(), 0);
+    assert_eq!(pin_route(first_cascade_root), pin_route(saved_handoff.handoff()));
+
+    let middle_cascade_root = &checkpoint_cascades.retained_wave(8).unwrap()[0];
+    let middle_cascade_label = checkpoint_cascades.retained_depth_label(8, 0).unwrap();
+    assert_eq!(middle_cascade_label.wave(), 8);
+    assert_eq!(middle_cascade_label.depth(), 0);
+    assert_eq!(
+        pin_route(middle_cascade_root),
+        pin_route(saved_middle_handoff.handoff())
+    );
+    let mut middle_cascade_eval = AdmittedReplSession::from_attached_database_session(
+        middle_cascade_root,
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        middle_cascade_eval.submit(&format!("use {};", aliases[3])),
+        Ok(None)
+    );
+    assert_eq!(
+        middle_cascade_eval.submit(&format!("{}.package_value()", aliases[3])),
+        Ok(Some(Value::int(84.into())))
+    );
+    let mut cascade_terminal_eval = AdmittedReplSession::from_attached_database_session(
+        &checkpoint_cascades.retained_wave(8).unwrap()[1],
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        cascade_terminal_eval.submit(&format!("use {};", aliases[4])),
+        Ok(None)
+    );
+    assert_eq!(
+        cascade_terminal_eval.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(96.into())))
+    );
+
     let replay_handoff = checkpoint_replay.retained_wave(4).unwrap()[0].clone();
+    let replay_depth_label = checkpoint_replay.retained_depth_label(4, 0).unwrap();
+    assert_eq!(replay_depth_label.wave(), 4);
+    assert_eq!(replay_depth_label.depth(), 0);
+    assert_eq!(
+        pin_route(&replay_handoff),
+        pin_route(saved_handoff.handoff()),
+        "the checkpoint depth label still identifies every exact pin after later pair folds"
+    );
     assert_eq!(
         replay_handoff.primary().pin().name(),
         saved_handoff.handoff().primary().pin().name()

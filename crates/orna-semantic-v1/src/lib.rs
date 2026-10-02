@@ -6245,6 +6245,86 @@ fn infer_local_generic_call(
     })
 }
 
+/// Codec decoders take their generic result type through the language's
+/// `as: T` type-witness argument. That argument is syntax, not a runtime
+/// value, so remove it before checking the codec's ordinary data/options
+/// parameters and use it as the call result type.
+fn infer_codec_decode_call(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let path = qualified_path(callee)?;
+    let root = *path.first()?;
+    if local.contains_key(root) {
+        return None;
+    }
+    let resolved = if root == "std" {
+        if !scope.modules.contains_key("std") {
+            return None;
+        }
+        path.iter().map(|part| (*part).to_owned()).collect::<Vec<_>>()
+    } else {
+        let namespace = scope.modules.get(root)?;
+        namespace
+            .0
+            .iter()
+            .cloned()
+            .chain(path[1..].iter().map(|part| (*part).to_owned()))
+            .collect::<Vec<_>>()
+    };
+    let operation = match resolved.join(".").as_str() {
+        "std.encoding.json.decode" => (Type::Text, false),
+        "std.encoding.json.decode_with_options" => (Type::Text, true),
+        "std.encoding.orna.decode" => (Type::Text, false),
+        "std.encoding.ovb.decode" => (Type::Named("std.BINARY_LARGE_OBJECT".into()), false),
+        _ => return None,
+    };
+
+    let mut witness = None;
+    let mut input = None;
+    let mut saw_options = false;
+    let mut positional_seen = false;
+    let mut effects = EffectSummary::default();
+    for argument in arguments {
+        match argument.name.as_deref() {
+            Some("as") if witness.is_none() => {
+                witness = start_type_witness(&argument.value, scope);
+                if witness.is_none() {
+                    diagnostics.push(diag(DIAG_TYPE, "codec result type witness is not a known static type"));
+                }
+            }
+            Some("input") if input.is_none() => {
+                let inferred = infer_contextual(&argument.value, &operation.0, scope, local, diagnostics);
+                effects.join(&inferred.effects);
+                input = Some(inferred.ty);
+            }
+            Some("ignore_unknown_fields") if operation.1 && !saw_options => {
+                let inferred = infer_contextual(&argument.value, &Type::Bool, scope, local, diagnostics);
+                effects.join(&inferred.effects);
+                saw_options = true;
+            }
+            None if input.is_none() && !positional_seen => {
+                let inferred = infer_contextual(&argument.value, &operation.0, scope, local, diagnostics);
+                effects.join(&inferred.effects);
+                input = Some(inferred.ty);
+                positional_seen = true;
+            }
+            _ => diagnostics.push(diag(DIAG_TYPE, "codec decode arguments do not match the documented signature")),
+        }
+    }
+    let Some(witness) = witness else {
+        diagnostics.push(diag(DIAG_TYPE, "codec decode requires an explicit `as: T` type witness"));
+        return Some(Inferred { ty: Type::Error, effects });
+    };
+    if input.is_none() {
+        diagnostics.push(diag(DIAG_TYPE, "codec decode requires an input value"));
+    }
+    Some(Inferred { ty: witness, effects })
+}
+
 /// Validate transfer statements after ordinary expression inference. `for` and
 /// `while` are the only loop forms this semantic slice gives a result type, so
 /// their nearest-loop break value is statically constrained to that result.
@@ -7554,6 +7634,11 @@ fn infer(
             }
             if let Some(inferred) =
                 infer_table_operation(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
+                infer_codec_decode_call(callee, arguments, scope, local, diagnostics)
             {
                 return inferred;
             }
@@ -17642,6 +17727,7 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
         }
         (Type::Record(expected), Type::Record(actual)) => {
             expected.len() == actual.len()
+                && record_pin_identity_topology_matches(expected, actual)
                 && expected.iter().all(|(name, expected)| {
                     actual.get(name).is_some_and(|actual| {
                         pinned_snapshot_shape_matches(expected, actual)
@@ -17828,6 +17914,34 @@ fn tuple_pin_identity_topology_matches(expected: &[Type], actual: &[Type]) -> bo
         }
     }
 
+    snapshot_context_topology_matches(&pin_maps)
+}
+
+/// Record fields form sibling slots just like tuple positions. A rebind may
+/// rename concrete selectors, but it must preserve which fields share a
+/// captured pin across every nested depth. The reference is silent about this
+/// local record-rebind edge, so use the same conservative topology rule as
+/// tuple rebinding rather than allowing equal-width fields to split or merge.
+fn record_pin_identity_topology_matches(
+    expected: &BTreeMap<String, Type>,
+    actual: &BTreeMap<String, Type>,
+) -> bool {
+    let mut pin_maps = Vec::new();
+    for (name, expected) in expected {
+        let Some(actual) = actual.get(name) else {
+            return false;
+        };
+        if !collect_corresponding_snapshot_context_maps(expected, actual, &mut pin_maps) {
+            return false;
+        }
+    }
+
+    snapshot_context_topology_matches(&pin_maps)
+}
+
+fn snapshot_context_topology_matches(
+    pin_maps: &[(BTreeSet<String>, BTreeSet<String>)],
+) -> bool {
     pin_maps.iter().enumerate().all(|(index, (expected, actual))| {
         expected.len() == actual.len()
             && pin_maps[index + 1..]
@@ -18805,7 +18919,7 @@ fn infer_table_assertion(
     let inferred = infer(body, scope, &local, diagnostics);
     let valid = match text.as_str() {
         "every" => inferred.ty == Type::Bool,
-        "all_unique" => is_lawful_all_unique_key_type(&inferred.ty),
+        "all_unique" => is_lawful_all_unique_key_type(&inferred.ty, scope),
         _ => unreachable!("table predicate constructors were matched above"),
     };
     if text == "all_unique" && inferred.ty != Type::Error && !valid {
@@ -18822,34 +18936,83 @@ fn infer_table_assertion(
 
 /// `all_unique` compares complete canonical selected values. Function and
 /// relation values have no stable value identity, and default Float equality
-/// is intentionally unavailable; nested keys inherit those restrictions.
-fn is_lawful_all_unique_key_type(ty: &Type) -> bool {
-    match ty {
-        Type::Error => false,
-        Type::Float => false,
-        Type::Applied { base, arguments } => {
-            base != "Float" && arguments.iter().all(is_lawful_all_unique_key_type)
+/// is intentionally unavailable; nested and locally described named keys
+/// inherit those restrictions. Opaque imported values retain the equality
+/// contract of their pinned declaration.
+fn is_lawful_all_unique_key_type(ty: &Type, scope: &Scope) -> bool {
+    fn unique_short_match<'a>(
+        values: &'a BTreeMap<String, Type>,
+        short_name: &str,
+    ) -> Option<&'a Type> {
+        let mut matching = values
+            .iter()
+            .filter(|(candidate, _)| candidate.rsplit('.').next() == Some(short_name));
+        let first = matching.next().map(|(_, ty)| ty);
+        if matching.next().is_some() {
+            None
+        } else {
+            first
         }
-        Type::List(element) | Type::Optional(element) => {
-            is_lawful_all_unique_key_type(element)
-        }
-        Type::Tuple(elements) => elements.iter().all(is_lawful_all_unique_key_type),
-        Type::Record(fields) => fields.values().all(is_lawful_all_unique_key_type),
-        Type::Range(_)
-        | Type::Relation(_)
-        | Type::Stream(_)
-        | Type::Function { .. }
-        | Type::MoneyPerUnit { .. } => false,
-        Type::Int
-        | Type::Decimal
-        | Type::Date
-        | Type::Instant
-        | Type::Text
-        | Type::Bool
-        | Type::Null
-        | Type::Named(_)
-        | Type::Bottom => true,
     }
+
+    fn visit(ty: &Type, scope: &Scope, expanding: &mut BTreeSet<String>) -> bool {
+        match ty {
+            Type::Error | Type::Float => false,
+            Type::Applied { base, arguments } => {
+                base != "Float"
+                    && arguments
+                        .iter()
+                        .all(|argument| visit(argument, scope, expanding))
+            }
+            Type::List(element) | Type::Optional(element) => visit(element, scope, expanding),
+            Type::Tuple(elements) => elements
+                .iter()
+                .all(|element| visit(element, scope, expanding)),
+            Type::Record(fields) => fields.values().all(|field| visit(field, scope, expanding)),
+            Type::Range(_)
+            | Type::Relation(_)
+            | Type::Stream(_)
+            | Type::Function { .. }
+            | Type::MoneyPerUnit { .. } => false,
+            Type::Named(name) => {
+                if !expanding.insert(name.clone()) {
+                    return true;
+                }
+                let short_name = name.rsplit('.').next().unwrap_or(name);
+                let shape = scope
+                    .nominal_rows
+                    .get(name)
+                    .or_else(|| unique_short_match(&scope.nominal_rows, short_name))
+                    .or_else(|| scope.type_aliases.get(name))
+                    .or_else(|| scope.refined_types.get(name))
+                    .or_else(|| scope.type_aliases.get(short_name))
+                    .or_else(|| scope.refined_types.get(short_name));
+                let shape_is_lawful = shape.is_none_or(|shape| visit(shape, scope, expanding));
+                let enum_payloads_are_lawful = scope
+                    .enum_variants
+                    .get(name)
+                    .or_else(|| scope.enum_variants.get(short_name))
+                    .is_none_or(|variants| {
+                        variants
+                            .values()
+                            .flat_map(BTreeMap::values)
+                            .all(|field| visit(field, scope, expanding))
+                    });
+                expanding.remove(name);
+                shape_is_lawful && enum_payloads_are_lawful
+            }
+            Type::Int
+            | Type::Decimal
+            | Type::Date
+            | Type::Instant
+            | Type::Text
+            | Type::Bool
+            | Type::Null
+            | Type::Bottom => true,
+        }
+    }
+
+    visit(ty, scope, &mut BTreeSet::new())
 }
 
 /// A table assertion may name an ordinary pure predicate function. Its
