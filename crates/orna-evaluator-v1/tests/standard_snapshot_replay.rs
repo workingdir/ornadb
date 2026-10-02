@@ -882,6 +882,16 @@ fn imported_project_module_executes_under_each_captured_standard_snapshot() {
             index + 1
         );
     }
+
+    let mut replays = sessions.clone();
+    for index in [5, 0, 4, 1, 3, 2] {
+        assert_eq!(
+            replays[index].submit(include_str!("fixtures/module-upgrade-call-app.orna")),
+            Ok(Some(int(expected_values[index]))),
+            "interleaved replay for project v{} must keep its original dependency pin",
+            index + 1
+        );
+    }
 }
 
 #[test]
