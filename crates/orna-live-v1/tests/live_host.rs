@@ -5903,6 +5903,9 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
 ) {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
     const HANDOFF_PAIRS: u8 = 4;
+    const BRIDGE_RECONNECT_STORM: u8 = 4;
+    const RECOVERED_RECONNECT_STORM: u8 = 5;
+    const QUERY_IDS_PER_HANDOFF_PAIR: u8 = 24;
 
     let (root, repository) = durable_repository();
     let runtime = open_durable_state(&repository);
@@ -6051,9 +6054,9 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
         }))
         .unwrap();
         let mut bridge_current_attachment = bridge_attachment;
-        for bridge_reconnect in 0..=1 {
+        for bridge_reconnect in 0..=BRIDGE_RECONNECT_STORM {
             if bridge_reconnect > 0 {
-                let next_attachment = [30 + handoff_pair * 2; 16];
+                let next_attachment = [30 + handoff_pair * 8 + bridge_reconnect - 1; 16];
                 let outcome = block_on(bridge_host.resume(ResumeRequest {
                     id: session,
                     origin: &origin(),
@@ -6088,7 +6091,8 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
                 );
             }
 
-            let first_pair_request = 83 + handoff_pair * 24 + bridge_reconnect * 2;
+            let first_pair_request =
+                83 + handoff_pair * QUERY_IDS_PER_HANDOFF_PAIR + bridge_reconnect * 2;
             let mut fresh_pair = Vec::with_capacity(2);
             for request_id in [first_pair_request, first_pair_request + 1] {
                 let fresh_request = status_request([request_id; 16]);
@@ -6160,9 +6164,9 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
         .unwrap();
 
         let mut current_attachment = attachment;
-        for reconnect in 0..=2 {
+        for reconnect in 0..=RECOVERED_RECONNECT_STORM {
             if reconnect > 0 {
-                let next_attachment = [40 + handoff_pair * 4 + reconnect - 1; 16];
+                let next_attachment = [80 + handoff_pair * 8 + reconnect - 1; 16];
                 let outcome = block_on(host.resume(ResumeRequest {
                     id: session,
                     origin: &origin(),
@@ -6199,7 +6203,10 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
                 );
             }
 
-            let first_pair_request = 87 + handoff_pair * 24 + reconnect * 2;
+            let first_pair_request = 83
+                + handoff_pair * QUERY_IDS_PER_HANDOFF_PAIR
+                + 2 * (BRIDGE_RECONNECT_STORM + 1)
+                + reconnect * 2;
             let mut fresh_pair = Vec::with_capacity(2);
             for request_id in [first_pair_request, first_pair_request + 1] {
                 let fresh_request = status_request([request_id; 16]);
