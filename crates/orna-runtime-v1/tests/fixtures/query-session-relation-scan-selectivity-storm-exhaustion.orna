@@ -1,0 +1,11 @@
+sys.Storage
+    | filter(storage => storage.id >= 9)
+    | filter(storage => storage.id == 12 || storage.id >= 18)
+    | filter(storage => storage.id == 12 || storage.id >= 22)
+    | filter(storage => storage.id == 12 || storage.id == 24 || storage.id >= 28)
+    | filter(storage => storage.id == 12 || storage.id == 24 || storage.id >= 34)
+    | filter(storage => storage.id == 12 || storage.id == 24 || storage.id == 36 || storage.id >= 40)
+    | filter(storage => storage.id == 12 || storage.id == 24 || storage.id == 36)
+    | filter(storage => sys.Storage.lookup(storage.target).title == "later")
+    | take(2)
+    | count()

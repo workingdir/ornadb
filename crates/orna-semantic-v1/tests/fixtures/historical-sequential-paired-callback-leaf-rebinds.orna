@@ -1,0 +1,54 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+// Rebind one leaf lane, checkpoint it, then rebind its paired sibling. Root
+// callbacks and earlier checkpoint aliases retain their original pins.
+pub fn paired_callback_leaf_rebinds_preserve_siblings() {
+    let rolling = (
+        (
+            () => factory_at(sys.snapshot("HEAD~80")),
+            () => factory_at(sys.snapshot("HEAD~60")),
+        ),
+        (
+            () => factory_at(sys.snapshot("HEAD~40")),
+            () => factory_at(sys.snapshot("HEAD~20")),
+        ),
+    );
+    let saved = rolling;
+    let ((saved_left_root, saved_left_leaf), (saved_right_root, saved_right_leaf)) = saved;
+
+    rolling = (
+        (
+            saved_left_root,
+            () => factory_at(sys.snapshot("HEAD~59")),
+        ),
+        (saved_right_root, saved_right_leaf),
+    );
+    let after_left = rolling;
+    let ((middle_left_root, middle_left_leaf), (middle_right_root, middle_right_leaf)) = after_left;
+
+    rolling = (
+        (middle_left_root, middle_left_leaf),
+        (
+            middle_right_root,
+            () => factory_at(sys.snapshot("HEAD~19")),
+        ),
+    );
+    let after_both = rolling;
+    let ((final_left_root, final_left_leaf), (final_right_root, final_right_leaf)) = after_both;
+
+    {
+        saved_left_root: std.concurrent.parallel([saved_left_root, saved_left_root]),
+        saved_left_leaf: std.concurrent.parallel([saved_left_leaf, saved_left_leaf]),
+        saved_right_root: std.concurrent.parallel([saved_right_root, saved_right_root]),
+        saved_right_leaf: std.concurrent.parallel([saved_right_leaf, saved_right_leaf]),
+        middle_left_root: std.concurrent.parallel([middle_left_root, middle_left_root]),
+        middle_left_leaf: std.concurrent.parallel([middle_left_leaf, middle_left_leaf]),
+        middle_right_root: std.concurrent.parallel([middle_right_root, middle_right_root]),
+        middle_right_leaf: std.concurrent.parallel([middle_right_leaf, middle_right_leaf]),
+        final_left_root: std.concurrent.parallel([final_left_root, final_left_root]),
+        final_left_leaf: std.concurrent.parallel([final_left_leaf, final_left_leaf]),
+        final_right_root: std.concurrent.parallel([final_right_root, final_right_root]),
+        final_right_leaf: std.concurrent.parallel([final_right_leaf, final_right_leaf]),
+    }
+}
