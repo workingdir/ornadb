@@ -17313,12 +17313,19 @@ fn is_snapshot_context_map_shape(ty: &Type) -> bool {
             is_contextual_snapshot_ref(ty)
         }
         Type::Applied { base, arguments } if base == "semantic.SnapshotContextMap" => {
-            !arguments.is_empty()
+            // SnapshotContextMap is the canonical encoding of a set with at
+            // least two selectors; singleton sets use SnapshotRefContext.
+            // Require sorted unique entries so repeated pairwise merges do
+            // not hide a non-canonical map behind equality.
+            arguments.len() > 1
                 && arguments
                     .iter()
                     .all(|argument| {
                         matches!(argument, Type::Named(selector) if is_snapshot_selector_context(selector))
                     })
+                && arguments.windows(2).all(|pair| {
+                    matches!(pair, [Type::Named(left), Type::Named(right)] if left < right)
+                })
         }
         _ => false,
     }
