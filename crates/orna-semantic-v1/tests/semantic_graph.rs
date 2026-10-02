@@ -4174,6 +4174,29 @@ fn paired_nested_chain_rebind_cascades_reject_cross_chain_terminal_mixing() {
 }
 
 #[test]
+fn paired_nested_chain_rebind_replays_preserve_captured_pin_identity() {
+    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-replay-stability.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-chain-rebind-replay-stability.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "replaying saved paired closures after nested decoy storms must preserve root, bridge, leaf, and terminal pin identity: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
