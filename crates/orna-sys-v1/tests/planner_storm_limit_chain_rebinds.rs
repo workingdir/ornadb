@@ -1418,6 +1418,22 @@ fn unknown_row_byte_caps_report_scoped_handoff_routes_by_nested_depth() {
         other => panic!("expected typed byte-cap handoff routes, got {other:?}"),
     };
     assert_eq!(first_routes.len(), 6);
+    for route in first_routes {
+        assert_eq!(
+            &route.output_path[..route.input_path.len()],
+            route.input_path.as_slice(),
+            "each typed destination descends from its actual bounded input"
+        );
+        assert_eq!(route.output_path.len(), route.input_path.len() + 2);
+        assert!(matches!(
+            route.output_path[route.input_path.len()],
+            PlanByteCapScopeSegment::Rebind { .. }
+        ));
+        assert!(matches!(
+            route.output_path[route.input_path.len() + 1],
+            PlanByteCapScopeSegment::Cascade { .. }
+        ));
+    }
     assert_eq!(
         first_routes[0],
         PlanByteCapHandoffRoute {
@@ -1441,6 +1457,18 @@ fn unknown_row_byte_caps_report_scoped_handoff_routes_by_nested_depth() {
         }
     );
     assert_eq!(
+        first_routes[1].output_path,
+        vec![
+            PlanByteCapScopeSegment::StormStage { index: 1 },
+            PlanByteCapScopeSegment::Branch { index: 1 },
+            PlanByteCapScopeSegment::Limit { position: 1 },
+            PlanByteCapScopeSegment::Rebind { position: 1 },
+            PlanByteCapScopeSegment::Cascade { index: 1 },
+            PlanByteCapScopeSegment::Rebind { position: 1 },
+            PlanByteCapScopeSegment::Cascade { index: 2 },
+        ]
+    );
+    assert_eq!(
         first_routes[2],
         PlanByteCapHandoffRoute {
             depth: 1,
@@ -1449,6 +1477,8 @@ fn unknown_row_byte_caps_report_scoped_handoff_routes_by_nested_depth() {
                 PlanByteCapScopeSegment::Branch { index: 1 },
                 PlanByteCapScopeSegment::Limit { position: 1 },
                 PlanByteCapScopeSegment::Rebind { position: 1 },
+                PlanByteCapScopeSegment::Cascade { index: 1 },
+                PlanByteCapScopeSegment::Rebind { position: 1 },
                 PlanByteCapScopeSegment::Cascade { index: 2 },
                 PlanByteCapScopeSegment::Limit { position: 2 },
             ],
@@ -1456,6 +1486,10 @@ fn unknown_row_byte_caps_report_scoped_handoff_routes_by_nested_depth() {
                 PlanByteCapScopeSegment::StormStage { index: 1 },
                 PlanByteCapScopeSegment::Branch { index: 1 },
                 PlanByteCapScopeSegment::Limit { position: 1 },
+                PlanByteCapScopeSegment::Rebind { position: 1 },
+                PlanByteCapScopeSegment::Cascade { index: 1 },
+                PlanByteCapScopeSegment::Rebind { position: 1 },
+                PlanByteCapScopeSegment::Cascade { index: 2 },
                 PlanByteCapScopeSegment::Limit { position: 2 },
                 PlanByteCapScopeSegment::Rebind { position: 2 },
                 PlanByteCapScopeSegment::Cascade { index: 1 },
