@@ -393,6 +393,13 @@ impl PackageResolver {
     /// on this sequence, so v1 derives each route from its exact selected pin.
     /// Each session's modules follow the pins in that snapshot; later sibling
     /// rebinds do not refresh or retarget earlier sessions.
+    /// After those paired depth waves, a terminal rebind storm updates only
+    /// that sibling session's terminal pin and module route. Siblings can
+    /// diverge and reconverge on the same terminal pin, while retained
+    /// manifest and pre-rebind snapshots keep their prior routes.
+    /// A later paired depth storm also leaves those rebound terminal
+    /// snapshots intact. Newly opened terminal closures start from their
+    /// latest exact deep pins and follow those pins' manifest routes.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
