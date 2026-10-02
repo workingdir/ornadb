@@ -736,6 +736,8 @@ pub enum PlanByteCapScopeSegment {
     Cascade { index: usize },
     /// A one-based nested storm position within a branch.
     NestedStorm { index: usize },
+    /// The bounded output of a one-based nested storm within a branch.
+    NestedStormOutput { index: usize },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -3085,13 +3087,14 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
             (None, _) => {}
         }
 
+        let mut prior_nested_storm_path = branch_byte_scope_path.clone();
         for (nested_index, nested_storm) in branch.nested_storms.iter().enumerate() {
             let nested_scope = format!(
                 "{storm_path}/branch{}/nested{}",
                 branch_index + 1,
                 nested_index + 1
             );
-            let mut nested_scope_path = branch_byte_scope_path.clone();
+            let mut nested_scope_path = prior_nested_storm_path.clone();
             nested_scope_path.push(PlanByteCapScopeSegment::NestedStorm {
                 index: nested_index + 1,
             });
@@ -3117,6 +3120,10 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
                 (None, _) => {}
             }
             branch_output = nested_output;
+            prior_nested_storm_path = nested_scope_path;
+            prior_nested_storm_path.push(PlanByteCapScopeSegment::NestedStormOutput {
+                index: nested_index + 1,
+            });
         }
 
         add_capped_estimate(&mut rows, &mut remaining_rows, branch_output.rows);
@@ -3629,6 +3636,10 @@ fn hash_byte_cap_scope_path(hash: &mut Sha256, path: &[PlanByteCapScopeSegment])
             }
             PlanByteCapScopeSegment::NestedStorm { index } => {
                 hash.update([5]);
+                hash.update((*index as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::NestedStormOutput { index } => {
+                hash.update([7]);
                 hash.update((*index as u64).to_be_bytes());
             }
         }
