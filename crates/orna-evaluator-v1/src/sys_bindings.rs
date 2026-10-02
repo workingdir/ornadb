@@ -761,3 +761,74 @@ impl EffectHandler for SysHostBindingRegistry {
 fn redacted_error(code: &'static str) -> EvaluationError {
     EvaluationError::redacted(SafeText::new(code).expect("static evaluator error code is safe"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_generated_host_operation_reaches_its_native_dispatch_arm() {
+        let environment = EnvironmentProvider::from_snapshot([(
+            "HOME".to_owned(),
+            Some("fixture-home".to_owned()),
+        )])
+        .expect("valid host environment snapshot");
+        let process = ProcessProvider::new(std::time::Duration::from_secs(1), 1024)
+            .expect("valid process limits");
+        let clock = ClockProvider::new(std::time::Duration::from_secs(1));
+        let filesystem = FilesystemProvider::new();
+        let http = HttpProvider::new(std::time::Duration::from_secs(1), 1024, 1024)
+            .expect("valid HTTP limits");
+        let bindings = SysHostBindingRegistry::new(environment)
+            .with_process_provider(process)
+            .with_clock_provider(clock)
+            .with_filesystem_provider(filesystem)
+            .with_http_provider(http);
+        let environment_argument = CanonicalValue::new(OvbRaw::Text("HOME".to_owned()))
+            .expect("environment name is canonical");
+        let mut checked = 0;
+
+        for operation in system_host_operation_registry().operations() {
+            checked += 1;
+            if operation.provider == "orna.sys.host.environment.v1" {
+                let actual = bindings
+                    .dispatch(
+                        &operation.name,
+                        std::slice::from_ref(&environment_argument),
+                        None,
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!("{} dispatch failed: {}", operation.name, error.code())
+                    })
+                    .expect("environment operation returns a value");
+                let expected = match operation.name.as_str() {
+                    "std.io.environment.get" => OvbRaw::Tag(
+                        60013,
+                        Box::new(OvbRaw::Array(vec![
+                            OvbRaw::Int(1.into()),
+                            OvbRaw::Text("fixture-home".to_owned()),
+                        ])),
+                    ),
+                    "std.io.environment.require" => OvbRaw::Text("fixture-home".to_owned()),
+                    name => panic!("unmapped environment operation {name}"),
+                };
+                assert_eq!(actual.raw(), &expected, "{} result", operation.name);
+            } else {
+                let error = bindings
+                    .dispatch(&operation.name, &[], None)
+                    .expect_err("empty args must reach a registered handler and fail arity");
+                assert_eq!(
+                    error.code(),
+                    "ORNA-EVAL-ARGUMENT",
+                    "{} must resolve to its typed native dispatch arm",
+                    operation.name
+                );
+            }
+        }
+
+        assert_eq!(
+            checked, 20,
+            "the host dispatch audit covers the full registry"
+        );
+    }
+}
