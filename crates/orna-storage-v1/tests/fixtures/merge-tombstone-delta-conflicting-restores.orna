@@ -1,0 +1,23 @@
+{
+  id: "root",
+  name: "Root from left",
+  city: "Bristol",
+}
+
+{
+  id: "root",
+  name: "Root from right",
+  city: "Bristol",
+}
+
+{
+  id: "root/child",
+  name: "Child from left",
+  city: "Leeds",
+}
+
+{
+  id: "root/child",
+  name: "Child from right",
+  city: "Leeds",
+}
