@@ -1,0 +1,29 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn nested_tuple_capture_wave() =
+    (left: (sys.SnapshotRef, sys.SnapshotRef),
+     right: (sys.SnapshotRef, sys.SnapshotRef)) => {
+        let (left_selected, left_sibling) = left;
+        let (right_selected, right_sibling) = right;
+        ((middle_selected, middle_sibling): (sys.SnapshotRef, sys.SnapshotRef)) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                left_selected_capture: factory_at(left_selected),
+                left_sibling_capture: factory_at(left_sibling),
+                right_selected_capture: factory_at(right_selected),
+                right_sibling_capture: factory_at(right_sibling),
+                middle_selected_capture: factory_at(middle_selected),
+                middle_sibling_capture: factory_at(middle_sibling),
+                terminal_capture: factory_at(terminal_pin),
+            }
+    };
+
+pub fn omitted_outer_tuple_preserves_sibling_pins_across_later_depths() {
+    let callback = nested_tuple_capture_wave();
+    let incomplete = callback(
+        right: (sys.snapshot("HEAD~900"), sys.snapshot("HEAD~890")),
+    )((sys.snapshot("HEAD~880"), sys.snapshot("HEAD~870")))(sys.snapshot("HEAD~860"));
+    {
+        incomplete: incomplete,
+    }
+}
