@@ -19904,6 +19904,61 @@ fn concurrent_uneven_depth_restore_retries_isolate_failed_attempts() {
 }
 
 #[test]
+fn duplicate_tombstones_are_scoped_to_each_concurrent_fragment_wave() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let repeated_key = fixture_rows
+        .iter()
+        .find(|row| row.key == string("a/child/deep"))
+        .expect("the in-crate depth fixture supplies the repeated tombstone")
+        .key
+        .clone();
+    let distinct_key = fixture_rows
+        .iter()
+        .find(|row| row.key == string("z"))
+        .expect("the in-crate depth fixture supplies a distinct tombstone")
+        .key
+        .clone();
+    let repeated_tombstone = [(id(1), repeated_key.clone())];
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(2, 0, 2, &repeated_tombstone)
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 0, 2, &repeated_tombstone)
+        .unwrap();
+    let before_duplicate = history.clone();
+    assert_eq!(
+        history.submit_depth_merge_fragment(2, 1, 2, &repeated_tombstone),
+        Err(BranchMergeTombstoneHistoryError::DuplicateTombstone { order: 2 }),
+        "same-wave duplicates are rejected even with another restore wave buffered",
+    );
+    assert_eq!(history, before_duplicate, "rejected fragments leave every wave untouched");
+
+    history.submit_depth_merge_fragment(1, 1, 2, &[]).unwrap();
+    let emitted = history.submit_depth_merge_fragment(0, 0, 1, &[]).unwrap();
+    assert_eq!(
+        emitted.iter().map(|event| (event.order, event.key.clone())).collect::<Vec<_>>(),
+        [(1, repeated_key.clone())],
+        "the same key at another lineage position remains an independent delete event",
+    );
+    assert_eq!(history.next_order(), Some(2));
+
+    let emitted = history
+        .submit_depth_merge_fragment(2, 1, 2, &[(id(1), distinct_key.clone())])
+        .unwrap();
+    assert_eq!(emitted.len(), 2, "the corrected fragment completes only its own wave");
+    assert!(emitted.iter().any(|event| event.key == repeated_key));
+    assert!(emitted.iter().any(|event| event.key == distinct_key));
+    assert!(history.events().iter().any(|event| event.order == 1 && event.table == id(1)));
+    assert!(history.events().iter().any(|event| event.order == 2 && event.table == id(1)));
+    assert_eq!(history.next_order(), Some(3));
+}
+
+#[test]
 fn paired_depth_storm_tombstone_history_stabilizes_across_restore_waves() {
     let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
         .split("\n\n")
