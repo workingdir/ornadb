@@ -9501,6 +9501,15 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
     if !checkpoint_snapshot_maps_are_valid(left) || !checkpoint_snapshot_maps_are_valid(right) {
         return None;
     }
+    // Bottom contributes no value to a collection fold. Keep the concrete
+    // sibling type when the other row omitted that slot; tuple promotion has
+    // already checked that doing so cannot collapse distinct pin identities.
+    if matches!(left, Type::Bottom) {
+        return Some(right.clone());
+    }
+    if matches!(right, Type::Bottom) {
+        return Some(left.clone());
+    }
     if is_snapshot_context_type(left) || is_snapshot_context_type(right) {
         if !is_snapshot_context_map_shape(left) || !is_snapshot_context_map_shape(right) {
             return None;
@@ -17872,11 +17881,21 @@ fn collect_corresponding_snapshot_context_maps(
     into: &mut Vec<(BTreeSet<String>, BTreeSet<String>)>,
 ) -> bool {
     // Generic SnapshotRef formals have no concrete checkpoint identity to
-    // preserve. Bottom leaves likewise represent values that were not made.
+    // preserve. A Bottom on one side of a compaction fold is different: its
+    // sibling slot still exists, so retain an empty map for that side. The
+    // empty map lets the fold detect when a live pin from the other row would
+    // make two previously distinct depth labels overlap.
+    if matches!(expected, Type::Bottom) && matches!(actual, Type::Bottom) {
+        return true;
+    }
+    if matches!(expected, Type::Bottom) {
+        return collect_snapshot_context_maps_from_omitted_value(actual, true, into);
+    }
+    if matches!(actual, Type::Bottom) {
+        return collect_snapshot_context_maps_from_omitted_value(expected, false, into);
+    }
     if expected == &Type::Named("sys.SnapshotRef".into())
         || actual == &Type::Named("sys.SnapshotRef".into())
-        || matches!(expected, Type::Bottom)
-        || matches!(actual, Type::Bottom)
     {
         return true;
     }
@@ -18010,6 +18029,69 @@ fn collect_corresponding_snapshot_context_maps(
         ) => {
             collect_corresponding_snapshot_context_maps(expected_currency, actual_currency, into)
                 && collect_corresponding_snapshot_context_maps(expected_unit, actual_unit, into)
+        }
+        _ => true,
+    }
+}
+
+fn collect_snapshot_context_maps_from_omitted_value(
+    value: &Type,
+    omitted_on_left: bool,
+    into: &mut Vec<(BTreeSet<String>, BTreeSet<String>)>,
+) -> bool {
+    if matches!(value, Type::Bottom) || value == &Type::Named("sys.SnapshotRef".into()) {
+        return true;
+    }
+    if is_contextual_snapshot_ref(value) || is_snapshot_context_map_shape(value) {
+        let Type::Applied { arguments, .. } = value else {
+            return false;
+        };
+        let selectors = arguments
+            .iter()
+            .filter_map(|argument| match argument {
+                Type::Named(selector) => Some(selector.clone()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        if selectors.is_empty() {
+            return false;
+        }
+        let empty = BTreeSet::new();
+        into.push(if omitted_on_left {
+            (empty, selectors)
+        } else {
+            (selectors, empty)
+        });
+        return true;
+    }
+
+    match value {
+        Type::List(value)
+        | Type::Range(value)
+        | Type::Relation(value)
+        | Type::Stream(value)
+        | Type::Optional(value) => {
+            collect_snapshot_context_maps_from_omitted_value(value, omitted_on_left, into)
+        }
+        Type::Record(fields) => fields.values().all(|value| {
+            collect_snapshot_context_maps_from_omitted_value(value, omitted_on_left, into)
+        }),
+        Type::Tuple(elements) => elements.iter().all(|value| {
+            collect_snapshot_context_maps_from_omitted_value(value, omitted_on_left, into)
+        }),
+        Type::Applied { arguments, .. } => arguments.iter().all(|value| {
+            collect_snapshot_context_maps_from_omitted_value(value, omitted_on_left, into)
+        }),
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters.iter().all(|value| {
+                collect_snapshot_context_maps_from_omitted_value(value, omitted_on_left, into)
+            }) && collect_snapshot_context_maps_from_omitted_value(result, omitted_on_left, into)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            collect_snapshot_context_maps_from_omitted_value(currency, omitted_on_left, into)
+                && collect_snapshot_context_maps_from_omitted_value(unit, omitted_on_left, into)
         }
         _ => true,
     }
@@ -20383,6 +20465,31 @@ mod tests {
         assert!(!pinned_snapshot_rebind_compatible(
             &nested_malformed,
             &nested_malformed
+        ));
+    }
+
+    #[test]
+    fn paired_omission_folds_do_not_collapse_distinct_depth_labels() {
+        let pin = |selector: &str| contextual_snapshot_ref(selector);
+        let before = [Type::Tuple(vec![
+            pin("selector:HEAD~depth-a"),
+            pin("selector:HEAD~depth-b"),
+        ])];
+        let after = [Type::Tuple(vec![Type::Bottom, pin("selector:HEAD~depth-a")])];
+
+        assert!(checkpoint_pin_map_widths_match(&before[0], &after[0]));
+        assert!(
+            !tuple_checkpoint_compaction_fold_preserves_pin_identity(&before, &after),
+            "an omitted first slot must not hide the later fold merging depth-a with depth-b"
+        );
+
+        let stable_after = [Type::Tuple(vec![
+            Type::Bottom,
+            pin("selector:HEAD~depth-c"),
+        ])];
+        assert!(tuple_checkpoint_compaction_fold_preserves_pin_identity(
+            &before,
+            &stable_after
         ));
     }
 
