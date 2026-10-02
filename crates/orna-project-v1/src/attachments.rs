@@ -397,6 +397,9 @@ impl PackageResolver {
     /// that sibling session's terminal pin and module route. Siblings can
     /// diverge and reconverge on the same terminal pin, while retained
     /// manifest and pre-rebind snapshots keep their prior routes.
+    /// A later paired depth storm also leaves those rebound terminal
+    /// snapshots intact. Newly opened terminal closures start from their
+    /// latest exact deep pins and follow those pins' manifest routes.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
