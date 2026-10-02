@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 
 use num_bigint::BigInt;
@@ -288,6 +288,8 @@ enum FilterBatchNode {
     Then(Arc<FilterBatch>, Arc<FilterBatch>),
 }
 
+type FilterBatchJoinCache = HashMap<(*const FilterBatch, *const FilterBatch), Arc<FilterBatch>>;
+
 impl FilterBatch {
     fn from_values(values: Vec<Value>) -> Arc<Self> {
         Arc::new(Self {
@@ -301,6 +303,20 @@ impl FilterBatch {
             node: FilterBatchNode::Then(Arc::clone(previous), Arc::clone(next)),
             flattened: OnceLock::new(),
         })
+    }
+
+    fn shared_followed_by(
+        previous: &Arc<Self>,
+        next: &Arc<Self>,
+        joins: &mut FilterBatchJoinCache,
+    ) -> Arc<Self> {
+        let key = (Arc::as_ptr(previous), Arc::as_ptr(next));
+        if let Some(batch) = joins.get(&key) {
+            return Arc::clone(batch);
+        }
+        let batch = Self::followed_by(previous, next);
+        joins.insert(key, Arc::clone(&batch));
+        batch
     }
 
     fn prefixed_by(values: Vec<Value>, next: &Arc<Self>) -> Arc<Self> {
@@ -324,7 +340,7 @@ impl FilterBatch {
         })
     }
 
-    fn values(&self) -> impl Iterator<Item = &Value> {
+    pub(super) fn values(&self) -> impl Iterator<Item = &Value> {
         self.chunks().iter().flat_map(|chunk| chunk.iter())
     }
 }
@@ -552,19 +568,27 @@ impl RelationPlan {
             }
         };
         let (left, right) = self.source_union.take().expect("checked union source");
+        let mut shared_joins = FilterBatchJoinCache::new();
         self.source_union = Some((
-            Box::new(left.push_filter_cascade(Arc::clone(&predicates))),
-            Box::new(right.push_filter_cascade(predicates)),
+            Box::new(left.push_filter_cascade(Arc::clone(&predicates), &mut shared_joins)),
+            Box::new(right.push_filter_cascade(predicates, &mut shared_joins)),
         ));
         self
     }
 
-    fn push_filter_cascade(mut self, predicates: Arc<FilterBatch>) -> Self {
+    fn push_filter_cascade(
+        mut self,
+        predicates: Arc<FilterBatch>,
+        shared_joins: &mut FilterBatchJoinCache,
+    ) -> Self {
         if let Some((left, right)) = self.source_union.take() {
             if self.stages.is_empty() {
                 self.source_union = Some((
-                    Box::new(left.push_filter_cascade(Arc::clone(&predicates))),
-                    Box::new(right.push_filter_cascade(predicates)),
+                    Box::new(left.push_filter_cascade(
+                        Arc::clone(&predicates),
+                        shared_joins,
+                    )),
+                    Box::new(right.push_filter_cascade(predicates, shared_joins)),
                 ));
                 return self;
             }
@@ -580,13 +604,16 @@ impl RelationPlan {
                         FilterBatch::prefixed_by(previous, &predicates)
                     }
                     RelationStage::SharedFilter(previous) => {
-                        FilterBatch::followed_by(&previous, &predicates)
+                        FilterBatch::shared_followed_by(&previous, &predicates, shared_joins)
                     }
                     _ => unreachable!("checked filter stage"),
                 };
                 self.source_union = Some((
-                    Box::new(left.push_filter_cascade(Arc::clone(&predicates))),
-                    Box::new(right.push_filter_cascade(predicates)),
+                    Box::new(left.push_filter_cascade(
+                        Arc::clone(&predicates),
+                        shared_joins,
+                    )),
+                    Box::new(right.push_filter_cascade(predicates, shared_joins)),
                 ));
                 return self;
             }
@@ -600,7 +627,7 @@ impl RelationPlan {
             }
             Some(RelationStage::SharedFilter(previous)) => {
                 self.stages.push(RelationStage::SharedFilter(
-                    FilterBatch::followed_by(&previous, &predicates),
+                    FilterBatch::shared_followed_by(&previous, &predicates, shared_joins),
                 ));
             }
             Some(previous) => {
