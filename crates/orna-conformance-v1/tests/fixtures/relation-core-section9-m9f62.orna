@@ -1,0 +1,49 @@
+pub table Reading(id: Int) {
+    value: Int,
+    assert every(reading => reading.value > 0);
+    assert all_unique(reading => reading.value);
+}
+
+fn total(): Int = Reading | map(reading => reading.value) | sum;
+fn minimum(): Int? = Reading | map(reading => reading.value) | min();
+fn maximum(): Int? = Reading | map(reading => reading.value) | max();
+fn all_before_three(): Bool = Reading | every(reading => reading.id < 3);
+fn has_twenty(): Bool = Reading | exists(reading => reading.value == 20);
+fn has_ninety(): Bool = Reading | exists(reading => reading.value == 90);
+
+fn parent() {
+    Reading.insert({ id: 3, value: 30 });
+    Reading.insert({ id: 1, value: 10 });
+    Reading.insert({ id: 2, value: 20 });
+
+    let selected = Reading | filter(reading => reading.id >= 2);
+    assert selected | count() == 2;
+    assert (selected | map(reading => reading.value) | first() ?? 0) == 20;
+    assert (selected | map(reading => reading.value) | drop(1) | first() ?? 0) == 30;
+
+    let expanded = Reading | flat_map(reading => [reading.value, reading.value + 1]);
+    assert expanded | count() == 6;
+    assert (expanded | take(1) | one()) == 10;
+    assert (expanded | drop(1) | take(1) | one()) == 11;
+
+    let ordered = Reading | sort_by(reading => reading.value);
+    assert (ordered | take(1) | one()).value == 10;
+    assert (ordered | drop(2) | one()).value == 30;
+
+    let unique = Reading | map(reading => reading.value % 20) | distinct();
+    assert unique | count() == 2;
+    assert (unique | first() ?? 99) == 10;
+    assert (unique | drop(1) | first() ?? 99) == 0;
+
+    let combined = Reading | filter(reading => reading.id == 1)
+        | union(Reading | filter(reading => reading.id > 1));
+    assert combined | count() == 3;
+    assert (combined | one(reading => reading.id == 2)).value == 20;
+
+    assert total() == 60;
+    assert (minimum() ?? 0) == 10;
+    assert (maximum() ?? 0) == 30;
+    assert all_before_three() == false;
+    assert has_twenty() == true;
+    assert has_ninety() == false;
+}
