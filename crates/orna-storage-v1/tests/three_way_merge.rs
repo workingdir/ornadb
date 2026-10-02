@@ -19903,7 +19903,7 @@ fn concurrent_uneven_depth_restore_retries_isolate_failed_attempts() {
 }
 
 #[test]
-fn paired_depth_storm_plans_release_depth_ordered_deltas_after_out_of_order_completion() {
+fn paired_depth_storm_plans_release_stable_depth_order_across_completion_schedules() {
     let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
         .split("\n\n")
         .map(|record| parse_fixture(record, RowKeyKind::Explicit))
@@ -20016,6 +20016,7 @@ fn paired_depth_storm_plans_release_depth_ordered_deltas_after_out_of_order_comp
     let mut sequencer = BranchMergePlanSequencer::new(0);
     let mut released_plans = Vec::new();
     let mut completion_order = Vec::new();
+    let mut plans_by_order = BTreeMap::new();
     for expected_order in [2_u64, 1, 0] {
         releases[&expected_order].send(()).unwrap();
         let (order, plan) = completed_rx.recv().unwrap();
@@ -20027,6 +20028,7 @@ fn paired_depth_storm_plans_release_depth_ordered_deltas_after_out_of_order_comp
         } else {
             assert!(ready.is_empty(), "a later wave waits for every earlier commit position");
         }
+        plans_by_order.insert(order, plan);
     }
     for worker in workers {
         worker.join().expect("the paired merge worker completes");
@@ -20040,6 +20042,30 @@ fn paired_depth_storm_plans_release_depth_ordered_deltas_after_out_of_order_comp
         [0, 1, 2],
         "the released paired deltas retain their assigned depth-wave positions",
     );
+    let completion_schedules = [
+        [2_u64, 1, 0],
+        [2, 0, 1],
+        [1, 2, 0],
+        [1, 0, 2],
+        [0, 2, 1],
+        [0, 1, 2],
+    ];
+    for schedule in completion_schedules {
+        let mut replay = BranchMergePlanSequencer::new(0);
+        let mut replayed_plans = Vec::new();
+        for order in schedule {
+            replayed_plans.extend(
+                replay
+                    .submit_with_tombstone_deltas(order, &plans_by_order[&order])
+                    .unwrap(),
+            );
+        }
+        assert_eq!(
+            replayed_plans,
+            released_plans,
+            "the same paired merge waves have identical depth order for every completion schedule",
+        );
+    }
     assert_eq!(
         sequencer.submit_with_tombstone_deltas(2, &released_plans[2].plan),
         Err(BranchMergePlanSequenceError::DuplicateOrStale { order: 2 }),
@@ -20137,6 +20163,33 @@ fn paired_depth_storm_plans_release_depth_ordered_deltas_after_out_of_order_comp
         paired_tombstone_history,
         expected_paired_history,
         "split-depth changes preserve each paired delta and append waves in commit lineage order",
+    );
+
+    let rows_by_table = [fixture_rows.as_slice(), fixture_rows.as_slice()];
+    let mut split_layout_deltas = Vec::new();
+    for layout in [0, 1] {
+        let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+            &rows_by_table,
+            &wave_zero_deletes,
+            &wave_zero_deletes,
+            layout,
+            layout == 1,
+            &format!("layout-stability-{layout}"),
+        );
+        let plan = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 128, max_conflicts: 0 },
+        )
+        .expect("the same paired delete wave merges under either depth layout");
+        split_layout_deltas.push(plan.ordered_row_tombstones());
+    }
+    assert_eq!(
+        split_layout_deltas[0],
+        split_layout_deltas[1],
+        "paired split-layout changes cannot reorder the same depth-shaped tombstone set",
     );
 }
 

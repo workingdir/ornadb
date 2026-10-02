@@ -219,8 +219,8 @@ pub struct BranchMergePlan {
 }
 
 impl BranchMergePlan {
-    /// Flattens this plan's row tombstones in table, split-range, then
-    /// canonical key order. Concatenate results from
+    /// Flattens this plan's row tombstones in table and canonical primary-key
+    /// order, independent of its split layout. Concatenate results from
     /// [`BranchMergePlanSequencer`] in the released order to retain commit
     /// lineage across plans whose depth splits differ.
     pub fn ordered_row_tombstones(&self) -> Vec<(ObjectId, CanonicalValue)> {
@@ -232,13 +232,18 @@ impl BranchMergePlan {
                 }
             }
         }
+        ordered.sort_by(|(left_table, left_key), (right_table, right_key)| {
+            left_table.cmp(right_table).then_with(|| {
+                compare_primary_keys(left_key, right_key).unwrap_or(Ordering::Equal)
+            })
+        });
         ordered
     }
 }
 
 /// One complete paired plan released at its selected commit position, with
-/// that plan's exact row tombstones flattened in table, split-range, then
-/// canonical key order.
+/// that plan's exact row tombstones flattened in table and canonical key
+/// order, independent of the plan's split layout.
 ///
 /// Adapters should persist `plan` as one paired step and append
 /// `ordered_row_tombstones` at `order`. This keeps each plan's depth order
@@ -300,9 +305,10 @@ impl BranchMergePlanSequencer {
 
     /// Submits one selected successful plan and returns each newly contiguous
     /// plan with its commit position and depth-ordered tombstones attached.
-    /// Tombstone order within each paired step follows table, validated split
-    /// range, and canonical key order; the returned steps preserve commit
-    /// lineage across calls, regardless of worker completion or depth layout.
+    /// Tombstone order within each paired step follows table and canonical key
+    /// order, independent of validated split ranges; the returned steps
+    /// preserve commit lineage across calls, regardless of worker completion
+    /// or depth layout.
     #[must_use = "released paired plans and tombstone deltas must be enacted in lineage order"]
     pub fn submit_with_tombstone_deltas(
         &mut self,
@@ -442,8 +448,9 @@ impl BranchMergePlanSequencer {
 /// commits append by lineage: a later shallow ancestor tombstone follows
 /// earlier descendant storm events instead of being sorted ahead of them.
 /// If successive plans use different split boundaries, each plan first
-/// flattens its keys in that plan's table and validated range order; depth
-/// changes never reorder or repartition the already-committed prefix.
+/// flattens its keys in table and canonical primary-key order, independent of
+/// that plan's ranges; depth changes never reorder or repartition the already-
+/// committed prefix.
 /// A conflicted candidate is not a paired commit step and has no appendable
 /// delta; concurrent retries from its base are alternatives, and at most one
 /// successful plan advances that paired lineage position.
