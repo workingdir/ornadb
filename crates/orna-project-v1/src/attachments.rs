@@ -618,6 +618,22 @@ impl PackageResolver {
         Ok(SiblingRebindResolution { routes })
     }
 
+    /// Repeats one identical rebind path across a completed sibling batch.
+    /// Each branch extends from its own terminal session and keeps its earlier
+    /// route snapshots; the returned batch preserves sibling order.
+    pub fn extend_sibling_rebind_wave(
+        &self,
+        previous: &SiblingRebindResolution,
+        replacements: &[PinnedDatabase],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let paths = previous
+            .routes
+            .iter()
+            .map(|route| (route, replacements))
+            .collect::<Vec<_>>();
+        self.extend_sibling_rebind_paths(&paths)
+    }
+
     /// Resolves a chain of exact aliases from a retained session snapshot.
     /// Each edge is selected from the session opened at the preceding edge;
     /// a failure leaves the caller's snapshot untouched.
