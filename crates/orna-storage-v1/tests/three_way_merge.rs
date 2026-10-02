@@ -17348,6 +17348,101 @@ fn paired_depth_chains_with_different_lengths_keep_orders_local() {
 }
 
 #[test]
+fn sustained_paired_chains_of_unequal_depth_keep_order_isolated() {
+    // Scheduling is unspecified, so pin independent per-table ordering for
+    // unequal nested chains while peers scan opposite physical layouts.
+    const LOADS_PER_WAVE: usize = 8;
+    const WAVES: usize = 6;
+    let expected_first_tombstones = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .into_iter()
+    .map(string)
+    .collect::<Vec<_>>();
+    let expected_second_tombstones = ["a", "a/child", "a/child/deep"]
+        .into_iter()
+        .map(string)
+        .collect::<Vec<_>>();
+    let expected_first_live = vec![string("z")];
+    let expected_second_live = ["b", "c", "d", "zz"]
+        .into_iter()
+        .map(string)
+        .collect::<Vec<_>>();
+    let mut complete_loads = 0;
+    let mut capped_loads = 0;
+
+    for wave in 0..WAVES {
+        let start = Arc::new(Barrier::new(LOADS_PER_WAVE));
+        let mut workers = Vec::with_capacity(LOADS_PER_WAVE);
+        for load in 0..LOADS_PER_WAVE {
+            let first_table_split = (wave + load) % 2 == 0;
+            let capped = (wave + load) % 4 == 0;
+            let (base, left, right, mut source) = paired_distinct_depth_chain_inputs(
+                first_table_split,
+                (wave + load) % 3 == 0,
+                (wave + load) % 3 != 0,
+            );
+            if (wave + load) % 3 == 1 {
+                for rows in source.rows.values_mut() {
+                    rows.reverse();
+                }
+            }
+            let gate = Arc::clone(&start);
+            workers.push(std::thread::spawn(move || {
+                let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+                let row_cap = if capped { 32 } else { 33 };
+                let result = merge_three_way_snapshots(
+                    &base,
+                    &left,
+                    &right,
+                    &mut source,
+                    BranchMergeBudget { max_rows_examined: row_cap, max_conflicts: 0 },
+                );
+                (result, capped, first_table_split)
+            }));
+        }
+
+        for worker in workers {
+            let (result, capped, first_table_split) =
+                worker.join().expect("unequal-depth worker completes");
+            if capped {
+                let Err(BranchMergeError::BudgetExceeded { report }) = result else {
+                    panic!("a one-row-short unequal-depth scan returns no partial plan")
+                };
+                assert_eq!(report.rows_examined, 33);
+                assert_eq!(report.conflicts_lower_bound, 0);
+                assert!(report.affected_tables.contains(&id(2)));
+                capped_loads += 1;
+            } else {
+                let plan = result.expect("an exact-budget paired peer remains complete");
+                assert_eq!(plan.report.rows_examined, 33);
+                assert_eq!(table_row_tombstones(&plan, id(1)), expected_first_tombstones);
+                assert_eq!(table_row_tombstones(&plan, id(2)), expected_second_tombstones);
+                assert_eq!(table_live_row_keys(&plan, id(1)), expected_first_live);
+                assert_eq!(table_live_row_keys(&plan, id(2)), expected_second_live);
+                assert_eq!(
+                    plan.tables[&id(1)].segments.len(),
+                    if first_table_split { 7 } else { 1 },
+                );
+                assert_eq!(
+                    plan.tables[&id(2)].segments.len(),
+                    if first_table_split { 1 } else { 7 },
+                );
+                complete_loads += 1;
+            }
+        }
+    }
+
+    assert_eq!(complete_loads, 36);
+    assert_eq!(capped_loads, 12);
+}
+
+#[test]
 fn fixture_cross_depth_load_budget_stops_without_partial_plan() {
     let (base, left, right, mut source) = cross_depth_load_inputs();
     let error = merge_three_way_snapshots(
