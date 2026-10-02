@@ -5101,6 +5101,29 @@ fn paired_continuation_reproduction_storms_reject_cross_lane_mixing() {
 }
 
 #[test]
+fn paired_continuation_reproductions_remain_stable_across_chained_rebind_orders() {
+    let source = include_str!("fixtures/historical-paired-continuation-reproduction-stability-rebind-order.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-reproduction-stability-rebind-order.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "repeated paired continuation reproductions must remain stable across opposite chained depth-storm rebind orders: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
