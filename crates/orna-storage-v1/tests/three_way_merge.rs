@@ -20580,6 +20580,74 @@ fn paired_mixed_mode_priority_survives_interleaved_depth_wave_release() {
 }
 
 #[test]
+fn paired_mixed_mode_priority_survives_cloned_wave_snapshots() {
+    let fixture_key = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .find(|row| row.key == string("a/child/deep"))
+        .expect("the in-crate depth fixture supplies a tombstone key")
+        .key
+        .clone();
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+
+    let mut original = BranchMergeTombstoneHistory::new(0);
+    original
+        .submit_depth_merge_fragment(2, 0, 2, &[(id(1), fixture_key.clone())])
+        .unwrap();
+    let mut snapshot = original.clone();
+    let invalid_whole_plan = whole_plan(2, vec![fixture_key.clone(), fixture_key.clone()]);
+
+    let before_original_conflict = original.clone();
+    assert_eq!(
+        original.submit(&invalid_whole_plan),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "the original pending wave retains its depth-fragment mode",
+    );
+    assert_eq!(original, before_original_conflict);
+    assert_eq!(
+        snapshot.submit(&invalid_whole_plan),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "a cloned pending wave retains the same mode priority",
+    );
+
+    assert!(snapshot.submit(&whole_plan(0, Vec::new())).unwrap().is_empty());
+    assert!(snapshot.submit(&whole_plan(1, Vec::new())).unwrap().is_empty());
+    assert_eq!(
+        snapshot
+            .submit_depth_merge_fragment(2, 1, 2, &[])
+            .unwrap(),
+        vec![BranchMergeTombstoneEvent {
+            order: 2,
+            table: id(1),
+            key: fixture_key.clone(),
+        }],
+        "the cloned snapshot releases its completed depth wave after the prefix",
+    );
+    let before_snapshot_conflict = snapshot.clone();
+    assert_eq!(
+        snapshot.submit(&invalid_whole_plan),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "the cloned snapshot keeps its accepted mode after release",
+    );
+    assert_eq!(snapshot, before_snapshot_conflict);
+    assert_eq!(
+        original.submit(&invalid_whole_plan),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "releasing a clone does not alter the original pending wave",
+    );
+    assert_eq!(original, before_original_conflict);
+}
+
+#[test]
 fn paired_depth_storm_tombstone_history_stabilizes_across_restore_waves() {
     let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
         .split("\n\n")
