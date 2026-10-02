@@ -1,0 +1,3 @@
+use std.math.{shift};
+
+pub fn value(): Int = shift(7);

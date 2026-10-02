@@ -171,6 +171,11 @@ fn module_upgrade_projects() -> (
         include_str!("fixtures/module-upgrade-project.orna"),
     )
     .unwrap();
+    fs::write(
+        project_path.join("snapshot_app.orna"),
+        include_str!("fixtures/module-upgrade-app.orna"),
+    )
+    .unwrap();
     git_output_at(&project_path, &["init", "--quiet"]);
     for (key, value) in [
         ("user.email", "kieran@drewett.dev"),
