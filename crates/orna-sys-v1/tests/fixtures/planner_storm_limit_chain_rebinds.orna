@@ -1,0 +1,27 @@
+pub table PlannerStormLimitChainRebinds(id: Int) {
+    first: Bool,
+    rebound: Bool,
+    final: Bool,
+}
+pub fn branch_limit_rebind_storm() = PlannerStormLimitChainRebinds
+    | union(
+        PlannerStormLimitChainRebinds
+            | take(20)
+            | union(
+                PlannerStormLimitChainRebinds
+                    | take(5)
+                    | filter(row => row.first)
+            )
+            | take(6)
+            | union(
+                PlannerStormLimitChainRebinds
+                    | take(2)
+                    | filter(row => row.rebound)
+            )
+            | filter(row => row.final)
+    )
+    | union(
+        PlannerStormLimitChainRebinds
+            | take(8)
+            | filter(row => row.first && row.final)
+    );
