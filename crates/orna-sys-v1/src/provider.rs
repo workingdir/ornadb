@@ -299,6 +299,7 @@ pub enum ProviderAbiError {
     InvalidEffect,
     DuplicateOperation,
     DuplicateRole,
+    DuplicateRoleOperation,
     RoleOperationMissing,
     OperationRoleMismatch,
     OperationRoleVersionMismatch,
@@ -423,6 +424,10 @@ impl SystemProviderAbi {
                 replaceable: raw_role.replaceable,
                 builtin_provider: raw_role.builtin_provider.map(ProviderId::new).transpose()?,
             };
+            let unique_operations = role.operations.iter().collect::<BTreeSet<_>>();
+            if unique_operations.len() != role.operations.len() {
+                return Err(ProviderAbiError::DuplicateRoleOperation);
+            }
             if role.operations.is_empty()
                 || role.operations.iter().any(|operation_id| {
                     operations
@@ -444,10 +449,13 @@ impl SystemProviderAbi {
             }
         }
         for operation in operations.values() {
-            if let Some(role) = &operation.role
-                && !roles.contains_key(role)
-            {
-                return Err(ProviderAbiError::OperationRoleMismatch);
+            if let Some(role_id) = &operation.role {
+                let Some(role) = roles.get(role_id) else {
+                    return Err(ProviderAbiError::OperationRoleMismatch);
+                };
+                if !role.operations.contains(&operation.id) {
+                    return Err(ProviderAbiError::OperationRoleMismatch);
+                }
             }
         }
         Ok(Self {
