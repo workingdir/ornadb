@@ -22107,6 +22107,62 @@ fn paired_fragment_retry_bindings_are_atomic_across_uneven_chains() {
 }
 
 #[test]
+fn paired_storm_recovery_reports_stale_depth_labels_before_bad_indices() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(0, 0, 3, &[(id(1), fixture_key("root"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 0, 4, &[(id(1), fixture_key("root/child"))])
+        .unwrap();
+
+    let before_stale_submit_label = history.clone();
+    assert_eq!(
+        history.submit_depth_merge_fragment(0, 2, 2, &[]),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 0,
+            expected: 3,
+            actual: 2,
+        }),
+        "the existing wave count identifies a stale depth label even when its index is out of range",
+    );
+    assert_eq!(history, before_stale_submit_label);
+
+    let before_stale_recovery_label = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[BranchMergeDepthFragmentRecovery {
+                order: 1,
+                fragment: 3,
+                fragment_count: 3,
+                tombstones: Vec::new(),
+            }],
+            &[],
+        ),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 1,
+            expected: 4,
+            actual: 3,
+        }),
+        "recovery retains the paired wave's own uneven depth label instead of reporting only a bad index",
+    );
+    assert_eq!(history, before_stale_recovery_label);
+}
+
+#[test]
 fn paired_fragment_retry_binding_recovery_and_replay_are_atomic() {
     let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
         .split("\n\n")
