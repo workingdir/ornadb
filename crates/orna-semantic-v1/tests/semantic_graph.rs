@@ -5056,6 +5056,51 @@ fn paired_continuation_reproduction_consistency_rejects_lane_mixing() {
 }
 
 #[test]
+fn paired_continuation_reproductions_remain_consistent_across_paired_depth_storms() {
+    let source = include_str!("fixtures/historical-paired-continuation-reproduction-paired-storms.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-reproduction-paired-storms.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "repeatedly reconstructed pairs must retain each lane's saved closure identity after restoring every depth of paired rebind storms: {:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn paired_continuation_reproduction_storms_reject_cross_lane_mixing() {
+    let source = include_str!("fixtures/historical-paired-continuation-reproduction-paired-storms-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-reproduction-paired-storms-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "repeatedly reproduced continuations must keep the paired lanes distinct after depth-storm restoration: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
