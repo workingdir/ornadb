@@ -11,7 +11,7 @@ use orna_evolution_v1::{
     RowMergeOperation, RowSnapshotMergeError, RowSnapshotState, Schema, SchemaMergeConflict,
     merge_checkpoint_generation, merge_keyed_row_states, merge_schema_bounded,
 };
-use orna_foundation_v1::compare_primary_keys;
+use orna_foundation_v1::{OvbRaw, compare_primary_keys};
 use sha2::{Digest, Sha256};
 use std::{
     cell::Cell,
@@ -236,7 +236,7 @@ impl BranchMergePlan {
         }
         ordered.sort_by(|(left_table, left_key), (right_table, right_key)| {
             left_table.cmp(right_table).then_with(|| {
-                compare_primary_keys(left_key, right_key).unwrap_or(Ordering::Equal)
+                compare_primary_keys_with_encoding_tiebreak(left_key, right_key)
             })
         });
         ordered
@@ -1262,7 +1262,7 @@ impl BranchMergeTombstoneHistory {
             self.committed_modes.insert(order, mode);
             tombstones.sort_by(|(left_table, left_key), (right_table, right_key)| {
                 left_table.cmp(right_table).then_with(|| {
-                    compare_primary_keys(left_key, right_key).unwrap_or(Ordering::Equal)
+                    compare_primary_keys_with_encoding_tiebreak(left_key, right_key)
                 })
             });
             self.events.extend(tombstones.into_iter().map(|(table, key)| {
@@ -1421,11 +1421,56 @@ fn same_primary_key(left: &CanonicalValue, right: &CanonicalValue) -> bool {
     left == right || matches!(compare_primary_keys(left, right), Ok(Ordering::Equal))
 }
 
+/// Makes partial primary-key comparison deterministic for storage ordering.
+///
+/// The primary-key comparator deliberately rejects tuples with different
+/// arities. Paired retries and fragment releases still need a total order so
+/// segment layout cannot erase that depth distinction; v1 orders differing
+/// top-level arities numerically, then uses canonical bytes when logical
+/// comparison is equal or undefined within one arity.
+fn compare_primary_keys_with_encoding_tiebreak(
+    left: &CanonicalValue,
+    right: &CanonicalValue,
+) -> Ordering {
+    let left_arity = primary_key_tuple_arity(left);
+    let right_arity = primary_key_tuple_arity(right);
+    if let (Some(left_arity), Some(right_arity)) = (left_arity, right_arity)
+        && left_arity != right_arity
+    {
+        return left_arity.cmp(&right_arity);
+    }
+
+    match compare_primary_keys(left, right) {
+        Ok(Ordering::Less) => Ordering::Less,
+        Ok(Ordering::Greater) => Ordering::Greater,
+        Ok(Ordering::Equal) | Err(_) => {
+            let left = left
+                .encode()
+                .expect("validated canonical primary keys remain encodable");
+            let right = right
+                .encode()
+                .expect("validated canonical primary keys remain encodable");
+            left.cmp(&right)
+        }
+    }
+}
+
+fn primary_key_tuple_arity(value: &CanonicalValue) -> Option<usize> {
+    match value.raw() {
+        OvbRaw::Tag(60015, payload) => match payload.as_ref() {
+            OvbRaw::Array(components) => Some(components.len()),
+            _ => None,
+        },
+        OvbRaw::Array(components) => Some(components.len()),
+        _ => Some(1),
+    }
+}
+
 fn has_duplicate_tombstones_in_wave(tombstones: &[(ObjectId, CanonicalValue)]) -> bool {
     let mut ordered = tombstones.to_vec();
     ordered.sort_by(|(left_table, left_key), (right_table, right_key)| {
         left_table.cmp(right_table).then_with(|| {
-            compare_primary_keys(left_key, right_key).unwrap_or(Ordering::Equal)
+            compare_primary_keys_with_encoding_tiebreak(left_key, right_key)
         })
     });
     ordered
@@ -1531,7 +1576,7 @@ fn paired_plan_retry_identity(plan: &BranchMergePlan) -> [u8; 32] {
         }
         rows.sort_by(|left, right| {
             left.table.cmp(&right.table).then_with(|| {
-                compare_primary_keys(&left.key, &right.key).unwrap_or(Ordering::Equal)
+                compare_primary_keys_with_encoding_tiebreak(&left.key, &right.key)
             })
         });
         update_retry_identity_count(&mut hash, rows.len());
@@ -1551,7 +1596,7 @@ fn paired_plan_retry_identity(plan: &BranchMergePlan) -> [u8; 32] {
 
         tombstones.sort_by(|(left_table, left_key), (right_table, right_key)| {
             left_table.cmp(right_table).then_with(|| {
-                compare_primary_keys(left_key, right_key).unwrap_or(Ordering::Equal)
+                compare_primary_keys_with_encoding_tiebreak(left_key, right_key)
             })
         });
         update_retry_identity_count(&mut hash, tombstones.len());
