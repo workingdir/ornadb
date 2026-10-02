@@ -17054,7 +17054,7 @@ fn collect_snapshot_binder_contexts(
                 }
             }
         }
-        (Type::Tuple(formal), Type::Tuple(actual)) => {
+        (Type::Tuple(formal), Type::Tuple(actual)) if formal.len() == actual.len() => {
             for (formal, actual) in formal.iter().zip(actual) {
                 collect_snapshot_binder_contexts(formal, actual, into);
             }
@@ -19539,6 +19539,23 @@ mod tests {
         assert!(
             !contexts.iter().any(|context| context.contains("HEAD~")),
             "unknown paired width must suppress all concrete identities in this wave: {contexts:?}"
+        );
+    }
+
+    #[test]
+    fn binder_context_collector_rejects_partial_tuple_widths() {
+        let formal = Type::Tuple(vec![
+            contextual_snapshot_ref("selector:binder:pair.orna@10..18:parameter:selected"),
+            contextual_snapshot_ref("selector:binder:pair.orna@20..28:parameter:sibling"),
+        ]);
+        let actual = Type::Tuple(vec![contextual_snapshot_ref("selector:HEAD~12")]);
+        let mut binder_contexts = BTreeMap::new();
+
+        collect_snapshot_binder_contexts(&formal, &actual, &mut binder_contexts);
+
+        assert!(
+            binder_contexts.is_empty(),
+            "an unpaired width must not collect even the valid tuple prefix: {binder_contexts:?}"
         );
     }
 
