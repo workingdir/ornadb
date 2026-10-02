@@ -601,6 +601,23 @@ impl PackageResolver {
         self.resolve_sibling_rebind_paths(&paths)
     }
 
+    /// Extends independently selected sibling routes with another wave.
+    /// Every earlier snapshot remains in its route's history, and input order
+    /// is retained. A failed sibling extension returns no partial batch and
+    /// leaves all supplied results unchanged.
+    pub fn extend_sibling_rebind_paths(
+        &self,
+        paths: &[(&ReboundPathResolution, &[PinnedDatabase])],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, replacements)| {
+                self.extend_nested_rebind_path(previous, replacements)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
     /// Resolves a chain of exact aliases from a retained session snapshot.
     /// Each edge is selected from the session opened at the preceding edge;
     /// a failure leaves the caller's snapshot untouched.
