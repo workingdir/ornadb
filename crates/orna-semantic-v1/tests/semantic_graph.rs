@@ -4001,6 +4001,32 @@ fn paired_cascade_chains_preserve_root_bridge_and_leaf_pins_through_storm_rebind
 }
 
 #[test]
+fn paired_cascade_chains_reject_cross_chain_leaf_mixing_after_storm_rebinds() {
+    let source = include_str!("fixtures/historical-paired-cascade-chains-storm-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-cascade-chains-storm-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "leaf results from separate paired closure chains must remain type-distinct: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
