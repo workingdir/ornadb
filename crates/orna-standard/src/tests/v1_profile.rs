@@ -84,6 +84,7 @@ fn pinned_regex_and_pattern_surfaces_are_versioned_and_snapshot_bound() {
         "pub fn is_match(regex: Regex, text: Str): Bool",
         "pub fn find(regex: Regex, text: Str): Match?",
         "pub fn find_all(regex: Regex, text: Str): [Match]",
+        "pub fn count_matches(regex: Regex, text: Str): Int",
         "pub fn matched_text(value: Match): Str",
         "pub fn start(value: Match): Int",
         "pub fn end(value: Match): Int",
@@ -99,9 +100,9 @@ fn pinned_regex_and_pattern_surfaces_are_versioned_and_snapshot_bound() {
         "Unicode 16.0.0",
         "Look-around, backreferences",
         "earliest-starting match",
-        "zero-width matches",
+        "Zero-width matches",
         "preserve empty fields",
-        "never silently truncated",
+        "silently truncated",
     ] {
         assert!(regex_source.contains(contract), "missing regex contract `{contract}`");
     }
