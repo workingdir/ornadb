@@ -571,11 +571,17 @@ impl RelationPlan {
         // child, so its filters compile through its own union storm once.
         let left = left.flush_filter_cascade();
         let right = right.flush_filter_cascade();
-        Self {
+        let mut plan = Self {
             source: String::new(),
             source_union: Some((Box::new(left), Box::new(right))),
             stages: Vec::new(),
-        }
+        };
+        // Independently compiled unknown operands can arrive with equal
+        // complete continuations even when neither their prefix nor suffix
+        // batches share identity. Intern those batches at the union boundary
+        // so nested unknown trees keep one continuation through the join.
+        plan.share_equal_filter_batches(&mut Vec::new());
+        plan
     }
 
     pub(super) fn with_stage(mut self, stage: RelationStage) -> Self {
@@ -690,6 +696,27 @@ impl RelationPlan {
                 .push(RelationStage::SharedFilter(predicates)),
         }
         self
+    }
+
+    fn share_equal_filter_batches(&mut self, shared: &mut Vec<Arc<FilterBatch>>) {
+        if let Some((left, right)) = &mut self.source_union {
+            left.share_equal_filter_batches(shared);
+            right.share_equal_filter_batches(shared);
+        }
+        for stage in &mut self.stages {
+            let RelationStage::SharedFilter(batch) = stage else {
+                continue;
+            };
+            let equivalent = shared.iter().find_map(|existing| {
+                (Arc::ptr_eq(existing, batch) || existing.values().eq(batch.values()))
+                    .then(|| Arc::clone(existing))
+            });
+            if let Some(equivalent) = equivalent {
+                *batch = equivalent;
+            } else {
+                shared.push(Arc::clone(batch));
+            }
+        }
     }
 }
 
@@ -890,5 +917,47 @@ mod tests {
                 .upgrade()
                 .is_some_and(|batch| Arc::ptr_eq(&batch, &batches[0]))
         }));
+    }
+
+    #[test]
+    fn independently_compiled_nested_unknown_continuations_share_equal_batches() {
+        let compile_prefix = || {
+            RelationPlan::union(
+                RelationPlan::new("UnknownBaseLeft".into()).with_stage(
+                    RelationStage::SharedFilter(FilterBatch::from_values(vec![Value::Bool(true)])),
+                ),
+                RelationPlan::new("UnknownBaseRight".into()).with_stage(
+                    RelationStage::SharedFilter(FilterBatch::from_values(vec![Value::Bool(true)])),
+                ),
+            )
+        };
+        let compile_continuation = || {
+            compile_prefix().with_stage(RelationStage::Filter(vec![Value::String(
+                "equal nested continuation".into(),
+            )]))
+        };
+        let plan = RelationPlan::union(compile_continuation(), compile_continuation());
+
+        let batch_for = |leaf: &RelationPlan| match leaf.stages.as_slice() {
+            [RelationStage::SharedFilter(batch)] => Arc::clone(batch),
+            stages => panic!("expected one shared batch, got {stages:?}"),
+        };
+        let (left, right) = plan.source_union.as_ref().expect("outer union remains");
+        let (left_left, left_right) = left.source_union.as_ref().expect("left nested union");
+        let (right_left, right_right) = right.source_union.as_ref().expect("right nested union");
+        let batches = [
+            batch_for(left_left),
+            batch_for(left_right),
+            batch_for(right_left),
+            batch_for(right_right),
+        ];
+
+        assert!(batches[1..]
+            .iter()
+            .all(|batch| Arc::ptr_eq(&batches[0], batch)));
+        assert_eq!(
+            batches[0].values().cloned().collect::<Vec<_>>(),
+            vec![Value::Bool(true), Value::String("equal nested continuation".into())]
+        );
     }
 }
