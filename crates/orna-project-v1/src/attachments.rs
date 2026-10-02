@@ -593,6 +593,17 @@ impl PackageResolver {
         })
     }
 
+    /// Extends a post-storm route with two ordered terminal-depth rebinds.
+    /// The prior history stays intact and the new pair is exposed together in
+    /// the last retained wave. A failure leaves `previous` unchanged.
+    pub fn extend_nested_terminal_pair(
+        &self,
+        previous: &ReboundPathResolution,
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        self.extend_nested_rebind_path(previous, &replacements)
+    }
+
     /// Resolves independently rebound paths for sibling parent snapshots.
     /// Each input plan is `(parent, replacements)`; results keep input order
     /// and each route retains its own pre-rebind sessions. No partial batch is
