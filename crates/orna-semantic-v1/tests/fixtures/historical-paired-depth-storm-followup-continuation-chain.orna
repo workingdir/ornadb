@@ -1,0 +1,214 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn terminal_followup_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+            };
+
+pub fn continuation_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+                terminal_followup: terminal_followup_at(terminal_pin),
+            };
+
+pub fn followup_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+                continuation: continuation_at(terminal_pin),
+            };
+
+pub fn cascade_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+                followup: followup_at(terminal_pin),
+            };
+
+pub fn pair_at(left_root: sys.SnapshotRef, right_root: sys.SnapshotRef) =
+    (cascade_at(left_root), cascade_at(right_root));
+pub fn forwarded_pair(left_root: sys.SnapshotRef, right_root: sys.SnapshotRef) =
+    pair_at(left_root, right_root);
+pub fn chained_pair(left_root: sys.SnapshotRef, right_root: sys.SnapshotRef) =
+    forwarded_pair(left_root, right_root);
+
+// Reproduce paired outer chains in opposite depth orders, then continue each captured follow-up.
+pub fn paired_followup_continuation_chains_remain_consistent() {
+    let roots = chained_pair(sys.snapshot("HEAD~760"), sys.snapshot("HEAD~750"));
+    let (left_root, right_root) = roots;
+    let left_bridge = left_root(sys.snapshot("HEAD~720"));
+    let right_bridge = right_root(sys.snapshot("HEAD~710"));
+    let left_leaf = left_bridge(sys.snapshot("HEAD~680"));
+    let right_leaf = right_bridge(sys.snapshot("HEAD~670"));
+    let left_origin = left_leaf(sys.snapshot("HEAD~640"));
+    let right_origin = right_leaf(sys.snapshot("HEAD~630"));
+
+    // Left restores root before descendants; right restores bridge and leaf before root.
+    let left_root_rolling = left_root;
+    left_root_rolling = cascade_at(sys.snapshot("HEAD~759"));
+    left_root_rolling = cascade_at(sys.snapshot("HEAD~758"));
+    left_root_rolling = cascade_at(sys.snapshot("HEAD~760"));
+    let left_root_reproduced = cascade_at(sys.snapshot("HEAD~760"));
+    let left_bridge_rolling = left_root_reproduced(sys.snapshot("HEAD~721"));
+    left_bridge_rolling = left_root_reproduced(sys.snapshot("HEAD~722"));
+    left_bridge_rolling = left_root_reproduced(sys.snapshot("HEAD~720"));
+    let left_leaf_rolling = left_bridge_rolling(sys.snapshot("HEAD~681"));
+    left_leaf_rolling = left_bridge_rolling(sys.snapshot("HEAD~682"));
+    left_leaf_rolling = left_bridge_rolling(sys.snapshot("HEAD~680"));
+    let left_reproduced = left_leaf_rolling(sys.snapshot("HEAD~640"));
+
+    let right_bridge_rolling = right_root(sys.snapshot("HEAD~711"));
+    right_bridge_rolling = right_root(sys.snapshot("HEAD~712"));
+    right_bridge_rolling = right_root(sys.snapshot("HEAD~710"));
+    let right_leaf_rolling = right_bridge_rolling(sys.snapshot("HEAD~671"));
+    right_leaf_rolling = right_bridge_rolling(sys.snapshot("HEAD~672"));
+    right_leaf_rolling = right_bridge_rolling(sys.snapshot("HEAD~670"));
+    let right_root_rolling = right_root;
+    right_root_rolling = cascade_at(sys.snapshot("HEAD~756"));
+    right_root_rolling = cascade_at(sys.snapshot("HEAD~755"));
+    right_root_rolling = cascade_at(sys.snapshot("HEAD~750"));
+    let right_root_reproduced = cascade_at(sys.snapshot("HEAD~750"));
+    let right_bridge_reproduced = right_root_reproduced(sys.snapshot("HEAD~710"));
+    let right_leaf_reproduced = right_bridge_reproduced(sys.snapshot("HEAD~670"));
+    let right_reproduced = right_leaf_reproduced(sys.snapshot("HEAD~630"));
+
+    let left_followup_origin = left_origin.followup(sys.snapshot("HEAD~600"))(sys.snapshot("HEAD~580"))(sys.snapshot("HEAD~560"));
+    let left_followup_reproduced = left_reproduced.followup(sys.snapshot("HEAD~600"))(sys.snapshot("HEAD~580"))(sys.snapshot("HEAD~560"));
+    let right_followup_origin = right_origin.followup(sys.snapshot("HEAD~590"))(sys.snapshot("HEAD~570"))(sys.snapshot("HEAD~550"));
+    let right_followup_reproduced = right_reproduced.followup(sys.snapshot("HEAD~590"))(sys.snapshot("HEAD~570"))(sys.snapshot("HEAD~550"));
+
+    // Reuse the captured continuation identities from both cascade constructions through another paired storm.
+    let continuation_roots_saved = (
+        left_followup_origin.continuation,
+        right_followup_reproduced.continuation,
+    );
+    let continuation_roots_rolling = continuation_roots_saved;
+    continuation_roots_rolling = (continuation_at(sys.snapshot("HEAD~559")), continuation_at(sys.snapshot("HEAD~549")));
+    continuation_roots_rolling = (continuation_at(sys.snapshot("HEAD~558")), continuation_at(sys.snapshot("HEAD~548")));
+    continuation_roots_rolling = continuation_roots_saved;
+    let continuation_roots_restored = continuation_roots_rolling;
+    let (left_continuation_root, right_continuation_root) = continuation_roots_restored;
+
+    let continuation_bridges_saved = (
+        left_continuation_root(sys.snapshot("HEAD~540")),
+        right_continuation_root(sys.snapshot("HEAD~530")),
+    );
+    let continuation_bridges_rolling = continuation_bridges_saved;
+    continuation_bridges_rolling = (
+        left_continuation_root(sys.snapshot("HEAD~538")),
+        right_continuation_root(sys.snapshot("HEAD~528")),
+    );
+    continuation_bridges_rolling = (
+        left_continuation_root(sys.snapshot("HEAD~539")),
+        right_continuation_root(sys.snapshot("HEAD~529")),
+    );
+    continuation_bridges_rolling = continuation_bridges_saved;
+    let continuation_bridges_restored = continuation_bridges_rolling;
+    let (left_continuation_bridge, right_continuation_bridge) = continuation_bridges_restored;
+
+    let continuation_leaves_saved = (
+        left_continuation_bridge(sys.snapshot("HEAD~520")),
+        right_continuation_bridge(sys.snapshot("HEAD~510")),
+    );
+    let continuation_leaves_rolling = continuation_leaves_saved;
+    continuation_leaves_rolling = (
+        left_continuation_bridge(sys.snapshot("HEAD~518")),
+        right_continuation_bridge(sys.snapshot("HEAD~508")),
+    );
+    continuation_leaves_rolling = (
+        left_continuation_bridge(sys.snapshot("HEAD~519")),
+        right_continuation_bridge(sys.snapshot("HEAD~509")),
+    );
+    continuation_leaves_rolling = continuation_leaves_saved;
+    let continuation_leaves_restored = continuation_leaves_rolling;
+    let (left_continuation_leaf, right_continuation_leaf) = continuation_leaves_restored;
+    let left_continuation_after_storm = left_continuation_leaf(sys.snapshot("HEAD~500"));
+    let right_continuation_after_storm = right_continuation_leaf(sys.snapshot("HEAD~490"));
+    let left_continuation_origin = left_followup_origin.continuation(sys.snapshot("HEAD~540"))(sys.snapshot("HEAD~520"))(sys.snapshot("HEAD~500"));
+    let left_continuation_reproduced = left_followup_reproduced.continuation(sys.snapshot("HEAD~540"))(sys.snapshot("HEAD~520"))(sys.snapshot("HEAD~500"));
+    let right_continuation_origin = right_followup_origin.continuation(sys.snapshot("HEAD~530"))(sys.snapshot("HEAD~510"))(sys.snapshot("HEAD~490"));
+    let right_continuation_reproduced = right_followup_reproduced.continuation(sys.snapshot("HEAD~530"))(sys.snapshot("HEAD~510"))(sys.snapshot("HEAD~490"));
+
+    // Carry each paired continuation's captured terminal follow-up through a second root/bridge/leaf storm.
+    let terminal_followup_roots_saved = (
+        left_continuation_origin.terminal_followup,
+        right_continuation_reproduced.terminal_followup,
+    );
+    let terminal_followup_roots_rolling = terminal_followup_roots_saved;
+    terminal_followup_roots_rolling = (terminal_followup_at(sys.snapshot("HEAD~499")), terminal_followup_at(sys.snapshot("HEAD~489")));
+    terminal_followup_roots_rolling = (terminal_followup_at(sys.snapshot("HEAD~498")), terminal_followup_at(sys.snapshot("HEAD~488")));
+    terminal_followup_roots_rolling = terminal_followup_roots_saved;
+    let terminal_followup_roots_restored = terminal_followup_roots_rolling;
+    let (left_terminal_followup_root, right_terminal_followup_root) = terminal_followup_roots_restored;
+
+    let terminal_followup_bridges_saved = (
+        left_terminal_followup_root(sys.snapshot("HEAD~480")),
+        right_terminal_followup_root(sys.snapshot("HEAD~470")),
+    );
+    let terminal_followup_bridges_rolling = terminal_followup_bridges_saved;
+    terminal_followup_bridges_rolling = (
+        left_terminal_followup_root(sys.snapshot("HEAD~478")),
+        right_terminal_followup_root(sys.snapshot("HEAD~468")),
+    );
+    terminal_followup_bridges_rolling = (
+        left_terminal_followup_root(sys.snapshot("HEAD~479")),
+        right_terminal_followup_root(sys.snapshot("HEAD~469")),
+    );
+    terminal_followup_bridges_rolling = terminal_followup_bridges_saved;
+    let terminal_followup_bridges_restored = terminal_followup_bridges_rolling;
+    let (left_terminal_followup_bridge, right_terminal_followup_bridge) = terminal_followup_bridges_restored;
+
+    let terminal_followup_leaves_saved = (
+        left_terminal_followup_bridge(sys.snapshot("HEAD~460")),
+        right_terminal_followup_bridge(sys.snapshot("HEAD~450")),
+    );
+    let terminal_followup_leaves_rolling = terminal_followup_leaves_saved;
+    terminal_followup_leaves_rolling = (
+        left_terminal_followup_bridge(sys.snapshot("HEAD~458")),
+        right_terminal_followup_bridge(sys.snapshot("HEAD~448")),
+    );
+    terminal_followup_leaves_rolling = (
+        left_terminal_followup_bridge(sys.snapshot("HEAD~459")),
+        right_terminal_followup_bridge(sys.snapshot("HEAD~449")),
+    );
+    terminal_followup_leaves_rolling = terminal_followup_leaves_saved;
+    let terminal_followup_leaves_restored = terminal_followup_leaves_rolling;
+    let (left_terminal_followup_leaf, right_terminal_followup_leaf) = terminal_followup_leaves_restored;
+
+    let left_terminal_followup_origin = left_continuation_origin.terminal_followup(sys.snapshot("HEAD~480"))(sys.snapshot("HEAD~460"))(sys.snapshot("HEAD~440"));
+    let left_terminal_followup_reproduced = left_continuation_reproduced.terminal_followup(sys.snapshot("HEAD~480"))(sys.snapshot("HEAD~460"))(sys.snapshot("HEAD~440"));
+    let left_terminal_followup_after_storm = left_terminal_followup_leaf(sys.snapshot("HEAD~440"));
+    let right_terminal_followup_origin = right_continuation_origin.terminal_followup(sys.snapshot("HEAD~470"))(sys.snapshot("HEAD~450"))(sys.snapshot("HEAD~430"));
+    let right_terminal_followup_reproduced = right_continuation_reproduced.terminal_followup(sys.snapshot("HEAD~470"))(sys.snapshot("HEAD~450"))(sys.snapshot("HEAD~430"));
+    let right_terminal_followup_after_storm = right_terminal_followup_leaf(sys.snapshot("HEAD~430"));
+
+    // Compare captured chains at every construction path; selector text alone does not erase call-site identity.
+    {
+        terminal_followup_consistency: {
+            left: [left_terminal_followup_origin, left_terminal_followup_after_storm, left_terminal_followup_reproduced],
+            right: [right_terminal_followup_origin, right_terminal_followup_after_storm, right_terminal_followup_reproduced],
+        },
+    }
+}
