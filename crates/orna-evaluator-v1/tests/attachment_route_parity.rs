@@ -841,7 +841,7 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         .unwrap(),
     ];
     let first_stage = resolver
-        .extend_nested_terminal_pair_chain(&fresh_route, &[first_pair])
+        .extend_nested_terminal_pair_chain(&fresh_route, &[first_pair.clone()])
         .unwrap_or_else(|error| panic!("first nested pair failed: {error:?}"));
     assert_eq!(first_stage.retained_wave(0).unwrap().len(), 2);
     let mut first_evaluator = AdmittedReplSession::from_attached_database_session(
@@ -859,7 +859,7 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
     );
 
     let chained = resolver
-        .extend_nested_terminal_pair_chain(&first_stage, &[second_pair])
+        .extend_nested_terminal_pair_chain(&first_stage, &[second_pair.clone()])
         .unwrap_or_else(|error| panic!("continued nested pair failed: {error:?}"));
 
     let mut evaluator = AdmittedReplSession::from_attached_database_session(
@@ -873,6 +873,50 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
     );
     assert_eq!(
         evaluator.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(96.into())))
+    );
+
+    let historical_handoff = resolver
+        .extend_nested_terminal_pair_chain_from_wave(
+            &first_stage,
+            0,
+            0,
+            &[first_pair, second_pair],
+        )
+        .unwrap_or_else(|error| panic!("historical handoff chain failed: {error:?}"));
+    let mut selected_root = AdmittedReplSession::from_attached_database_session(
+        &historical_handoff.retained_wave(2).unwrap()[0],
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        selected_root.submit(&format!("use {};", aliases[2])),
+        Ok(None)
+    );
+    assert_eq!(
+        selected_root.submit(&format!("{}.package_value()", aliases[2])),
+        Ok(Some(Value::int(80.into())))
+    );
+
+    let mut handoff = AdmittedReplSession::from_attached_database_session(
+        &historical_handoff.retained_wave(2).unwrap()[1],
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(handoff.submit(&format!("use {};", aliases[3])), Ok(None));
+    assert_eq!(
+        handoff.submit(&format!("{}.package_value()", aliases[3])),
+        Ok(Some(Value::int(84.into())))
+    );
+
+    let mut continued = AdmittedReplSession::from_attached_database_session(
+        &historical_handoff.retained_wave(4).unwrap()[1],
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(continued.submit(&format!("use {};", aliases[4])), Ok(None));
+    assert_eq!(
+        continued.submit(&format!("{}.package_value()", aliases[4])),
         Ok(Some(Value::int(96.into())))
     );
 }
