@@ -3586,6 +3586,29 @@ fn structural_storm_round_trip_keeps_nested_cascade_pins_distinct() {
 }
 
 #[test]
+fn structural_storms_preserve_identity_through_chained_rebind_cascades() {
+    let source = include_str!("fixtures/historical-pinned-closure-chained-cascade-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chained-cascade-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "nested closure identities must survive structural storms and successive outer/inner rebinds: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
