@@ -1,0 +1,30 @@
+pub table Sample { time: Instant, group: Str, }
+pub table Tag { label: Str, }
+
+pub fn chunked(rows: Relation<Sample>): Relation<[Sample]> =
+    std.collection.chunk(rows, 2);
+pub fn flattened(rows: Relation<[Sample]>): Relation<Sample> =
+    std.collection.flatten(rows);
+pub fn partitioned(rows: Relation<Sample>): (Relation<Sample>, Relation<Sample>) =
+    std.collection.partition(rows, row => row.group == "keep");
+pub fn zipped(left: Relation<Sample>, right: Relation<Tag>): Relation<(Sample, Tag)> =
+    std.collection.zip(left, right);
+pub fn unique_rows(rows: Relation<Sample>): Relation<Sample> =
+    std.collection.unique(rows);
+pub fn grouped(rows: Relation<Sample>): Relation<(Str, [Sample])> =
+    std.collection.group_by(rows, row => row.group);
+pub fn pairs(rows: Relation<Sample>): Relation<(Sample, Sample)> =
+    std.collection.pairs(rows);
+pub fn windowed(rows: Relation<Sample>): Relation<[Sample]> =
+    std.collection.window(rows, 2, 1);
+pub fn split(rows: Relation<Sample>): Relation<[Sample]> =
+    std.collection.split_when(rows, row => row.group == "break");
+pub fn ranked(rows: Relation<Sample>): Relation<(Sample, Int)> =
+    std.collection.rank(rows, row => row.group);
+pub fn joined(left: Relation<Sample>, right: Relation<Sample>):
+    Relation<(Sample, Sample?)> =
+    std.collection.asof_join(left, right, row => row.time, row => row.group);
+pub fn bucketed(rows: Relation<Instant>): Relation<[Instant]> =
+    std.collection.bucket_by(rows, 1, "UTC");
+pub fn piped_chunks(rows: Relation<Sample>): Relation<[Sample]> =
+    rows | std.collection.chunk(2);
