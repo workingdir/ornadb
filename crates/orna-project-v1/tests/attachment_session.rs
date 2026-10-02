@@ -10434,6 +10434,61 @@ fn paired_depth_storm_rebinds_keep_sibling_terminal_routes_consistent() {
     );
     assert_route(&reopened_terminals[0], &format!("{}.orna", aliases[3]), 3, 0, 1);
     assert_route(&reopened_terminals[1], &format!("{}.orna", aliases[3]), 3, 0, 1);
+
+    let forward_interleaving = [(0, 1), (1, 0), (0, 0), (1, 1)];
+    let reordered_interleaving = [(1, 0), (0, 1), (1, 1), (0, 0)];
+    let mut forward_terminals = reopened_manifest_snapshots.clone();
+    let mut reordered_terminals = reopened_manifest_snapshots.clone();
+    for (sibling, variant) in forward_interleaving {
+        rebind(
+            &mut forward_terminals[sibling],
+            aliases[3],
+            &terminal_pins[variant],
+        );
+    }
+    for (sibling, variant) in reordered_interleaving {
+        rebind(
+            &mut reordered_terminals[sibling],
+            aliases[3],
+            &terminal_pins[variant],
+        );
+    }
+    for (sibling, expected_variant) in [0, 1].into_iter().enumerate() {
+        for session in [&forward_terminals[sibling], &reordered_terminals[sibling]] {
+            assert_pin(
+                session,
+                aliases[3],
+                &terminal_commits[expected_variant],
+            );
+            assert_route(
+                session,
+                &format!("{}.orna", aliases[3]),
+                3,
+                0,
+                expected_variant,
+            );
+            assert_route(
+                session,
+                "main.orna",
+                2,
+                sibling,
+                later_deep_variants[sibling],
+            );
+        }
+        assert_pin(
+            &reopened_manifest_snapshots[sibling],
+            aliases[3],
+            &terminal_commits[later_deep_variants[sibling]],
+        );
+        assert_route(
+            &reopened_manifest_snapshots[sibling],
+            &format!("{}.orna", aliases[3]),
+            3,
+            0,
+            later_deep_variants[sibling],
+        );
+    }
+
     assert_pin(&parent, aliases[1], &middle_commits[0][0]);
     assert_route(&parent, &format!("{}.orna", aliases[1]), 1, 0, 0);
 }
