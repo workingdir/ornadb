@@ -5835,6 +5835,101 @@ fn unknown_paired_width_suppresses_sibling_pin_promotion() {
 }
 
 #[test]
+fn paired_pin_identities_survive_omissions_at_outer_and_middle_depths() {
+    let source = include_str!(
+        "fixtures/historical-paired-omission-depth-identity-preservation.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-omission-depth-identity-preservation.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .count();
+    assert_eq!(
+        type_diagnostics, 2,
+        "only the two calls with intentionally omitted required siblings should fail: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("omitted_sibling_waves_keep_pair_identities")
+        })
+        .expect("paired omission-depth fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["omitted_sibling_waves_keep_pair_identities"].ty
+    else {
+        panic!("omission-depth proof must be a function");
+    };
+    let Type::Record(stages) = result.as_ref() else {
+        panic!("omission-depth proof must retain its computed stage record: {result:?}");
+    };
+    for (stage, concrete_selectors) in [
+        (
+            "complete",
+            vec![
+                "HEAD~120", "HEAD~119", "HEAD~118", "HEAD~117", "HEAD~116", "HEAD~115",
+                "HEAD~114", "HEAD~113", "HEAD~112",
+            ],
+        ),
+        (
+            "outer_suppressed",
+            vec!["HEAD~90", "HEAD~89", "HEAD~88", "HEAD~87", "HEAD~86"],
+        ),
+        (
+            "middle_suppressed",
+            vec!["HEAD~120", "HEAD~119", "HEAD~118", "HEAD~117", "HEAD~76"],
+        ),
+    ] {
+        let value = stages.get(stage).expect("computed stage value");
+        let Type::List(element) = value else {
+            panic!("{stage} must remain a computed historical list: {value:?}");
+        };
+        let Type::Record(checkpoint) = element.as_ref() else {
+            panic!("{stage} must retain its computed checkpoint record: {element:?}");
+        };
+        assert!(
+            matches!(checkpoint.get("capture"), Some(Type::Applied { base, .. }) if base == "sys.HistoricalCallable"),
+            "{stage} must keep a real historical callable result: {checkpoint:?}"
+        );
+        assert_canonical_snapshot_context_maps(value);
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(value, &mut contexts);
+        assert_eq!(contexts.len(), 9, "{stage} collapsed paired slots: {contexts:?}");
+        let symbolic = contexts
+            .iter()
+            .filter(|context| context.starts_with("selector:dynamic-call:"))
+            .count();
+        assert_eq!(
+            symbolic,
+            if stage == "complete" { 0 } else { 4 },
+            "only the omitted depth's four tuple pins should remain symbolic: {contexts:?}"
+        );
+        for selector in concrete_selectors {
+            assert!(
+                contexts.contains(&format!("selector:{selector}")),
+                "{stage} lost independent concrete selector {selector}: {contexts:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn missing_outer_tuple_keeps_sibling_pins_symbolic_across_later_depths() {
     let source =
         include_str!("fixtures/historical-missing-outer-tuple-preserves-sibling-pins.orna");
