@@ -708,9 +708,10 @@ impl PackageResolver {
 
     /// Applies an ordered chain of terminal-depth pairs to one nested route.
     /// Each pair starts from the last snapshot in the latest retained wave,
-    /// carrying the preceding rebind forward by one closure depth. The
-    /// reference is silent on this continuation rule; v1 keeps the exact
-    /// retained-wave tail and returns no partial chain if a pair fails.
+    /// carrying the preceding rebind forward by one closure depth. With no
+    /// retained history, the first pair starts from the current final route.
+    /// The reference is silent on this continuation rule; v1 uses that
+    /// fallback and returns no partial chain if a pair fails.
     pub fn extend_nested_terminal_pair_chain(
         &self,
         previous: &ReboundPathResolution,
@@ -718,20 +719,19 @@ impl PackageResolver {
     ) -> Result<ReboundPathResolution, AttachmentError> {
         let mut route = previous.clone();
         for replacements in replacement_waves {
-            let latest_wave = route
-                .retained_wave_lengths
-                .len()
-                .checked_sub(1)
-                .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
-            let latest_snapshot = route.retained_wave_lengths[latest_wave]
-                .checked_sub(1)
-                .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
-            route = self.extend_nested_terminal_pair_from_wave(
-                &route,
-                latest_wave,
-                latest_snapshot,
-                replacements.clone(),
-            )?;
+            if let Some(latest_wave) = route.retained_wave_lengths.len().checked_sub(1) {
+                let latest_snapshot = route.retained_wave_lengths[latest_wave]
+                    .checked_sub(1)
+                    .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+                route = self.extend_nested_terminal_pair_from_wave(
+                    &route,
+                    latest_wave,
+                    latest_snapshot,
+                    replacements.clone(),
+                )?;
+            } else {
+                route = self.extend_nested_terminal_pair(&route, replacements.clone())?;
+            }
         }
         Ok(route)
     }
