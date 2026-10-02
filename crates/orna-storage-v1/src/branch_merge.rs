@@ -259,7 +259,9 @@ pub struct BranchMergePlan {
 /// restorations converge; divergent restorations conflict by exact key in the
 /// normal table/key order. A conflicted wave has no appendable tombstone delta,
 /// and retrying from the same committed base does not give either restoration
-/// precedence because of older history.
+/// precedence because of older history. Swapping left and right branch
+/// orientation likewise preserves the conflict key identities and their
+/// table/key order.
 ///
 /// A read failure at any table or range aborts the whole invocation. Facts
 /// gathered from earlier tables or depth ranges remain private; after source
