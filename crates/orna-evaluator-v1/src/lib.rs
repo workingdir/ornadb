@@ -3552,12 +3552,13 @@ impl Context<'_, '_> {
             }
             let ordered = relation_named_arguments(name, arguments, values, implicit)?;
             if name == "union" {
-                let (Value::Relation(left), Value::Relation(right)) =
-                    (&ordered[0], &ordered[1])
+                let mut union_operands = ordered.into_iter();
+                let (Some(Value::Relation(left)), Some(Value::Relation(right))) =
+                    (union_operands.next(), union_operands.next())
                 else {
                     return Err(error("ORNA-EVAL-TYPE"));
                 };
-                return Ok(Value::Relation(RelationPlan::union(left.clone(), right.clone())));
+                return Ok(Value::Relation(RelationPlan::union(left, right)));
             }
             let Value::Relation(mut plan) = ordered[0].clone() else {
                 return Err(error("ORNA-EVAL-TYPE"));
@@ -9437,6 +9438,41 @@ mod tests {
         assert_eq!(
             unknown_right.stages,
             vec![RelationStage::Filter(vec![first, second, third])]
+        );
+    }
+
+    #[test]
+    fn relation_plan_flushes_operand_batch_before_nested_union_composition() {
+        let first = Value::Bool(true);
+        let second = Value::Bool(false);
+        let third = Value::Int(3.into());
+        let fourth = Value::Int(4.into());
+        let inner = RelationPlan::union(
+            RelationPlan::new("KnownLeft".into()),
+            RelationPlan::new("UnknownRight".into()),
+        )
+        .with_stage(RelationStage::Filter(vec![first.clone()]))
+        .with_stage(RelationStage::Filter(vec![second.clone()]));
+
+        assert_eq!(
+            inner.stages,
+            vec![RelationStage::Filter(vec![first.clone(), second.clone()])]
+        );
+        let outer = RelationPlan::union(inner, RelationPlan::new("UnknownTail".into()))
+            .with_stage(RelationStage::Filter(vec![third.clone()]))
+            .with_stage(RelationStage::Filter(vec![fourth.clone()]))
+            .flush_filter_cascade();
+
+        assert!(outer.stages.is_empty());
+        let (inner, unknown_tail) = outer.source_union.as_ref().unwrap();
+        assert!(inner.stages.is_empty());
+        let (known_left, unknown_right) = inner.source_union.as_ref().unwrap();
+        let merged = vec![first, second, third.clone(), fourth.clone()];
+        assert_eq!(known_left.stages, vec![RelationStage::Filter(merged.clone())]);
+        assert_eq!(unknown_right.stages, vec![RelationStage::Filter(merged)]);
+        assert_eq!(
+            unknown_tail.stages,
+            vec![RelationStage::Filter(vec![third, fourth])]
         );
     }
 
