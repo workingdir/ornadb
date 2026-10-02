@@ -18292,6 +18292,142 @@ fn paired_depth_chain_reinsert_conflicts_ignore_prior_tombstones() {
 }
 
 #[test]
+fn paired_depth_chain_restore_conflicts_keep_order_when_branches_swap() {
+    // The same competing restores must report the same exact-key conflicts if
+    // left/right inputs are exchanged, regardless of chain split layout or row
+    // source visitation order.
+    let fixture_rows = TOMBSTONE_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let conflicting_restores = TOMBSTONE_DELTA_CONFLICTING_RESTORES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let (base, left, right, mut source) = paired_chained_storm_inputs(
+        &fixture_rows,
+        &["root"],
+        &["root/child"],
+        0,
+        false,
+        "branch-symmetric-restore-wave-one",
+    );
+    let deleted = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 38, max_conflicts: 0 },
+    )
+    .expect("the setup wave commits the same prior chain tombstones");
+    let next_base_rows = table_live_rows(&deleted, id(1));
+
+    const RETRIES: usize = 8;
+    let start = Arc::new(Barrier::new(RETRIES));
+    let mut workers = Vec::with_capacity(RETRIES);
+    for retry in 0..RETRIES {
+        let (base, left, right, mut source) = paired_chained_storm_inputs(
+            &next_base_rows,
+            &[],
+            &[],
+            (retry / 2) % 2,
+            false,
+            "branch-symmetric-restore-wave-two",
+        );
+        add_chained_storm_fixture_rows(
+            &left,
+            &mut source,
+            MergeSide::Left,
+            id(1),
+            &[conflicting_restores[0].clone()],
+        );
+        add_chained_storm_fixture_rows(
+            &right,
+            &mut source,
+            MergeSide::Right,
+            id(1),
+            &[conflicting_restores[1].clone()],
+        );
+        add_chained_storm_fixture_rows(
+            &left,
+            &mut source,
+            MergeSide::Left,
+            id(2),
+            &[conflicting_restores[2].clone()],
+        );
+        add_chained_storm_fixture_rows(
+            &right,
+            &mut source,
+            MergeSide::Right,
+            id(2),
+            &[conflicting_restores[3].clone()],
+        );
+        let reverse_branches = retry % 2 == 1;
+        if retry % 4 >= 2 {
+            for rows in source.rows.values_mut() {
+                rows.reverse();
+            }
+        }
+        if reverse_branches {
+            let original_rows = std::mem::take(&mut source.rows);
+            source.rows = original_rows
+                .into_iter()
+                .map(|((side, locator), rows)| {
+                    let side = match side {
+                        MergeSide::Left => MergeSide::Right,
+                        MergeSide::Right => MergeSide::Left,
+                        MergeSide::Base => MergeSide::Base,
+                    };
+                    ((side, locator), rows)
+                })
+                .collect();
+        }
+        let gate = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+            let (merge_left, merge_right) = if reverse_branches {
+                (&right, &left)
+            } else {
+                (&left, &right)
+            };
+            merge_three_way_snapshots(
+                &base,
+                merge_left,
+                merge_right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 64, max_conflicts: 8 },
+            )
+        }));
+    }
+
+    let expected_conflicts = vec![
+        (id(1), string("root")),
+        (id(2), string("root/child")),
+    ];
+    for worker in workers {
+        let result = worker.join().expect("branch-swap conflict retry completes");
+        let Err(BranchMergeError::Conflicts { conflicts, report }) = result else {
+            panic!("competing restores remain conflicts after exchanging branch orientation")
+        };
+        assert_eq!(report.conflicts_lower_bound, 2);
+        let observed = conflicts
+            .into_iter()
+            .map(|conflict| {
+                let BranchMergeConflict::Row {
+                    conflict: RowMergeConflict::KeyCollision { table, key },
+                    ..
+                } = conflict
+                else {
+                    panic!("branch swapping preserves ordinary exact-key create conflicts")
+                };
+                (table, key)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(observed, expected_conflicts);
+    }
+}
+
+#[test]
 fn unequal_depth_paired_chain_read_failure_discards_partial_order() {
     let (base, left, right, source) = paired_distinct_depth_chain_inputs(true, true, false);
     let mut interrupted = FailAfterRowsFixtureRows {
