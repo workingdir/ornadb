@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use num_bigint::BigInt;
 use num_integer::Integer;
@@ -276,30 +276,52 @@ pub(super) struct RelationPlan {
 }
 
 /// Ordered filter chunks shared when a cascade fans out through a union.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub(super) struct FilterBatch {
-    pub(super) chunks: Vec<Arc<Vec<Value>>>,
+    node: FilterBatchNode,
+    flattened: OnceLock<Vec<Arc<Vec<Value>>>>,
+}
+
+#[derive(Debug)]
+enum FilterBatchNode {
+    Values(Arc<Vec<Value>>),
+    Then(Arc<FilterBatch>, Arc<FilterBatch>),
 }
 
 impl FilterBatch {
     fn from_values(values: Vec<Value>) -> Arc<Self> {
         Arc::new(Self {
-            chunks: vec![Arc::new(values)],
+            node: FilterBatchNode::Values(Arc::new(values)),
+            flattened: OnceLock::new(),
         })
     }
 
-    fn followed_by(&self, next: &Self) -> Self {
-        let mut chunks = Vec::with_capacity(self.chunks.len() + next.chunks.len());
-        chunks.extend(self.chunks.iter().cloned());
-        chunks.extend(next.chunks.iter().cloned());
-        Self { chunks }
+    fn followed_by(previous: &Arc<Self>, next: &Arc<Self>) -> Arc<Self> {
+        Arc::new(Self {
+            node: FilterBatchNode::Then(Arc::clone(previous), Arc::clone(next)),
+            flattened: OnceLock::new(),
+        })
     }
 
-    fn prefixed_by(values: Vec<Value>, next: &Self) -> Self {
-        let mut chunks = Vec::with_capacity(1 + next.chunks.len());
-        chunks.push(Arc::new(values));
-        chunks.extend(next.chunks.iter().cloned());
-        Self { chunks }
+    fn prefixed_by(values: Vec<Value>, next: &Arc<Self>) -> Arc<Self> {
+        Self::followed_by(&Self::from_values(values), next)
+    }
+
+    pub(super) fn chunks(&self) -> &[Arc<Vec<Value>>] {
+        self.flattened.get_or_init(|| {
+            let mut pending = vec![self];
+            let mut chunks = Vec::new();
+            while let Some(batch) = pending.pop() {
+                match &batch.node {
+                    FilterBatchNode::Values(values) => chunks.push(Arc::clone(values)),
+                    FilterBatchNode::Then(previous, next) => {
+                        pending.push(next);
+                        pending.push(previous);
+                    }
+                }
+            }
+            chunks
+        })
     }
 }
 
@@ -336,13 +358,9 @@ impl RelationStage {
     fn filter_values(&self) -> Option<Vec<&Value>> {
         match self {
             Self::Filter(predicates) => Some(predicates.iter().collect()),
-            Self::SharedFilter(batch) => Some(
-                batch
-                    .chunks
-                    .iter()
-                    .flat_map(|chunk| chunk.iter())
-                    .collect(),
-            ),
+            Self::SharedFilter(batch) => {
+                Some(batch.chunks().iter().flat_map(|chunk| chunk.iter()).collect())
+            }
             _ => None,
         }
     }
@@ -489,9 +507,9 @@ impl RelationPlan {
                     }
                     Some(RelationStage::SharedFilter(previous)) => {
                         let next = FilterBatch::from_values(predicates);
-                        self.stages.push(RelationStage::SharedFilter(Arc::new(
-                            previous.followed_by(&next),
-                        )));
+                        self.stages.push(RelationStage::SharedFilter(
+                            FilterBatch::followed_by(&previous, &next),
+                        ));
                     }
                     Some(previous) => {
                         self.stages.push(previous);
@@ -548,11 +566,11 @@ impl RelationPlan {
             {
                 let previous = self.stages.pop().expect("checked filter stage");
                 let predicates = match previous {
-                    RelationStage::Filter(previous) => Arc::new(
-                        FilterBatch::prefixed_by(previous, &predicates),
-                    ),
+                    RelationStage::Filter(previous) => {
+                        FilterBatch::prefixed_by(previous, &predicates)
+                    }
                     RelationStage::SharedFilter(previous) => {
-                        Arc::new(previous.followed_by(&predicates))
+                        FilterBatch::followed_by(&previous, &predicates)
                     }
                     _ => unreachable!("checked filter stage"),
                 };
@@ -566,14 +584,14 @@ impl RelationPlan {
         }
         match self.stages.pop() {
             Some(RelationStage::Filter(previous)) => {
-                self.stages.push(RelationStage::SharedFilter(Arc::new(
+                self.stages.push(RelationStage::SharedFilter(
                     FilterBatch::prefixed_by(previous, &predicates),
-                )));
+                ));
             }
             Some(RelationStage::SharedFilter(previous)) => {
-                self.stages.push(RelationStage::SharedFilter(Arc::new(
-                    previous.followed_by(&predicates),
-                )));
+                self.stages.push(RelationStage::SharedFilter(
+                    FilterBatch::followed_by(&previous, &predicates),
+                ));
             }
             Some(previous) => {
                 self.stages.push(previous);
