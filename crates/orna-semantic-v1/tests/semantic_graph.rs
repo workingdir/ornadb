@@ -5030,6 +5030,32 @@ fn paired_continuation_reproduction_consistency_survives_repeated_storm_rebinds(
 }
 
 #[test]
+fn paired_continuation_reproduction_consistency_rejects_lane_mixing() {
+    let source = include_str!("fixtures/historical-paired-continuation-reproduction-consistency-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-reproduction-consistency-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "repeatedly reproduced terminal values from distinct lanes must retain separate snapshot identities after restoration: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
