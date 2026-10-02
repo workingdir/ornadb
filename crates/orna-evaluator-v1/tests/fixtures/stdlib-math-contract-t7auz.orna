@@ -1,0 +1,29 @@
+math.abs(-17) == 17
+&& math.abs(17) == 17
+&& math.signum(-9) == -1
+&& math.signum(0) == 0
+&& math.signum(9) == 1
+&& math.is_positive(9)
+&& !math.is_positive(0)
+&& math.is_negative(-9)
+&& !math.is_negative(0)
+&& math.is_even(-8)
+&& math.is_odd(-7)
+&& math.square(9007199254740993) == 81129638414606699710187514626049
+&& math.cube(-3) == -27
+&& math.gcd(-84, 30) == 6
+&& math.gcd(0, 0) == 0
+&& math.lcm(-4, 6) == 12
+&& math.lcm(0, 9) == 0
+&& case math.pow_nonnegative(2, 10) {
+    Some(value): value == 1024,
+    null: false,
+}
+&& case math.pow_nonnegative(2, 0) {
+    Some(value): value == 1,
+    null: false,
+}
+&& case math.pow_nonnegative(2, -1) {
+    Some(_): false,
+    null: true,
+}
