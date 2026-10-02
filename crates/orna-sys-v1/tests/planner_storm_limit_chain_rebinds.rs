@@ -25,6 +25,10 @@ const DEEP_UNKNOWN_REBIND_CAPS_FIXTURE: &str =
     include_str!("fixtures/planner_storm_deep_unknown_rebind_caps.orna");
 const REBIND_CAP_SCOPE_DEPTH_FIXTURE: &str =
     include_str!("fixtures/planner_storm_rebind_cap_scope_depth.orna");
+const REBIND_CAP_DEPTH_GAPS_FIXTURE: &str =
+    include_str!("fixtures/planner_storm_rebind_cap_depth_gaps.orna");
+const REBIND_CAP_HANDOFFS_FIXTURE: &str =
+    include_str!("fixtures/planner_storm_rebind_cap_handoffs.orna");
 
 fn branch(
     limits: &[u64],
@@ -1134,6 +1138,168 @@ fn nested_rebind_byte_cap_scope_exposes_deepest_unknown_cascade_level() {
         Some(PlanDetail::Text(scope))
             if scope == "immediate_post_limit_branch_bytes_at_every_rebind_nesting_depth"
     )));
+}
+
+#[test]
+fn unknown_row_byte_caps_report_each_nested_rebind_scope() {
+    let parsed = orna_syntax_v1::parse_module(REBIND_CAP_DEPTH_GAPS_FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    let leaf = storm("expr:scope-depth-leaf", vec![branch(&[80], 1, vec![])]);
+    let depth_three = storm(
+        "expr:scope-depth-three",
+        vec![branch(&[100], 1, vec![rebind(1, vec![leaf.clone()])])],
+    );
+    let mut depth_two_branch = branch(&[100], 1, vec![]);
+    depth_two_branch.nested_storms.push(depth_three);
+    let depth_two = storm("expr:scope-depth-two", vec![depth_two_branch]);
+    let first_stage = storm(
+        "expr:scope-depth-first-stage",
+        vec![branch(&[100], 1, vec![rebind(1, vec![depth_two])])],
+    );
+
+    let depth_two_rebind = storm(
+        "expr:scope-depth-two-rebind",
+        vec![branch(&[100], 1, vec![rebind(1, vec![leaf])])],
+    );
+    let second_stage = storm(
+        "expr:scope-depth-second-stage",
+        vec![branch(&[100], 1, vec![rebind(1, vec![depth_two_rebind])])],
+    );
+
+    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+        &query(None, Some(2_048)),
+        &[first_stage, second_stage],
+        &[],
+    )
+    .expect("known byte caps stay scoped while row estimates remain unknown");
+    let mut filters = explained
+        .nodes()
+        .iter()
+        .filter(|node| {
+            node.kind() == PlanNodeKind::Filter && node.details().contains_key("disjunct_storm")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(filters.len(), 2);
+    filters.sort_by_key(|filter| match filter.details().get("disjunct_storm") {
+        Some(PlanDetail::Integer(index)) => *index,
+        _ => unreachable!("top-level storm stages carry their one-based index"),
+    });
+
+    assert_eq!(
+        filters
+            .iter()
+            .map(|filter| (filter.estimated_rows(), filter.estimated_bytes()))
+            .collect::<Vec<_>>(),
+        vec![(None, Some(128)), (None, Some(16))]
+    );
+    assert_eq!(
+        filters
+            .iter()
+            .map(|filter| filter.details().get("limit_chain_rebind_byte_cap_depths"))
+            .collect::<Vec<_>>(),
+        vec![
+            Some(&PlanDetail::Text("1,3".to_owned())),
+            Some(&PlanDetail::Text("1,2".to_owned())),
+        ]
+    );
+    assert_eq!(
+        filters
+            .iter()
+            .map(|filter| filter.details().get("limit_chain_rebind_max_nested_depth"))
+            .collect::<Vec<_>>(),
+        vec![Some(&PlanDetail::Integer(3)), Some(&PlanDetail::Integer(2))]
+    );
+}
+
+#[test]
+fn unknown_row_byte_caps_report_rebind_handoffs_by_nested_depth() {
+    let parsed = orna_syntax_v1::parse_module(REBIND_CAP_HANDOFFS_FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    let leaf = storm("expr:handoff-leaf", vec![branch(&[40], 1, vec![])]);
+    let nested = storm(
+        "expr:handoff-depth-two",
+        vec![branch(&[80, 40], 1, vec![rebind(1, vec![leaf.clone()])])],
+    );
+    let first_stage = storm(
+        "expr:handoff-first-stage",
+        vec![
+            branch(
+                &[100, 50],
+                1,
+                vec![
+                    rebind(1, vec![nested.clone(), nested.clone()]),
+                    rebind(2, vec![nested.clone()]),
+                ],
+            ),
+            branch(&[20], 1, vec![]),
+        ],
+    );
+    let second_stage = storm(
+        "expr:handoff-second-stage",
+        vec![
+            branch(&[30], 1, vec![rebind(1, vec![nested])]),
+            branch(&[10], 1, vec![]),
+        ],
+    );
+
+    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+        &query(None, Some(2_048)),
+        &[first_stage, second_stage],
+        &[],
+    )
+    .expect("unknown row counts retain byte-cap handoffs through limit rebinds");
+    let mut filters = explained
+        .nodes()
+        .iter()
+        .filter(|node| {
+            node.kind() == PlanNodeKind::Filter && node.details().contains_key("disjunct_storm")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(filters.len(), 2);
+    filters.sort_by_key(|filter| match filter.details().get("disjunct_storm") {
+        Some(PlanDetail::Integer(index)) => *index,
+        _ => unreachable!("top-level storm stages carry their one-based index"),
+    });
+
+    let byte_estimates = filters
+        .iter()
+        .map(|filter| (filter.estimated_rows(), filter.estimated_bytes()))
+        .collect::<Vec<_>>();
+    assert!(byte_estimates
+        .iter()
+        .all(|(rows, bytes)| rows.is_none() && bytes.is_some()));
+    assert!(byte_estimates[0].1.unwrap() <= 2_048);
+    assert!(byte_estimates[1].1.unwrap() <= byte_estimates[0].1.unwrap());
+    assert_eq!(
+        filters
+            .iter()
+            .map(|filter| filter.details().get("limit_chain_rebind_byte_cap_depths"))
+            .collect::<Vec<_>>(),
+        vec![
+            Some(&PlanDetail::Text("1,2".to_owned())),
+            Some(&PlanDetail::Text("1,2".to_owned())),
+        ]
+    );
+    assert_eq!(
+        filters
+            .iter()
+            .map(|filter| filter
+                .details()
+                .get("limit_chain_rebind_byte_cap_handoffs_by_depth"))
+            .collect::<Vec<_>>(),
+        vec![
+            Some(&PlanDetail::Text("1:3,2:3".to_owned())),
+            Some(&PlanDetail::Text("1:1,2:1".to_owned())),
+        ]
+    );
+    assert!(matches!(
+        filters[0].details().get("limit_chain_rebind_shapes"),
+        Some(PlanDetail::Text(shapes)) if shapes.contains("1@1:") && shapes.contains("1@2:")
+    ));
 }
 
 #[test]
