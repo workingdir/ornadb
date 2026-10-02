@@ -350,6 +350,11 @@ impl PackageResolver {
     /// terminal pin; previously retained storm sessions keep their selections.
     /// The reference does not define this post-storm reopen sequence, so v1
     /// treats each newly expanded parent pin as a fresh route root.
+    /// A terminal rebind in one sibling may interleave with a later paired
+    /// middle/deep rebind in another. The new terminal closure follows only
+    /// its selected deep pin's manifest, while the first sibling keeps its
+    /// own last terminal pin. Since the reference is silent on cross-depth
+    /// event order, v1 preserves each closure's exact-pin route independently.
     /// If another paired middle/deep rebind wave follows that reopen, each
     /// new terminal closure still starts from its selected deep pin's
     /// manifest, regardless of terminal pins retained from earlier waves.
