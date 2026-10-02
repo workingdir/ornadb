@@ -959,3 +959,77 @@ fn paired_snapshot_pins_reload_transitive_standard_module_sources() {
         assert_eq!(runtime_modules, expected_runtime_modules);
     }
 }
+
+#[test]
+fn repl_replays_and_rejects_mixed_transitive_module_pins() {
+    let (_directory, historical, upgraded, _snapshots) = module_chain_projects();
+    let mut historical_session = AdmittedReplSession::from_loaded_project(
+        &historical,
+        historical.standard_sources().iter().cloned(),
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        historical_session.submit(include_str!("fixtures/module-chain-use-replay.orna")),
+        Ok(None)
+    );
+    assert_eq!(
+        historical_session.submit(include_str!("fixtures/module-chain-call-replay.orna")),
+        Ok(Some(ints(&[20])))
+    );
+
+    let mut upgraded_session = AdmittedReplSession::from_loaded_project(
+        &upgraded,
+        upgraded.standard_sources().iter().cloned(),
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        upgraded_session.submit(include_str!("fixtures/module-chain-use-replay.orna")),
+        Ok(None)
+    );
+    assert_eq!(
+        upgraded_session.submit(include_str!("fixtures/module-chain-call-replay.orna")),
+        Ok(Some(ints(&[155])))
+    );
+
+    let mut replay = historical_session.clone();
+    assert_eq!(
+        replay.submit(include_str!("fixtures/module-chain-call-replay.orna")),
+        Ok(Some(ints(&[20])))
+    );
+
+    let mut historical_with_new_leaf = historical.standard_sources().to_vec();
+    historical_with_new_leaf
+        .iter_mut()
+        .find(|(path, _)| path == "std/chain/leaf.orna")
+        .unwrap()
+        .1 = include_str!("fixtures/module-chain-std-leaf-v2.orna").into();
+    assert_eq!(
+        AdmittedReplSession::from_loaded_project(
+            &historical,
+            historical_with_new_leaf,
+            Limits::default(),
+        )
+        .unwrap_err()
+        .code(),
+        "ORNA-REPL-STANDARD"
+    );
+
+    let mut upgraded_with_old_bridge = upgraded.standard_sources().to_vec();
+    upgraded_with_old_bridge
+        .iter_mut()
+        .find(|(path, _)| path == "std/chain/bridge.orna")
+        .unwrap()
+        .1 = include_str!("fixtures/module-chain-std-bridge-v1.orna").into();
+    assert_eq!(
+        AdmittedReplSession::from_loaded_project(
+            &upgraded,
+            upgraded_with_old_bridge,
+            Limits::default(),
+        )
+        .unwrap_err()
+        .code(),
+        "ORNA-REPL-STANDARD"
+    );
+}
