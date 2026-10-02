@@ -377,6 +377,13 @@ impl PackageResolver {
     /// their own pins. The reference is silent on diverging post-storm child
     /// routes, so v1 resolves each edge from its selected immutable pin and
     /// does not inherit a sibling's prior route.
+    /// Route consistency also applies to retained sessions: each attached
+    /// module resolves through the same package snapshot as that session's
+    /// pin. A paired depth rebind can make a fresh descendant closure follow
+    /// another manifest route, while the old closure keeps its matching pin
+    /// and module route. Since the reference does not define cross-session
+    /// route refresh, v1 keeps pin and module routing in the same session
+    /// snapshot.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
