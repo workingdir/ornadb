@@ -1,0 +1,12 @@
+pub table Event(id: Int = 40 + 2) {
+    label: Str = "default label",
+    sequence: Int = id + 1,
+}
+
+pub fn main() {
+    Event.insert({ label: "supplied label" })
+}
+
+pub fn upsert_defaults() {
+    Event.upsert({ id: 42 })
+}
