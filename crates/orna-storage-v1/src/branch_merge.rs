@@ -254,6 +254,14 @@ pub struct BranchMergePlan {
 /// new tombstone event for that exact key. Consumers that retain a history
 /// append only the selected committed plan's delta, in commit order; competing
 /// retries from one base are alternatives and must not append duplicate events.
+/// A key absent from the current base is reconciled as an ordinary creation,
+/// even when an older committed delta tombstoned it. Equal explicit-row
+/// restorations converge; divergent restorations conflict by exact key in the
+/// normal table/key order. A conflicted wave has no appendable tombstone delta,
+/// and retrying from the same committed base does not give either restoration
+/// precedence because of older history. Swapping left and right branch
+/// orientation likewise preserves the conflict key identities and their
+/// table/key order.
 ///
 /// A read failure at any table or range aborts the whole invocation. Facts
 /// gathered from earlier tables or depth ranges remain private; after source
