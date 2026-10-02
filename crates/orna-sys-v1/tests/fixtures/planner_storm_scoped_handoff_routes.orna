@@ -1,0 +1,33 @@
+pub table PlannerStormScopedHandoffRoutes(id: Int) {
+    first: Bool,
+    second: Bool,
+    third: Bool,
+    leaf: Bool,
+}
+pub fn scoped_handoff_routes() = PlannerStormScopedHandoffRoutes
+    | take(100)
+    | union(
+        PlannerStormScopedHandoffRoutes
+            | take(100)
+            | union(
+                PlannerStormScopedHandoffRoutes | take(80) | filter(row => row.leaf),
+                PlannerStormScopedHandoffRoutes | take(80) | filter(row => row.leaf)
+            )
+            | take(50)
+            | union(
+                PlannerStormScopedHandoffRoutes | take(40) | filter(row => row.leaf),
+                PlannerStormScopedHandoffRoutes | take(40) | filter(row => row.leaf)
+            )
+            | filter(row => row.second),
+        PlannerStormScopedHandoffRoutes | take(20) | filter(row => row.first)
+    )
+    | union(
+        PlannerStormScopedHandoffRoutes
+            | take(30)
+            | union(
+                PlannerStormScopedHandoffRoutes | take(40) | filter(row => row.leaf),
+                PlannerStormScopedHandoffRoutes | take(40) | filter(row => row.leaf)
+            )
+            | filter(row => row.third),
+        PlannerStormScopedHandoffRoutes | take(10) | filter(row => row.first)
+    );
