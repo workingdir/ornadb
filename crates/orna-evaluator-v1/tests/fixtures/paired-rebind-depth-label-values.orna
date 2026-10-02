@@ -1,0 +1,34 @@
+pub fn lane_at(root: Int) =
+    (middle: Int) => (leaf: Int) => [root, middle, leaf, root + middle + leaf];
+
+pub fn paired_rebind_depth_values() = {
+    let paired = {
+        left: lane_at(10),
+        right: lane_at(20),
+    };
+    let saved = paired;
+
+    // Rebind both sibling lanes, while saved retains the earlier depth labels.
+    paired = {
+        left: lane_at(100),
+        right: lane_at(200),
+    };
+
+    // Collapse each pair after the first callback depth, then evaluate the
+    // leaf callbacks. The body returns the actual root, middle, leaf, and
+    // computed total for each saved or rebound lane.
+    let saved_depth = {
+        left: saved.left(1),
+        right: saved.right(2),
+    };
+    let rebound_depth = {
+        left: paired.left(3),
+        right: paired.right(4),
+    };
+    [
+        saved_depth.left(5),
+        saved_depth.right(6),
+        rebound_depth.left(7),
+        rebound_depth.right(8),
+    ]
+}
