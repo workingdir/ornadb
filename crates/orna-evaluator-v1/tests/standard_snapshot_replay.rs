@@ -895,6 +895,58 @@ fn imported_project_module_executes_under_each_captured_standard_snapshot() {
 }
 
 #[test]
+fn stepwise_snapshot_replay_matrix_retains_values_after_each_upgrade() {
+    let (
+        _directory,
+        project_v1,
+        project_v2,
+        project_v3,
+        project_v4,
+        project_v5,
+        project_v6,
+        snapshots,
+    ) = module_upgrade_projects();
+    let projects = [
+        &project_v1,
+        &project_v2,
+        &project_v3,
+        &project_v4,
+        &project_v5,
+        &project_v6,
+    ];
+    let expected_values = [8, 107, 1007, 1007, 10007, 100007];
+    let mut retained_sessions = Vec::new();
+
+    for (upgrade_index, (project, expected)) in projects.iter().zip(expected_values).enumerate() {
+        assert_eq!(
+            project.standard_profile().unwrap().snapshot(),
+            &snapshots[upgrade_index],
+            "upgrade v{} must use its committed std gitlink",
+            upgrade_index + 1
+        );
+        let mut session = admitted_snapshot_app_session(project);
+        assert_eq!(
+            session.submit(include_str!("fixtures/module-upgrade-call-app.orna")),
+            Ok(Some(int(expected))),
+            "new project v{} must execute its captured std math body",
+            upgrade_index + 1
+        );
+        retained_sessions.push(session);
+
+        for retained_index in (0..retained_sessions.len()).rev() {
+            assert_eq!(
+                retained_sessions[retained_index]
+                    .submit(include_str!("fixtures/module-upgrade-call-app.orna")),
+                Ok(Some(int(expected_values[retained_index]))),
+                "replay of project v{} must stay pinned after upgrade v{}",
+                retained_index + 1,
+                upgrade_index + 1
+            );
+        }
+    }
+}
+
+#[test]
 fn stable_module_replays_across_distinct_snapshot_pins() {
     let (
         _directory,
