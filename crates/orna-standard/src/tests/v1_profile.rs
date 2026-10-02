@@ -117,6 +117,30 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     assert!(sources[5].1.contains("pub fn mean<T>"));
     assert!(sources[5].1.contains("pub fn percentile<T, P>"));
     assert!(sources[5].1.contains("pub fn median<T>"));
+    for declaration in [
+        "pub fn sum<T>(rows: [T]): T",
+        "pub fn min<T>(rows: [T]): T?",
+        "pub fn max<T>(rows: [T]): T?",
+        "pub fn range<T>(rows: [T]): T?",
+        "pub fn mode<T>(rows: [T]): [T]",
+        "pub fn variance<T>(",
+        "pub fn standard_deviation<T>(",
+        "pub fn histogram<T>(",
+        "pub fn rate<T>(points: [(Instant, T)]): T?",
+        "pub fn derivative<T>(points: [(Instant, T)]): [(Instant, T)]",
+        "pub fn integrate<T>(points: [(Instant, T)]): T?",
+    ] {
+        assert!(sources[5].1.contains(declaration), "missing stats declaration `{declaration}`");
+    }
+    for contract in [
+        "Empty sum is the additive zero",
+        "Float aggregates preserve input order",
+        "nonoverlapping [lower, upper)",
+        "strictly increasing timestamps",
+        "trapezoidal integration",
+    ] {
+        assert!(sources[5].1.contains(contract), "missing stats contract `{contract}`");
+    }
     assert_eq!(sources[6].0, REFERENCE_STANDARD_TIME_PATH_V1);
     assert!(sources[6].1.contains("pub fn timezone_data_version()"));
     assert!(sources[6].1.contains("pub fn resolve_local("));
@@ -667,6 +691,29 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     assert!(
         analysis.is_ok(),
         "{}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+}
+
+#[test]
+fn pinned_stats_aggregate_surface_typechecks_for_consumers() {
+    let source = include_str!("fixtures/stats_consumer_fdqo9.orna");
+    let parsed = orna_syntax_v1::parse_module_with_file(source, "stats-consumer.orna");
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    let catalogue = reference_standard_catalogue_v1().unwrap();
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("stats-consumer.orna", source)],
+        &catalogue,
+    );
+    assert!(
+        analysis.is_ok(),
+        "{:#?}\n{}",
+        analysis.diagnostics,
         analysis
             .diagnostics
             .iter()
