@@ -8,6 +8,7 @@ use orna_sys_v1::{
     SystemProviderAbi, system_api_json, system_api_schema_json, system_binding_stubs,
     system_dispatch_table, system_host_operation_registry_json,
     system_host_operation_registry_schema_json, system_provider_abi_json,
+    system_provider_abi_schema_json,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -15,6 +16,9 @@ use sha2::{Digest, Sha256};
 #[path = "../build_host.rs"]
 #[allow(dead_code)]
 mod build_host;
+#[path = "../build_provider.rs"]
+#[allow(dead_code)]
+mod build_provider;
 #[path = "../build_support.rs"]
 mod build_support;
 
@@ -79,6 +83,7 @@ fn verify_generated_output_tree(
     artifacts: &build_support::GeneratedSysArtifacts,
     host_registry_json: &str,
     host_schema_json: &str,
+    provider_schema_json: &str,
 ) -> Result<(), String> {
     for (relative_path, expected) in [
         ("api_sys.json", artifacts.api_json.as_str()),
@@ -87,6 +92,7 @@ fn verify_generated_output_tree(
             "system_provider_abi.json",
             artifacts.provider_abi_json.as_str(),
         ),
+        ("system_provider_abi.schema.json", provider_schema_json),
         ("system_bindings.orna", artifacts.binding_bundle.as_str()),
         ("system_host_operations.json", host_registry_json),
         ("system_host_operations.schema.json", host_schema_json),
@@ -125,6 +131,7 @@ fn copy_output_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
         "api_sys.json",
         "system_api_schema.json",
         "system_provider_abi.json",
+        "system_provider_abi.schema.json",
         "system_bindings.orna",
         "system_host_operations.json",
         "system_host_operations.schema.json",
@@ -164,6 +171,14 @@ fn generated_sys_artifacts_regenerate_byte_for_byte_across_fresh_registry_builds
         .expect("annotated native host operations regenerate deterministically");
     let host_schema_json = build_host::generate_host_registry_schema()
         .expect("native host operation schema regenerates deterministically");
+    let provider_schema_json = build_provider::generate_provider_registry_schema()
+        .expect("typed provider schema regenerates deterministically");
+    assert_eq!(
+        provider_schema_json,
+        build_provider::generate_provider_registry_schema()
+            .expect("second typed provider schema projection"),
+        "dispatch schema generation is stable across independent runs"
+    );
 
     assert_eq!(regenerated.api_json, system_api_json());
     let api_hash = format!("{:x}", Sha256::digest(regenerated.api_json.as_bytes()));
@@ -176,6 +191,11 @@ fn generated_sys_artifacts_regenerate_byte_for_byte_across_fresh_registry_builds
         regenerated.provider_abi_json,
         system_provider_abi_json(),
         "embedded dispatch table JSON must match a fresh typed-registry projection"
+    );
+    assert_eq!(
+        system_provider_abi_schema_json(),
+        provider_schema_json,
+        "embedded dispatch schema matches a fresh deterministic schema projection"
     );
     assert_eq!(
         regenerated.binding_bundle,
@@ -196,6 +216,11 @@ fn generated_sys_artifacts_regenerate_byte_for_byte_across_fresh_registry_builds
         fs::read_to_string(out_dir.join("system_provider_abi.json"))
             .expect("read build dispatch artifact"),
         regenerated.provider_abi_json
+    );
+    assert_eq!(
+        fs::read_to_string(out_dir.join("system_provider_abi.schema.json"))
+            .expect("read build dispatch schema artifact"),
+        provider_schema_json
     );
     assert_eq!(
         fs::read_to_string(out_dir.join("system_bindings.orna"))
@@ -227,6 +252,7 @@ fn generated_sys_artifacts_regenerate_byte_for_byte_across_fresh_registry_builds
         &regenerated,
         &host_registry_json,
         &host_schema_json,
+        &provider_schema_json,
     )
     .expect("every build output exactly matches fresh typed-registry projections");
 
@@ -236,6 +262,19 @@ fn generated_sys_artifacts_regenerate_byte_for_byte_across_fresh_registry_builds
     let api: Value = serde_json::from_str(&regenerated.api_json).expect("regenerated API JSON");
     let schema: Value =
         serde_json::from_str(&regenerated.schema_json).expect("generated system API schema");
+    let provider_schema: Value =
+        serde_json::from_str(&provider_schema_json).expect("generated typed provider JSON Schema");
+    assert_eq!(
+        build_support::canonical_pretty_json(&provider_schema).unwrap() + "\n",
+        provider_schema_json,
+        "dispatch schema serialization is canonical and deterministic"
+    );
+    build_host::validate_json_against_schema(&regenerated.provider_abi_json, &provider_schema_json)
+        .expect("generated dispatch metadata matches its JSON Schema");
+    assert_eq!(
+        provider_schema["$schema"],
+        "https://json-schema.org/draft/2020-12/schema"
+    );
     assert_eq!(
         build_support::canonical_pretty_json(&schema).unwrap() + "\n",
         regenerated.schema_json,
@@ -265,17 +304,73 @@ fn generated_sys_artifacts_regenerate_byte_for_byte_across_fresh_registry_builds
 }
 
 #[test]
+fn dispatch_metadata_schema_covers_nullable_roles_and_rejects_unknown_or_invalid_fields() {
+    let dispatch_json = system_provider_abi_json();
+    let schema_json = system_provider_abi_schema_json();
+    let registry: Value = serde_json::from_str(dispatch_json).expect("embedded dispatch JSON");
+    let schema: Value = serde_json::from_str(schema_json).expect("embedded dispatch schema");
+
+    build_host::validate_json_against_schema(dispatch_json, schema_json)
+        .expect("the complete generated registry matches its JSON Schema");
+    assert_eq!(
+        SystemProviderAbi::from_json(dispatch_json).expect("typed dispatch registry"),
+        *system_dispatch_table(),
+        "exported registry metadata reparses to the runtime dispatch table"
+    );
+    assert_eq!(
+        schema["$defs"]["operation"]["properties"]["role"]["type"],
+        serde_json::json!(["string", "null"]),
+        "unroled operations are represented as explicit nullable roles"
+    );
+
+    let mut unknown_field = registry.clone();
+    unknown_field["operations"][0]["unexpected"] = Value::Bool(true);
+    assert!(
+        build_host::validate_json_against_schema(&unknown_field.to_string(), schema_json)
+            .unwrap_err()
+            .contains("unexpected field"),
+        "dispatch operation schema rejects metadata outside the generated contract"
+    );
+
+    let mut invalid_effect = registry.clone();
+    invalid_effect["operations"][0]["effect"] = Value::String("mutate".to_owned());
+    assert!(
+        build_host::validate_json_against_schema(&invalid_effect.to_string(), schema_json)
+            .unwrap_err()
+            .contains("outside the schema enum"),
+        "dispatch operation schema restricts effects to the ABI vocabulary"
+    );
+
+    let mut invalid_failure = registry;
+    let operation = invalid_failure["operations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|operation| !operation["failures"].as_array().unwrap().is_empty())
+        .expect("at least one dispatch operation declares failures");
+    operation["failures"][0] = Value::String("vendor.failure".to_owned());
+    assert!(
+        build_host::validate_json_against_schema(&invalid_failure.to_string(), schema_json)
+            .unwrap_err()
+            .contains("invalid sys failure code"),
+        "dispatch schema restricts operation failures to the sys vocabulary"
+    );
+}
+
+#[test]
 fn generated_artifact_drift_probe_rejects_tampered_outputs_and_stale_modules() {
     let regenerated = regenerate();
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let host_registry_json = build_host::generate_host_registry(&source_root).unwrap();
     let host_schema_json = build_host::generate_host_registry_schema().unwrap();
+    let provider_schema_json = build_provider::generate_provider_registry_schema().unwrap();
     let out_dir = Path::new(env!("OUT_DIR"));
     verify_generated_output_tree(
         out_dir,
         &regenerated,
         &host_registry_json,
         &host_schema_json,
+        &provider_schema_json,
     )
     .expect("baseline build outputs match their generated projections");
 
@@ -303,6 +398,10 @@ fn generated_artifact_drift_probe_rejects_tampered_outputs_and_stale_modules() {
             "system_provider_abi.json",
             "system_provider_abi.json".to_owned(),
         ),
+        (
+            "system_provider_abi.schema.json",
+            "system_provider_abi.schema.json".to_owned(),
+        ),
         ("system_bindings.orna", "system_bindings.orna".to_owned()),
         (
             "system_host_operations.json",
@@ -327,6 +426,7 @@ fn generated_artifact_drift_probe_rejects_tampered_outputs_and_stale_modules() {
             &regenerated,
             &host_registry_json,
             &host_schema_json,
+            &provider_schema_json,
         )
         .expect_err("drifted generated output must fail the parity guard");
         assert!(
@@ -345,6 +445,7 @@ fn generated_artifact_drift_probe_rejects_tampered_outputs_and_stale_modules() {
         &regenerated,
         &host_registry_json,
         &host_schema_json,
+        &provider_schema_json,
     )
     .expect_err("stale generated modules must fail the parity guard");
     assert!(error.contains("intentional_stale_module.orna"), "{error}");

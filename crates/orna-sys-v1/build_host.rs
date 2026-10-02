@@ -157,6 +157,13 @@ pub fn generate_host_registry_schema() -> Result<String, String> {
 /// deliberately small JSON Schema subset. The same path runs in build.rs and
 /// parity tests, so malformed registry output cannot be embedded silently.
 pub fn validate_host_registry_json(registry_json: &str, schema_json: &str) -> Result<(), String> {
+    validate_json_against_schema(registry_json, schema_json)
+}
+
+/// Validates generated JSON against the schema subset used by sys build
+/// artifacts. Kept shared so typed dispatch and host-operation registries get
+/// identical fail-closed schema behavior.
+pub fn validate_json_against_schema(registry_json: &str, schema_json: &str) -> Result<(), String> {
     let registry: Value = serde_json::from_str(registry_json)
         .map_err(|error| format!("invalid registry JSON: {error}"))?;
     let schema: Value = serde_json::from_str(schema_json)
@@ -182,7 +189,19 @@ fn validate_schema_value(
         return Err(format!("{path}: value is outside the schema enum"));
     }
 
-    match schema.get("type").and_then(Value::as_str) {
+    let schema_type = match schema.get("type") {
+        Some(Value::String(kind)) => Some(kind.as_str()),
+        Some(Value::Array(kinds)) => Some(
+            kinds
+                .iter()
+                .filter_map(Value::as_str)
+                .find(|kind| matches_json_type(value, kind))
+                .ok_or_else(|| format!("{path}: value does not match any allowed schema type"))?,
+        ),
+        Some(_) => return Err(format!("{path}: schema `type` must be a string or array")),
+        None => None,
+    };
+    match schema_type {
         Some("object") => {
             let object = value
                 .as_object()
@@ -249,9 +268,9 @@ fn validate_schema_value(
             }
             if schema.get("pattern").and_then(Value::as_str)
                 == Some("^sys\\.[a-z0-9_]+(\\.[a-z0-9_]+)*$")
-                && !valid_host_failure_code(string)
+                && !valid_sys_failure_code(string)
             {
-                return Err(format!("{path}: invalid host failure code `{string}`"));
+                return Err(format!("{path}: invalid sys failure code `{string}`"));
             }
         }
         Some("integer") => {
@@ -268,10 +287,24 @@ fn validate_schema_value(
         Some("boolean") if !value.is_boolean() => {
             return Err(format!("{path}: expected boolean"));
         }
-        Some("boolean") | None => {}
+        Some("null") if !value.is_null() => return Err(format!("{path}: expected null")),
+        Some("boolean") | Some("null") | None => {}
         Some(kind) => return Err(format!("{path}: unsupported schema type `{kind}`")),
     }
     Ok(())
+}
+
+fn matches_json_type(value: &Value, kind: &str) -> bool {
+    match kind {
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "string" => value.is_string(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "number" => value.is_number(),
+        "boolean" => value.is_boolean(),
+        "null" => value.is_null(),
+        _ => false,
+    }
 }
 
 fn resolve_schema_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
@@ -282,7 +315,7 @@ fn resolve_schema_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value>
     })
 }
 
-fn valid_host_failure_code(code: &str) -> bool {
+fn valid_sys_failure_code(code: &str) -> bool {
     let Some(namespace) = code.strip_prefix("sys.") else {
         return false;
     };
