@@ -17565,6 +17565,45 @@ fn tuple_checkpoint_promotion_matches(left: &[Type], right: &[Type]) -> bool {
             .iter()
             .zip(right)
             .all(|(left, right)| checkpoint_pin_map_widths_match(left, right))
+        && tuple_checkpoint_compaction_fold_preserves_pin_identity(left, right)
+}
+
+/// A folded tuple map must not invent cross-slot identity by unioning maps
+/// from opposite rows. The reference does not define that compaction case;
+/// only promote when every identity shared after the fold was shared within
+/// at least one input row.
+fn tuple_checkpoint_compaction_fold_preserves_pin_identity(
+    left: &[Type],
+    right: &[Type],
+) -> bool {
+    let mut pin_maps = Vec::new();
+    for (left, right) in left.iter().zip(right) {
+        if !collect_corresponding_snapshot_context_maps(left, right, &mut pin_maps) {
+            return false;
+        }
+    }
+
+    pin_maps.iter().enumerate().all(|(index, (left, right))| {
+        let folded = left.union(right).cloned().collect::<BTreeSet<_>>();
+        pin_maps[index + 1..]
+            .iter()
+            .all(|(other_left, other_right)| {
+                let folded_other = other_left
+                    .union(other_right)
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let shared_before = left
+                    .intersection(other_left)
+                    .chain(right.intersection(other_right))
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let shared_after = folded
+                    .intersection(&folded_other)
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                shared_after == shared_before
+            })
+    })
 }
 
 fn checkpoint_pin_map_widths_match(left: &Type, right: &Type) -> bool {
