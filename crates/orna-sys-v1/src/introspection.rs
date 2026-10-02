@@ -19,6 +19,7 @@ pub const MAX_DEPENDENCY_EDGES: usize = 1_000_000;
 pub const MAX_PLAN_NODES: usize = 16_384;
 pub const MAX_PLAN_EXPRESSIONS: usize = 8_192;
 pub const MAX_REFERENCE_BYTES: usize = 4_096;
+const MAX_DISJUNCT_STORM_DEPTH: usize = 64;
 
 macro_rules! descriptive_reference {
     ($name:ident) => {
@@ -585,6 +586,8 @@ pub struct DisjunctStormBranchDescription {
     pub nested_limits: Vec<u64>,
     /// Ordered AND terms evaluated in this branch after its limits.
     pub conjunct_count: u64,
+    /// Nested disjunct storms evaluated against this branch's filtered output.
+    pub nested_storms: Vec<DisjunctStormCascadeDescription>,
 }
 
 /// A disjunct storm stage with independently described branch pipelines.
@@ -1069,15 +1072,6 @@ pub fn explain_query_with_disjunct_storm_branch_limit_chains(
     if storms.is_empty() || query.predicate.is_some() {
         return Err(ExplainError::InvalidExpression);
     }
-    if storms.iter().any(|storm| {
-        storm.branches.is_empty()
-            || storm
-                .branches
-                .iter()
-                .any(|branch| branch.nested_limits.is_empty() || branch.conjunct_count == 0)
-    }) {
-        return Err(ExplainError::InvalidExpression);
-    }
     explain_query_with_predicate_pressure_and_branch_limits_and_storms(
         query,
         1,
@@ -1383,6 +1377,47 @@ fn explain_query_with_predicate_pressure_and_branch_limits(
     )
 }
 
+fn disjunct_storm_cascade_shape_counts<'a>(
+    storms: &'a [DisjunctStormCascadeDescription],
+) -> Result<(usize, usize, Vec<&'a ExpressionRef>), ExplainError> {
+    let mut pending = storms.iter().map(|storm| (storm, 1usize)).collect::<Vec<_>>();
+    let mut operators = 0usize;
+    let mut expressions = 0usize;
+    let mut predicates = Vec::new();
+    while let Some((storm, depth)) = pending.pop() {
+        if depth > MAX_DISJUNCT_STORM_DEPTH {
+            return Err(ExplainError::TooManyNodes);
+        }
+        if storm.branches.is_empty() {
+            return Err(ExplainError::InvalidExpression);
+        }
+        operators = operators.saturating_add(1);
+        predicates.push(&storm.predicate);
+        for branch in &storm.branches {
+            if branch.nested_limits.is_empty() || branch.conjunct_count == 0 {
+                return Err(ExplainError::InvalidExpression);
+            }
+            operators = operators.saturating_add(branch.nested_limits.len());
+            expressions = expressions.saturating_add(
+                usize::try_from(branch.conjunct_count).unwrap_or(usize::MAX),
+            );
+            pending.extend(
+                branch
+                    .nested_storms
+                    .iter()
+                    .map(|nested| (nested, depth.saturating_add(1))),
+            );
+            if operators > MAX_PLAN_NODES {
+                return Err(ExplainError::TooManyNodes);
+            }
+            if expressions > MAX_PLAN_EXPRESSIONS {
+                return Err(ExplainError::TooManyExpressions);
+            }
+        }
+    }
+    Ok((operators, expressions, predicates))
+}
+
 fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
     query: &QueryPlanDescription,
     disjunct_count: u64,
@@ -1396,6 +1431,8 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
     disjunct_storms: &[DisjunctStormDescription],
     disjunct_storm_cascades: &[DisjunctStormCascadeDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
+    let (storm_cascade_operators, storm_cascade_expressions, storm_cascade_predicates) =
+        disjunct_storm_cascade_shape_counts(disjunct_storm_cascades)?;
     if disjunct_count == 0
         || conjunct_count == Some(0)
         || conjunct_count_per_disjunct == Some(0)
@@ -1454,12 +1491,7 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
         .saturating_add(disjunct_storms.iter().fold(0usize, |total, storm| {
             total.saturating_add(storm.nested_branch_limits.len())
         }))
-        .saturating_add(disjunct_storm_cascades.len())
-        .saturating_add(disjunct_storm_cascades.iter().fold(0usize, |total, storm| {
-            total.saturating_add(storm.branches.iter().fold(0usize, |branch_total, branch| {
-                branch_total.saturating_add(branch.nested_limits.len())
-            }))
-        }))
+        .saturating_add(storm_cascade_operators)
         .saturating_add(limits_between_disjunct_and_conjunct.len())
         .saturating_add(usize::from(post_expansion_conjunct.is_some()))
         .saturating_add(additional_limits.len())
@@ -1476,7 +1508,7 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
         .chain(query.joins.iter().filter_map(|join| join.predicate.as_ref()))
         .chain(post_expansion_conjunct.iter().copied())
         .chain(disjunct_storms.iter().map(|storm| &storm.predicate))
-        .chain(disjunct_storm_cascades.iter().map(|storm| &storm.predicate))
+        .chain(storm_cascade_predicates.iter().copied())
         .any(|expression| invalid_reference(expression.as_str()))
     {
         return Err(ExplainError::InvalidExpression);
@@ -1497,13 +1529,7 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             .unwrap_or(usize::MAX);
             total.saturating_add(stage)
         }))
-        .saturating_add(disjunct_storm_cascades.iter().fold(0usize, |total, storm| {
-            total.saturating_add(storm.branches.iter().fold(0usize, |branch_total, branch| {
-                branch_total.saturating_add(
-                    usize::try_from(branch.conjunct_count).unwrap_or(usize::MAX),
-                )
-            }))
-        }))
+        .saturating_add(storm_cascade_expressions)
         > MAX_PLAN_EXPRESSIONS
     {
         return Err(ExplainError::TooManyExpressions);
@@ -1909,6 +1935,30 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             .map(|branch| branch.conjunct_count.to_string())
             .collect::<Vec<_>>()
             .join(",");
+        let nested_cascade_shapes = storm
+            .branches
+            .iter()
+            .enumerate()
+            .filter(|(_, branch)| !branch.nested_storms.is_empty())
+            .map(|(index, branch)| {
+                format!(
+                    "{}:{}",
+                    index + 1,
+                    branch
+                        .nested_storms
+                        .iter()
+                        .map(disjunct_storm_shape_text)
+                        .collect::<Vec<_>>()
+                        .join(">")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        let nested_cascade_predicates = storm
+            .branches
+            .iter()
+            .flat_map(|branch| disjunct_storm_predicates(&branch.nested_storms))
+            .collect::<Vec<_>>();
         let mut details = BTreeMap::from([
             (
                 "selectivity_assumption".to_owned(),
@@ -1922,6 +1972,14 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             (
                 "branch_conjunct_counts".to_owned(),
                 PlanDetail::Text(conjunct_counts),
+            ),
+            (
+                "nested_cascade_shapes".to_owned(),
+                PlanDetail::Text(nested_cascade_shapes),
+            ),
+            (
+                "nested_cascade_predicates".to_owned(),
+                PlanDetail::Expressions(nested_cascade_predicates),
             ),
             (
                 "expansion_work".to_owned(),
@@ -2377,6 +2435,53 @@ fn conjunctive_disjunction_cardinality_and_work(
     (Cardinality { rows, bytes }, work)
 }
 
+fn disjunct_storm_shape_text(storm: &DisjunctStormCascadeDescription) -> String {
+    let branches = storm
+        .branches
+        .iter()
+        .enumerate()
+        .map(|(index, branch)| {
+            let limits = branch
+                .nested_limits
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let nested = branch
+                .nested_storms
+                .iter()
+                .map(disjunct_storm_shape_text)
+                .collect::<Vec<_>>()
+                .join(">");
+            if nested.is_empty() {
+                format!("{}:[{}]/{}", index + 1, limits, branch.conjunct_count)
+            } else {
+                format!(
+                    "{}:[{}]/{}{{{}}}",
+                    index + 1,
+                    limits,
+                    branch.conjunct_count,
+                    nested
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    format!("[{branches}]")
+}
+
+fn disjunct_storm_predicates(storms: &[DisjunctStormCascadeDescription]) -> Vec<ExpressionRef> {
+    let mut pending = storms.iter().rev().collect::<Vec<_>>();
+    let mut predicates = Vec::new();
+    while let Some(storm) = pending.pop() {
+        predicates.push(storm.predicate.clone());
+        for branch in storm.branches.iter().rev() {
+            pending.extend(branch.nested_storms.iter().rev());
+        }
+    }
+    predicates
+}
+
 fn disjunct_storm_branch_cascade_cardinality_and_work(
     input: Cardinality,
     branches: &[DisjunctStormBranchDescription],
@@ -2405,7 +2510,7 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
             branch_cardinality = limit_cardinality(branch_cardinality, *limit);
         }
 
-        let (branch_output, branch_work) =
+        let (mut branch_output, branch_work) =
             conjunctive_disjunction_cardinality_and_work(branch_cardinality, 1, branch.conjunct_count);
         if branch_cardinality.rows.is_some() && branch_work.is_none() {
             overflowed = true;
@@ -2420,6 +2525,24 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
             },
             (Some(_), None) => work = None,
             (None, _) => {}
+        }
+
+        for nested_storm in &branch.nested_storms {
+            let (nested_output, nested_work, nested_overflowed) =
+                disjunct_storm_branch_cascade_cardinality_and_work(branch_output, &nested_storm.branches);
+            overflowed |= nested_overflowed;
+            match (work, nested_work) {
+                (Some(total), Some(nested_work)) => match total.checked_add(nested_work) {
+                    Some(total) => work = Some(total),
+                    None => {
+                        work = None;
+                        overflowed = true;
+                    }
+                },
+                (Some(_), None) => work = None,
+                (None, _) => {}
+            }
+            branch_output = nested_output;
         }
 
         add_capped_estimate(&mut rows, &mut remaining_rows, branch_output.rows);
