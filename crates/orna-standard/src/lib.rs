@@ -97,6 +97,7 @@ pub const REFERENCE_STANDARD_QUERY_PATH_V1: &str = "std/query.orna";
 pub const REFERENCE_STANDARD_TEXT_PATH_V1: &str = "std/text.orna";
 pub const REFERENCE_STANDARD_BITS_PATH_V1: &str = "std/bits.orna";
 pub const REFERENCE_STANDARD_STATS_PATH_V1: &str = "std/stats.orna";
+pub const REFERENCE_STANDARD_MONEY_PATH_V1: &str = "std/money.orna";
 pub const REFERENCE_STANDARD_TIME_PATH_V1: &str = "std/time.orna";
 pub const REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1: &str = "std/time/calendar.orna";
 pub const REFERENCE_STANDARD_STREAM_PATH_V1: &str = "std/stream.orna";
@@ -148,6 +149,7 @@ const REFERENCE_STANDARD_QUERY_SOURCE_V1: &str = include_str!("../../../stdlib/s
 const REFERENCE_STANDARD_TEXT_SOURCE_V1: &str = include_str!("../../../stdlib/std/text.orna");
 const REFERENCE_STANDARD_BITS_SOURCE_V1: &str = include_str!("../../../stdlib/std/bits.orna");
 const REFERENCE_STANDARD_STATS_SOURCE_V1: &str = include_str!("../../../stdlib/std/stats.orna");
+const REFERENCE_STANDARD_MONEY_SOURCE_V1: &str = include_str!("../../../stdlib/std/money.orna");
 const REFERENCE_STANDARD_TIME_SOURCE_V1: &str = include_str!("../../../stdlib/std/time.orna");
 const REFERENCE_STANDARD_TIME_CALENDAR_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/time/calendar.orna");
@@ -201,10 +203,8 @@ const REFERENCE_STANDARD_GENERICS_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/generics.orna");
 const REFERENCE_STANDARD_TYPE_UTILS_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/type_utils.orna");
-const REFERENCE_STANDARD_PATTERN_SOURCE_V1: &str =
-    include_str!("../../../stdlib/std/pattern.orna");
-const REFERENCE_STANDARD_REGEX_SOURCE_V1: &str =
-    include_str!("../../../stdlib/std/regex.orna");
+const REFERENCE_STANDARD_PATTERN_SOURCE_V1: &str = include_str!("../../../stdlib/std/pattern.orna");
+const REFERENCE_STANDARD_REGEX_SOURCE_V1: &str = include_str!("../../../stdlib/std/regex.orna");
 const REFERENCE_STANDARD_ITERATOR_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/iterator.orna");
 const REFERENCE_STANDARD_LAZY_SOURCE_V1: &str = include_str!("../../../stdlib/std/lazy.orna");
@@ -219,7 +219,7 @@ const REFERENCE_STANDARD_REFLECTION_SOURCE_V1: &str =
 /// This is the current source-backed standard boundary. The retained `orna.std/1`–
 /// `orna.std/11` APIs below model older, explicitly versioned snapshots.
 #[must_use]
-pub fn reference_standard_sources_v1() -> [(String, String); 48] {
+pub fn reference_standard_sources_v1() -> [(String, String); 49] {
     [
         (
             REFERENCE_STANDARD_MATH_PATH_V1.into(),
@@ -412,6 +412,10 @@ pub fn reference_standard_sources_v1() -> [(String, String); 48] {
         (
             REFERENCE_STANDARD_REGEX_PATH_V1.into(),
             REFERENCE_STANDARD_REGEX_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_MONEY_PATH_V1.into(),
+            REFERENCE_STANDARD_MONEY_SOURCE_V1.into(),
         ),
     ]
 }
