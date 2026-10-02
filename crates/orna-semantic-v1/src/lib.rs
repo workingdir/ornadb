@@ -14201,7 +14201,7 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
         return false;
     }
     if expected == actual {
-        return true;
+        return checkpoint_snapshot_maps_are_valid(expected);
     }
     if matches!(actual, Type::Bottom) {
         return true;
