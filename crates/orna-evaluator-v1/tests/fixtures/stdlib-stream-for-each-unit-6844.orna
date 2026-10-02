@@ -1,0 +1,4 @@
+Stream.from_list([2, 3, 5], source_identity: "small-primes")
+| for_each((value: Int) => if value > 0 { null } else {
+        fail(error(code: "ORNA-EVAL-VALUE", message: "stream emitted a nonpositive item"))
+    })

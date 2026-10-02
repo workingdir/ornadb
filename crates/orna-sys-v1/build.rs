@@ -4,6 +4,7 @@ use std::{
 };
 
 mod build_host;
+mod build_provider;
 mod build_support;
 
 use build_support::{collect_rust_sources, generate_sys_artifacts};
@@ -27,9 +28,11 @@ fn main() {
     let source_root = manifest.join("src");
     let build_support_path = manifest.join("build_support.rs");
     let build_host_path = manifest.join("build_host.rs");
+    let build_provider_path = manifest.join("build_provider.rs");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", build_support_path.display());
     println!("cargo:rerun-if-changed={}", build_host_path.display());
+    println!("cargo:rerun-if-changed={}", build_provider_path.display());
     // Watch the directory recursively so adding a new annotated module also
     // invalidates the collected schema, even before that file is known here.
     println!("cargo:rerun-if-changed={}", source_root.display());
@@ -61,6 +64,10 @@ fn main() {
     // focused parity test reruns this exact path against the compiled outputs.
     let artifacts = generate_sys_artifacts(&collector.functions, registry, &schema)
         .expect("registry-generated sys artifacts must be internally consistent");
+    let provider_schema = build_provider::generate_provider_registry_schema()
+        .expect("generate deterministic typed-provider JSON Schema");
+    build_host::validate_json_against_schema(&artifacts.provider_abi_json, &provider_schema)
+        .expect("generated typed provider registry matches its JSON Schema");
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("build output directory"));
     fs::write(out_dir.join("api_sys.json"), artifacts.api_json)
@@ -88,6 +95,11 @@ fn main() {
         artifacts.provider_abi_json,
     )
     .expect("write generated typed system provider ABI");
+    fs::write(
+        out_dir.join("system_provider_abi.schema.json"),
+        provider_schema,
+    )
+    .expect("write generated typed system provider ABI schema");
     let binding_root = out_dir.join("system_bindings");
     if binding_root.exists() {
         fs::remove_dir_all(&binding_root).expect("remove stale generated sys binding stubs");

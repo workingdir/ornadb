@@ -1,6 +1,6 @@
-use orna_syntax_v1::{Declaration, TypeExpr, parse_module};
+use orna_syntax_v1::{parse_module, Declaration, TypeExpr};
 use orna_sys_v1::{
-    AbiType, EffectSet, OperationContract, SystemEffect, system_binding_stubs, system_provider_abi,
+    system_binding_stubs, system_provider_abi, AbiType, EffectSet, OperationContract, SystemEffect,
 };
 
 const GENERIC_KEYWORD_STUB_FIXTURE: &str = include_str!("fixtures/sys-invoke-generic-keyword.orna");
@@ -48,6 +48,41 @@ fn local_function_name(contract: &OperationContract) -> &str {
         .expect("registered sys callable has a leaf name")
 }
 
+fn validate_stub_dispatch_inventory(
+    source: &str,
+    expected_operations: &[&str],
+) -> Result<(), String> {
+    let parsed = parse_module(source);
+    if !parsed.is_ok() {
+        return Err(format!(
+            "generated declarations do not parse: {:?}",
+            parsed.diagnostics
+        ));
+    }
+    let markers = source
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+    if markers.len() != parsed.value.items.len() {
+        return Err(format!(
+            "{} dispatch markers cover {} parsed declarations",
+            markers.len(),
+            parsed.value.items.len()
+        ));
+    }
+    let unique_markers = markers
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    if unique_markers.len() != markers.len() {
+        return Err("duplicate generated dispatch marker".to_owned());
+    }
+    if markers != expected_operations {
+        return Err("generated dispatch markers differ from registry order".to_owned());
+    }
+    Ok(())
+}
+
 #[test]
 fn generated_sys_stubs_parse_resolve_to_registry_types_and_dispatch_one_to_one() {
     let source = system_binding_stubs();
@@ -60,6 +95,12 @@ fn generated_sys_stubs_parse_resolve_to_registry_types_and_dispatch_one_to_one()
 
     let abi = system_provider_abi();
     let operations = abi.operations().collect::<Vec<_>>();
+    let expected_operation_ids = operations
+        .iter()
+        .map(|operation| operation.id.as_str())
+        .collect::<Vec<_>>();
+    validate_stub_dispatch_inventory(source, &expected_operation_ids)
+        .expect("generated stub markers are a bijection with registry operations");
     let mut current_module = None;
     let mut operation_markers =
         Vec::<(String, String, std::collections::BTreeMap<String, String>)>::new();
@@ -188,6 +229,38 @@ fn generated_sys_stubs_parse_resolve_to_registry_types_and_dispatch_one_to_one()
             operation.id.as_str()
         );
     }
+}
+
+#[test]
+fn generated_stub_parity_guard_rejects_missing_duplicate_and_unknown_dispatch_rows() {
+    let source = system_binding_stubs();
+    let expected = system_provider_abi()
+        .operations()
+        .map(|operation| operation.id.as_str())
+        .collect::<Vec<_>>();
+    validate_stub_dispatch_inventory(source, &expected).unwrap();
+
+    let first_marker = source
+        .lines()
+        .find(|line| line.starts_with("// sys-op: "))
+        .expect("generated stubs have dispatch markers");
+    let missing = source.replacen(&format!("{first_marker}\n"), "", 1);
+    assert!(
+        validate_stub_dispatch_inventory(&missing, &expected).is_err(),
+        "omitting a generated dispatch row fails the parity guard"
+    );
+
+    let duplicate = format!("{source}\n{first_marker}\n");
+    assert!(
+        validate_stub_dispatch_inventory(&duplicate, &expected).is_err(),
+        "duplicating a generated dispatch row fails the parity guard"
+    );
+
+    let unknown = source.replacen(first_marker, "// sys-op: sys.vendor.unknown", 1);
+    assert!(
+        validate_stub_dispatch_inventory(&unknown, &expected).is_err(),
+        "redirecting a generated stub to an unknown registry operation fails the parity guard"
+    );
 }
 
 #[test]

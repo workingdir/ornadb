@@ -143,7 +143,13 @@ fn int(value: i64) -> CanonicalValue {
 }
 
 fn capture_standard_gitlink(project_path: &Path, standard_snapshot: &str, message: &str) -> String {
-    git_output_at(project_path, &["add", "main.orna", ".gitmodules"]);
+    let mut staged_paths = vec!["main.orna", ".gitmodules"];
+    if project_path.join("snapshot_app.orna").is_file() {
+        staged_paths.push("snapshot_app.orna");
+    }
+    let mut add_arguments = vec!["add"];
+    add_arguments.extend(staged_paths);
+    git_output_at(project_path, &add_arguments);
     let gitlink = format!("160000,{standard_snapshot},stdlib/std");
     git_output_at(
         project_path,
@@ -169,6 +175,11 @@ fn module_upgrade_projects() -> (
     fs::write(
         project_path.join("main.orna"),
         include_str!("fixtures/module-upgrade-project.orna"),
+    )
+    .unwrap();
+    fs::write(
+        project_path.join("snapshot_app.orna"),
+        include_str!("fixtures/module-upgrade-app.orna"),
     )
     .unwrap();
     git_output_at(&project_path, &["init", "--quiet"]);
@@ -763,6 +774,51 @@ fn module_upgrade_sessions_replay_with_their_captured_standard_snapshot() {
     assert_eq!(
         session_v6.submit(include_str!("fixtures/snapshot-replay-callback-nine.orna")),
         Ok(Some(ints(&[100012])))
+    );
+}
+
+#[test]
+fn project_module_executes_a_real_function_from_its_gitlink_pinned_std_snapshot() {
+    let (
+        _directory,
+        project_v1,
+        _project_v2,
+        _project_v3,
+        _project_v4,
+        _project_v5,
+        project_v6,
+        snapshots,
+    ) = module_upgrade_projects();
+    assert_ne!(snapshots[0], snapshots[5]);
+
+    let mut historical = AdmittedReplSession::from_loaded_project(
+        &project_v1,
+        project_v1.standard_sources().iter().cloned(),
+        Limits::default(),
+    )
+    .expect("the historical project's exact std gitlink snapshot admits");
+    let mut current = AdmittedReplSession::from_loaded_project(
+        &project_v6,
+        project_v6.standard_sources().iter().cloned(),
+        Limits::default(),
+    )
+    .expect("the current project's exact std gitlink snapshot admits");
+
+    assert_eq!(project_v1.standard_profile().unwrap().snapshot(), snapshots[0]);
+    assert_eq!(project_v6.standard_profile().unwrap().snapshot(), snapshots[5]);
+    assert_eq!(historical.submit("use snapshot_app;"), Ok(None));
+    assert_eq!(current.submit("use snapshot_app;"), Ok(None));
+    assert_eq!(
+        historical
+            .submit("snapshot_app.value()")
+            .unwrap_or_else(|error| panic!("historical snapshot_app.value failed: {}", error.code())),
+        Some(int(8))
+    );
+    assert_eq!(
+        current
+            .submit("snapshot_app.value()")
+            .unwrap_or_else(|error| panic!("current snapshot_app.value failed: {}", error.code())),
+        Some(int(100_007))
     );
 }
 

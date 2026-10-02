@@ -2,10 +2,16 @@
 
 use std::{fs, process::Command};
 
-use orna_sys_v1::{system_api_json, system_api_schema_json};
+use orna_sys_v1::{
+    SystemProviderAbi, system_api_json, system_api_schema_json, system_dispatch_table,
+    system_provider_abi_json, system_provider_abi_schema_json,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+#[path = "../build_host.rs"]
+#[allow(dead_code)]
+mod build_host;
 #[path = "../build_support.rs"]
 #[allow(dead_code)]
 mod build_support;
@@ -13,9 +19,13 @@ mod build_support;
 const SYS_API_V1_SHA256: &str = "b569785bfaa204b366b2cee444c01a9aa8dd74c710852fdad925dcfae60a256f";
 
 fn export(schema: bool, output_path: Option<&std::path::Path>) -> Vec<u8> {
+    export_mode(schema.then_some("--schema"), output_path)
+}
+
+fn export_mode(option: Option<&str>, output_path: Option<&std::path::Path>) -> Vec<u8> {
     let mut command = Command::new(env!("CARGO_BIN_EXE_sys-api-export"));
-    if schema {
-        command.arg("--schema");
+    if let Some(option) = option {
+        command.arg(option);
     }
     if let Some(output_path) = output_path {
         command.arg(output_path);
@@ -95,4 +105,61 @@ fn dev_exports_are_byte_stable_and_api_export_matches_the_embedded_schema() {
     assert_eq!(export(true, None), exported_schema);
 
     fs::remove_dir_all(&output_dir).expect("remove temporary export directory");
+}
+
+#[test]
+fn dev_provider_registry_export_is_byte_stable_schema_valid_and_runtime_identical() {
+    let output_dir = std::env::temp_dir().join(format!(
+        "orna-sys-provider-artifacts-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&output_dir);
+    fs::create_dir_all(&output_dir).expect("create temporary provider export directory");
+    let first_path = output_dir.join("first/dispatch.json");
+    let second_path = output_dir.join("second/dispatch.json");
+    let exported = export_mode(Some("--provider-abi"), Some(&first_path));
+    assert_eq!(
+        exported,
+        export_mode(Some("--provider-abi"), Some(&second_path)),
+        "provider registry exports from separate processes are byte-stable"
+    );
+    assert_eq!(exported, system_provider_abi_json().as_bytes());
+
+    let first_schema_path = output_dir.join("first/dispatch.schema.json");
+    let second_schema_path = output_dir.join("second/dispatch.schema.json");
+    let exported_schema = export_mode(Some("--provider-abi-schema"), Some(&first_schema_path));
+    assert_eq!(
+        exported_schema,
+        export_mode(Some("--provider-abi-schema"), Some(&second_schema_path)),
+        "provider schema exports from separate processes are byte-stable"
+    );
+    assert_eq!(
+        exported_schema,
+        system_provider_abi_schema_json().as_bytes()
+    );
+
+    let registry_json = std::str::from_utf8(&exported).expect("provider export is UTF-8");
+    let schema_json = std::str::from_utf8(&exported_schema).expect("provider schema is UTF-8");
+    build_host::validate_json_against_schema(registry_json, schema_json)
+        .expect("conformance export matches its embedded provider schema");
+    let exported_table = SystemProviderAbi::from_json(registry_json)
+        .expect("conformance export deserializes into the typed provider registry");
+    assert_eq!(
+        &exported_table,
+        system_dispatch_table(),
+        "conformance export resolves to the exact runtime dispatch table"
+    );
+    let schema: Value = serde_json::from_str(schema_json).expect("exported provider schema JSON");
+    assert_eq!(
+        build_support::canonical_pretty_json(&schema).expect("canonical provider schema") + "\n",
+        schema_json,
+        "provider schema export is canonically serialized"
+    );
+    assert_eq!(export_mode(Some("--provider-abi"), None), exported);
+    assert_eq!(
+        export_mode(Some("--provider-abi-schema"), None),
+        exported_schema
+    );
+
+    fs::remove_dir_all(&output_dir).expect("remove temporary provider export directory");
 }

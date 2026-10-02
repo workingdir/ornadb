@@ -460,6 +460,7 @@ pub struct BranchMergeTombstoneHistory {
     pending_deltas: BTreeMap<u64, BufferedBranchMergeTombstoneDelta>,
     pending_plan_identities: BTreeMap<u64, [u8; 32]>,
     committed_modes: BTreeMap<u64, BranchMergeTombstoneSubmissionMode>,
+    committed_fragment_counts: BTreeMap<u64, usize>,
     committed_plan_identities: BTreeMap<u64, [u8; 32]>,
     duplicate_retry_modes: BTreeMap<u64, BranchMergeTombstoneSubmissionMode>,
     applied_fragment_retry_transactions: Vec<AppliedDepthFragmentRetryTransaction>,
@@ -474,6 +475,7 @@ impl BranchMergeTombstoneHistory {
             pending_deltas: BTreeMap::new(),
             pending_plan_identities: BTreeMap::new(),
             committed_modes: BTreeMap::new(),
+            committed_fragment_counts: BTreeMap::new(),
             committed_plan_identities: BTreeMap::new(),
             duplicate_retry_modes: BTreeMap::new(),
             applied_fragment_retry_transactions: Vec::new(),
@@ -559,7 +561,12 @@ impl BranchMergeTombstoneHistory {
     /// completion order. An empty fragment still counts toward completeness.
     /// For an existing wave, a changed fragment count is reported before an
     /// index that is invalid under the caller's changed count, preserving the
-    /// wave's authoritative depth label in diagnostics.
+    /// wave's authoritative depth label in diagnostics. After a wave commits,
+    /// its count and valid index range remain authoritative for stale retries
+    /// too, so changed labels report `FragmentCountMismatch` or `InvalidFragment`
+    /// before the generic stale-position error. MERGE-1 is silent on validating
+    /// fragment labels after a fold; this v1 policy preserves the committed
+    /// label pair to keep storm retry diagnostics consistent across cascades.
     pub fn submit_depth_merge_fragment(
         &mut self,
         order: u64,
@@ -567,6 +574,27 @@ impl BranchMergeTombstoneHistory {
         fragment_count: usize,
         tombstones: &[(ObjectId, CanonicalValue)],
     ) -> Result<Vec<BranchMergeTombstoneEvent>, BranchMergeTombstoneHistoryError> {
+        self.classify_submission_mode_conflict(
+            order,
+            BranchMergeTombstoneSubmissionMode::DepthFragments,
+        )?;
+        if let Some(expected_count) = self.committed_fragment_counts.get(&order).copied()
+            && expected_count != fragment_count
+        {
+            return Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+                order,
+                expected: expected_count,
+                actual: fragment_count,
+            });
+        }
+        if let Some(expected_count) = self.committed_fragment_counts.get(&order).copied()
+            && fragment >= expected_count
+        {
+            return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+                fragment,
+                fragment_count: expected_count,
+            });
+        }
         self.classify_submission_position(
             order,
             BranchMergeTombstoneSubmissionMode::DepthFragments,
@@ -853,6 +881,10 @@ impl BranchMergeTombstoneHistory {
     /// callers that need separate transactions can use the constituent APIs.
     /// A successful equivalent request can be retried: it returns no new
     /// events and leaves the already-committed result unchanged.
+    /// Before changing paired identities, the batch checks fragment-count
+    /// labels against every buffered wave in lineage order. This lets a stale
+    /// label in an earlier wave remain visible even if a later binding would
+    /// also conflict; all paired changes still commit atomically afterward.
     pub fn bind_depth_fragment_retry_plans_with_recovery(
         &mut self,
         bindings: &[SequencedBranchMergePlan],
@@ -867,6 +899,7 @@ impl BranchMergeTombstoneHistory {
         {
             return Ok(Vec::new());
         }
+        self.validate_depth_fragment_labels(recoveries)?;
 
         let mut candidate = self.clone();
         candidate.bind_depth_fragment_retry_plans(bindings)?;
@@ -1039,6 +1072,11 @@ impl BranchMergeTombstoneHistory {
     /// retry plan carries tombstones, its exact projection must match the
     /// separately supplied delta even for unbound fragment waves. Legacy
     /// projection-only plans with no embedded tombstones remain supported.
+    /// A committed depth wave keeps its fragment-count retry label, so a later
+    /// recovery with a changed count reports `FragmentCountMismatch` rather
+    /// than losing the label when an uneven cascade folds. MERGE-1 is silent
+    /// on retaining labels after folds; this v1 policy preserves each wave's
+    /// declared count for deterministic stale-retry diagnostics.
     pub fn recover_depth_merge_fragments_with_appends(
         &mut self,
         recoveries: &[BranchMergeDepthFragmentRecovery],
@@ -1058,6 +1096,7 @@ impl BranchMergeTombstoneHistory {
                 });
             }
         }
+        self.validate_depth_fragment_labels(&recoveries)?;
 
         let mut candidate = self.clone();
         let mut appends = appends.to_vec();
@@ -1277,6 +1316,57 @@ impl BranchMergeTombstoneHistory {
         Ok(self.release_contiguous())
     }
 
+    fn validate_depth_fragment_labels(
+        &self,
+        recoveries: &[BranchMergeDepthFragmentRecovery],
+    ) -> Result<(), BranchMergeTombstoneHistoryError> {
+        let mut recoveries = recoveries.iter().collect::<Vec<_>>();
+        recoveries.sort_unstable_by_key(|recovery| (recovery.order, recovery.fragment));
+        if recoveries.windows(2).any(|pair| {
+            pair[0].order == pair[1].order && pair[0].fragment == pair[1].fragment
+        }) {
+            // The public recovery API reports duplicate labels after paired
+            // bindings. Leave that established structural-error precedence
+            // intact instead of preflighting a partial label view.
+            return Ok(());
+        }
+
+        for recovery in recoveries {
+            let expected_count = match self.pending_deltas.get(&recovery.order) {
+                Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
+                    fragment_count,
+                    ..
+                }) => Some(*fragment_count),
+                Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => None,
+                None => self.committed_fragment_counts.get(&recovery.order).copied(),
+            };
+            let Some(expected_count) = expected_count else {
+                continue;
+            };
+
+            if recovery.fragment_count == 0 {
+                return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+                    fragment: recovery.fragment,
+                    fragment_count: recovery.fragment_count,
+                });
+            }
+            if expected_count != recovery.fragment_count {
+                return Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+                    order: recovery.order,
+                    expected: expected_count,
+                    actual: recovery.fragment_count,
+                });
+            }
+            if recovery.fragment >= recovery.fragment_count {
+                return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+                    fragment: recovery.fragment,
+                    fragment_count: recovery.fragment_count,
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn release_contiguous(&mut self) -> Vec<BranchMergeTombstoneEvent> {
         let first_new_event = self.events.len();
         while let Some(order) = self.next_order {
@@ -1293,6 +1383,15 @@ impl BranchMergeTombstoneHistory {
             }
             let delta = self.pending_deltas.remove(&order).expect("ready delta is buffered");
             let mode = delta.submission_mode();
+            if let BufferedBranchMergeTombstoneDelta::DepthFragments {
+                fragment_count, ..
+            } = &delta
+            {
+                // The fold drops buffered fragments, but retry diagnostics
+                // still need the wave's label after its events commit.
+                self.committed_fragment_counts
+                    .insert(order, *fragment_count);
+            }
             self.duplicate_retry_modes.remove(&order);
             if let Some(identity) = self.pending_plan_identities.remove(&order) {
                 self.committed_plan_identities.insert(order, identity);

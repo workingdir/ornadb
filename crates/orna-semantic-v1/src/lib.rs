@@ -2589,6 +2589,7 @@ fn primitive(name: &str) -> Option<Type> {
         "Instant" => Type::Instant,
         "Str" | "Text" | "String" => Type::Text,
         "Bool" => Type::Bool,
+        "Unit" => Type::Null,
         "Null" => Type::Null,
         "BOOLEAN" | "BOOL" => Type::Bool,
         "INTEGER" | "INT" | "BIGINT" => Type::Int,
@@ -16797,13 +16798,42 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                     || contains_type_error(actual)
                     || !types_match(formal, actual))
         });
+    let paired_direct_binders = formal_parameters
+        .iter()
+        .filter_map(|formal| snapshot_ref_context_key(formal).and_then(snapshot_ref_binder_id))
+        .collect::<BTreeSet<_>>();
+    let incomplete_paired_direct_rebind = paired_direct_binders.len() > 1
+        && formal_parameters
+            .iter()
+            .enumerate()
+            .any(|(parameter_index, formal)| {
+                if snapshot_ref_context_key(formal)
+                    .and_then(snapshot_ref_binder_id)
+                    .is_none()
+                {
+                    return false;
+                }
+                let Some(argument_index) = call_argument_index_for_position(
+                    parameter_names,
+                    parameter_index,
+                    arguments,
+                ) else {
+                    return false;
+                };
+                argument_types
+                    .get(argument_index)
+                    .is_none_or(|actual| !is_contextual_snapshot_ref(actual))
+            });
     // The reference specifies pin identity but leaves recovery after a call
     // that cannot reach the callee unspecified. Treat its binding wave
     // transactionally:
     // a malformed tuple at any depth in an argument signature, or any missing
     // required argument, must not rebind otherwise valid siblings captured by
-    // the returned callable. Omitted defaults are valid.
-    let suppress_rebinding = nonreturning_argument || incomplete_argument;
+    // the returned callable. Paired direct pin parameters share that wave too;
+    // an unknown sibling must not promote the other pin alone. Omitted defaults
+    // are valid.
+    let suppress_rebinding =
+        nonreturning_argument || incomplete_argument || incomplete_paired_direct_rebind;
     if !suppress_rebinding {
         for (parameter_index, formal) in formal_parameters.iter().enumerate() {
             let Some(argument_index) = call_argument_index_for_position(
@@ -18773,7 +18803,7 @@ fn infer_table_assertion(
     let inferred = infer(body, scope, &local, diagnostics);
     let valid = match text.as_str() {
         "every" => inferred.ty == Type::Bool,
-        "all_unique" => is_lawful_all_unique_key_type(&inferred.ty),
+        "all_unique" => is_lawful_all_unique_key_type(&inferred.ty, scope),
         _ => unreachable!("table predicate constructors were matched above"),
     };
     if text == "all_unique" && inferred.ty != Type::Error && !valid {
@@ -18790,34 +18820,83 @@ fn infer_table_assertion(
 
 /// `all_unique` compares complete canonical selected values. Function and
 /// relation values have no stable value identity, and default Float equality
-/// is intentionally unavailable; nested keys inherit those restrictions.
-fn is_lawful_all_unique_key_type(ty: &Type) -> bool {
-    match ty {
-        Type::Error => false,
-        Type::Float => false,
-        Type::Applied { base, arguments } => {
-            base != "Float" && arguments.iter().all(is_lawful_all_unique_key_type)
+/// is intentionally unavailable; nested and locally described named keys
+/// inherit those restrictions. Opaque imported values retain the equality
+/// contract of their pinned declaration.
+fn is_lawful_all_unique_key_type(ty: &Type, scope: &Scope) -> bool {
+    fn unique_short_match<'a>(
+        values: &'a BTreeMap<String, Type>,
+        short_name: &str,
+    ) -> Option<&'a Type> {
+        let mut matching = values
+            .iter()
+            .filter(|(candidate, _)| candidate.rsplit('.').next() == Some(short_name));
+        let first = matching.next().map(|(_, ty)| ty);
+        if matching.next().is_some() {
+            None
+        } else {
+            first
         }
-        Type::List(element) | Type::Optional(element) => {
-            is_lawful_all_unique_key_type(element)
-        }
-        Type::Tuple(elements) => elements.iter().all(is_lawful_all_unique_key_type),
-        Type::Record(fields) => fields.values().all(is_lawful_all_unique_key_type),
-        Type::Range(_)
-        | Type::Relation(_)
-        | Type::Stream(_)
-        | Type::Function { .. }
-        | Type::MoneyPerUnit { .. } => false,
-        Type::Int
-        | Type::Decimal
-        | Type::Date
-        | Type::Instant
-        | Type::Text
-        | Type::Bool
-        | Type::Null
-        | Type::Named(_)
-        | Type::Bottom => true,
     }
+
+    fn visit(ty: &Type, scope: &Scope, expanding: &mut BTreeSet<String>) -> bool {
+        match ty {
+            Type::Error | Type::Float => false,
+            Type::Applied { base, arguments } => {
+                base != "Float"
+                    && arguments
+                        .iter()
+                        .all(|argument| visit(argument, scope, expanding))
+            }
+            Type::List(element) | Type::Optional(element) => visit(element, scope, expanding),
+            Type::Tuple(elements) => elements
+                .iter()
+                .all(|element| visit(element, scope, expanding)),
+            Type::Record(fields) => fields.values().all(|field| visit(field, scope, expanding)),
+            Type::Range(_)
+            | Type::Relation(_)
+            | Type::Stream(_)
+            | Type::Function { .. }
+            | Type::MoneyPerUnit { .. } => false,
+            Type::Named(name) => {
+                if !expanding.insert(name.clone()) {
+                    return true;
+                }
+                let short_name = name.rsplit('.').next().unwrap_or(name);
+                let shape = scope
+                    .nominal_rows
+                    .get(name)
+                    .or_else(|| unique_short_match(&scope.nominal_rows, short_name))
+                    .or_else(|| scope.type_aliases.get(name))
+                    .or_else(|| scope.refined_types.get(name))
+                    .or_else(|| scope.type_aliases.get(short_name))
+                    .or_else(|| scope.refined_types.get(short_name));
+                let shape_is_lawful = shape.is_none_or(|shape| visit(shape, scope, expanding));
+                let enum_payloads_are_lawful = scope
+                    .enum_variants
+                    .get(name)
+                    .or_else(|| scope.enum_variants.get(short_name))
+                    .is_none_or(|variants| {
+                        variants
+                            .values()
+                            .flat_map(BTreeMap::values)
+                            .all(|field| visit(field, scope, expanding))
+                    });
+                expanding.remove(name);
+                shape_is_lawful && enum_payloads_are_lawful
+            }
+            Type::Int
+            | Type::Decimal
+            | Type::Date
+            | Type::Instant
+            | Type::Text
+            | Type::Bool
+            | Type::Null
+            | Type::Bottom => true,
+        }
+    }
+
+    visit(ty, scope, &mut BTreeSet::new())
 }
 
 /// A table assertion may name an ordinary pure predicate function. Its
@@ -19920,6 +19999,56 @@ mod tests {
         assert_ne!(
             left, right,
             "suppression must keep same-named paired pin slots at distinct widths"
+        );
+    }
+
+    #[test]
+    fn unknown_direct_pair_sibling_suppresses_valid_pin_promotion() {
+        let left = contextual_snapshot_ref(
+            "selector:binder:pair.orna@10..18:parameter:left_pin",
+        );
+        let right = contextual_snapshot_ref(
+            "selector:binder:pair.orna@20..28:parameter:right_pin",
+        );
+        let result = Type::Record(BTreeMap::from([
+            ("left".into(), left.clone()),
+            ("right".into(), right.clone()),
+        ]));
+        let arguments = (0..2)
+            .map(|index| orna_syntax_v1::Argument {
+                name: None,
+                value: Expr::Name {
+                    text: format!("pair_pin_{index}"),
+                    span: SyntaxSpan::new(40 + index * 12, 48 + index * 12),
+                },
+                span: SyntaxSpan::new(40 + index * 12, 48 + index * 12),
+            })
+            .collect::<Vec<_>>();
+
+        let specialized = specialize_dynamic_parameter_snapshot_contexts(
+            &result,
+            &[left, right],
+            &BTreeSet::new(),
+            None,
+            &arguments,
+            &[contextual_snapshot_ref("selector:HEAD~12"), Type::Error],
+            &BTreeMap::new(),
+            &SyntaxSpan::new(30, 68),
+            None,
+        );
+
+        let mut contexts = BTreeSet::new();
+        collect_test_snapshot_contexts(&specialized, &mut contexts);
+        assert_eq!(contexts.len(), 2, "both pins must remain represented: {contexts:?}");
+        assert!(
+            contexts
+                .iter()
+                .all(|context| context.starts_with("selector:dynamic-call:")),
+            "an unknown pair sibling must suppress every sibling promotion: {contexts:?}"
+        );
+        assert!(
+            !contexts.iter().any(|context| context.contains("HEAD~12")),
+            "the valid sibling must not be promoted independently: {contexts:?}"
         );
     }
 
