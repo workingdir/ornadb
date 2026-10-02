@@ -102,6 +102,46 @@ fn sys_filesystem_registry_dispatches_real_reads_writes_lists_and_denials() {
     );
 }
 
+#[test]
+fn all_registered_filesystem_dispatch_arms_execute_with_native_results() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("input.txt"), "source").unwrap();
+    let mut filesystem = FilesystemProvider::new();
+    filesystem.allow_root(root.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem);
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    session
+        .submit(include_str!("fixtures/stdlib-use-io-fs-mpk0d.orna"))
+        .unwrap();
+
+    let fixtures = [
+        include_str!("fixtures/stdlib-io-fs-append-mpk0d.orna"),
+        include_str!("fixtures/stdlib-io-fs-exists-mpk0d.orna"),
+        include_str!("fixtures/stdlib-io-fs-is-directory-mpk0d.orna"),
+        include_str!("fixtures/stdlib-io-fs-create-dir-mpk0d.orna"),
+        include_str!("fixtures/stdlib-io-fs-copy-mpk0d.orna"),
+        include_str!("fixtures/stdlib-io-fs-move-mpk0d.orna"),
+        include_str!("fixtures/stdlib-io-fs-remove-mpk0d.orna"),
+    ];
+    for (index, fixture) in fixtures.into_iter().enumerate() {
+        let result = session
+            .submit_with_sys_host_bindings(&fixture_root(fixture, root.path()), &mut bindings)
+            .unwrap_or_else(|error| panic!("filesystem dispatch {index} failed: {}", error.code()));
+        match index {
+            1 | 2 => assert_eq!(result, Some(CanonicalValue::new(Raw::Bool(true)).unwrap())),
+            _ => assert_eq!(result, Some(CanonicalValue::new(Raw::Null).unwrap())),
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("input.txt")).unwrap(),
+        "source-appended"
+    );
+    assert!(root.path().join("created").is_dir());
+    assert!(!root.path().join("copy.txt").exists());
+    assert!(!root.path().join("moved.txt").exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn sys_filesystem_symlink_metadata_is_non_following_and_reads_cannot_escape_root() {
@@ -210,6 +250,36 @@ fn sys_http_registry_dispatches_real_bounded_loopback_response() {
                 if pair.as_slice() == [OvbRaw::Text("x-proof".into()), OvbRaw::Text("native".into())]))
     ));
     assert_eq!(parts[2], OvbRaw::Bytes(b"loopback-response".to_vec()));
+}
+
+#[test]
+fn sys_http_registry_requires_an_installed_origin_allowlist() {
+    let url = "http://127.0.0.1:9/never-connected";
+    let source = include_str!("fixtures/stdlib-net-http-send-mpk0d.orna").replace("URL_VALUE", url);
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    session
+        .submit(include_str!("fixtures/stdlib-use-net-http-mpk0d.orna"))
+        .unwrap();
+
+    let mut no_provider = SysHostBindingRegistry::default();
+    assert_eq!(
+        session
+            .submit_with_sys_host_bindings(&source, &mut no_provider)
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-UNSUPPORTED"
+    );
+
+    let provider = HttpProvider::new(Duration::from_secs(2), 4096, 1024).unwrap();
+    let mut no_origin =
+        SysHostBindingRegistry::new(EnvironmentProvider::default()).with_http_provider(provider);
+    assert_eq!(
+        session
+            .submit_with_sys_host_bindings(&source, &mut no_origin)
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-ERROR"
+    );
 }
 
 #[test]
