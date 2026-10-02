@@ -316,9 +316,9 @@ enum BranchMergeTombstoneSubmissionMode {
 /// position delays that decision; an intervening position that omits the key
 /// separates a later re-delete. Once an earlier position has been released,
 /// a later position may record the key again as a separate event.
-/// Mixing whole-plan and depth-fragment submissions at one pending position
-/// reports `ConflictingSubmission` before fragment-index or tombstone-content
-/// validation; for a non-stale position, the mode conflict takes precedence.
+/// Submission positions are classified centrally: exhaustion precedes stale
+/// order, stale order precedes pending-mode checks, and a mixed-mode conflict
+/// at a live position precedes fragment-index or tombstone-content validation.
 /// Concurrent completions may arrive out of order; future deltas wait until
 /// every earlier paired position is present. Split waves wait until every
 /// fragment arrives, then flatten in canonical table/key order atomically.
@@ -366,19 +366,10 @@ impl BranchMergeTombstoneHistory {
         &mut self,
         step: &SequencedBranchMergePlan,
     ) -> Result<Vec<BranchMergeTombstoneEvent>, BranchMergeTombstoneHistoryError> {
-        let Some(expected) = self.next_order else {
-            return Err(BranchMergeTombstoneHistoryError::OrderExhausted);
-        };
-        if step.order < expected {
-            return Err(BranchMergeTombstoneHistoryError::DuplicateOrStale {
-                order: step.order,
-            });
-        }
-        if let Some(error) =
-            self.pending_submission_error(step.order, BranchMergeTombstoneSubmissionMode::WholePlan)
-        {
-            return Err(error);
-        }
+        self.classify_submission_position(
+            step.order,
+            BranchMergeTombstoneSubmissionMode::WholePlan,
+        )?;
         if has_duplicate_tombstones_in_wave(&step.ordered_row_tombstones) {
             return Err(BranchMergeTombstoneHistoryError::DuplicateTombstone {
                 order: step.order,
@@ -408,18 +399,10 @@ impl BranchMergeTombstoneHistory {
         fragment_count: usize,
         tombstones: &[(ObjectId, CanonicalValue)],
     ) -> Result<Vec<BranchMergeTombstoneEvent>, BranchMergeTombstoneHistoryError> {
-        let Some(expected) = self.next_order else {
-            return Err(BranchMergeTombstoneHistoryError::OrderExhausted);
-        };
-        if order < expected {
-            return Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order });
-        }
-        if let Some(error) = self.pending_submission_error(
+        self.classify_submission_position(
             order,
             BranchMergeTombstoneSubmissionMode::DepthFragments,
-        ) {
-            return Err(error);
-        }
+        )?;
         if fragment_count == 0 || fragment >= fragment_count {
             return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
                 fragment,
@@ -514,16 +497,23 @@ impl BranchMergeTombstoneHistory {
         self.events[first_new_event..].to_vec()
     }
 
-    fn pending_submission_error(
+    fn classify_submission_position(
         &self,
         order: u64,
         incoming_mode: BranchMergeTombstoneSubmissionMode,
-    ) -> Option<BranchMergeTombstoneHistoryError> {
+    ) -> Result<(), BranchMergeTombstoneHistoryError> {
+        let Some(expected) = self.next_order else {
+            return Err(BranchMergeTombstoneHistoryError::OrderExhausted);
+        };
+        if order < expected {
+            return Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order });
+        }
+
         match (self.pending_deltas.get(&order), incoming_mode) {
             (
                 Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)),
                 BranchMergeTombstoneSubmissionMode::WholePlan,
-            ) => Some(BranchMergeTombstoneHistoryError::DuplicateOrStale { order }),
+            ) => Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order }),
             (
                 Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)),
                 BranchMergeTombstoneSubmissionMode::DepthFragments,
@@ -531,10 +521,12 @@ impl BranchMergeTombstoneHistory {
             | (
                 Some(BufferedBranchMergeTombstoneDelta::DepthFragments { .. }),
                 BranchMergeTombstoneSubmissionMode::WholePlan,
-            ) => Some(BranchMergeTombstoneHistoryError::ConflictingSubmission { order }),
-            (Some(BufferedBranchMergeTombstoneDelta::DepthFragments { .. }),
-             BranchMergeTombstoneSubmissionMode::DepthFragments)
-            | (None, _) => None,
+            ) => Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order }),
+            (
+                Some(BufferedBranchMergeTombstoneDelta::DepthFragments { .. }),
+                BranchMergeTombstoneSubmissionMode::DepthFragments,
+            )
+            | (None, _) => Ok(()),
         }
     }
 

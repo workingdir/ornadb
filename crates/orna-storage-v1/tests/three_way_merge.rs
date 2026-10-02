@@ -20220,6 +20220,62 @@ fn paired_mixed_mode_conflicts_precede_logical_duplicate_validation() {
 }
 
 #[test]
+fn paired_tombstone_position_priority_is_shared_by_both_submission_modes() {
+    let fixture_key = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .find(|row| row.key == string("a/child/deep"))
+        .expect("the in-crate depth fixture supplies a tombstone key")
+        .key
+        .clone();
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+
+    let mut stale_history = BranchMergeTombstoneHistory::new(0);
+    stale_history
+        .submit(&whole_plan(0, vec![fixture_key.clone()]))
+        .unwrap();
+    let before_stale = stale_history.clone();
+    assert_eq!(
+        stale_history.submit(&whole_plan(0, vec![fixture_key.clone(), fixture_key.clone()])),
+        Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 0 }),
+        "stale position classification precedes whole-plan content validation",
+    );
+    assert_eq!(
+        stale_history.submit_depth_merge_fragment(0, 0, 0, &[(id(1), fixture_key.clone())]),
+        Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 0 }),
+        "stale position classification precedes fragment metadata validation",
+    );
+    assert_eq!(stale_history, before_stale);
+
+    let mut exhausted_history = BranchMergeTombstoneHistory::new(u64::MAX);
+    exhausted_history.submit(&whole_plan(u64::MAX, Vec::new())).unwrap();
+    let before_exhausted = exhausted_history.clone();
+    assert_eq!(
+        exhausted_history.submit(&whole_plan(
+            u64::MAX,
+            vec![fixture_key.clone(), fixture_key.clone()],
+        )),
+        Err(BranchMergeTombstoneHistoryError::OrderExhausted),
+        "exhaustion classification precedes whole-plan content validation",
+    );
+    assert_eq!(
+        exhausted_history.submit_depth_merge_fragment(u64::MAX, 0, 0, &[(id(1), fixture_key)]),
+        Err(BranchMergeTombstoneHistoryError::OrderExhausted),
+        "exhaustion classification precedes fragment metadata validation",
+    );
+    assert_eq!(exhausted_history, before_exhausted);
+}
+
+#[test]
 fn paired_depth_storm_tombstone_history_stabilizes_across_restore_waves() {
     let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
         .split("\n\n")
