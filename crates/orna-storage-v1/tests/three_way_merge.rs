@@ -17402,6 +17402,87 @@ fn unequal_depth_paired_chain_read_failure_discards_partial_order() {
 }
 
 #[test]
+fn recovery_storms_keep_unequal_depth_paired_chain_order() {
+    const RETRIES_PER_WAVE: usize = 8;
+    const WAVES: usize = 6;
+    let expected_first_tombstones = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .into_iter()
+    .map(string)
+    .collect::<Vec<_>>();
+    let expected_second_tombstones = ["a", "a/child", "a/child/deep"]
+        .into_iter()
+        .map(string)
+        .collect::<Vec<_>>();
+    let expected_first_live = vec![string("z")];
+    let expected_second_live = ["b", "c", "d", "zz"]
+        .into_iter()
+        .map(string)
+        .collect::<Vec<_>>();
+    let mut completed_retries = 0;
+
+    for wave in 0..WAVES {
+        let start = Arc::new(Barrier::new(RETRIES_PER_WAVE));
+        let mut workers = Vec::with_capacity(RETRIES_PER_WAVE);
+        for retry in 0..RETRIES_PER_WAVE {
+            let index = wave * RETRIES_PER_WAVE + retry;
+            let first_table_split = index % 2 == 0;
+            let (base, left, right, mut source) = paired_distinct_depth_chain_inputs(
+                first_table_split,
+                index % 3 == 0,
+                index % 3 != 0,
+            );
+            if index % 3 == 1 {
+                for rows in source.rows.values_mut() {
+                    rows.reverse();
+                }
+            }
+            let gate = Arc::clone(&start);
+            workers.push(std::thread::spawn(move || {
+                let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+                let plan = merge_three_way_snapshots(
+                    &base,
+                    &left,
+                    &right,
+                    &mut source,
+                    BranchMergeBudget { max_rows_examined: 33, max_conflicts: 0 },
+                )
+                .expect("each fresh paired retry fits its private exact budget");
+                (plan, first_table_split)
+            }));
+        }
+
+        for worker in workers {
+            let (plan, first_table_split) =
+                worker.join().expect("unequal-depth retry worker completes");
+            assert_eq!(plan.report.rows_examined, 33);
+            assert_eq!(plan.report.conflicts_lower_bound, 0);
+            assert_eq!(table_row_tombstones(&plan, id(1)), expected_first_tombstones);
+            assert_eq!(table_row_tombstones(&plan, id(2)), expected_second_tombstones);
+            assert_eq!(table_live_row_keys(&plan, id(1)), expected_first_live);
+            assert_eq!(table_live_row_keys(&plan, id(2)), expected_second_live);
+            assert_eq!(
+                plan.tables[&id(1)].segments.len(),
+                if first_table_split { 7 } else { 1 },
+            );
+            assert_eq!(
+                plan.tables[&id(2)].segments.len(),
+                if first_table_split { 1 } else { 7 },
+            );
+            completed_retries += 1;
+        }
+    }
+
+    assert_eq!(completed_retries, RETRIES_PER_WAVE * WAVES);
+}
+
+#[test]
 fn paired_depth_chains_keep_identical_keys_table_local() {
     let (base, left, right, mut source) = paired_tombstone_chain_load_inputs(true, true, false);
     let plan = merge_three_way_snapshots(
