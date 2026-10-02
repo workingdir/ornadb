@@ -5,8 +5,9 @@ use orna_evolution_v1::{
 use orna_foundation_v1::OvbRaw;
 use orna_storage_v1::{
     BranchMergeBudget, BranchMergeConflict, BranchMergeError, BranchMergePlan, BranchRowSource,
-    BranchMergePlanSequenceError, BranchMergePlanSequencer, KeyRange, MergeSide, MergedSegment,
-    RowSegmentManifest, TableManifest, ThreeWaySnapshot, merge_three_way_snapshots,
+    BranchMergePlanSequenceError, BranchMergePlanSequencer, BranchMergeTombstoneHistory,
+    BranchMergeTombstoneHistoryError, KeyRange, MergeSide, MergedSegment, RowSegmentManifest,
+    TableManifest, ThreeWaySnapshot, merge_three_way_snapshots,
 };
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 use std::{
@@ -19903,7 +19904,7 @@ fn concurrent_uneven_depth_restore_retries_isolate_failed_attempts() {
 }
 
 #[test]
-fn paired_depth_storm_plans_release_stable_depth_order_across_completion_schedules() {
+fn paired_depth_storm_tombstone_history_stabilizes_across_restore_waves() {
     let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
         .split("\n\n")
         .map(|record| parse_fixture(record, RowKeyKind::Explicit))
@@ -19920,7 +19921,7 @@ fn paired_depth_storm_plans_release_stable_depth_order_across_completion_schedul
         "root/child/deep",
         "root/child/deep/leaf/twig",
     ];
-    let wave_one_deletes = ["root/child/deep/leaf/twig/bud", "z"];
+    let wave_one_deletes: [&str; 0] = [];
     let wave_two_deletes = ["a/child/deep", "root/child/deep"];
     let wave_zero_restores = fixture_rows
         .iter()
@@ -19940,8 +19941,8 @@ fn paired_depth_storm_plans_release_stable_depth_order_across_completion_schedul
         .collect::<Vec<_>>();
 
     // Each worker plans against its own committed paired base. Wave one
-    // restores wave zero's deletes while recording new storm tombstones;
-    // wave two then appends shallow ancestors after those deep events.
+    // restores wave zero's deletes with an empty delta; wave two then
+    // re-deletes restored mid-depth keys as new history events.
     let specs = vec![
         (0_u64, fixture_rows.clone(), wave_zero_deletes.to_vec(), Vec::new()),
         (1_u64, wave_one_base, wave_one_deletes.to_vec(), wave_zero_restores),
@@ -20050,21 +20051,31 @@ fn paired_depth_storm_plans_release_stable_depth_order_across_completion_schedul
         [0, 2, 1],
         [0, 1, 2],
     ];
+    let mut replay_histories = Vec::new();
     for schedule in completion_schedules {
         let mut replay = BranchMergePlanSequencer::new(0);
+        let mut replay_history = BranchMergeTombstoneHistory::new(0);
         let mut replayed_plans = Vec::new();
         for order in schedule {
-            replayed_plans.extend(
-                replay
-                    .submit_with_tombstone_deltas(order, &plans_by_order[&order])
-                    .unwrap(),
-            );
+            for step in replay
+                .submit_with_tombstone_deltas(order, &plans_by_order[&order])
+                .unwrap()
+            {
+                replay_history.append(&step).unwrap();
+                replayed_plans.push(step);
+            }
         }
         assert_eq!(
             replayed_plans,
             released_plans,
             "the same paired merge waves have identical depth order for every completion schedule",
         );
+        assert_eq!(
+            replay_history.next_order(),
+            Some(3),
+            "restore-only waves still consume their lineage position",
+        );
+        replay_histories.push(replay_history);
     }
     assert_eq!(
         sequencer.submit_with_tombstone_deltas(2, &released_plans[2].plan),
@@ -20093,7 +20104,7 @@ fn paired_depth_storm_plans_release_stable_depth_order_across_completion_schedul
     ]
     .map(string)
     .to_vec();
-    let expected_second = ["root/child/deep/leaf/twig/bud", "z"].map(string).to_vec();
+    let expected_second = Vec::new();
     let expected_third = ["a/child/deep", "root/child/deep"].map(string).to_vec();
     assert_eq!(
         per_wave_deltas,
@@ -20119,8 +20130,6 @@ fn paired_depth_storm_plans_release_stable_depth_order_across_completion_schedul
             "root/child",
             "root/child/deep",
             "root/child/deep/leaf/twig",
-            "root/child/deep/leaf/twig/bud",
-            "z",
             "a/child/deep",
             "root/child/deep",
         ]
@@ -20149,10 +20158,6 @@ fn paired_depth_storm_plans_release_stable_depth_order_across_completion_schedul
         (id(2), "root/child"),
         (id(2), "root/child/deep"),
         (id(2), "root/child/deep/leaf/twig"),
-        (id(1), "root/child/deep/leaf/twig/bud"),
-        (id(1), "z"),
-        (id(2), "root/child/deep/leaf/twig/bud"),
-        (id(2), "z"),
         (id(1), "a/child/deep"),
         (id(1), "root/child/deep"),
         (id(2), "a/child/deep"),
@@ -20163,6 +20168,61 @@ fn paired_depth_storm_plans_release_stable_depth_order_across_completion_schedul
         paired_tombstone_history,
         expected_paired_history,
         "split-depth changes preserve each paired delta and append waves in commit lineage order",
+    );
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert_eq!(
+        history.append(&released_plans[1]),
+        Err(BranchMergeTombstoneHistoryError::OutOfOrder { expected: 0, actual: 1 }),
+        "a later restore wave cannot skip the earlier paired history position",
+    );
+    assert!(history.events().is_empty(), "rejected steps leave history unchanged");
+    for step in &released_plans {
+        history.append(step).unwrap();
+    }
+    assert!(
+        released_plans[1].ordered_row_tombstones.is_empty(),
+        "restoring rows consumes the wave position without replaying old deletes",
+    );
+    assert_eq!(history.next_order(), Some(3));
+    let recorded_history = history
+        .events()
+        .iter()
+        .map(|event| (event.order, event.table, event.key.clone()))
+        .collect::<Vec<_>>();
+    let expected_recorded_history = [
+        (0, id(1), "a"),
+        (0, id(1), "a/child"),
+        (0, id(1), "a/child/deep"),
+        (0, id(1), "a/child/deep/leaf"),
+        (0, id(1), "root"),
+        (0, id(1), "root/child"),
+        (0, id(1), "root/child/deep"),
+        (0, id(1), "root/child/deep/leaf/twig"),
+        (0, id(2), "a"),
+        (0, id(2), "a/child"),
+        (0, id(2), "a/child/deep"),
+        (0, id(2), "a/child/deep/leaf"),
+        (0, id(2), "root"),
+        (0, id(2), "root/child"),
+        (0, id(2), "root/child/deep"),
+        (0, id(2), "root/child/deep/leaf/twig"),
+        (2, id(1), "a/child/deep"),
+        (2, id(1), "root/child/deep"),
+        (2, id(2), "a/child/deep"),
+        (2, id(2), "root/child/deep"),
+    ]
+    .map(|(order, table, key)| (order, table, string(key)));
+    assert_eq!(recorded_history, expected_recorded_history);
+    assert_eq!(
+        history.append(&released_plans[0]),
+        Err(BranchMergeTombstoneHistoryError::OutOfOrder { expected: 3, actual: 0 }),
+        "a repeated wave cannot duplicate its earlier tombstone events",
+    );
+    assert_eq!(
+        replay_histories,
+        vec![history.clone(); completion_schedules.len()],
+        "append-only tombstone history is stable across every completion schedule",
     );
 
     let rows_by_table = [fixture_rows.as_slice(), fixture_rows.as_slice()];
