@@ -275,6 +275,12 @@ impl PackageResolver {
     /// manifest rather than carrying forward the ancestor's prefix siblings.
     /// This keeps precedence stable across repeated storms at multiple closure
     /// depths, including when those storms finish in different candidates.
+    /// If the caller returns to an ancestor session after rebinding descendants,
+    /// a later expansion follows the ancestor pin selected at that time. A
+    /// closure already expanded from a retained pin remains its own branch;
+    /// descendant storms do not become fallback pins for a newly selected
+    /// ancestor candidate. Where the reference is silent, v1 gives precedence
+    /// to the exact pin passed to each closure expansion.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
