@@ -4272,6 +4272,55 @@ fn paired_nested_chain_reproduction_rejects_cross_chain_terminal_mixing() {
 }
 
 #[test]
+fn paired_nested_chain_rebind_paths_stay_consistent_across_storm_orders() {
+    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-consistency.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-chain-rebind-consistency.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "direct, restored, and freshly rebuilt paired chains must agree on every captured pin across different depth-storm orders: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_nested_chain_rebind_consistency_keeps_rebuilt_pair_sides_distinct() {
+    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-consistency-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-chain-rebind-consistency-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "a rebuilt right-side terminal must not type-check as the original left-side terminal after storm-order variation: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
