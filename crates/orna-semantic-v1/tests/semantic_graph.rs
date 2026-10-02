@@ -5078,6 +5078,275 @@ fn bottom_cascade_keeps_completed_capture_depth_identities() {
 }
 
 #[test]
+fn nested_bottom_cascade_preserves_tuple_pin_identity_by_capture_depth_wave() {
+    let source = include_str!("fixtures/historical-nested-tuple-bottom-cascade-depth-wave.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-nested-tuple-bottom-cascade-depth-wave.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_bottom_cascade_tuple_depth_identities")
+        })
+        .expect("bottom cascade tuple identity fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_bottom_cascade_tuple_depth_identities"].ty
+    else {
+        panic!("bottom cascade identity proof must be a function");
+    };
+    let Type::Record(lanes) = result.as_ref() else {
+        panic!("bottom cascade identity proof must expose both lanes");
+    };
+    fn pin_selector<'a>(lanes: &'a BTreeMap<String, Type>, lane: &str, field: &str) -> &'a str {
+        let Type::Record(fields) = lanes.get(lane).expect("paired lane") else {
+            panic!("{lane} lane must expose capture depths");
+        };
+        let Type::Stream(element) = fields.get(field).expect("capture depth field") else {
+            panic!("{lane}.{field} must be a stream");
+        };
+        let Type::Applied { base, arguments } = element.as_ref() else {
+            panic!("{lane}.{field} must retain a historical callable");
+        };
+        assert_eq!(base, "sys.HistoricalCallable");
+        let [pin, _] = arguments.as_slice() else {
+            panic!("{lane}.{field} must retain its contextual snapshot pin: {arguments:?}");
+        };
+        let Type::Applied {
+            base,
+            arguments: context_arguments,
+        } = pin
+        else {
+            panic!("{lane}.{field} must retain a contextual snapshot pin: {pin:?}");
+        };
+        assert_eq!(base, "sys.SnapshotRefContext");
+        let [Type::Named(selector)] = context_arguments.as_slice() else {
+            panic!("{lane}.{field} snapshot context must have one identity: {context_arguments:?}");
+        };
+        selector
+            .strip_prefix("selector:")
+            .expect("snapshot context selector")
+    }
+    fn assert_pinned_wave(
+        lanes: &BTreeMap<String, Type>,
+        lane: &str,
+        depth: &str,
+        selectors: [(&str, &str); 4],
+    ) {
+        for (leaf, expected) in selectors {
+            let field = format!("{depth}_{leaf}");
+            assert_eq!(
+                pin_selector(lanes, lane, &field),
+                expected,
+                "{lane}.{field}"
+            );
+        }
+    }
+    fn assert_unbound_wave(
+        lanes: &BTreeMap<String, Type>,
+        lane: &str,
+        depth: &str,
+        attempted_selectors: &[&str],
+    ) -> BTreeSet<String> {
+        let mut binders = BTreeSet::new();
+        for leaf in ["selected", "left", "middle", "right"] {
+            let field = format!("{depth}_{leaf}");
+            let selector = pin_selector(lanes, lane, &field);
+            assert!(
+                selector.starts_with(
+                    "dynamic-call:historical-nested-tuple-bottom-cascade-depth-wave.orna:"
+                ),
+                "{lane}.{field} must retain its own unresolved binder after an incomplete tuple wave: {selector}"
+            );
+            assert!(
+                selector.ends_with(&format!(":parameter:{leaf}")),
+                "{lane}.{field} rebound to a sibling tuple binder: {selector}"
+            );
+            for attempted in attempted_selectors {
+                assert!(
+                    !selector.contains(attempted),
+                    "{lane}.{field} leaked a pin from a non-returning wave: {selector}"
+                );
+            }
+            assert!(
+                binders.insert(selector.to_owned()),
+                "tuple leaves share a binder in {lane}.{depth}"
+            );
+        }
+        binders
+    }
+
+    assert_pinned_wave(
+        lanes,
+        "left",
+        "outer",
+        [
+            ("selected", "HEAD~450"),
+            ("left", "HEAD~440"),
+            ("middle", "HEAD~430"),
+            ("right", "HEAD~420"),
+        ],
+    );
+    assert_pinned_wave(
+        lanes,
+        "right",
+        "outer",
+        [
+            ("selected", "HEAD~410"),
+            ("left", "HEAD~400"),
+            ("middle", "HEAD~390"),
+            ("right", "HEAD~380"),
+        ],
+    );
+    let left_failed_wave = assert_unbound_wave(
+        lanes,
+        "left",
+        "first",
+        &["HEAD~370", "HEAD~350", "HEAD~340"],
+    );
+    assert_pinned_wave(
+        lanes,
+        "right",
+        "first",
+        [
+            ("selected", "HEAD~330"),
+            ("left", "HEAD~320"),
+            ("middle", "HEAD~310"),
+            ("right", "HEAD~300"),
+        ],
+    );
+    assert_pinned_wave(
+        lanes,
+        "left",
+        "second",
+        [
+            ("selected", "HEAD~290"),
+            ("left", "HEAD~280"),
+            ("middle", "HEAD~270"),
+            ("right", "HEAD~260"),
+        ],
+    );
+    let right_failed_wave = assert_unbound_wave(
+        lanes,
+        "right",
+        "second",
+        &["HEAD~240", "HEAD~230", "HEAD~220"],
+    );
+    assert!(
+        left_failed_wave.is_disjoint(&right_failed_wave),
+        "incomplete tuple waves from opposite lanes must retain separate binder identities"
+    );
+    let left_terminal_failed_wave = assert_unbound_wave(
+        lanes,
+        "left",
+        "third",
+        &["HEAD~210", "HEAD~200", "HEAD~190"],
+    );
+    assert!(
+        left_terminal_failed_wave.is_disjoint(&left_failed_wave),
+        "separate incomplete capture depths must retain separate binder identities"
+    );
+    assert_pinned_wave(
+        lanes,
+        "right",
+        "third",
+        [
+            ("selected", "HEAD~170"),
+            ("left", "HEAD~160"),
+            ("middle", "HEAD~150"),
+            ("right", "HEAD~140"),
+        ],
+    );
+}
+
+#[test]
+fn bottom_incomplete_tuple_argument_does_not_rebind_sibling_snapshot_pin() {
+    let source = include_str!("fixtures/historical-nested-tuple-bottom-cascade-depth-wave.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-nested-tuple-bottom-cascade-depth-wave.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("scalar_pin_after_incomplete_tuple_wave")
+        })
+        .expect("scalar pin / incomplete tuple fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["scalar_pin_after_incomplete_tuple_wave"].ty
+    else {
+        panic!("scalar pin proof must be a function");
+    };
+    let Type::Record(cases) = result.as_ref() else {
+        panic!("scalar pin proof must expose both calls");
+    };
+    fn global_selector<'a>(cases: &'a BTreeMap<String, Type>, case: &str) -> &'a str {
+        let Type::Record(fields) = cases.get(case).expect("call case") else {
+            panic!("{case} call must expose captured values");
+        };
+        let Type::Stream(element) = fields.get("global").expect("global snapshot stream") else {
+            panic!("{case}.global must remain a stream");
+        };
+        let Type::Applied { base, arguments } = element.as_ref() else {
+            panic!("{case}.global must retain a historical callable");
+        };
+        assert_eq!(base, "sys.HistoricalCallable");
+        let [pin, _] = arguments.as_slice() else {
+            panic!("{case}.global must retain its snapshot identity: {arguments:?}");
+        };
+        let Type::Applied {
+            base,
+            arguments: context_arguments,
+        } = pin
+        else {
+            panic!("{case}.global must retain a snapshot context: {pin:?}");
+        };
+        assert_eq!(base, "sys.SnapshotRefContext");
+        let [Type::Named(selector)] = context_arguments.as_slice() else {
+            panic!("{case}.global context must have one identity: {context_arguments:?}");
+        };
+        selector
+            .strip_prefix("selector:")
+            .expect("snapshot context selector")
+    }
+    let incomplete = global_selector(cases, "incomplete");
+    assert!(
+        incomplete.starts_with(
+            "dynamic-call:historical-nested-tuple-bottom-cascade-depth-wave.orna:"
+        ),
+        "a call with a non-returning tuple argument cannot bind its sibling snapshot: {incomplete}"
+    );
+    assert!(
+        incomplete.ends_with(":parameter:global_pin"),
+        "the unresolved sibling must retain the scalar parameter identity: {incomplete}"
+    );
+    assert_eq!(
+        global_selector(cases, "complete"),
+        "HEAD~60",
+        "a complete tuple wave still binds its sibling snapshot"
+    );
+}
+
+
+#[test]
 fn concurrent_callback_tuples_reject_cross_lane_identity_mix_after_rebind() {
     let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
