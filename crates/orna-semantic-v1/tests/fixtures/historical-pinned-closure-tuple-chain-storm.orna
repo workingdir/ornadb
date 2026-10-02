@@ -1,0 +1,118 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn cascade_at(root_pin: sys.SnapshotRef) = (
+    chained_factory(root_pin),
+    (bridge_pin: sys.SnapshotRef) => (
+        chained_factory(bridge_pin)().read,
+        (leaf_pin: sys.SnapshotRef) => (
+            chained_factory(leaf_pin)().read,
+            chained_factory(leaf_pin)().read(),
+        ),
+    ),
+);
+
+pub fn structure_at(
+    primary_pin: sys.SnapshotRef,
+    secondary_pin: sys.SnapshotRef,
+    tertiary_pin: sys.SnapshotRef,
+) = (
+    cascade_at(primary_pin),
+    (cascade_at(secondary_pin), cascade_at(tertiary_pin)),
+);
+
+pub fn tuple_chains_keep_structural_stage_pins() {
+    let rolling = structure_at(
+        sys.snapshot("HEAD~80"),
+        sys.snapshot("HEAD~60"),
+        sys.snapshot("HEAD~40"),
+    );
+    let stage_0 = rolling;
+    rolling = structure_at(
+        sys.snapshot("HEAD~79"),
+        sys.snapshot("HEAD~59"),
+        sys.snapshot("HEAD~39"),
+    );
+    rolling = structure_at(
+        sys.snapshot("HEAD~78"),
+        sys.snapshot("HEAD~58"),
+        sys.snapshot("HEAD~38"),
+    );
+    rolling = structure_at(
+        sys.snapshot("HEAD~77"),
+        sys.snapshot("HEAD~57"),
+        sys.snapshot("HEAD~37"),
+    );
+    let stage_3 = rolling;
+    rolling = structure_at(
+        sys.snapshot("HEAD~76"),
+        sys.snapshot("HEAD~56"),
+        sys.snapshot("HEAD~36"),
+    );
+    rolling = structure_at(
+        sys.snapshot("HEAD~75"),
+        sys.snapshot("HEAD~55"),
+        sys.snapshot("HEAD~35"),
+    );
+    rolling = structure_at(
+        sys.snapshot("HEAD~74"),
+        sys.snapshot("HEAD~54"),
+        sys.snapshot("HEAD~34"),
+    );
+    rolling = structure_at(
+        sys.snapshot("HEAD~73"),
+        sys.snapshot("HEAD~53"),
+        sys.snapshot("HEAD~33"),
+    );
+    let stage_7 = rolling;
+    rolling = stage_0;
+    let returned = rolling;
+
+    let (returned_primary, (_, _)) = returned;
+    let (returned_root, returned_chain) = returned_primary;
+    let (returned_bridge, returned_leaf_chain) = returned_chain(sys.snapshot("HEAD~70"));
+    let (returned_reader, returned_continuation) =
+        returned_leaf_chain(sys.snapshot("HEAD~20"));
+
+    let (_, (stage_3_secondary, _)) = stage_3;
+    let (_, stage_3_chain) = stage_3_secondary;
+    let (stage_3_bridge, stage_3_leaf_chain) = stage_3_chain(sys.snapshot("HEAD~67"));
+    let (stage_3_reader, stage_3_continuation) = stage_3_leaf_chain(sys.snapshot("HEAD~15"));
+
+    let (_, (_, stage_7_tertiary)) = stage_7;
+    let (_, stage_7_chain) = stage_7_tertiary;
+    let (stage_7_bridge, stage_7_leaf_chain) = stage_7_chain(sys.snapshot("HEAD~63"));
+    let (stage_7_reader, stage_7_continuation) = stage_7_leaf_chain(sys.snapshot("HEAD~10"));
+
+    {
+        returned: {
+            root: [returned_root, chained_factory(sys.snapshot("HEAD~80"))],
+            bridge: [returned_bridge, chained_factory(sys.snapshot("HEAD~70"))().read],
+            reader: [returned_reader, chained_factory(sys.snapshot("HEAD~20"))().read],
+            continuation: [
+                returned_continuation,
+                chained_factory(sys.snapshot("HEAD~20"))().read(),
+            ],
+        },
+        stage_3: {
+            bridge: [stage_3_bridge, chained_factory(sys.snapshot("HEAD~67"))().read],
+            reader: [stage_3_reader, chained_factory(sys.snapshot("HEAD~15"))().read],
+            continuation: [
+                stage_3_continuation,
+                chained_factory(sys.snapshot("HEAD~15"))().read(),
+            ],
+        },
+        stage_7: {
+            bridge: [stage_7_bridge, chained_factory(sys.snapshot("HEAD~63"))().read],
+            reader: [stage_7_reader, chained_factory(sys.snapshot("HEAD~10"))().read],
+            continuation: [
+                stage_7_continuation,
+                chained_factory(sys.snapshot("HEAD~10"))().read(),
+            ],
+        },
+    }
+}
