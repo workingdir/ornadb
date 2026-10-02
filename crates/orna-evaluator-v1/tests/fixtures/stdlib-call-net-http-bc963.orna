@@ -1,0 +1,1 @@
+std.net.http.send("GET", "https://example.test/", [], null, null, 4096, 65536)
