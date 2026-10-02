@@ -1,0 +1,32 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+// Collecting each checkpoint lane coalesces its pins into canonical selector
+// maps before the saved tuple is rebound to a later compacted checkpoint set.
+pub fn tuple_checkpoint_maps_survive_compaction_rebind() {
+    let checkpoints = [
+        (
+            factory_at(sys.snapshot("HEAD~12")),
+            factory_at(sys.snapshot("HEAD~12")),
+        ),
+        (
+            factory_at(sys.snapshot("HEAD~11")),
+            factory_at(sys.snapshot("HEAD~11")),
+        ),
+    ];
+    let saved = checkpoints;
+    checkpoints = [
+        (
+            factory_at(sys.snapshot("HEAD~10")),
+            factory_at(sys.snapshot("HEAD~10")),
+        ),
+        (
+            factory_at(sys.snapshot("HEAD~9")),
+            factory_at(sys.snapshot("HEAD~9")),
+        ),
+    ];
+    {
+        saved: saved,
+        compacted: checkpoints,
+    }
+}
