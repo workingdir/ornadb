@@ -9391,6 +9391,11 @@ fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
         // cannot silently combine terminal values from separate lanes.
         return None;
     }
+    if let (Type::Tuple(left), Type::Tuple(right)) = (left, right)
+        && !tuple_checkpoint_promotion_matches(left, right)
+    {
+        return None;
+    }
     merge_checkpoint_field_map(left, right)
 }
 
@@ -9490,6 +9495,16 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
             })
         }
         (Type::List(left), Type::List(right)) => {
+            // Tuple shape is a list-element promotion contract: otherwise a
+            // later row with narrower checkpoint maps can widen the already
+            // inferred tuple slots. Keep this check at collection promotion
+            // so ordinary tuple rebinding (including Bottom recovery) retains
+            // its existing binder semantics.
+            if let (Type::Tuple(left), Type::Tuple(right)) = (left.as_ref(), right.as_ref())
+                && !tuple_checkpoint_promotion_matches(left, right)
+            {
+                return None;
+            }
             Some(Type::List(Box::new(merge_checkpoint_field_map(left, right)?)))
         }
         (Type::Range(left), Type::Range(right)) => {
@@ -14412,6 +14427,40 @@ fn contains_type_error(ty: &Type) -> bool {
     }
 }
 
+/// Tuple widths in callback signatures are part of the binding wave even when
+/// the tuple is nested under a higher-order function or aggregate parameter.
+/// If a nested width is unknown during recovery, do not partially promote pins
+/// from sibling arguments.
+fn contains_tuple_type(ty: &Type) -> bool {
+    match ty {
+        Type::Tuple(_) => true,
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => contains_tuple_type(element),
+        Type::Record(fields) => fields.values().any(contains_tuple_type),
+        Type::Applied { arguments, .. } => arguments.iter().any(contains_tuple_type),
+        Type::Function {
+            parameters, result, ..
+        } => parameters.iter().any(contains_tuple_type) || contains_tuple_type(result),
+        Type::MoneyPerUnit { currency, unit } => {
+            contains_tuple_type(currency) || contains_tuple_type(unit)
+        }
+        Type::Int
+        | Type::Decimal
+        | Type::Float
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null
+        | Type::Named(_)
+        | Type::Bottom
+        | Type::Error => false,
+    }
+}
+
 /// `Bottom` is compatible during ordinary contextual checking, but a value
 /// containing a non-returning tuple or record component is never produced as
 /// an argument. Walk only value aggregates: a callback's Bottom result or an
@@ -16658,7 +16707,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
             let Some(actual) = argument_types.get(argument_index) else {
                 return true;
             };
-            matches!(formal, Type::Tuple(_))
+            contains_tuple_type(formal)
                 && (contains_type_error(formal)
                     || contains_type_error(actual)
                     || !types_match(formal, actual))
@@ -16666,9 +16715,9 @@ fn specialize_dynamic_parameter_snapshot_contexts(
     // The reference specifies pin identity but leaves recovery after a call
     // that cannot reach the callee unspecified. Treat its binding wave
     // transactionally:
-    // a malformed tuple or any missing required argument must not rebind
-    // otherwise valid siblings captured by the returned callable. Omitted
-    // defaults are valid.
+    // a malformed tuple at any depth in an argument signature, or any missing
+    // required argument, must not rebind otherwise valid siblings captured by
+    // the returned callable. Omitted defaults are valid.
     let suppress_rebinding = nonreturning_argument || incomplete_argument;
     if !suppress_rebinding {
         for (parameter_index, formal) in formal_parameters.iter().enumerate() {
@@ -16779,11 +16828,14 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                     // Keep separate same-named tuple slots separate in the
                     // resulting symbolic pin map by carrying their formal
                     // binder identity alongside the shared call site.
-                    let binder_identity = binder
+                    // Binderless captured and live selectors can share a
+                    // parameter name. Preserve their source identity too, or
+                    // a suppressed rebind can collapse distinct map slots.
+                    let formal_identity = binder
                         .map(|binder| format!(":formal-binder:{binder}"))
-                        .unwrap_or_default();
+                        .unwrap_or_else(|| format!(":formal-selector:{selector}"));
                     contextual_snapshot_ref(&format!(
-                        "selector:dynamic-call:{}:{}..{}:parameter:{parameter}{binder_identity}",
+                        "selector:dynamic-call:{}:{}..{}:parameter:{parameter}{formal_identity}",
                         call_span.file.as_deref().unwrap_or("<unknown>"),
                         call_span.start,
                         call_span.end,
@@ -17044,7 +17096,7 @@ fn collect_snapshot_binder_contexts(
                 }
             }
         }
-        (Type::Tuple(formal), Type::Tuple(actual)) => {
+        (Type::Tuple(formal), Type::Tuple(actual)) if formal.len() == actual.len() => {
             for (formal, actual) in formal.iter().zip(actual) {
                 collect_snapshot_binder_contexts(formal, actual, into);
             }
@@ -17480,14 +17532,7 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
                 })
         }
         (Type::Tuple(expected), Type::Tuple(actual)) => {
-            expected.len() == actual.len()
-                && tuple_pin_identity_topology_matches(expected, actual)
-                && expected
-                    .iter()
-                    .zip(actual)
-                    .all(|(expected, actual)| {
-                        pinned_snapshot_shape_matches(expected, actual)
-                    })
+            tuple_checkpoint_shape_matches(expected, actual)
         }
         (
             Type::Applied {
@@ -17522,6 +17567,94 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
                 && pinned_snapshot_shape_matches(expected_unit, actual_unit)
         }
         _ => false,
+    }
+}
+
+fn tuple_checkpoint_shape_matches(expected: &[Type], actual: &[Type]) -> bool {
+    expected.len() == actual.len()
+        && tuple_pin_identity_topology_matches(expected, actual)
+        && expected
+            .iter()
+            .zip(actual)
+            .all(|(expected, actual)| pinned_snapshot_shape_matches(expected, actual))
+}
+
+/// Preserve the first tuple row's checkpoint-map width during local list
+/// promotion. The history reference defines pin identity but not widening a
+/// tuple slot when a later row has a different map width, so this edge fails
+/// closed instead of silently unioning incompatible slot maps.
+fn tuple_checkpoint_promotion_matches(left: &[Type], right: &[Type]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| checkpoint_pin_map_widths_match(left, right))
+}
+
+fn checkpoint_pin_map_widths_match(left: &Type, right: &Type) -> bool {
+    if matches!(left, Type::Bottom)
+        || matches!(right, Type::Bottom)
+        || left == &Type::Named("sys.SnapshotRef".into())
+        || right == &Type::Named("sys.SnapshotRef".into())
+    {
+        return true;
+    }
+    if is_snapshot_context_type(left) || is_snapshot_context_type(right) {
+        return is_snapshot_context_map_shape(left)
+            && is_snapshot_context_map_shape(right)
+            && snapshot_context_map_cardinality(left) == snapshot_context_map_cardinality(right);
+    }
+
+    match (left, right) {
+        (Type::List(left), Type::List(right))
+        | (Type::Range(left), Type::Range(right))
+        | (Type::Relation(left), Type::Relation(right))
+        | (Type::Optional(left), Type::Optional(right)) => {
+            checkpoint_pin_map_widths_match(left, right)
+        }
+        // Stream element identities are scoped to their callback waves and
+        // are validated by stream inference; they are not checkpoint tuple
+        // data slots for this promotion guard.
+        (Type::Stream(_), Type::Stream(_)) => true,
+        (Type::Tuple(left), Type::Tuple(right)) if left.len() == right.len() => left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| checkpoint_pin_map_widths_match(left, right)),
+        (Type::Record(left), Type::Record(right)) if left.len() == right.len() => left
+            .iter()
+            .all(|(name, left)| right.get(name).is_some_and(|right| checkpoint_pin_map_widths_match(left, right))),
+        // Function parameter/result compatibility is checked by the function
+        // merge arm itself. Tuple promotion only needs to guard data slots;
+        // recursively treating callable binders as tuple data breaks
+        // transactional recovery for a Bottom call wave.
+        (Type::Function { .. }, Type::Function { .. }) => true,
+        (
+            Type::Applied {
+                base: left_base,
+                arguments: left_arguments,
+            },
+            Type::Applied {
+                base: right_base,
+                arguments: right_arguments,
+            },
+        ) if left_base == right_base && left_arguments.len() == right_arguments.len() => left_arguments
+            .iter()
+            .zip(right_arguments)
+            .all(|(left, right)| checkpoint_pin_map_widths_match(left, right)),
+        (
+            Type::MoneyPerUnit {
+                currency: left_currency,
+                unit: left_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: right_currency,
+                unit: right_unit,
+            },
+        ) => {
+            checkpoint_pin_map_widths_match(left_currency, right_currency)
+                && checkpoint_pin_map_widths_match(left_unit, right_unit)
+        }
+        _ => true,
     }
 }
 
@@ -19664,6 +19797,165 @@ mod tests {
             left, right,
             "suppression must keep same-named paired pin slots at distinct widths"
         );
+    }
+
+    #[test]
+    fn unknown_nested_paired_width_suppresses_sibling_identity_promotion() {
+        let callback_selected =
+            contextual_snapshot_ref("selector:binder:callback.orna@10..18:parameter:selected");
+        let callback_sibling =
+            contextual_snapshot_ref("selector:binder:callback.orna@20..28:parameter:sibling");
+        let paired_selected =
+            contextual_snapshot_ref("selector:binder:pair.orna@30..38:parameter:selected");
+        let paired_sibling =
+            contextual_snapshot_ref("selector:binder:pair.orna@40..48:parameter:sibling");
+        let formal_callback = Type::Function {
+            parameters: vec![Type::Tuple(vec![
+                callback_selected.clone(),
+                callback_sibling.clone(),
+            ])],
+            parameter_names: None,
+            default_parameters: BTreeSet::new(),
+            result: Box::new(Type::Text),
+        };
+        let formal_pair = Type::Tuple(vec![paired_selected.clone(), paired_sibling.clone()]);
+        let actual_callback = Type::Function {
+            parameters: vec![Type::Tuple(vec![
+                contextual_snapshot_ref("selector:HEAD~12"),
+                Type::Error,
+            ])],
+            parameter_names: None,
+            default_parameters: BTreeSet::new(),
+            result: Box::new(Type::Text),
+        };
+        let arguments = (0..2)
+            .map(|index| orna_syntax_v1::Argument {
+                name: None,
+                value: Expr::Name {
+                    text: format!("argument_{index}"),
+                    span: SyntaxSpan::new(50 + index * 10, 55 + index * 10),
+                },
+                span: SyntaxSpan::new(50 + index * 10, 55 + index * 10),
+            })
+            .collect::<Vec<_>>();
+        let result = Type::Record(BTreeMap::from([
+            ("callback_selected".into(), callback_selected),
+            ("callback_sibling".into(), callback_sibling),
+            ("paired_selected".into(), paired_selected),
+            ("paired_sibling".into(), paired_sibling),
+        ]));
+
+        let specialized = specialize_dynamic_parameter_snapshot_contexts(
+            &result,
+            &[formal_callback, formal_pair],
+            &BTreeSet::new(),
+            None,
+            &arguments,
+            &[
+                actual_callback,
+                Type::Tuple(vec![
+                    contextual_snapshot_ref("selector:HEAD~10"),
+                    contextual_snapshot_ref("selector:HEAD~9"),
+                ]),
+            ],
+            &BTreeMap::new(),
+            &SyntaxSpan::new(45, 75),
+            None,
+        );
+
+        let mut contexts = BTreeSet::new();
+        collect_test_snapshot_contexts(&specialized, &mut contexts);
+        assert_eq!(
+            contexts.len(),
+            4,
+            "all paired pins must remain represented after an unknown nested width: {contexts:?}"
+        );
+        assert!(
+            contexts
+                .iter()
+                .all(|context| context.starts_with("selector:dynamic-call:")),
+            "no valid callback or sibling pin may be promoted independently: {contexts:?}"
+        );
+        assert!(
+            !contexts.iter().any(|context| context.contains("HEAD~")),
+            "unknown paired width must suppress all concrete identities in this wave: {contexts:?}"
+        );
+    }
+
+    #[test]
+    fn binder_context_collector_rejects_partial_tuple_widths() {
+        let formal = Type::Tuple(vec![
+            contextual_snapshot_ref("selector:binder:pair.orna@10..18:parameter:selected"),
+            contextual_snapshot_ref("selector:binder:pair.orna@20..28:parameter:sibling"),
+        ]);
+        let actual = Type::Tuple(vec![contextual_snapshot_ref("selector:HEAD~12")]);
+        let mut binder_contexts = BTreeMap::new();
+
+        collect_snapshot_binder_contexts(&formal, &actual, &mut binder_contexts);
+
+        assert!(
+            binder_contexts.is_empty(),
+            "an unpaired width must not collect even the valid tuple prefix: {binder_contexts:?}"
+        );
+    }
+
+    #[test]
+    fn omitted_sibling_keeps_same_named_captured_and_live_slots_distinct() {
+        let result = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:capture:parameter:pin".into()),
+                Type::Named("selector:parameter:pin".into()),
+            ],
+        };
+        let arguments = vec![orna_syntax_v1::Argument {
+            name: None,
+            value: Expr::Name {
+                text: "supplied_pin".into(),
+                span: SyntaxSpan::new(10, 22),
+            },
+            span: SyntaxSpan::new(10, 22),
+        }];
+        let specialized = specialize_dynamic_parameter_snapshot_contexts(
+            &result,
+            &[
+                Type::Named("sys.SnapshotRef".into()),
+                Type::Tuple(vec![
+                    Type::Named("sys.SnapshotRef".into()),
+                    Type::Named("sys.SnapshotRef".into()),
+                ]),
+            ],
+            &BTreeSet::new(),
+            None,
+            &arguments,
+            &[contextual_snapshot_ref("selector:HEAD~12")],
+            &BTreeMap::new(),
+            &SyntaxSpan::new(5, 30),
+            None,
+        );
+
+        let Type::Applied { base, arguments } = &specialized else {
+            panic!("omission must preserve the pair rather than collapse it: {specialized:?}");
+        };
+        assert_eq!(base, "semantic.SnapshotContextMap");
+        assert!(is_snapshot_context_map_shape(&specialized));
+        assert_eq!(
+            arguments.len(),
+            2,
+            "both paired slots must remain distinct: {arguments:?}"
+        );
+        let Type::Named(left) = &arguments[0] else {
+            panic!("the first suppressed slot must retain a selector identity: {arguments:?}");
+        };
+        let Type::Named(right) = &arguments[1] else {
+            panic!("the second suppressed slot must retain a selector identity: {arguments:?}");
+        };
+        assert!(
+            left.starts_with("selector:dynamic-call:")
+                && right.starts_with("selector:dynamic-call:"),
+            "the failed call must preserve symbolic identities: {arguments:?}"
+        );
+        assert_ne!(left, right, "captured and live slots must not collapse");
     }
 
     fn collect_test_snapshot_contexts(ty: &Type, into: &mut BTreeSet<String>) {
