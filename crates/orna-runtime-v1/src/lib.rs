@@ -24944,7 +24944,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            result.unwrap(),
+            result.unwrap_or_else(|failure| panic!("fixture failed with {}", failure.code())),
             CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
         );
         assert_eq!(
