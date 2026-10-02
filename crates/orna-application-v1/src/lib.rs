@@ -9455,7 +9455,7 @@ mod tests {
             &dispatcher,
         ))
         .expect("checked-in source table write evaluates for the activation");
-        assert_eq!(staged.value().raw(), &OvbRaw::Bool(true));
+        assert_eq!(staged.value().raw(), &OvbRaw::Int(34.into()));
         assert_eq!(staged.mutations().len(), 1);
 
         let source_id = staged.mutations()[0].id();
@@ -9471,6 +9471,7 @@ mod tests {
             .stage_for_request(&authority, &context, request)
             .expect("same captured source activation can be staged again");
         assert_eq!(activation.mutations()[0].id(), retry.mutations()[0].id());
+        assert_eq!(activation.next_digest(), retry.next_digest());
         let sibling_request = staged
             .stage_for_request(
                 &authority,
@@ -9485,6 +9486,26 @@ mod tests {
             activation.mutations()[0].id(),
             sibling_request.mutations()[0].id(),
             "source writes from different requests cannot reuse mutation identity"
+        );
+        let sibling_session = staged
+            .stage_for_request(
+                &authority,
+                &context,
+                RequestIdentity {
+                    session_id: [47; 16],
+                    request_id: request.request_id,
+                },
+            )
+            .expect("the same request ID can be used in a different session");
+        assert_ne!(
+            activation.mutations()[0].id(),
+            sibling_session.mutations()[0].id(),
+            "request identity includes its session scope"
+        );
+        assert_ne!(
+            activation.next_digest(),
+            sibling_session.next_digest(),
+            "the committed generation digest retains the request session scope"
         );
         let key = activation.mutations()[0].key().to_vec();
 
@@ -9513,10 +9534,21 @@ mod tests {
         let OvbRaw::Map(fields) = row.raw() else {
             panic!("committed row is a record");
         };
-        assert!(fields.iter().any(|(field, value)| {
-            matches!(field, OvbRaw::Text(name) if name == "text")
-                && matches!(value, OvbRaw::Text(text) if text == "staged before pause")
-        }));
+        assert_eq!(
+            fields,
+            &vec![
+                (
+                    OvbRaw::Text("id".to_owned()),
+                    OvbRaw::Int(12.into()),
+                ),
+                (
+                    OvbRaw::Text("text".to_owned()),
+                    OvbRaw::Text("staged before pause".to_owned()),
+                ),
+                (OvbRaw::Text("computed".to_owned()), OvbRaw::Int(34.into())),
+            ],
+            "the source computation and its key are the values durably staged"
+        );
 
         drop(state);
         std::fs::remove_dir_all(root).expect("temporary runtime repository removed");
