@@ -9516,7 +9516,9 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
                     .collect::<Option<BTreeMap<_, _>>>()?,
             ))
         }
-        (Type::Tuple(left), Type::Tuple(right)) if left.len() == right.len() => {
+        (Type::Tuple(left), Type::Tuple(right))
+            if tuple_checkpoint_shape_matches(left, right) =>
+        {
             Some(Type::Tuple(
                 left.iter()
                     .zip(right)
@@ -17456,14 +17458,7 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
                 })
         }
         (Type::Tuple(expected), Type::Tuple(actual)) => {
-            expected.len() == actual.len()
-                && tuple_pin_identity_topology_matches(expected, actual)
-                && expected
-                    .iter()
-                    .zip(actual)
-                    .all(|(expected, actual)| {
-                        pinned_snapshot_shape_matches(expected, actual)
-                    })
+            tuple_checkpoint_shape_matches(expected, actual)
         }
         (
             Type::Applied {
@@ -17499,6 +17494,15 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
         }
         _ => false,
     }
+}
+
+fn tuple_checkpoint_shape_matches(expected: &[Type], actual: &[Type]) -> bool {
+    expected.len() == actual.len()
+        && tuple_pin_identity_topology_matches(expected, actual)
+        && expected
+            .iter()
+            .zip(actual)
+            .all(|(expected, actual)| pinned_snapshot_shape_matches(expected, actual))
 }
 
 /// A tuple rebind may rename snapshot selectors, but it must keep the
