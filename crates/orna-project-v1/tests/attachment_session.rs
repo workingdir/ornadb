@@ -10856,6 +10856,193 @@ fn paired_depth_storm_rebinds_keep_sibling_terminal_routes_consistent() {
     assert_route(&parent, &format!("{}.orna", aliases[1]), 1, 0, 0);
 }
 
+#[test]
+fn atomic_rebind_preserves_retained_routes_through_paired_depths() {
+    let package_source = include_str!("fixtures/attach-package.orna");
+    let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
+    let aliases = ["archive", "archive_copy", "archive_copy_archive"];
+    let terminal_before_commit = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "701",
+        None,
+        "terminal before paired rebind",
+    );
+    let terminal_after_commit = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "702",
+        None,
+        "terminal after paired rebind",
+    );
+    let deep_before_manifest = format!("{} {}\n", aliases[2], terminal_before_commit);
+    let deep_before_commit = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "601",
+        Some(&deep_before_manifest),
+        "deep before paired rebind",
+    );
+    let deep_after_manifest = format!("{} {}\n", aliases[2], terminal_after_commit);
+    let deep_after_commit = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "602",
+        Some(&deep_after_manifest),
+        "deep after paired rebind",
+    );
+    let middle_before_manifest = format!("{} {}\n", aliases[1], deep_before_commit);
+    let middle_before_commit = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "501",
+        Some(&middle_before_manifest),
+        "middle before paired rebind",
+    );
+    let middle_after_manifest = format!("{} {}\n", aliases[1], deep_after_commit);
+    let middle_after_commit = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "502",
+        Some(&middle_after_manifest),
+        "middle after paired rebind",
+    );
+    let parent_manifest = format!("{} {}\n", aliases[0], middle_before_commit);
+    let parent_commit = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "401",
+        Some(&parent_manifest),
+        "parent for atomic paired rebind",
+    );
+
+    let loader = ProjectLoader::default();
+    let resolve_pin = |name: &str, commit: &str| {
+        PinnedDatabase::resolve(
+            name.to_owned(),
+            shared_repository.clone(),
+            commit,
+            loader,
+        )
+        .unwrap()
+    };
+    let resolver = PackageResolver::new(
+        aliases
+            .iter()
+            .map(|alias| ((*alias).to_owned(), shared_repository.clone())),
+        loader,
+    )
+    .unwrap();
+    let assert_pin = |session: &AttachedDatabaseSession, alias: &str, commit: &str| {
+        assert_eq!(
+            session.database(alias).unwrap().pin().commit().as_str(),
+            commit
+        );
+    };
+
+    let mut parent = resolver
+        .resolve_for_parent(resolve_pin("app", &parent_commit))
+        .unwrap();
+    let retained_parent = parent.clone();
+    let previous_middle = parent
+        .rebind_database(resolve_pin(aliases[0], &middle_after_commit))
+        .unwrap();
+    assert_pin(&parent, aliases[0], &middle_after_commit);
+    assert_module_route(&parent, "archive.orna", "= 502");
+    assert_pin(&retained_parent, aliases[0], &middle_before_commit);
+    assert_module_route(&retained_parent, "archive.orna", "= 501");
+    assert_eq!(previous_middle.pin().name(), aliases[0]);
+    assert_eq!(
+        previous_middle.pin().commit().as_str(),
+        middle_before_commit.as_str()
+    );
+
+    let mut retained_middle = resolver
+        .resolve_nested_for_alias(&retained_parent, aliases[0])
+        .unwrap();
+    assert_pin(&retained_middle, aliases[0], &middle_before_commit);
+    assert_pin(&retained_middle, aliases[1], &deep_before_commit);
+    assert_module_route(&retained_middle, "main.orna", "= 501");
+    assert_module_route(&retained_middle, "archive_copy.orna", "= 601");
+    let retained_deep = retained_middle
+        .rebind_database(resolve_pin(aliases[1], &deep_after_commit))
+        .unwrap();
+    assert_pin(&retained_middle, aliases[1], &deep_after_commit);
+    assert_module_route(&retained_middle, "archive_copy.orna", "= 602");
+    assert_eq!(retained_deep.pin().name(), aliases[1]);
+    assert_eq!(
+        retained_deep.pin().commit().as_str(),
+        deep_before_commit.as_str()
+    );
+
+    let retained_terminal = resolver.resolve_for_parent(retained_deep).unwrap();
+    assert_pin(
+        &retained_terminal,
+        aliases[2],
+        &terminal_before_commit,
+    );
+    assert_module_route(&retained_terminal, "main.orna", "= 601");
+    assert_module_route(&retained_terminal, "archive_copy_archive.orna", "= 701");
+    let fresh_middle = resolver
+        .resolve_nested_for_alias(&parent, aliases[0])
+        .unwrap();
+    assert_pin(&fresh_middle, aliases[0], &middle_after_commit);
+    assert_pin(&fresh_middle, aliases[1], &deep_after_commit);
+    assert_module_route(&fresh_middle, "main.orna", "= 502");
+    assert_module_route(&fresh_middle, "archive_copy.orna", "= 602");
+    let fresh_terminal = resolver
+        .resolve_nested_for_alias(&retained_middle, aliases[1])
+        .unwrap();
+    assert_pin(&fresh_terminal, aliases[2], &terminal_after_commit);
+    assert_module_route(&fresh_terminal, "main.orna", "= 602");
+    assert_module_route(&fresh_terminal, "archive_copy_archive.orna", "= 702");
+
+    let retained_path_terminal = resolver
+        .resolve_nested_path(&retained_parent, &aliases[..2])
+        .unwrap();
+    assert_pin(
+        &retained_path_terminal,
+        aliases[2],
+        &terminal_before_commit,
+    );
+    assert_module_route(&retained_path_terminal, "main.orna", "= 601");
+    assert_module_route(
+        &retained_path_terminal,
+        "archive_copy_archive.orna",
+        "= 701",
+    );
+    let current_path_terminal = resolver
+        .resolve_nested_path(&parent, &aliases[..2])
+        .unwrap();
+    assert_pin(
+        &current_path_terminal,
+        aliases[2],
+        &terminal_after_commit,
+    );
+    assert_module_route(&current_path_terminal, "main.orna", "= 602");
+    assert_module_route(
+        &current_path_terminal,
+        "archive_copy_archive.orna",
+        "= 702",
+    );
+
+    assert!(matches!(
+        resolver.resolve_nested_for_alias(&parent, aliases[1]),
+        Err(AttachmentError::DatabaseUnavailable)
+    ));
+    assert!(matches!(
+        resolver.resolve_nested_path(&parent, &["missing"]),
+        Err(AttachmentError::DatabaseUnavailable)
+    ));
+
+    assert!(matches!(
+        parent.rebind_database(resolve_pin(aliases[2], &terminal_after_commit)),
+        Err(AttachmentError::AttachmentNotFound)
+    ));
+    assert_pin(&parent, aliases[0], &middle_after_commit);
+    assert_module_route(&parent, "archive.orna", "= 502");
+}
+
 fn assert_module_route(session: &AttachedDatabaseSession, path: &str, source_marker: &str) {
     assert!(
         session
