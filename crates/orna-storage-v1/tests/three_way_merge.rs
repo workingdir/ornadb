@@ -16849,6 +16849,37 @@ fn sustained_paired_depth_merges_keep_chain_order_isolated() {
 }
 
 #[test]
+fn paired_depth_chains_keep_identical_keys_table_local() {
+    let (base, left, right, mut source) = paired_tombstone_chain_load_inputs(true, true, false);
+    let plan = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 30, max_conflicts: 0 },
+    )
+    .expect("paired tables with identical primary keys merge independently");
+    let expected_tombstones = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .into_iter()
+    .map(string)
+    .collect::<Vec<_>>();
+
+    assert_eq!(plan.tables.keys().copied().collect::<Vec<_>>(), [id(1), id(2)]);
+    assert_eq!(plan.report.rows_examined, 30);
+    for table in [id(1), id(2)] {
+        assert_eq!(table_row_tombstones(&plan, table), expected_tombstones);
+        assert_eq!(table_live_row_keys(&plan, table), vec![string("z")]);
+    }
+}
+
+#[test]
 fn fixture_cross_depth_load_budget_stops_without_partial_plan() {
     let (base, left, right, mut source) = cross_depth_load_inputs();
     let error = merge_three_way_snapshots(
