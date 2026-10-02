@@ -1072,14 +1072,14 @@ pub fn explain_query_with_disjunct_storm_chain(
 /// ORNA-PLAN does not specify estimates for branch-local limit chains inside
 /// nested disjunctions or where nested cascades rebind within those chains.
 /// This adapter applies each branch's limits and 50%-per-conjunct fallback
-/// independently, combines branch matches in declaration order without
-/// counting more rows or bytes than the stage input, and feeds that result to
-/// the next storm. Every cascade result is capped to its immediate input at
-/// every nesting depth; a nested rebind therefore cannot escape an ancestor's
-/// already-bounded branch estimate. At a rebind, the immediate cap is the
-/// current branch's bounded rows and bytes. An explicit rebind runs just after
-/// its one-based limit position and feeds its capped output to the following
-/// limit. Since
+/// independently from the same stage input, combines branch matches in
+/// declaration order without counting more rows or bytes than that input, and
+/// feeds the bounded result to the next storm stage. Every cascade result is
+/// capped to its immediate input at every nesting depth, so a nested rebind
+/// cannot expand beyond its ancestor branch's bounded estimate. The immediate
+/// cap at a rebind is the current branch's bounded rows and bytes. An explicit
+/// rebind runs just after its one-based limit position and feeds its capped
+/// output to the following limit. Since
 /// `sys.PlanNodeKind` has no union node, each storm is one aggregate filter
 /// node whose details retain the exact branch chains and rebind points; this
 /// avoids presenting sibling limits as a false serial pipeline. The
@@ -2060,6 +2060,12 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             (
                 "limit_chain_rebind_predicates".to_owned(),
                 PlanDetail::Expressions(limit_chain_rebind_predicates),
+            ),
+            (
+                "storm_stage_input_scope".to_owned(),
+                PlanDetail::Text(
+                    "query_input_then_previous_stage_bounded_rows_and_bytes".to_owned(),
+                ),
             ),
             (
                 "branch_local_storm_cap_scope".to_owned(),
