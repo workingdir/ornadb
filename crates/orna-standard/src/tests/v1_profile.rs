@@ -11,6 +11,8 @@ use crate::{
     REFERENCE_STANDARD_ENCODING_PATH_V1, REFERENCE_STANDARD_ENCODING_ORNA_PATH_V1,
     REFERENCE_STANDARD_ENCODING_OVB_PATH_V1, REFERENCE_STANDARD_ENCODING_JSON_PATH_V1,
     REFERENCE_STANDARD_ENCODING_BASE64_PATH_V1,
+    REFERENCE_STANDARD_NET_PATH_V1, REFERENCE_STANDARD_URL_PATH_V1,
+    REFERENCE_STANDARD_NET_HTTP_PATH_V1, REFERENCE_STANDARD_NET_WEBSOCKET_PATH_V1,
     REFERENCE_STANDARD_TIME_COMPACT_PATH_V1, REFERENCE_STANDARD_TIME_CLOCK_PATH_V1,
     REFERENCE_STANDARD_TIME_WORDS_PATH_V1, REFERENCE_STANDARD_TIME_ISO_PATH_V1,
     REFERENCE_STANDARD_OPTION_PATH_V1, REFERENCE_STANDARD_RESULT_PATH_V1,
@@ -23,11 +25,15 @@ use crate::{
 };
 
 #[test]
-fn pinned_std_entrypoint_imports_random_and_hash_modules() {
+fn pinned_std_entrypoint_imports_optional_content_modules() {
     let entrypoint = include_str!("../../../../stdlib/std/main.orna");
+    let parsed = orna_syntax_v1::parse_module_with_file(entrypoint, "std/main.orna");
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
     assert!(entrypoint.lines().any(|line| line.trim() == "use hash;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use random;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use encoding;"));
+    assert!(entrypoint.lines().any(|line| line.trim() == "use url;"));
+    assert!(entrypoint.lines().any(|line| line.trim() == "use net;"));
 }
 
 #[test]
@@ -37,6 +43,17 @@ fn pinned_encoding_entrypoint_exports_its_named_codec_modules() {
         assert!(
             entrypoint.lines().any(|line| line.trim() == format!("use {module};")),
             "std.encoding must import {module}"
+        );
+    }
+}
+
+#[test]
+fn pinned_network_entrypoint_exports_http_and_websocket_modules() {
+    let entrypoint = include_str!("../../../../stdlib/std/net/main.orna");
+    for module in ["http", "websocket"] {
+        assert!(
+            entrypoint.lines().any(|line| line.trim() == format!("use {module};")),
+            "std.net must import {module}"
         );
     }
 }
@@ -254,6 +271,84 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[28].1.contains(contract), "missing Base64 contract `{contract}`");
     }
+    assert_eq!(sources[29].0, REFERENCE_STANDARD_NET_PATH_V1);
+    for module in ["http", "websocket"] {
+        assert!(sources[29].1.contains(&format!("use {module};")));
+    }
+    assert_eq!(sources[30].0, REFERENCE_STANDARD_URL_PATH_V1);
+    for declaration in [
+        "pub fn parse(input: Str): Str",
+        "pub fn resolve(base_url: Str, reference: Str): Str",
+        "pub fn format(value: Str): Str",
+        "pub fn encode_component(value: Str): Str",
+        "pub fn decode_component(value: Str): Str",
+        "pub fn query_parameters(value: Str): [(Str, Str?)]",
+        "pub fn with_query_parameter(value: Str, name: Str, parameter: Str?): Str",
+    ] {
+        assert!(sources[30].1.contains(declaration), "missing URL declaration `{declaration}`");
+    }
+    for contract in [
+        "http, https",
+        "non-ASCII host labels",
+        "malformed percent escapes",
+        "RFC 3986 reference resolution",
+        "Non-ASCII path, query, and fragment scalars are UTF-8",
+        "Query parameters preserve source order and duplicates",
+        "distinct from an explicit empty value",
+        "'+' is a literal plus",
+        "never transmit a fragment",
+    ] {
+        assert!(sources[30].1.contains(contract), "missing URL contract `{contract}`");
+    }
+    assert_eq!(sources[31].0, REFERENCE_STANDARD_NET_HTTP_PATH_V1);
+    for declaration in [
+        "pub fn start(",
+        "max_header_bytes: Int",
+        "max_body_bytes: Int",
+        "pub fn wait(handle: Uuid, timeout: Duration?): (Int, [(Str, Str)], Blob)",
+        "pub fn cancel(handle: Uuid): Bool",
+        "pub fn send(",
+    ] {
+        assert!(sources[31].1.contains(declaration), "missing HTTP declaration `{declaration}`");
+    }
+    for contract in [
+        "ordered list of name/value pairs",
+        "http/https URLs are accepted",
+        "HTTPS always validates",
+        "No redirect is followed and no retry is implicit",
+        "max_header_bytes must be positive",
+        "max_body_bytes is nonnegative",
+        "max_header_bytes",
+        "max_body_bytes",
+        "caller may cancel explicitly",
+        "cannot retract bytes already sent",
+    ] {
+        assert!(sources[31].1.contains(contract), "missing HTTP contract `{contract}`");
+    }
+    assert_eq!(sources[32].0, REFERENCE_STANDARD_NET_WEBSOCKET_PATH_V1);
+    for declaration in [
+        "pub fn connect(",
+        "pub fn send(connection: Uuid, kind: Str, payload: Blob): Unit",
+        "pub fn receive(connection: Uuid): (Str, Blob)?",
+        "pub fn selected_subprotocol(connection: Uuid): Str?",
+        "pub fn close(connection: Uuid, code: Int, reason: Str): Unit",
+        "pub fn cancel(connection: Uuid): Bool",
+    ] {
+        assert!(sources[32].1.contains(declaration), "missing WebSocket declaration `{declaration}`");
+    }
+    for contract in [
+        "Only ws/wss URLs",
+        "max_handshake_bytes",
+        "max_message_bytes",
+        "status is 101 and repeated headers are preserved",
+        "must be positive",
+        "owner ending cancels pending",
+        "text payload must be valid UTF-8",
+        "Return null only after an orderly peer close",
+        "Immediate cancellation aborts pending reads/writes",
+    ] {
+        assert!(sources[32].1.contains(contract), "missing WebSocket contract `{contract}`");
+    }
     assert_eq!(sources[11].0, REFERENCE_STANDARD_OPTION_PATH_V1);
     assert!(sources[11].1.contains("pub fn and_then<T, U>"));
     assert_eq!(sources[12].0, REFERENCE_STANDARD_RESULT_PATH_V1);
@@ -355,6 +450,13 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
             .verify_source(path, source)
             .expect("the exact 1.0 source is pinned");
     }
+    let semantic_catalogue = orna_semantic_v1::Catalogue::authoritative_core()
+        .with_standard_sources(&profile, sources.clone());
+    assert!(
+        semantic_catalogue.is_ok(),
+        "source-backed standard catalogue rejected the pinned modules: {:?}",
+        semantic_catalogue.err()
+    );
     let mut changed_error_source = sources[19].1.clone();
     changed_error_source.push_str("\n// changed after the captured snapshot\n");
     assert!(profile
@@ -378,6 +480,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         (REFERENCE_STANDARD_ENCODING_OVB_PATH_V1, 26),
         (REFERENCE_STANDARD_ENCODING_JSON_PATH_V1, 27),
         (REFERENCE_STANDARD_ENCODING_BASE64_PATH_V1, 28),
+        (REFERENCE_STANDARD_NET_PATH_V1, 29),
+        (REFERENCE_STANDARD_URL_PATH_V1, 30),
+        (REFERENCE_STANDARD_NET_HTTP_PATH_V1, 31),
+        (REFERENCE_STANDARD_NET_WEBSOCKET_PATH_V1, 32),
     ] {
         let mut changed_source = sources[source_index].1.clone();
         changed_source.push_str("\n// changed after the captured snapshot\n");
@@ -399,6 +505,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "{:?}",
         parsed_serialization_calls.diagnostics
     );
+    let network_calls = include_str!("fixtures/v1_network_calls.orna");
+    let parsed_network_calls =
+        orna_syntax_v1::parse_module_with_file(network_calls, "network_calls.orna");
+    assert!(parsed_network_calls.is_ok(), "{:?}", parsed_network_calls.diagnostics);
     let catalogue = reference_standard_catalogue_v1().expect("the standard module checks");
     let consumer = include_str!("fixtures/v1_collection_operations_consumer.orna");
     let asof_consumer = include_str!("fixtures/v1_standard_consumer.orna");
@@ -411,6 +521,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     let iteration_consumer = include_str!("fixtures/v1_iteration_consumer.orna");
     let random_hash_consumer = include_str!("fixtures/v1_random_hash_consumer.orna");
     let serialization_consumer = include_str!("fixtures/v1_serialization_consumer.orna");
+    let network_consumer = include_str!("fixtures/v1_network_consumer.orna");
     for (path, source) in [
         ("list_consumer.orna", include_str!("fixtures/v1_list_consumer.orna")),
         ("map_consumer.orna", include_str!("fixtures/v1_map_consumer.orna")),
@@ -442,6 +553,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
             ModuleInput::new("iteration_consumer.orna", iteration_consumer),
             ModuleInput::new("random_hash_consumer.orna", random_hash_consumer),
             ModuleInput::new("serialization_consumer.orna", serialization_consumer),
+            ModuleInput::new("network_consumer.orna", network_consumer),
         ],
         &catalogue,
     );
