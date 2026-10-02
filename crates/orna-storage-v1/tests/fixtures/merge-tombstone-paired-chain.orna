@@ -1,0 +1,41 @@
+{
+  id: "a",
+  name: "Anchor",
+  city: "Oslo",
+}
+
+{
+  id: "a/child",
+  name: "Child",
+  city: "Oslo",
+}
+
+{
+  id: "a/child/deep",
+  name: "Deep",
+  city: "Oslo",
+}
+
+{
+  id: "b",
+  name: "Sibling B",
+  city: "Paris",
+}
+
+{
+  id: "c",
+  name: "Sibling C",
+  city: "Paris",
+}
+
+{
+  id: "d",
+  name: "Sibling D",
+  city: "Paris",
+}
+
+{
+  id: "zz",
+  name: "Sibling ZZ",
+  city: "Paris",
+}
