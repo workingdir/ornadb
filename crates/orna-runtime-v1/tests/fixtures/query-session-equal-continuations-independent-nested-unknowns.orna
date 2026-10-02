@@ -1,0 +1,17 @@
+if true {
+    let left_prefix =
+        (sys.MaintenanceJob | filter(job => job.id >= 8))
+            | union(sys.MaintenanceJob | filter(job => job.id >= 8));
+    let right_prefix =
+        (sys.MaintenanceJob | filter(job => job.id >= 8))
+            | union(sys.MaintenanceJob | filter(job => job.id >= 8));
+    let left_continuation = left_prefix | filter(job => job.id >= 10);
+    let right_continuation = right_prefix | filter(job => job.id >= 10);
+    let nested_unknown = left_continuation | union(right_continuation);
+
+    sys.Storage
+        | filter(storage => storage.id >= 7)
+        | union(nested_unknown)
+        | project(row => row.id)
+        | first() ?? 0
+} else { 0 }
