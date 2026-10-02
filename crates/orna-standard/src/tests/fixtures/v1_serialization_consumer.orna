@@ -1,0 +1,3 @@
+use std.encoding;
+
+pub fn untouched_core(value: Int): Int = value;
