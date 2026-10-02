@@ -2709,6 +2709,10 @@ fn dynamic_selector_occurrences_from_distinct_modules_do_not_alias() {
 }
 
 fn historical_nested_callable_catalogue() -> Catalogue {
+    historical_nested_callable_catalogue_with_other(false)
+}
+
+fn historical_nested_callable_catalogue_with_other(include_other: bool) -> Catalogue {
     let continuation = Type::Function {
         parameters: Vec::new(),
         parameter_names: Some(Vec::new()),
@@ -2735,7 +2739,26 @@ fn historical_nested_callable_catalogue() -> Catalogue {
         enum_variants: BTreeSet::new(),
         table_schema: None,
     };
-    let symbols = BTreeMap::from([("factory".to_owned(), factory)]);
+    let mut symbols = BTreeMap::from([("factory".to_owned(), factory)]);
+    if include_other {
+        symbols.insert(
+            "other".into(),
+            Symbol {
+                kind: SymbolKind::Function,
+                ty: Type::Function {
+                    parameters: Vec::new(),
+                    parameter_names: Some(Vec::new()),
+                    default_parameters: BTreeSet::new(),
+                    result: Box::new(Type::Text),
+                },
+                public: true,
+                effects: EffectSummary::default(),
+                generic_parameters: Vec::new(),
+                enum_variants: BTreeSet::new(),
+                table_schema: None,
+            },
+        );
+    }
     Catalogue::authoritative_fixture().with_historical_modules([ModuleHeader {
         namespace: Namespace(vec!["energy".into()]),
         exports: symbols.clone(),
@@ -3065,6 +3088,195 @@ fn pinned_closure_chain_storms_reject_cross_stage_and_cross_call_mixing() {
             .iter()
             .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
         "closures from separate storm stages and call sites should not compose: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn closure_rebinding_retains_identity_through_nested_callables() {
+    let source = include_str!("fixtures/historical-pinned-closure-chain-closure-rebind.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-closure-rebind.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn closure_rebinding_does_not_merge_old_and_new_pin_contexts() {
+    let source = include_str!(
+        "fixtures/historical-pinned-closure-chain-closure-rebind-mixed.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-closure-rebind-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "closures rebound across distinct pins should not compose: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn closure_rebinding_rejects_a_changed_callable_shape() {
+    let source = include_str!(
+        "fixtures/historical-pinned-closure-chain-closure-rebind-shape-mismatch.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-closure-rebind-shape-mismatch.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue_with_other(true),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "closures with different callable contracts should not rebind: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn closure_identity_returns_with_its_pin_after_rebinding_round_trips() {
+    // The reference requires exact SnapshotRef pinning but does not specify
+    // whether repeated local closure rebinds create a new identity. Identity
+    // follows the pinned snapshot value, so returning to a prior pin rejoins it.
+    let source = include_str!(
+        "fixtures/historical-pinned-closure-chain-rebind-round-trip.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-rebind-round-trip.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn closure_identity_round_trips_do_not_merge_intermediate_pins() {
+    let source = include_str!(
+        "fixtures/historical-pinned-closure-chain-rebind-round-trip-mixed.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-rebind-round-trip-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "round-tripping to an older pin must not merge an intermediate closure: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn closure_bundle_rebinding_retains_component_pin_identities() {
+    let source = include_str!("fixtures/historical-pinned-closure-bundle-rebind.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-bundle-rebind.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn closure_bundle_round_trips_keep_intermediate_pins_distinct() {
+    let source = include_str!(
+        "fixtures/historical-pinned-closure-bundle-rebind-mixed.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-bundle-rebind-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        1,
+        "bundle rebinds should succeed while distinct pin values stay incompatible: {:?}",
         result
             .diagnostics
             .iter()

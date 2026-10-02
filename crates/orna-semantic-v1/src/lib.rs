@@ -8651,6 +8651,16 @@ fn infer_assignment(
                         symbol.ty = rebound_type;
                     }
                 }
+                Some(expected)
+                    if historical_callable_rebind_compatible(&expected, &value.ty) =>
+                {
+                    // A local historical closure now refers to the new pin;
+                    // aliases inferred before this assignment keep their old
+                    // snapshot context.
+                    if let Some(symbol) = local.get_mut(name) {
+                        symbol.ty = value.ty.clone();
+                    }
+                }
                 Some(expected) => require_same(&expected, &value.ty, diagnostics),
                 None => diagnostics.push(diag(
                     DIAG_UNRESOLVED,
@@ -16496,6 +16506,154 @@ fn callable_function_type(ty: &Type) -> Option<&Type> {
             }
         }
         _ => None,
+    }
+}
+
+fn historical_callable_rebind_compatible(expected: &Type, actual: &Type) -> bool {
+    type_contains_historical_callable(expected)
+        && type_contains_historical_callable(actual)
+        && historical_callable_shape_matches(expected, actual)
+}
+
+fn type_contains_historical_callable(ty: &Type) -> bool {
+    match ty {
+        Type::Applied { base, .. } if base == "sys.HistoricalCallable" => {
+            historical_callable_context(ty).is_some()
+        }
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => type_contains_historical_callable(element),
+        Type::Record(fields) => fields.values().any(type_contains_historical_callable),
+        Type::Tuple(elements) => elements.iter().any(type_contains_historical_callable),
+        Type::Applied { arguments, .. } => {
+            arguments.iter().any(type_contains_historical_callable)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_historical_callable(currency) || type_contains_historical_callable(unit)
+        }
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters.iter().any(type_contains_historical_callable)
+                || type_contains_historical_callable(result)
+        }
+        _ => false,
+    }
+}
+
+/// Closure rebinding may change pinned snapshot identity while preserving the
+/// value shape and callable contracts. The reference fixes `SnapshotRef` at
+/// historical reads but is silent about structured local rebinding; permit it
+/// when the only type differences are snapshot arguments of historical
+/// callable wrappers. Saved aliases retain their original types and pins.
+fn historical_callable_shape_matches(expected: &Type, actual: &Type) -> bool {
+    if expected == actual {
+        return true;
+    }
+    match (expected, actual) {
+        (
+            Type::Applied {
+                base: expected_base,
+                arguments: expected_arguments,
+            },
+            Type::Applied {
+                base: actual_base,
+                arguments: actual_arguments,
+            },
+        ) if expected_base == "sys.HistoricalCallable"
+            && actual_base == "sys.HistoricalCallable" =>
+        {
+            match (expected_arguments.as_slice(), actual_arguments.as_slice()) {
+                ([_, expected_callable], [_, actual_callable]) => {
+                    historical_callable_shape_matches(expected_callable, actual_callable)
+                }
+                _ => false,
+            }
+        }
+        (
+            Type::Function {
+                parameters: expected_parameters,
+                parameter_names: expected_names,
+                default_parameters: expected_defaults,
+                result: expected_result,
+            },
+            Type::Function {
+                parameters: actual_parameters,
+                parameter_names: actual_names,
+                default_parameters: actual_defaults,
+                result: actual_result,
+            },
+        ) => {
+            expected_names == actual_names
+                && expected_defaults == actual_defaults
+                && expected_parameters.len() == actual_parameters.len()
+                && expected_parameters
+                    .iter()
+                    .zip(actual_parameters)
+                    .all(|(expected, actual)| {
+                        historical_callable_shape_matches(expected, actual)
+                    })
+                && historical_callable_shape_matches(expected_result, actual_result)
+        }
+        (Type::List(expected), Type::List(actual))
+        | (Type::Range(expected), Type::Range(actual))
+        | (Type::Relation(expected), Type::Relation(actual))
+        | (Type::Stream(expected), Type::Stream(actual))
+        | (Type::Optional(expected), Type::Optional(actual)) => {
+            historical_callable_shape_matches(expected, actual)
+        }
+        (Type::Record(expected), Type::Record(actual)) => {
+            expected.len() == actual.len()
+                && expected.iter().all(|(name, expected)| {
+                    actual.get(name).is_some_and(|actual| {
+                        historical_callable_shape_matches(expected, actual)
+                    })
+                })
+        }
+        (Type::Tuple(expected), Type::Tuple(actual)) => {
+            expected.len() == actual.len()
+                && expected
+                    .iter()
+                    .zip(actual)
+                    .all(|(expected, actual)| {
+                        historical_callable_shape_matches(expected, actual)
+                    })
+        }
+        (
+            Type::Applied {
+                base: expected_base,
+                arguments: expected_arguments,
+            },
+            Type::Applied {
+                base: actual_base,
+                arguments: actual_arguments,
+            },
+        ) => {
+            expected_base == actual_base
+                && expected_arguments.len() == actual_arguments.len()
+                && expected_arguments
+                    .iter()
+                    .zip(actual_arguments)
+                    .all(|(expected, actual)| {
+                        historical_callable_shape_matches(expected, actual)
+                    })
+        }
+        (
+            Type::MoneyPerUnit {
+                currency: expected_currency,
+                unit: expected_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: actual_currency,
+                unit: actual_unit,
+            },
+        ) => {
+            historical_callable_shape_matches(expected_currency, actual_currency)
+                && historical_callable_shape_matches(expected_unit, actual_unit)
+        }
+        _ => false,
     }
 }
 
