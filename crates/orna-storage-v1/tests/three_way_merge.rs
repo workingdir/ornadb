@@ -20359,6 +20359,37 @@ fn paired_depth_storm_tombstone_history_stabilizes_across_restore_waves() {
     );
     assert_eq!(fragment_guards, unchanged_fragment_guards);
 
+    let repeated_key = string("a/child/deep");
+    let first_overlap = [(id(1), repeated_key.clone())];
+    let mut overlap_guard = BranchMergeTombstoneHistory::new(0);
+    assert!(overlap_guard
+        .submit_depth_merge_fragment(0, 0, 2, &first_overlap)
+        .unwrap()
+        .is_empty());
+    let unchanged_overlap_guard = overlap_guard.clone();
+    assert_eq!(
+        overlap_guard.submit_depth_merge_fragment(0, 1, 2, &first_overlap),
+        Err(BranchMergeTombstoneHistoryError::DuplicateTombstone { order: 0 }),
+        "overlapping depth pieces cannot record one table/key twice in one wave",
+    );
+    assert_eq!(overlap_guard, unchanged_overlap_guard);
+    let other_table_overlap = [(id(2), repeated_key.clone())];
+    overlap_guard
+        .submit_depth_merge_fragment(0, 1, 2, &other_table_overlap)
+        .unwrap();
+    overlap_guard.append(&released_plans[1]).unwrap();
+    overlap_guard.append(&released_plans[2]).unwrap();
+    assert_eq!(
+        overlap_guard
+            .events()
+            .iter()
+            .filter(|event| event.key == repeated_key)
+            .map(|event| event.order)
+            .collect::<Vec<_>>(),
+        [0, 0, 2, 2],
+        "a clean restore wave leaves later re-delete events distinct from the earlier depth wave",
+    );
+
     let mut whole_plan_mode_guard = BranchMergeTombstoneHistory::new(0);
     whole_plan_mode_guard.submit(&released_plans[2]).unwrap();
     let unchanged_whole_plan_mode_guard = whole_plan_mode_guard.clone();
@@ -20374,6 +20405,20 @@ fn paired_depth_storm_tombstone_history_stabilizes_across_restore_waves() {
         }),
     );
     assert_eq!(whole_plan_mode_guard, unchanged_whole_plan_mode_guard);
+
+    let mut duplicate_whole_plan = released_plans[2].clone();
+    duplicate_whole_plan
+        .ordered_row_tombstones
+        .push(duplicate_whole_plan.ordered_row_tombstones[0].clone());
+    let mut whole_plan_duplicate_guard = BranchMergeTombstoneHistory::new(0);
+    assert_eq!(
+        whole_plan_duplicate_guard.submit(&duplicate_whole_plan),
+        Err(BranchMergeTombstoneHistoryError::DuplicateTombstone {
+            order: released_plans[2].order,
+        }),
+    );
+    assert_eq!(whole_plan_duplicate_guard.next_order(), Some(0));
+    assert!(whole_plan_duplicate_guard.events().is_empty());
 
     let rows_by_table = [fixture_rows.as_slice(), fixture_rows.as_slice()];
     let mut split_layout_deltas = Vec::new();
