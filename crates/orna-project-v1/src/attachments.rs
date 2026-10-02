@@ -555,6 +555,17 @@ impl PackageResolver {
         })
     }
 
+    /// Resolves two ordered terminal-depth replacements as one atomic wave.
+    /// The two prior sessions remain together in `retained_wave(0)`, so the
+    /// pre-pair and between-depth routes can both be reopened independently.
+    pub fn resolve_nested_terminal_pair(
+        &self,
+        parent: &AttachedDatabaseSession,
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        self.resolve_nested_rebind_path(parent, &replacements)
+    }
+
     /// Continues a resolved rebind path with another wave of replacements.
     /// Snapshots from the earlier wave stay in order, followed by the prior
     /// terminal session and any new intermediate routes. A failed extension
