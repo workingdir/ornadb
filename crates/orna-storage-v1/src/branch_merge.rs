@@ -271,6 +271,10 @@ pub struct BranchMergePlan {
 /// partial upsert plan is returned. Concurrent retries from the unchanged
 /// post-delete base independently rebuild the complete restored row set and
 /// emit no old tombstones; commit one successful retry as the wave's delta.
+/// Across chained merge waves, each restoration retry starts from the latest
+/// committed live rows. Earlier wave deltas remain historical facts, while a
+/// later retry emits only its own exact-key tombstones and restored rows; a
+/// failed attempt cannot replay prior deletes or discard earlier restores.
 ///
 /// A read failure at any table or range aborts the whole invocation. Facts
 /// gathered from earlier tables or depth ranges remain private; after source
