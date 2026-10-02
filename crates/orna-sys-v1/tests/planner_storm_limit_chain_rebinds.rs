@@ -15,6 +15,8 @@ const REBIND_STAGE_CAP_FIXTURE: &str =
     include_str!("fixtures/planner_storm_rebind_stage_caps.orna");
 const SEQUENTIAL_REBIND_POSITIONS_FIXTURE: &str =
     include_str!("fixtures/planner_storm_sequential_rebind_positions.orna");
+const REBIND_CAP_STABILITY_FIXTURE: &str =
+    include_str!("fixtures/planner_storm_rebind_cap_stability.orna");
 
 fn branch(
     limits: &[u64],
@@ -576,6 +578,118 @@ fn later_rebind_positions_consume_only_prior_bounded_branch_outputs() {
         filter.details().get("limit_chain_rebind_shapes"),
         Some(&PlanDetail::Text(
             "1@1:[1:[100]/1;2:[100]/1;3:[100]/1];1@2:[1:[5,80]/1@1=[1:[100]/1;2:[100]/1;3:[100]/1];2:[4]/1]".to_owned()
+        ))
+    );
+}
+
+#[test]
+fn sequential_rebind_caps_stay_stable_across_limit_positions_and_storm_stages() {
+    let parsed = orna_syntax_v1::parse_module(REBIND_CAP_STABILITY_FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    let deep_storm = storm(
+        "expr:deep-cap-storm",
+        (0..3).map(|_| branch(&[40], 2, vec![])).collect(),
+    );
+    let middle_storm = storm(
+        "expr:middle-cap-storm",
+        (0..2).map(|_| branch(&[30], 2, vec![])).collect(),
+    );
+    let first_stage = storm(
+        "expr:first-cap-stage",
+        vec![
+            branch(
+                &[19, 11],
+                1,
+                vec![
+                    rebind(1, vec![deep_storm, middle_storm]),
+                    rebind(
+                        2,
+                        vec![storm(
+                            "expr:post-limit-cap-storm",
+                            (0..2).map(|_| branch(&[20], 2, vec![])).collect(),
+                        )],
+                    ),
+                ],
+            ),
+            branch(&[7], 2, vec![]),
+        ],
+    );
+    let second_stage = storm(
+        "expr:second-cap-stage",
+        vec![
+            branch(
+                &[8, 5],
+                1,
+                vec![rebind(
+                    1,
+                    vec![
+                        storm(
+                            "expr:second-stage-rebind-one",
+                            (0..2).map(|_| branch(&[24], 2, vec![])).collect(),
+                        ),
+                        storm(
+                            "expr:second-stage-rebind-two",
+                            (0..3).map(|_| branch(&[16], 2, vec![])).collect(),
+                        ),
+                    ],
+                )],
+            ),
+            branch(&[4], 2, vec![]),
+        ],
+    );
+    let third_stage = storm(
+        "expr:third-cap-stage",
+        vec![branch(&[3], 1, vec![]), branch(&[2], 1, vec![])],
+    );
+    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+        &query(Some(61), Some(257)),
+        &[first_stage, second_stage, third_stage],
+        &[],
+    )
+    .expect("each limit and rebind stage consumes its bounded predecessor");
+
+    let mut stages = explained
+        .nodes()
+        .iter()
+        .filter(|node| {
+            node.kind() == PlanNodeKind::Filter && node.details().contains_key("disjunct_storm")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(stages.len(), 3);
+    stages.sort_by_key(|stage| match stage.details().get("disjunct_storm") {
+        Some(PlanDetail::Integer(index)) => *index,
+        _ => unreachable!("top-level storm stages carry their one-based index"),
+    });
+    let cardinalities = stages
+        .iter()
+        .map(|stage| (stage.estimated_rows(), stage.estimated_bytes()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        cardinalities,
+        vec![(Some(4), Some(16)), (Some(2), Some(7)), (Some(2), Some(7))]
+    );
+    for pair in cardinalities.windows(2) {
+        assert!(pair[1].0.unwrap() <= pair[0].0.unwrap());
+        assert!(pair[1].1.unwrap() <= pair[0].1.unwrap());
+    }
+
+    let first_stage = stages
+        .iter()
+        .find(|stage| stage.details().get("disjunct_storm") == Some(&PlanDetail::Integer(1)))
+        .expect("first storm stage is labeled");
+    assert_eq!(
+        first_stage.details().get("limit_chain_rebind_stage_order"),
+        Some(&PlanDetail::Text(
+            "declaration_order_each_rebind_output_capped_before_next_rebind".to_owned()
+        ))
+    );
+    assert_eq!(
+        first_stage.details().get("limit_chain_rebind_shapes"),
+        Some(&PlanDetail::Text(
+            "1@1:[1:[40]/2;2:[40]/2;3:[40]/2]>[1:[30]/2;2:[30]/2];1@2:[1:[20]/2;2:[20]/2]"
+                .to_owned()
         ))
     );
 }
