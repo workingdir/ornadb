@@ -4938,6 +4938,90 @@ fn nested_tuple_bottom_terminal_wave_keeps_paired_capture_pins_atomic() {
 }
 
 #[test]
+fn bottom_terminal_tuple_wave_preserves_each_capture_depth_pin_identity() {
+    let source = include_str!("fixtures/historical-paired-nested-tuple-bottom-wave.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-tuple-bottom-wave.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_nested_tuple_bottom_terminal_depth_identities")
+        })
+        .expect("bottom terminal identity fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_nested_tuple_bottom_terminal_depth_identities"].ty
+    else {
+        panic!("bottom terminal identity proof must be a function");
+    };
+    let Type::Record(lanes) = result.as_ref() else {
+        panic!("bottom terminal identity proof must expose both lanes");
+    };
+    fn pin_type<'a>(lanes: &'a BTreeMap<String, Type>, lane: &str, field: &str) -> &'a Type {
+        let Type::Record(fields) = lanes.get(lane).expect("paired lane") else {
+            panic!("{lane} lane must expose pin streams");
+        };
+        let Type::Stream(element) = fields.get(field).expect("capture depth field") else {
+            panic!("{lane}.{field} must be a stream");
+        };
+        let Type::Applied { base, arguments } = element.as_ref() else {
+            panic!("{lane}.{field} must retain a historical callable");
+        };
+        assert_eq!(base, "sys.HistoricalCallable");
+        let [pin, _] = arguments.as_slice() else {
+            panic!("historical callable must expose its pin: {arguments:?}");
+        };
+        pin
+    }
+    let expected = |selector: &str| Type::Applied {
+        base: "sys.SnapshotRefContext".into(),
+        arguments: vec![Type::Named(format!("selector:{selector}"))],
+    };
+    for (field, selector) in [
+        ("outer_selected", "HEAD~450"),
+        ("outer_left", "HEAD~440"),
+        ("outer_right", "HEAD~430"),
+        ("middle_selected", "HEAD~380"),
+        ("middle_left", "HEAD~370"),
+        ("middle_right", "HEAD~360"),
+    ] {
+        assert_eq!(pin_type(lanes, "left", field), &expected(selector), "left.{field}");
+    }
+    for (field, selector) in [
+        ("outer_selected", "HEAD~420"),
+        ("outer_left", "HEAD~410"),
+        ("outer_right", "HEAD~400"),
+        ("middle_selected", "HEAD~350"),
+        ("middle_left", "HEAD~340"),
+        ("middle_right", "HEAD~330"),
+        ("terminal_selected", "HEAD~290"),
+        ("terminal_left", "HEAD~280"),
+        ("terminal_right", "HEAD~270"),
+    ] {
+        assert_eq!(
+            pin_type(lanes, "right", field),
+            &expected(selector),
+            "right.{field}"
+        );
+    }
+    let summary = format!("{result:?}");
+    assert!(
+        !summary.contains("HEAD~320") && !summary.contains("HEAD~310"),
+        "a failed bottom leaf must not bind any terminal tuple sibling: {summary}"
+    );
+}
+
+#[test]
 fn concurrent_callback_tuples_reject_cross_lane_identity_mix_after_rebind() {
     let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
