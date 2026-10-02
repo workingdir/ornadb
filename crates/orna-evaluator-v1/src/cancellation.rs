@@ -14,6 +14,7 @@ use crate::{EvaluationError, error};
 #[derive(Clone, Debug)]
 pub struct CancellationToken {
     requested: Arc<AtomicBool>,
+    parent: Option<Arc<CancellationToken>>,
     /// Once this token has observed a request, the observation cannot be
     /// undone by an owner resetting the source flag.
     observed: Arc<AtomicBool>,
@@ -37,6 +38,19 @@ impl CancellationToken {
     pub fn from_shared(requested: Arc<AtomicBool>) -> Self {
         Self {
             requested,
+            parent: None,
+            observed: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            checks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(test)]
+            request_after: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    pub(crate) fn child(requested: Arc<AtomicBool>, parent: Option<CancellationToken>) -> Self {
+        Self {
+            requested,
+            parent: parent.map(Arc::new),
             observed: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             checks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -60,7 +74,9 @@ impl CancellationToken {
             self.observed.store(true, Ordering::Release);
             return true;
         }
-        false
+        self.parent
+            .as_deref()
+            .is_some_and(CancellationToken::is_requested)
     }
 
     /// Fails with the non-recoverable evaluator cancellation diagnostic.
