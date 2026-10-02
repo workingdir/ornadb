@@ -654,6 +654,22 @@ impl PackageResolver {
         Ok(SiblingRebindResolution { routes })
     }
 
+    /// Applies one ordered terminal-depth pair to each sibling route. Every
+    /// branch retains its own two pre-rebind snapshots, input order is stable,
+    /// and no partial sibling batch is returned on failure.
+    pub fn extend_sibling_terminal_pair_paths(
+        &self,
+        paths: &[(&ReboundPathResolution, &[PinnedDatabase; 2])],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, replacements)| {
+                self.extend_nested_terminal_pair(previous, (**replacements).clone())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
     /// Repeats one identical rebind path across a completed sibling batch.
     /// Each branch extends from its own terminal session and keeps its earlier
     /// route snapshots; the returned batch preserves sibling order.
