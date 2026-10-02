@@ -7292,12 +7292,11 @@ fn infer(
                         }
                     });
                 let ty = match (&parameter.pattern, &ty) {
-                    (Pattern::Name(name, span), ty)
-                        if local
-                            .get(name)
-                            .is_some_and(|symbol| is_snapshot_ref_value(&symbol.ty))
-                            && is_snapshot_ref_value(ty) =>
-                    {
+                    (Pattern::Name(name, span), ty) if is_snapshot_ref_value(ty) => {
+                        // Scope each lambda pin independently, even when its
+                        // name does not shadow an enclosing parameter. A
+                        // returned closure may later introduce that same name
+                        // and must not capture or retarget this selector.
                         let source = span.file.as_deref().unwrap_or("<unknown>");
                         contextual_snapshot_ref(&format!(
                             "selector:binder:{source}@{}..{}:parameter:{name}",

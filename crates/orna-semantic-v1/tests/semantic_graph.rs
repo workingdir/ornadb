@@ -5980,28 +5980,90 @@ fn paired_checkpoints_retain_their_selected_lane_contexts() {
         panic!("paired reproduction proof must expose checkpoint records");
     };
 
-    for (lane, expected) in [
+    for (lane, expected_depths) in [
         (
             "left_checkpoints",
-            ["selector:HEAD~840", "selector:HEAD~880", "selector:HEAD~920"],
+            [
+                ("roots", &["selector:HEAD~760"][..]),
+                (
+                    "bridges",
+                    &["selector:HEAD~730", "selector:HEAD~740", "selector:HEAD~760"][..],
+                ),
+                (
+                    "leaves",
+                    &[
+                        "selector:HEAD~710",
+                        "selector:HEAD~720",
+                        "selector:HEAD~730",
+                        "selector:HEAD~740",
+                        "selector:HEAD~760",
+                    ][..],
+                ),
+                (
+                    "outputs",
+                    &[
+                        "selector:HEAD~690",
+                        "selector:HEAD~700",
+                        "selector:HEAD~710",
+                        "selector:HEAD~720",
+                        "selector:HEAD~730",
+                        "selector:HEAD~740",
+                        "selector:HEAD~760",
+                    ][..],
+                ),
+            ],
         ),
         (
             "right_checkpoints",
-            ["selector:HEAD~830", "selector:HEAD~870", "selector:HEAD~910"],
+            [
+                ("roots", &["selector:HEAD~750"][..]),
+                (
+                    "bridges",
+                    &["selector:HEAD~730", "selector:HEAD~750"][..],
+                ),
+                (
+                    "leaves",
+                    &[
+                        "selector:HEAD~710",
+                        "selector:HEAD~730",
+                        "selector:HEAD~750",
+                    ][..],
+                ),
+                (
+                    "outputs",
+                    &[
+                        "selector:HEAD~690",
+                        "selector:HEAD~710",
+                        "selector:HEAD~730",
+                        "selector:HEAD~750",
+                    ][..],
+                ),
+            ],
         ),
     ] {
         let ty = checkpoints.get(lane).expect("paired lane checkpoint record");
         let Type::Record(depths) = ty else {
             panic!("{lane} must expose checkpoint depth records");
         };
-        for depth in ["roots", "bridges", "leaves", "outputs"] {
+        for (depth, expected) in expected_depths {
             let ty = depths.get(depth).expect("checkpoint depth field");
             let mut contexts = BTreeSet::new();
             collect_snapshot_contexts(ty, &mut contexts);
+            let selected_contexts = contexts
+                .iter()
+                .filter(|context| context.starts_with("selector:HEAD~"))
+                .cloned()
+                .collect::<BTreeSet<_>>();
             assert_eq!(
-                contexts,
-                expected.map(str::to_owned).into_iter().collect(),
-                "{lane}.{depth} must preserve every nested snapshot selector"
+                selected_contexts,
+                expected.iter().map(|context| (*context).to_owned()).collect(),
+                "{lane}.{depth} must keep every concrete pin selected at that rebind depth"
+            );
+            assert!(
+                contexts
+                    .iter()
+                    .all(|context| !context.starts_with("selector:parameter:")),
+                "{lane}.{depth} must not leave a same-named pin parameter unresolved: {contexts:?}"
             );
         }
     }
@@ -6087,42 +6149,85 @@ fn paired_checkpoint_outputs_keep_lane_to_snapshot_mapping() {
         panic!("paired reproduction proof must expose checkpoint records");
     };
 
-    for (lane, root, bridge, leaf) in [
+    for (lane, expected_depths) in [
         (
             "left_checkpoints",
-            "selector:HEAD~840",
-            "selector:HEAD~920",
-            "selector:HEAD~880",
+            [
+                ("roots", &["760"][..], None, None, None),
+                ("bridges", &["760"][..], Some(&["740", "730"][..]), None, None),
+                (
+                    "leaves",
+                    &["760"][..],
+                    Some(&["740", "730"][..]),
+                    Some(&["720", "710"][..]),
+                    None,
+                ),
+                (
+                    "outputs",
+                    &["760"][..],
+                    Some(&["740", "730"][..]),
+                    Some(&["720", "710"][..]),
+                    Some(&["700", "690"][..]),
+                ),
+            ],
         ),
         (
             "right_checkpoints",
-            "selector:HEAD~830",
-            "selector:HEAD~910",
-            "selector:HEAD~870",
+            [
+                ("roots", &["750"][..], None, None, None),
+                ("bridges", &["750"][..], Some(&["730"][..]), None, None),
+                (
+                    "leaves",
+                    &["750"][..],
+                    Some(&["730"][..]),
+                    Some(&["710"][..]),
+                    None,
+                ),
+                (
+                    "outputs",
+                    &["750"][..],
+                    Some(&["730"][..]),
+                    Some(&["710"][..]),
+                    Some(&["690"][..]),
+                ),
+            ],
         ),
     ] {
         let ty = checkpoints.get(lane).expect("paired lane checkpoint record");
         let Type::Record(depths) = ty else {
             panic!("{lane} must expose checkpoint depth records");
         };
-        for depth in ["roots", "bridges", "leaves", "outputs"] {
+        for (depth, root, bridge, leaf, terminal) in expected_depths {
             let fields = checkpoint_output_fields(
                 depths.get(depth).expect("checkpoint depth field"),
             );
-            for (field, expected_context) in [
-                ("root", root),
+            for (field, expected_contexts) in [
+                ("root", Some(root)),
                 ("bridge", bridge),
                 ("leaf", leaf),
-                ("terminal", root),
+                ("terminal", terminal),
             ] {
                 let ty = fields.get(field).expect("pinned output field");
                 let mut contexts = BTreeSet::new();
                 collect_snapshot_contexts(ty, &mut contexts);
-                assert_eq!(
-                    contexts,
-                    BTreeSet::from([expected_context.to_owned()]),
-                    "{lane}.{depth}.{field} must retain its paired snapshot context"
-                );
+                if let Some(expected_contexts) = expected_contexts {
+                    assert_eq!(
+                        contexts,
+                        expected_contexts
+                            .iter()
+                            .map(|context| format!("selector:HEAD~{context}"))
+                            .collect(),
+                        "{lane}.{depth}.{field} must retain its lane-specific snapshot map"
+                    );
+                } else {
+                    assert_eq!(contexts.len(), 1, "{lane}.{depth}.{field} pin binder");
+                    assert!(
+                        contexts
+                            .iter()
+                            .all(|context| context.starts_with("selector:binder:")),
+                        "{lane}.{depth}.{field} must keep the not-yet-invoked lexical pin: {contexts:?}"
+                    );
+                }
             }
         }
     }
