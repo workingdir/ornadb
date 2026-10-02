@@ -5883,6 +5883,45 @@ fn paired_checkpoint_outputs_keep_lane_to_snapshot_mapping() {
 }
 
 #[test]
+fn shadowed_paired_checkpoint_parameters_keep_their_innermost_pins() {
+    let source = include_str!("fixtures/historical-paired-shadowed-checkpoint-rebinds.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-shadowed-checkpoint-rebinds.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("paired_nested_rebind_checkpoints"))
+        .expect("paired nested checkpoint module");
+    let Type::Function { result, .. } = &module.symbols["paired_nested_rebind_checkpoints"].ty
+    else {
+        panic!("paired nested checkpoints must be callable");
+    };
+    let Type::Record(checkpoints) = result.as_ref() else {
+        panic!("paired nested checkpoints must expose both lanes");
+    };
+
+    for (lane, expected) in [("left", "selector:HEAD~1"), ("right", "selector:HEAD~2")] {
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(
+            checkpoints.get(lane).expect("paired lane output"),
+            &mut contexts,
+        );
+        assert_eq!(
+            contexts,
+            BTreeSet::from([expected.to_owned()]),
+            "{lane} output must use its innermost shadowed snapshot parameter"
+        );
+    }
+}
+#[test]
 fn paired_reproduction_checkpoint_types_stay_stable_across_interleaved_analyses() {
     const FUNCTION: &str =
         "paired_reproductions_remain_stable_across_chained_storm_orders";
