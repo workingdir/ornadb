@@ -20,17 +20,17 @@ use orna_syntax_v1::{
     PatternField, ReplInput, Statement, StringSegment, parse_expression, parse_repl,
 };
 use orna_value_v1::{
-    CANONICAL_NAN_BITS, ErrorValue as CanonicalErrorValue, Raw, float_max, float_min,
-    float_ordinary_eq, float_total_cmp,
+    CANONICAL_NAN_BITS, ErrorValue as CanonicalErrorValue, Raw, domain_digest, float_max,
+    float_min, float_ordinary_eq, float_total_cmp,
 };
 use unicode_normalization::UnicodeNormalization;
 
 mod admitted_repl;
 mod cancellation;
 mod relation;
-mod timezone;
 mod repl;
 mod sys_bindings;
+mod timezone;
 
 pub use admitted_repl::{AdmittedReplSession, ReplError};
 pub use cancellation::CancellationToken;
@@ -38,12 +38,12 @@ use relation::{
     BucketBySpec, BucketPeriod, RelationBucket, RelationBucketError, RelationBucketState,
     RelationLastState, RelationPlan, RelationStage, RelationWindowState,
 };
-pub use timezone::{
-    Instant, LocalDateTime, LocalTimeResolution, TimeZone, TimeZoneError,
-    TIMEZONE_DATASET_VERSION, ZonedLocalDateTime, resolve_time_zone,
-};
 pub use repl::{ReplSession, parse_admitted_repl};
 pub use sys_bindings::SysHostBindingRegistry;
+pub use timezone::{
+    Instant, LocalDateTime, LocalTimeResolution, TIMEZONE_DATASET_VERSION, TimeZone, TimeZoneError,
+    ZonedLocalDateTime, resolve_time_zone,
+};
 
 /// The verified standard-source bundle used by the bounded local and remote
 /// REPL boundaries. `orna-standard` owns the canonical module source; this
@@ -170,7 +170,6 @@ impl StepBudget {
 /// supplied with the admitted nominal definitions.
 pub type Environment = BTreeMap<String, CanonicalValue>;
 
-
 /// A declaration-owned nominal field admitted to the evaluator.
 ///
 /// The semantic layer remains responsible for checking the field's static
@@ -289,8 +288,6 @@ impl NominalDefinition {
 /// Trusted evaluator definitions keyed by admitted source spellings.
 pub type NominalDefinitions = BTreeMap<String, NominalDefinition>;
 
-
-
 fn object_id_raw(object_id: [u8; 16]) -> Raw {
     Raw::Tag(37, Box::new(Raw::Bytes(object_id.to_vec())))
 }
@@ -396,11 +393,16 @@ fn validate_nominal_definitions(
             })?)
             .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
         total_name_bytes = total_name_bytes
-            .checked_add(definition.variants.iter().try_fold(0usize, |total, variant| {
-                total
-                    .checked_add(variant.name.len())
-                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))
-            })?)
+            .checked_add(
+                definition
+                    .variants
+                    .iter()
+                    .try_fold(0usize, |total, variant| {
+                        total
+                            .checked_add(variant.name.len())
+                            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))
+                    })?,
+            )
             .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
     }
     limits.check_items(total_fields)?;
@@ -420,7 +422,6 @@ fn validate_nominal_definitions(
     }
     Ok(())
 }
-
 
 fn validate_admitted_nominals(
     value: &Value,
@@ -1251,7 +1252,9 @@ enum Value {
         nanosecond: u32,
     },
     /// Calendar periods remain distinct from elapsed durations.
-    Period { days: BigInt },
+    Period {
+        days: BigInt,
+    },
     Error(EvaluationError),
     Range {
         lower: Option<Box<Value>>,
@@ -1259,6 +1262,15 @@ enum Value {
         upper_inclusive: bool,
     },
     List(Vec<Value>),
+    /// Immutable replayable source over a finite list. `position` is the
+    /// canonical `orna.list.v1` next-item index; the source digest binds the
+    /// supplied label to the typed encoding of the entire list.
+    Stream {
+        values: Vec<Value>,
+        source_label: String,
+        source_digest: [u8; 32],
+        position: usize,
+    },
     Relation(RelationPlan),
     Tuple(Vec<Value>),
     Record(BTreeMap<String, Value>),
@@ -1394,7 +1406,9 @@ impl DecimalValue {
             }
             numerator *= BigInt::from(10u8).pow(power as u32);
         } else {
-            let power = (-power).to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            let power = (-power)
+                .to_usize()
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
             if power > DEFAULT_INTEGER_DIGITS {
                 return Err(error("ORNA-EVAL-LIMIT"));
             }
@@ -1429,7 +1443,9 @@ impl DecimalValue {
             }
             coefficient *= BigInt::from(10u8).pow(shift as u32);
         } else {
-            let shift = (-shift).to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            let shift = (-shift)
+                .to_usize()
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
             if shift > DEFAULT_INTEGER_DIGITS {
                 return Err(error("ORNA-EVAL-LIMIT"));
             }
@@ -1458,6 +1474,7 @@ impl Value {
         match self {
             Self::Function { .. } | Self::Closure(_) => true,
             Self::List(values) | Self::Tuple(values) => values.iter().any(Self::contains_callable),
+            Self::Stream { values, .. } => values.iter().any(Self::contains_callable),
             Self::Record(values) => values.values().any(Self::contains_callable),
             Self::NominalRecord { fields, .. } => {
                 fields.iter().any(|(_, value)| value.contains_callable())
@@ -1473,6 +1490,7 @@ impl Value {
         match self {
             Self::Float(_) => true,
             Self::List(values) | Self::Tuple(values) => values.iter().any(Self::contains_float),
+            Self::Stream { values, .. } => values.iter().any(Self::contains_float),
             Self::Record(values) => values.values().any(Self::contains_float),
             Self::NominalRecord { fields, .. } => {
                 fields.iter().any(|(_, value)| value.contains_float())
@@ -1494,7 +1512,7 @@ impl Value {
             Self::Function { .. } | Self::Closure(_) => {
                 return Err(error("ORNA-EVAL-UNSUPPORTED"));
             }
-            Self::Relation(_) | Self::Period { .. } => {
+            Self::Relation(_) | Self::Stream { .. } | Self::Period { .. } => {
                 return Err(error("ORNA-EVAL-UNSUPPORTED"));
             }
             // Error values are only available to the handling side of `|?`.
@@ -2175,7 +2193,9 @@ impl Context<'_, '_> {
         // stored seconds value, not this temporary nanosecond scaling.
         let (seconds, nanosecond) =
             total_nanoseconds.div_mod_floor(&BigInt::from(1_000_000_000u32));
-        let nanosecond = nanosecond.to_u32().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        let nanosecond = nanosecond
+            .to_u32()
+            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
         self.integer(seconds.clone())?;
         Ok(Value::Duration {
             seconds,
@@ -2870,13 +2890,7 @@ impl Context<'_, '_> {
             ("-", Value::Decimal(value)) => self
                 .checked_decimal(DecimalValue::new(-value.coefficient, value.exponent10)?)
                 .map(Value::Decimal),
-            (
-                "-",
-                Value::Money {
-                    amount,
-                    currency,
-                },
-            ) => self
+            ("-", Value::Money { amount, currency }) => self
                 .checked_decimal(DecimalValue::new(-amount.coefficient, amount.exponent10)?)
                 .map(|amount| Value::Money { amount, currency }),
             (
@@ -2885,9 +2899,8 @@ impl Context<'_, '_> {
                     seconds,
                     nanosecond,
                 },
-            ) => self.duration_from_total_nanoseconds(
-                -elapsed_total_nanoseconds(&seconds, nanosecond),
-            ),
+            ) => self
+                .duration_from_total_nanoseconds(-elapsed_total_nanoseconds(&seconds, nanosecond)),
             ("-", Value::Float(value)) => finite_float(-f64::from_bits(value)),
             _ => Err(error("ORNA-EVAL-TYPE")),
         }
@@ -3147,8 +3160,14 @@ impl Context<'_, '_> {
                 true,
             ),
             (
-                Value::Money { amount: a, currency: ac },
-                Value::Money { amount: b, currency: bc },
+                Value::Money {
+                    amount: a,
+                    currency: ac,
+                },
+                Value::Money {
+                    amount: b,
+                    currency: bc,
+                },
             ) => self.money_binary(op, a, ac, b, bc),
             (Value::Money { amount, currency }, Value::Decimal(scalar)) => {
                 self.money_scalar_binary(op, amount, currency, scalar, false)
@@ -3267,10 +3286,7 @@ impl Context<'_, '_> {
         duration_nanosecond: u32,
         subtract: bool,
     ) -> Result<Value, EvaluationError> {
-        let instant = elapsed_total_nanoseconds(
-            &BigInt::from(instant_seconds),
-            instant_nanosecond,
-        );
+        let instant = elapsed_total_nanoseconds(&BigInt::from(instant_seconds), instant_nanosecond);
         let duration = elapsed_total_nanoseconds(&duration_seconds, duration_nanosecond);
         let total = if subtract {
             instant - duration
@@ -3461,7 +3477,9 @@ impl Context<'_, '_> {
                     currency: left_currency,
                 }),
             "-" => self
-                .checked_decimal(left.add(&DecimalValue::new(-right.coefficient, right.exponent10)?)?)
+                .checked_decimal(
+                    left.add(&DecimalValue::new(-right.coefficient, right.exponent10)?)?,
+                )
                 .map(|amount| Value::Money {
                     amount,
                     currency: left_currency,
@@ -3555,9 +3573,9 @@ impl Context<'_, '_> {
             scope,
             !self.restrict_function_names,
             function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
-        ) || resolved.as_deref().is_some_and(|name| {
-            matches!(name, "std.collection.asof_join" | "std.query.asof_join")
-        });
+        ) || resolved
+            .as_deref()
+            .is_some_and(|name| matches!(name, "std.collection.asof_join" | "std.query.asof_join"));
         let name = root_collection_name(callee).or_else(|| {
             native_export
                 .then(|| portable_collection_operation(callee, resolved.as_deref()))
@@ -3634,9 +3652,7 @@ impl Context<'_, '_> {
                 }
                 "window" => {
                     let size = relation_window_argument(&ordered[1])?;
-                    let step = ordered
-                        .get(2)
-                        .map_or(Ok(1), relation_window_argument)?;
+                    let step = ordered.get(2).map_or(Ok(1), relation_window_argument)?;
                     plan = plan.with_stage(RelationStage::Window(size, step));
                     Ok(Value::Relation(plan))
                 }
@@ -3747,30 +3763,31 @@ impl Context<'_, '_> {
         let mut window_states = (0..plan.stages.len())
             .map(|_| None)
             .collect::<Vec<Option<RelationWindowState>>>();
-        let mut emit = |context: &mut Self, bucket: RelationBucket| -> Result<bool, EvaluationError> {
-            let rows = context.apply_relation_stages(
-                Value::List(bucket.values),
-                suffix,
-                &mut counters,
-                &mut distinct_seen,
-                &mut pair_previous,
-                &mut window_states,
-                bucket_index + 1,
-                depth + 1,
-            )?;
-            for row in rows {
-                match row {
-                    RelationRow::Skip => {}
-                    RelationRow::End => return Ok(false),
-                    RelationRow::Yield(value) => {
-                        if !visit(context, value)? {
-                            return Ok(false);
+        let mut emit =
+            |context: &mut Self, bucket: RelationBucket| -> Result<bool, EvaluationError> {
+                let rows = context.apply_relation_stages(
+                    Value::List(bucket.values),
+                    suffix,
+                    &mut counters,
+                    &mut distinct_seen,
+                    &mut pair_previous,
+                    &mut window_states,
+                    bucket_index + 1,
+                    depth + 1,
+                )?;
+                for row in rows {
+                    match row {
+                        RelationRow::Skip => {}
+                        RelationRow::End => return Ok(false),
+                        RelationRow::Yield(value) => {
+                            if !visit(context, value)? {
+                                return Ok(false);
+                            }
                         }
                     }
                 }
-            }
-            Ok(true)
-        };
+                Ok(true)
+            };
         let mut ended = false;
         self.for_each_sorted_relation(&prefix, depth, |context, value| {
             let flushed = state.push(value).map_err(bucket_error)?;
@@ -3802,7 +3819,9 @@ impl Context<'_, '_> {
             "count" => {
                 let mut count = 0usize;
                 self.for_each_bucket_group(plan, bucket_index, depth, |context, _| {
-                    count = count.checked_add(1).ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                    count = count
+                        .checked_add(1)
+                        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
                     context.items(count)?;
                     Ok(true)
                 })?;
@@ -3845,7 +3864,9 @@ impl Context<'_, '_> {
                 self.observe_list_relation(operation, values, arguments, depth)
             }
             "every" | "exists" => {
-                let predicate = arguments.first().ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
+                let predicate = arguments
+                    .first()
+                    .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
                 let want_exists = operation == "exists";
                 let mut result = !want_exists;
                 self.for_each_bucket_group(plan, bucket_index, depth, |context, value| {
@@ -4232,10 +4253,7 @@ impl Context<'_, '_> {
                     }
                 }
                 RelationStage::SharedFilter(batch) => {
-                    let predicates = batch
-                        .chunks()
-                        .iter()
-                        .flat_map(|chunk| chunk.iter());
+                    let predicates = batch.chunks().iter().flat_map(|chunk| chunk.iter());
                     if !self.relation_filter_passes(&value, predicates, depth + 1)? {
                         let mut rows = vec![RelationRow::Skip];
                         if stages.iter().enumerate().any(|(offset, stage)| {
@@ -4273,9 +4291,7 @@ impl Context<'_, '_> {
                             index + 1,
                             depth + 1,
                         )?;
-                        let ended = inner_rows
-                            .iter()
-                            .any(|row| matches!(row, RelationRow::End));
+                        let ended = inner_rows.iter().any(|row| matches!(row, RelationRow::End));
                         rows.extend(inner_rows);
                         self.items(rows.len())?;
                         if ended {
@@ -4777,9 +4793,7 @@ impl Context<'_, '_> {
                 orna_sys_v1::system_host_operation_registry().operation(operation_name)
             && self.effects.is_some()
         {
-            if input.is_some()
-                || arguments.len() != operation.parameters.len()
-            {
+            if input.is_some() || arguments.len() != operation.parameters.len() {
                 return Err(error("ORNA-EVAL-ARGUMENT"));
             }
             let positional = arguments.iter().all(|argument| argument.name.is_none());
@@ -4790,9 +4804,7 @@ impl Context<'_, '_> {
                 for parameter in &operation.parameters {
                     let mut matches = arguments
                         .iter()
-                        .filter(|argument| {
-                            argument.name.as_deref() == Some(parameter.as_str())
-                        });
+                        .filter(|argument| argument.name.as_deref() == Some(parameter.as_str()));
                     let Some(argument) = matches.next() else {
                         return Err(error("ORNA-EVAL-ARGUMENT"));
                     };
@@ -4835,8 +4847,8 @@ impl Context<'_, '_> {
                 return self.effect_value(&value);
             }
         }
-        let source_export_available = function_name(callee)
-            .is_some_and(|name| self.functions.contains_key(&name));
+        let source_export_available =
+            function_name(callee).is_some_and(|name| self.functions.contains_key(&name));
         let native_binding = registered_standard_binding(
             callee,
             resolved_function.as_deref(),
@@ -4860,6 +4872,15 @@ impl Context<'_, '_> {
         let native_time = native_binding
             .filter(|binding| binding.kind == StandardBindingKind::Time)
             .map(|binding| binding.operation);
+        let native_stream = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::Stream)
+            .map(|binding| binding.operation);
+        let root_stream = root_stream_name(callee);
+        let stream = native_stream.or_else(|| match (root_stream, input.as_ref()) {
+            (Some("from_list"), None) => Some("from_list"),
+            (Some("for_each"), Some(Value::Stream { .. })) => Some("for_each"),
+            _ => None,
+        });
         let qualified_math = (!scope.0.contains_key("std"))
             .then(|| math_name(callee))
             .flatten();
@@ -4885,11 +4906,11 @@ impl Context<'_, '_> {
         {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
-        let native_collection = native_binding
-            .is_some_and(|binding| binding.kind == StandardBindingKind::Collection);
-        let native_asof_join = resolved_function.as_deref().is_some_and(|name| {
-            matches!(name, "std.collection.asof_join" | "std.query.asof_join")
-        })
+        let native_collection =
+            native_binding.is_some_and(|binding| binding.kind == StandardBindingKind::Collection);
+        let native_asof_join = resolved_function
+            .as_deref()
+            .is_some_and(|name| matches!(name, "std.collection.asof_join" | "std.query.asof_join"))
             || (portable_collection_name(callee) == Some("asof_join")
                 && !self.restrict_function_names
                 && !scope.0.contains_key("std")
@@ -4907,6 +4928,7 @@ impl Context<'_, '_> {
         // reads remain on the separate, allowlisted system binding path above.
         if !native_asof_join
             && !native_collection
+            && stream.is_none()
             && native_math.is_none()
             && native_text.is_none()
             && native_bits.is_none()
@@ -5093,6 +5115,7 @@ impl Context<'_, '_> {
             .or(text)
             .or(stats)
             .or(time)
+            .or(stream)
             .or(collection)
             .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
         let implicit = usize::from(input.is_some());
@@ -5122,7 +5145,13 @@ impl Context<'_, '_> {
             }
         }
         values.extend(explicit);
-        let values = named_arguments(name, arguments, values, implicit, collection.is_some())?;
+        let values = named_arguments(
+            name,
+            arguments,
+            values,
+            implicit,
+            collection.is_some() || stream.is_some(),
+        )?;
         if math.is_some() {
             self.math(name, values)
         } else if bits.is_some() {
@@ -5141,6 +5170,8 @@ impl Context<'_, '_> {
             }
         } else if time.is_some() {
             self.time(name, values)
+        } else if stream.is_some() {
+            self.stream(name, values, depth)
         } else {
             self.collection(name, values, depth)
         }
@@ -5366,10 +5397,13 @@ impl Context<'_, '_> {
         match (name, values.as_slice()) {
             (
                 "offset_at",
-                [Value::Instant {
-                    unix_seconds,
-                    nanosecond,
-                }, Value::String(zone)],
+                [
+                    Value::Instant {
+                        unix_seconds,
+                        nanosecond,
+                    },
+                    Value::String(zone),
+                ],
             ) => {
                 self.step()?;
                 let zone = resolve_time_zone(zone).map_err(|_| error("ORNA-EVAL-VALUE"))?;
@@ -5383,7 +5417,11 @@ impl Context<'_, '_> {
             }
             (
                 "resolve_local",
-                [Value::String(local), Value::String(zone), Value::String(ambiguous)],
+                [
+                    Value::String(local),
+                    Value::String(zone),
+                    Value::String(ambiguous),
+                ],
             ) => {
                 if !matches!(ambiguous.as_str(), "reject" | "earlier" | "later") {
                     return Err(error("ORNA-EVAL-VALUE"));
@@ -5396,9 +5434,7 @@ impl Context<'_, '_> {
                     .map_err(|_| error("ORNA-EVAL-VALUE"))?
                 {
                     LocalTimeResolution::Unique { instant, .. } => instant,
-                    LocalTimeResolution::Ambiguous { earlier, .. }
-                        if ambiguous == "earlier" =>
-                    {
+                    LocalTimeResolution::Ambiguous { earlier, .. } if ambiguous == "earlier" => {
                         earlier
                     }
                     LocalTimeResolution::Ambiguous { later, .. } if ambiguous == "later" => later,
@@ -5419,10 +5455,12 @@ impl Context<'_, '_> {
                 | "duration.clock.format"
                 | "duration.words.format"
                 | "duration.iso.format",
-                [Value::Duration {
-                    seconds,
-                    nanosecond,
-                }],
+                [
+                    Value::Duration {
+                        seconds,
+                        nanosecond,
+                    },
+                ],
             ) => {
                 self.step()?;
                 format_duration_context(None)?;
@@ -5451,6 +5489,85 @@ impl Context<'_, '_> {
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
+    fn stream(
+        &mut self,
+        name: &str,
+        values: Vec<Value>,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        match (name, values.as_slice()) {
+            ("from_list", [Value::List(items), Value::String(source_label)]) => {
+                self.items(items.len())?;
+                let source_label = self.string(source_label.clone())?;
+                let source_digest = self.list_stream_digest(&source_label, items)?;
+                Ok(Value::Stream {
+                    values: items.clone(),
+                    source_label,
+                    source_digest,
+                    position: 0,
+                })
+            }
+            (
+                "for_each",
+                [
+                    Value::Stream {
+                        values,
+                        source_label,
+                        source_digest,
+                        position,
+                    },
+                    action,
+                ],
+            ) => {
+                self.items(values.len())?;
+                if *position > values.len()
+                    || self.list_stream_digest(source_label, values)? != *source_digest
+                {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+
+                // Keep the list position as the index of the next item. The
+                // callback and checkpoint move debit separate cancellable
+                // steps, and the position advances only after a Unit result.
+                let mut next_index = *position;
+                while next_index < values.len() {
+                    self.step()?;
+                    let result =
+                        self.invoke_predicate(action, values[next_index].clone(), depth + 1)?;
+                    if !matches!(result, Value::Unit | Value::Null) {
+                        return Err(error("ORNA-EVAL-TYPE"));
+                    }
+                    self.step()?;
+                    next_index += 1;
+                }
+                Ok(Value::Unit)
+            }
+            ("from_list", [_, _]) => Err(error("ORNA-EVAL-TYPE")),
+            ("for_each", [_, _]) => Err(error("ORNA-EVAL-TYPE")),
+            _ => Err(error("ORNA-EVAL-ARGUMENT")),
+        }
+    }
+
+    fn list_stream_digest(
+        &mut self,
+        source_label: &str,
+        values: &[Value],
+    ) -> Result<[u8; 32], EvaluationError> {
+        self.string(source_label.to_owned())?;
+        self.items(values.len())?;
+        let mut encoded_values = Vec::with_capacity(values.len());
+        for value in values {
+            self.step()?;
+            encoded_values.push(value.clone().raw()?);
+            self.items(encoded_values.len())?;
+        }
+        let identity = Raw::Array(vec![
+            Raw::Text(source_label.to_owned()),
+            Raw::Array(encoded_values),
+        ]);
+        domain_digest("orna.list.v1", &identity).map_err(|_| error("ORNA-EVAL-VALUE"))
+    }
+
     fn collection(
         &mut self,
         name: &str,
@@ -5548,8 +5665,8 @@ impl Context<'_, '_> {
             }
             ("chunk", [_, _])
             | (
-                "flatten" | "distinct" | "unique" | "pairs" | "count" | "first" | "last"
-                | "min" | "max" | "sum",
+                "flatten" | "distinct" | "unique" | "pairs" | "count" | "first" | "last" | "min"
+                | "max" | "sum",
                 [_],
             )
             | ("one", [_] | [_, _])
@@ -5788,7 +5905,11 @@ impl Context<'_, '_> {
             }
             return Ok(Value::Decimal(total));
         }
-        if !values.is_empty() && values.iter().all(|value| matches!(value, Value::Money { .. })) {
+        if !values.is_empty()
+            && values
+                .iter()
+                .all(|value| matches!(value, Value::Money { .. }))
+        {
             self.step()?;
             let Value::Money {
                 amount: first_amount,
@@ -5869,9 +5990,7 @@ impl Context<'_, '_> {
             .exponent10
             .to_usize()
             .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-        let integer = self.integer(
-            value.coefficient * BigInt::from(10u8).pow(power as u32),
-        )?;
+        let integer = self.integer(value.coefficient * BigInt::from(10u8).pow(power as u32))?;
         Ok(Value::Int(integer))
     }
 
@@ -5891,9 +6010,7 @@ impl Context<'_, '_> {
                 };
                 self.exact_decimal_result(value, preserve_decimal)
             }
-            Err(failure)
-                if matches!(failure.code(), "InexactDivision" | "ORNA-EVAL-VALUE") =>
-            {
+            Err(failure) if matches!(failure.code(), "InexactDivision" | "ORNA-EVAL-VALUE") => {
                 let Some((scale, _)) = options else {
                     return Err(error("ORNA-EVAL-VALUE"));
                 };
@@ -5912,8 +6029,12 @@ impl Context<'_, '_> {
                 (rows.as_slice(), self.stats_options(rest)?)
             }
             "percentile" => {
-                let [Value::List(rows), probability, Value::String(interpolation), rest @ ..] =
-                    values.as_slice()
+                let [
+                    Value::List(rows),
+                    probability,
+                    Value::String(interpolation),
+                    rest @ ..,
+                ] = values.as_slice()
                 else {
                     return Err(error("ORNA-EVAL-TYPE"));
                 };
@@ -5943,7 +6064,9 @@ impl Context<'_, '_> {
             Some(Value::Int(_)) if values.iter().all(|value| matches!(value, Value::Int(_))) => {
                 let mut total = BigInt::zero();
                 for value in values {
-                    let Value::Int(value) = value else { unreachable!() };
+                    let Value::Int(value) = value else {
+                        unreachable!()
+                    };
                     total = self.integer(total + value)?;
                 }
                 self.divide_stats(
@@ -5958,10 +6081,14 @@ impl Context<'_, '_> {
                     .iter()
                     .all(|value| matches!(value, Value::Decimal(_))) =>
             {
-                let Value::Decimal(first) = &values[0] else { unreachable!() };
+                let Value::Decimal(first) = &values[0] else {
+                    unreachable!()
+                };
                 let mut total = first.clone();
                 for value in &values[1..] {
-                    let Value::Decimal(value) = value else { unreachable!() };
+                    let Value::Decimal(value) = value else {
+                        unreachable!()
+                    };
                     total = total.add(value)?;
                 }
                 self.divide_stats(&total, &count, options, true)
@@ -5974,7 +6101,9 @@ impl Context<'_, '_> {
                 };
                 let mut total = f64::from_bits(*first);
                 for value in &values[1..] {
-                    let Value::Float(bits) = value else { unreachable!() };
+                    let Value::Float(bits) = value else {
+                        unreachable!()
+                    };
                     total += f64::from_bits(*bits);
                 }
                 finite_float(total / values.len() as f64)
@@ -5993,7 +6122,9 @@ impl Context<'_, '_> {
         };
         let homogeneous = match first {
             Value::Int(_) => values.iter().all(|value| matches!(value, Value::Int(_))),
-            Value::Decimal(_) => values.iter().all(|value| matches!(value, Value::Decimal(_))),
+            Value::Decimal(_) => values
+                .iter()
+                .all(|value| matches!(value, Value::Decimal(_))),
             Value::Float(_) => values.iter().all(|value| matches!(value, Value::Float(_))),
             _ => false,
         };
@@ -6100,7 +6231,9 @@ impl Context<'_, '_> {
         };
         let homogeneous = match first {
             Value::Int(_) => values.iter().all(|value| matches!(value, Value::Int(_))),
-            Value::Decimal(_) => values.iter().all(|value| matches!(value, Value::Decimal(_))),
+            Value::Decimal(_) => values
+                .iter()
+                .all(|value| matches!(value, Value::Decimal(_))),
             Value::Float(_) => values.iter().all(|value| matches!(value, Value::Float(_))),
             _ => false,
         };
@@ -6122,12 +6255,8 @@ impl Context<'_, '_> {
         let span = DecimalValue::new(BigInt::from(values.len() - 1), BigInt::zero())?;
         let position = probability.multiply(&span)?;
         let (index, fraction) = decimal_floor_fraction(&position)?;
-        let lower = values
-            .get(index)
-            .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
-        let upper = values
-            .get(index.saturating_add(1))
-            .unwrap_or(lower);
+        let lower = values.get(index).ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+        let upper = values.get(index.saturating_add(1)).unwrap_or(lower);
         match interpolation {
             "lower" => Ok(lower.clone()),
             "higher" => {
@@ -6176,8 +6305,10 @@ impl Context<'_, '_> {
                 self.exact_decimal_result(result, false)
             }
             (Value::Decimal(lower), Value::Decimal(upper)) => {
-                let delta =
-                    upper.add(&DecimalValue::new(-lower.coefficient.clone(), lower.exponent10.clone())?)?;
+                let delta = upper.add(&DecimalValue::new(
+                    -lower.coefficient.clone(),
+                    lower.exponent10.clone(),
+                )?)?;
                 let result = lower.add(&delta.multiply(fraction)?)?;
                 let result = if let Some((scale, _)) = options {
                     result.round_to_scale(scale)?
@@ -6188,8 +6319,7 @@ impl Context<'_, '_> {
             }
             (Value::Float(lower), Value::Float(upper)) => finite_float(
                 f64::from_bits(*lower)
-                    + (f64::from_bits(*upper) - f64::from_bits(*lower))
-                        * decimal_to_f64(fraction)?,
+                    + (f64::from_bits(*upper) - f64::from_bits(*lower)) * decimal_to_f64(fraction)?,
             ),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
@@ -6223,7 +6353,11 @@ impl Context<'_, '_> {
             "lower" => lower,
             "higher" => upper,
             "nearest" => {
-                if fraction < 0.5 { lower } else { upper }
+                if fraction < 0.5 {
+                    lower
+                } else {
+                    upper
+                }
             }
             _ => lower,
         };
@@ -6234,7 +6368,9 @@ impl Context<'_, '_> {
             );
         }
         if interpolation == "midpoint" {
-            return finite_float((f64::from_bits(sorted[lower]) + f64::from_bits(sorted[upper])) / 2.0);
+            return finite_float(
+                (f64::from_bits(sorted[lower]) + f64::from_bits(sorted[upper])) / 2.0,
+            );
         }
         Ok(Value::Float(sorted[choose]))
     }
@@ -6260,7 +6396,11 @@ impl Context<'_, '_> {
                 Value::Option(Some(Box::new(Value::Float(value))))
             }));
         }
-        if !values.is_empty() && values.iter().all(|value| matches!(value, Value::Decimal(_))) {
+        if !values.is_empty()
+            && values
+                .iter()
+                .all(|value| matches!(value, Value::Decimal(_)))
+        {
             let mut candidate = None;
             for value in values {
                 self.step()?;
@@ -6281,11 +6421,13 @@ impl Context<'_, '_> {
                     candidate = Some(value.clone());
                 }
             }
-            return Ok(candidate.map_or(Value::Null, |value| {
-                Value::Option(Some(Box::new(value)))
-            }));
+            return Ok(candidate.map_or(Value::Null, |value| Value::Option(Some(Box::new(value)))));
         }
-        if !values.is_empty() && values.iter().all(|value| matches!(value, Value::Money { .. })) {
+        if !values.is_empty()
+            && values
+                .iter()
+                .all(|value| matches!(value, Value::Money { .. }))
+        {
             let currency = match &values[0] {
                 Value::Money { currency, .. } => *currency,
                 _ => unreachable!("non-empty all-Money list has a first Money"),
@@ -6318,9 +6460,7 @@ impl Context<'_, '_> {
                     candidate = Some(value.clone());
                 }
             }
-            return Ok(candidate.map_or(Value::Null, |value| {
-                Value::Option(Some(Box::new(value)))
-            }));
+            return Ok(candidate.map_or(Value::Null, |value| Value::Option(Some(Box::new(value)))));
         }
         let temporal_kind = values.first().and_then(range_endpoint_kind);
         if matches!(temporal_kind, Some("Date" | "Instant" | "Duration"))
@@ -6374,14 +6514,13 @@ impl Context<'_, '_> {
         Ok(candidate.map_or(Value::Null, |value| Value::Option(Some(Box::new(value)))))
     }
     fn first(&self, values: &[Value]) -> Result<Value, EvaluationError> {
-        Ok(values.first().cloned().map_or(Value::Null, |value| {
-            Value::Option(Some(Box::new(value)))
-        }))
+        Ok(values
+            .first()
+            .cloned()
+            .map_or(Value::Null, |value| Value::Option(Some(Box::new(value)))))
     }
     fn last(&self, values: &[Value]) -> Result<Value, EvaluationError> {
-        Ok(Value::Option(
-            values.last().cloned().map(Box::new),
-        ))
+        Ok(Value::Option(values.last().cloned().map(Box::new)))
     }
     fn one(
         &mut self,
@@ -6627,12 +6766,11 @@ impl Context<'_, '_> {
         by: &Value,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
-        // ORNA-LIB-003 names the selectors but leaves their shape and the
-        // result schema open. This evaluator uses one callback per selector,
-        // applied to rows from either list, and returns (left, right-or-null)
-        // tuples in left input order. "Nearest" means minimum absolute time
-        // distance, so a later right time may win. Equal distances choose the
-        // last matching row in right source order, not a canonical-key order.
+        // ORNA-LIB-003 leaves selector/result shapes open. Apply the selectors
+        // to both lists, preserve left input order, and choose the latest right
+        // value not after the left time in the same group. Equal timestamps
+        // use canonical OVB encoding as the right-key order; the final key
+        // wins. Missing matches are null.
         self.items(left.len())?;
         self.items(right.len())?;
         if left.is_empty() {
@@ -6659,34 +6797,46 @@ impl Context<'_, '_> {
             self.step()?;
             let group_key = self.invoke_predicate(by, row.clone(), depth + 1)?;
             lawful_group_key(&group_key)?;
-            right_keys.push((time_key, group_key));
+            let canonical_key = row
+                .clone()
+                .canonical()?
+                .encode()
+                .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+            right_keys.push((time_key, group_key, canonical_key));
             self.items(right_keys.len())?;
         }
 
         let mut joined = Vec::with_capacity(left.len());
         for (left_row, (left_time, left_group)) in left.iter().zip(left_keys) {
-            let mut nearest = None::<(Value, Value)>;
-            for (right_row, (right_time, right_group)) in right.iter().zip(&right_keys) {
+            let mut latest = None::<(usize, Vec<u8>)>;
+            for (right_index, (right_time, right_group, right_key)) in right_keys.iter().enumerate()
+            {
                 self.step()?;
                 if compare_group_keys(&left_group, right_group)? != std::cmp::Ordering::Equal {
                     continue;
                 }
-                let distance = asof_time_distance(&left_time, right_time)?;
-                let replace = match &nearest {
+                if compare_values(right_time, &left_time)?.is_gt() {
+                    continue;
+                }
+                let replace = match &latest {
                     None => true,
-                    Some((best_distance, _)) => {
-                        compare_values(&distance, best_distance)? != std::cmp::Ordering::Greater
+                    Some((best_index, best_key)) => {
+                        match compare_values(right_time, &right_keys[*best_index].0)? {
+                            std::cmp::Ordering::Greater => true,
+                            std::cmp::Ordering::Less => false,
+                            std::cmp::Ordering::Equal => right_key > best_key,
+                        }
                     }
                 };
                 if replace {
-                    // Replacing on equality makes the rightmost equal-distance
-                    // row win, matching the documented source-order tie rule.
-                    nearest = Some((distance, right_row.clone()));
+                    latest = Some((right_index, right_key.clone()));
                 }
             }
             joined.push(Value::Tuple(vec![
                 left_row.clone(),
-                nearest.map_or(Value::Null, |(_, row)| row),
+                latest.map_or(Value::Null, |(index, _)| {
+                    Value::Option(Some(Box::new(right[index].clone())))
+                }),
             ]));
             self.items(joined.len())?;
         }
@@ -7020,18 +7170,15 @@ fn bind_constructor(
         .collect::<Vec<_>>()
         .join(".");
     let owner = context.string(owner)?;
-    let variant = context.string(
-        path.last()
-            .expect("path length checked")
-            .text
-            .clone(),
-    )?;
+    let variant = context.string(path.last().expect("path length checked").text.clone())?;
     let qualified_name = context.string(format!("{owner}.{variant}"))?;
     let Some((expected_type, expected_variant)) = enum_variant_identity(scope, &owner, &variant)
         .or_else(|| {
             scope.0.get(&qualified_name).and_then(|value| match value {
                 Value::Enum {
-                    type_id, variant_id, ..
+                    type_id,
+                    variant_id,
+                    ..
                 } => Some((type_id, variant_id)),
                 _ => None,
             })
@@ -7078,13 +7225,7 @@ fn bind_pattern_fields(
             return Ok(false);
         };
         if let Some(pattern) = &field.pattern {
-            if !bind(
-                pattern,
-                field_value.clone(),
-                scope,
-                context,
-                depth + 1,
-            )? {
+            if !bind(pattern, field_value.clone(), scope, context, depth + 1)? {
                 return Ok(false);
             }
         } else {
@@ -7133,6 +7274,8 @@ fn named_arguments(
         "bit_not" => &["value"],
         "shift_left" | "shift_right" => &["value", "count"],
         "chunk" => &["values", "size"],
+        "from_list" => &["values", "source_identity"],
+        "for_each" => &["stream", "action"],
         "flatten" | "unique" | "pairs" => &["values"],
         "distinct" | "count" => &["rows"],
         "last" => &["rows"],
@@ -7198,8 +7341,7 @@ fn named_arguments(
                     // Older bounded evaluator fixtures used `values` for
                     // finite lists. Keep that alias at runtime while the
                     // pinned 1.0 source signature canonically names `rows`.
-                    (name == "values" && expected.first() == Some(&"rows"))
-                        .then_some(0)
+                    (name == "values" && expected.first() == Some(&"rows")).then_some(0)
                 })
         } else if named_started {
             None
@@ -7257,6 +7399,7 @@ fn standard_collection_function_operation(name: &str) -> Option<&str> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StandardBindingKind {
     Collection,
+    Stream,
     Math,
     Text,
     Bits,
@@ -7284,21 +7427,76 @@ const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
         prefix: "std.collection.",
         kind: StandardBindingKind::Collection,
         operations: &[
-            "chunk", "flatten", "filter", "map", "flat_map", "sort_by", "rank", "take",
-            "drop", "distinct", "unique", "union", "count", "first", "one", "sum", "min",
-            "max", "every", "exists", "partition", "zip", "zip_exact", "group_by", "pairs",
-            "window", "split_when", "bucket_by", "asof_join",
+            "chunk",
+            "flatten",
+            "filter",
+            "map",
+            "flat_map",
+            "sort_by",
+            "rank",
+            "take",
+            "drop",
+            "distinct",
+            "unique",
+            "union",
+            "count",
+            "first",
+            "one",
+            "sum",
+            "min",
+            "max",
+            "every",
+            "exists",
+            "partition",
+            "zip",
+            "zip_exact",
+            "group_by",
+            "pairs",
+            "window",
+            "split_when",
+            "bucket_by",
+            "asof_join",
         ],
     },
     StandardBindingModule {
         prefix: "std.query.",
         kind: StandardBindingKind::Collection,
         operations: &[
-            "chunk", "flatten", "filter", "map", "flat_map", "sort_by", "rank", "take",
-            "drop", "distinct", "unique", "union", "count", "first", "one", "sum", "min",
-            "max", "every", "exists", "partition", "zip", "zip_exact", "group_by", "pairs",
-            "window", "split_when", "bucket_by", "asof_join",
+            "chunk",
+            "flatten",
+            "filter",
+            "map",
+            "flat_map",
+            "sort_by",
+            "rank",
+            "take",
+            "drop",
+            "distinct",
+            "unique",
+            "union",
+            "count",
+            "first",
+            "one",
+            "sum",
+            "min",
+            "max",
+            "every",
+            "exists",
+            "partition",
+            "zip",
+            "zip_exact",
+            "group_by",
+            "pairs",
+            "window",
+            "split_when",
+            "bucket_by",
+            "asof_join",
         ],
+    },
+    StandardBindingModule {
+        prefix: "std.stream.",
+        kind: StandardBindingKind::Stream,
+        operations: &["from_list", "for_each"],
     },
     StandardBindingModule {
         prefix: "std.math.",
@@ -7309,15 +7507,28 @@ const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
         prefix: "std.text.",
         kind: StandardBindingKind::Text,
         operations: &[
-            "trim", "split", "join", "starts_with", "ends_with", "contains", "replace",
-            "normalise", "lower", "upper",
+            "trim",
+            "split",
+            "join",
+            "starts_with",
+            "ends_with",
+            "contains",
+            "replace",
+            "normalise",
+            "lower",
+            "upper",
         ],
     },
     StandardBindingModule {
         prefix: "std.bits.",
         kind: StandardBindingKind::Bits,
         operations: &[
-            "bit_or", "bit_and", "bit_xor", "bit_not", "shift_left", "shift_right",
+            "bit_or",
+            "bit_and",
+            "bit_xor",
+            "bit_not",
+            "shift_left",
+            "shift_right",
         ],
     },
     StandardBindingModule {
@@ -7329,8 +7540,12 @@ const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
         prefix: "std.time.",
         kind: StandardBindingKind::Time,
         operations: &[
-            "offset_at", "resolve_local", "duration.compact.format", "duration.clock.format",
-            "duration.words.format", "duration.iso.format",
+            "offset_at",
+            "resolve_local",
+            "duration.compact.format",
+            "duration.clock.format",
+            "duration.words.format",
+            "duration.iso.format",
         ],
     },
 ];
@@ -7447,7 +7662,9 @@ fn format_duration(name: &str, seconds: &BigInt, nanosecond: u32) -> String {
     let (minutes, remainder) = remainder.div_rem(&BigInt::from(NANOS_PER_MINUTE));
     let (whole_seconds, fraction) = remainder.div_rem(&BigInt::from(NANOS_PER_SECOND));
     let hours = hours.to_u32().expect("hour remainder is below one day");
-    let minutes = minutes.to_u32().expect("minute remainder is below one hour");
+    let minutes = minutes
+        .to_u32()
+        .expect("minute remainder is below one hour");
     let whole_seconds = whole_seconds
         .to_u32()
         .expect("second remainder is below one minute");
@@ -7508,10 +7725,7 @@ fn format_duration(name: &str, seconds: &BigInt, nanosecond: u32) -> String {
                 ));
             }
             if hours > 0 {
-                parts.push(format!(
-                    "{hours} hour{}",
-                    if hours == 1 { "" } else { "s" }
-                ));
+                parts.push(format!("{hours} hour{}", if hours == 1 { "" } else { "s" }));
             }
             if minutes > 0 {
                 parts.push(format!(
@@ -7545,7 +7759,10 @@ fn format_duration(name: &str, seconds: &BigInt, nanosecond: u32) -> String {
                     output.push_str(&minutes.to_string());
                     output.push('M');
                 }
-                if whole_seconds > 0 || fraction > 0 || (days.is_zero() && hours == 0 && minutes == 0) {
+                if whole_seconds > 0
+                    || fraction > 0
+                    || (days.is_zero() && hours == 0 && minutes == 0)
+                {
                     output.push_str(&fractional_seconds);
                     output.push('S');
                 }
@@ -7637,6 +7854,19 @@ fn root_collection_name(expression: &Expr) -> Option<&str> {
     .then_some(text.as_str())
 }
 
+fn root_stream_name(expression: &Expr) -> Option<&'static str> {
+    match expression {
+        Expr::Field { base, name, .. }
+            if name == "from_list"
+                && matches!(base.as_ref(), Expr::Name { text, .. } if text == "Stream") =>
+        {
+            Some("from_list")
+        }
+        Expr::Name { text, .. } if text == "for_each" => Some("for_each"),
+        _ => None,
+    }
+}
+
 fn is_relation_source(expression: &Expr) -> bool {
     matches!(
         expression,
@@ -7673,11 +7903,14 @@ fn relation_expression_candidate(expression: &Expr, scope: &Scope) -> bool {
         Expr::Call {
             callee, arguments, ..
         } if root_collection_name(callee).is_some()
-            || portable_collection_name(callee).is_some() => arguments
-            .iter()
-            .find(|argument| argument.name.as_deref() == Some("rows"))
-            .or_else(|| arguments.first())
-            .is_some_and(|argument| relation_expression_candidate(&argument.value, scope)),
+            || portable_collection_name(callee).is_some() =>
+        {
+            arguments
+                .iter()
+                .find(|argument| argument.name.as_deref() == Some("rows"))
+                .or_else(|| arguments.first())
+                .is_some_and(|argument| relation_expression_candidate(&argument.value, scope))
+        }
         _ => false,
     }
 }
@@ -7862,9 +8095,8 @@ fn is_static_effect_path(callee: &Expr, scope: &Scope) -> bool {
     matches!(callee, Expr::Field { base, .. }
         if matches!(base.as_ref(), Expr::ReplBinding { text, .. } if text == "$__orna_relation"))
         || matches!(callee, Expr::Field { .. })
-            && function_root_name(callee).is_some_and(|root| {
-                scope.4.contains(root) || !scope.0.contains_key(root)
-            })
+            && function_root_name(callee)
+                .is_some_and(|root| scope.4.contains(root) || !scope.0.contains_key(root))
 }
 
 fn one_like(value: &Value) -> Result<Value, EvaluationError> {
@@ -8117,14 +8349,26 @@ fn decimal_floor_fraction(value: &DecimalValue) -> Result<(usize, DecimalValue),
     }
     let divisor = BigInt::from(10u8).pow(power as u32);
     let (index, remainder) = value.coefficient.div_rem(&divisor);
-    Ok((index.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?, DecimalValue::new(remainder, value.exponent10.clone())?))
+    Ok((
+        index.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?,
+        DecimalValue::new(remainder, value.exponent10.clone())?,
+    ))
 }
 
 fn decimal_to_f64(value: &DecimalValue) -> Result<f64, EvaluationError> {
-    let coefficient = value.coefficient.to_f64().ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
-    let exponent = value.exponent10.to_i32().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+    let coefficient = value
+        .coefficient
+        .to_f64()
+        .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+    let exponent = value
+        .exponent10
+        .to_i32()
+        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
     let value = coefficient * 10f64.powi(exponent);
-    value.is_finite().then_some(value).ok_or_else(|| error("ORNA-EVAL-VALUE"))
+    value
+        .is_finite()
+        .then_some(value)
+        .ok_or_else(|| error("ORNA-EVAL-VALUE"))
 }
 
 fn lawful_sort_key(value: &Value) -> Result<(), EvaluationError> {
@@ -8197,79 +8441,6 @@ fn lawful_group_key(value: &Value) -> Result<(), EvaluationError> {
 fn lawful_asof_time(value: &Value) -> Result<(), EvaluationError> {
     match value {
         Value::Int(_) | Value::Decimal(_) | Value::Date(_) | Value::Instant { .. } => Ok(()),
-        _ => Err(error("ORNA-EVAL-TYPE")),
-    }
-}
-fn asof_time_distance(left: &Value, right: &Value) -> Result<Value, EvaluationError> {
-    match (left, right) {
-        (Value::Int(left), Value::Int(right)) => {
-            let distance = (left - right).abs();
-            if distance.to_str_radix(10).len() > DEFAULT_INTEGER_DIGITS {
-                return Err(error("ORNA-EVAL-LIMIT"));
-            }
-            Ok(Value::Int(distance))
-        }
-        (Value::Decimal(left), Value::Decimal(right)) => {
-            let exponent = left.exponent10.clone().min(right.exponent10.clone());
-            let left_shift = (&left.exponent10 - &exponent)
-                .to_usize()
-                .filter(|shift| *shift <= DEFAULT_INTEGER_DIGITS)
-                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-            let right_shift = (&right.exponent10 - &exponent)
-                .to_usize()
-                .filter(|shift| *shift <= DEFAULT_INTEGER_DIGITS)
-                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-            let left_coefficient = &left.coefficient * BigInt::from(10u8).pow(left_shift as u32);
-            let right_coefficient = &right.coefficient * BigInt::from(10u8).pow(right_shift as u32);
-            let difference = (left_coefficient - right_coefficient).abs();
-            if difference.to_str_radix(10).len() > DEFAULT_INTEGER_DIGITS {
-                return Err(error("ORNA-EVAL-LIMIT"));
-            }
-            Ok(Value::Decimal(DecimalValue::new(difference, exponent)?))
-        }
-        (Value::Date(left), Value::Date(right)) => {
-            let date_days = |date: &str| -> Result<BigInt, EvaluationError> {
-                if !valid_date_literal(date) {
-                    return Err(error("ORNA-EVAL-VALUE"));
-                }
-                let year = date[0..4]
-                    .parse::<u32>()
-                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
-                let month = date[5..7]
-                    .parse::<u32>()
-                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
-                let day = date[8..10]
-                    .parse::<u32>()
-                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
-                days_since_unix_epoch(year, month, day)
-                    .map(BigInt::from)
-                    .ok_or_else(|| error("ORNA-EVAL-VALUE"))
-            };
-            let distance = (date_days(left)? - date_days(right)?).abs();
-            if distance.to_str_radix(10).len() > DEFAULT_INTEGER_DIGITS {
-                return Err(error("ORNA-EVAL-LIMIT"));
-            }
-            Ok(Value::Int(distance))
-        }
-        (
-            Value::Instant {
-                unix_seconds: left_seconds,
-                nanosecond: left_nanosecond,
-            },
-            Value::Instant {
-                unix_seconds: right_seconds,
-                nanosecond: right_nanosecond,
-            },
-        ) => {
-            let billion = BigInt::from(1_000_000_000u32);
-            let left = BigInt::from(*left_seconds) * &billion + BigInt::from(*left_nanosecond);
-            let right = BigInt::from(*right_seconds) * billion + BigInt::from(*right_nanosecond);
-            let distance = (left - right).abs();
-            if distance.to_str_radix(10).len() > DEFAULT_INTEGER_DIGITS {
-                return Err(error("ORNA-EVAL-LIMIT"));
-            }
-            Ok(Value::Int(distance))
-        }
         _ => Err(error("ORNA-EVAL-TYPE")),
     }
 }
@@ -8418,7 +8589,10 @@ mod tests {
                 }
             }
         }
-        assert!(registered >= 80, "expected the registered pinned host surface, got {registered}");
+        assert!(
+            registered >= 80,
+            "expected the registered pinned host surface, got {registered}"
+        );
     }
 
     fn evaluate_recovery(source: &str) -> CanonicalValue {
@@ -8670,7 +8844,6 @@ mod tests {
         );
         assert_eq!(effects.calls, 0);
     }
-
 
     #[test]
     fn recovery_pipelines_handle_ordinary_failures_and_skip_successes() {
@@ -9474,8 +9647,8 @@ mod tests {
         let outer_second = Value::Bool(true);
         let left = RelationPlan::new("Left".into())
             .with_stage(RelationStage::Filter(vec![left_first.clone()]));
-        let right = RelationPlan::new("Right".into())
-            .with_stage(RelationStage::Map(right_map.clone()));
+        let right =
+            RelationPlan::new("Right".into()).with_stage(RelationStage::Map(right_map.clone()));
         let plan = RelationPlan::union(left, right)
             .with_stage(RelationStage::Filter(vec![outer_first.clone()]))
             .with_stage(RelationStage::Filter(vec![outer_second.clone()]))
@@ -9485,7 +9658,11 @@ mod tests {
         let (left, right) = plan.source_union.as_ref().unwrap();
         assert_eq!(
             left.stages,
-            vec![RelationStage::Filter(vec![left_first, outer_first.clone(), outer_second.clone()])]
+            vec![RelationStage::Filter(vec![
+                left_first,
+                outer_first.clone(),
+                outer_second.clone()
+            ])]
         );
         assert_eq!(
             right.stages,
@@ -9641,7 +9818,10 @@ mod tests {
         assert!(inner.stages.is_empty());
         let (known_left, unknown_right) = inner.source_union.as_ref().unwrap();
         let merged = vec![first, second, third.clone(), fourth.clone()];
-        assert_eq!(known_left.stages, vec![RelationStage::Filter(merged.clone())]);
+        assert_eq!(
+            known_left.stages,
+            vec![RelationStage::Filter(merged.clone())]
+        );
         assert_eq!(unknown_right.stages, vec![RelationStage::Filter(merged)]);
         assert_eq!(
             unknown_tail.stages,
@@ -9690,7 +9870,12 @@ mod tests {
                 .flat_map(|chunk| chunk.iter())
                 .cloned()
                 .collect::<Vec<_>>(),
-            vec![left_own, outer_first.clone(), outer_second.clone(), outer_third.clone()]
+            vec![
+                left_own,
+                outer_first.clone(),
+                outer_second.clone(),
+                outer_third.clone()
+            ]
         );
         assert_eq!(
             middle_batch
@@ -9740,7 +9925,12 @@ mod tests {
         assert!(Arc::ptr_eq(&left_batch, &right_batch));
         assert_eq!(
             left_batch.values().cloned().collect::<Vec<_>>(),
-            vec![unknown_first, unknown_second, outer_first.clone(), outer_second.clone()]
+            vec![
+                unknown_first,
+                unknown_second,
+                outer_first.clone(),
+                outer_second.clone()
+            ]
         );
         let tail_batch = batch_for(unknown_tail);
         assert_eq!(
@@ -9806,7 +9996,10 @@ mod tests {
         let composed = RelationPlan::union(operand.clone(), operand)
             .with_stage(RelationStage::SharedFilter(shared_outer))
             .flush_filter_cascade();
-        let (left, right) = composed.source_union.as_ref().expect("unknown union remains");
+        let (left, right) = composed
+            .source_union
+            .as_ref()
+            .expect("unknown union remains");
         let left_batch = batch_for(left);
         let right_batch = batch_for(right);
 
