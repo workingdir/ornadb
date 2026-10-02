@@ -3658,6 +3658,32 @@ fn shared_ancestor_pin_survives_sibling_cascade_rebind_storms() {
 }
 
 #[test]
+fn sibling_bridge_pins_do_not_merge_after_structural_round_trip() {
+    let source = include_str!("fixtures/historical-pinned-closure-sibling-cascade-storm-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-sibling-cascade-storm-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "sibling cascades with distinct bridge pins must remain incompatible after structural round trip: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
