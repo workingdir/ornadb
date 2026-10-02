@@ -1,6 +1,6 @@
 {
   id: "a",
-  name: "Anchor",
+  name: "Anchor root",
   city: "Oslo",
 }
 
@@ -17,6 +17,12 @@
 }
 
 {
+  id: "a/child/deep/leaf",
+  name: "Anchor leaf",
+  city: "Oslo",
+}
+
+{
   id: "root",
   name: "Storm root",
   city: "London",
@@ -29,14 +35,26 @@
 }
 
 {
-  id: "root/child/deep/storm/a",
-  name: "Storm leaf A",
+  id: "root/child/deep",
+  name: "Storm deep",
   city: "London",
 }
 
 {
-  id: "root/child/deep/storm/b",
-  name: "Storm leaf B",
+  id: "root/child/deep/leaf/twig",
+  name: "Storm twig",
+  city: "London",
+}
+
+{
+  id: "root/child/deep/leaf/twig/bud",
+  name: "Storm bud",
+  city: "London",
+}
+
+{
+  id: "root/child/deep/leaf/twig/bud/seed",
+  name: "Storm seed",
   city: "London",
 }
 
