@@ -1879,6 +1879,326 @@ fn nested_rebind_chain_keeps_longer_sibling_and_uses_each_replacement_manifest()
 }
 
 #[test]
+fn alias_rebind_storm_keeps_latest_exact_manifest_and_prior_route_snapshots() {
+    let package_source = include_str!("fixtures/attach-package.orna");
+    let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
+
+    let original_short = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "20",
+        None,
+        "original short route before rebound storm",
+    );
+    let original_long = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "30",
+        None,
+        "original longer prefix route before rebound storm",
+    );
+    let original_deep = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "40",
+        None,
+        "original deepest prefix route before rebound storm",
+    );
+
+    let mut replacements = Vec::new();
+    for revision in 0..3 {
+        let child = write_package_snapshot(
+            shared_dir.path(),
+            package_source,
+            &format!("{}", 60 + revision),
+            None,
+            &format!("storm child revision {revision}"),
+        );
+        let deep_sibling = write_package_snapshot(
+            shared_dir.path(),
+            package_source,
+            &format!("{}", 70 + revision),
+            None,
+            &format!("storm deep sibling revision {revision}"),
+        );
+        let manifest = format!(
+            "archive_copy {child}\narchive_copy_archive {deep_sibling}\n"
+        );
+        let replacement = write_package_snapshot(
+            shared_dir.path(),
+            package_source,
+            &format!("{}", 50 + revision),
+            Some(&manifest),
+            &format!("short alias rebound revision {revision}"),
+        );
+        replacements.push(replacement);
+    }
+
+    let root_manifest = format!(
+        "archive {original_short}\narchive_copy {original_long}\narchive_copy_archive {original_deep}\n"
+    );
+    let (_root_dir, root_repository, root_commit) = repository(&[
+        ("main.orna", include_str!("fixtures/attach-primary.orna")),
+        (PACKAGE_PIN_MANIFEST_PATH, &root_manifest),
+    ]);
+    let loader = ProjectLoader::default();
+    let primary = PinnedDatabase::resolve("app", root_repository, &root_commit, loader).unwrap();
+    let resolver = PackageResolver::new(
+        [
+            ("archive".to_owned(), shared_repository.clone()),
+            ("archive_copy".to_owned(), shared_repository.clone()),
+            ("archive_copy_archive".to_owned(), shared_repository.clone()),
+        ],
+        loader,
+    )
+    .unwrap();
+
+    let mut session = resolver.resolve_for_parent(primary).unwrap();
+    let original_session = session.clone();
+    for revision in [0, 1, 2, 0, 2, 1, 2] {
+        let replacement = PinnedDatabase::resolve(
+            "archive",
+            shared_repository.clone(),
+            &replacements[revision],
+            loader,
+        )
+        .unwrap();
+        session.detach_database("archive").unwrap();
+        session.attach_database(replacement).unwrap();
+
+        assert_module_route(
+            &session,
+            "archive.orna",
+            &format!("= {}", 50 + revision),
+        );
+        assert_module_route(&session, "archive_copy.orna", "= 30");
+        assert_module_route(&session, "archive_copy_archive.orna", "= 40");
+        assert_module_route(&original_session, "archive.orna", "= 20");
+        assert_module_route(&original_session, "archive_copy.orna", "= 30");
+    }
+
+    let latest = PinnedDatabase::resolve(
+        "archive",
+        shared_repository,
+        &replacements[2],
+        loader,
+    )
+    .unwrap();
+    let latest_closure = resolver.resolve_for_parent(latest).unwrap();
+    assert_module_route(&latest_closure, "main.orna", "= 52");
+    assert_module_route(&latest_closure, "archive_copy.orna", "= 62");
+    assert_module_route(&latest_closure, "archive_copy_archive.orna", "= 72");
+}
+
+#[test]
+fn deep_alias_rebind_storm_uses_each_latest_parent_manifest() {
+    let package_source = include_str!("fixtures/attach-package.orna");
+    let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
+    let aliases = [
+        "archive",
+        "archive_copy",
+        "archive_copy_archive",
+        "archive_copy_archive_archive",
+        "archive_copy_archive_archive_archive",
+    ];
+    let depth_count = aliases.len() - 1;
+    let cycle_count = 3;
+
+    let mut original_commits = Vec::new();
+    for (index, _) in aliases.iter().enumerate() {
+        original_commits.push(write_package_snapshot(
+            shared_dir.path(),
+            package_source,
+            &format!("{}", 10 + index),
+            None,
+            &format!("original alias route {index}"),
+        ));
+    }
+
+    let mut sibling_commits: Vec<Vec<Vec<String>>> = (0..depth_count)
+        .map(|_| {
+            (0..cycle_count)
+                .map(|_| vec![String::new(); aliases.len()])
+                .collect()
+        })
+        .collect();
+    for depth in 0..depth_count {
+        for cycle in 0..cycle_count {
+            for alias_index in depth + 2..aliases.len() {
+                let marker = 150 + depth * 20 + cycle * 5 + alias_index;
+                sibling_commits[depth][cycle][alias_index] = write_package_snapshot(
+                    shared_dir.path(),
+                    package_source,
+                    &format!("{marker}"),
+                    None,
+                    &format!("depth {depth} cycle {cycle} sibling {alias_index}"),
+                );
+            }
+        }
+    }
+
+    let mut terminal_commits = Vec::new();
+    for cycle in 0..cycle_count {
+        terminal_commits.push(write_package_snapshot(
+            shared_dir.path(),
+            package_source,
+            &format!("{}", 240 + cycle),
+            None,
+            &format!("terminal route selected by cycle {cycle}"),
+        ));
+    }
+
+    let mut replacement_commits: Vec<Vec<String>> = (0..depth_count)
+        .map(|_| vec![String::new(); cycle_count])
+        .collect();
+    for depth in (0..depth_count).rev() {
+        for cycle in 0..cycle_count {
+            let child_index = depth + 1;
+            let child_commit = if child_index < depth_count {
+                &replacement_commits[child_index][cycle]
+            } else {
+                &terminal_commits[cycle]
+            };
+            let mut manifest = format!("{} {child_commit}\n", aliases[child_index]);
+            for alias_index in depth + 2..aliases.len() {
+                manifest.push_str(&format!(
+                    "{} {}\n",
+                    aliases[alias_index], sibling_commits[depth][cycle][alias_index]
+                ));
+            }
+            let marker = 80 + depth * 10 + cycle;
+            replacement_commits[depth][cycle] = write_package_snapshot(
+                shared_dir.path(),
+                package_source,
+                &format!("{marker}"),
+                Some(&manifest),
+                &format!("depth {depth} replacement cycle {cycle}"),
+            );
+        }
+    }
+
+    let root_manifest = aliases
+        .iter()
+        .zip(&original_commits)
+        .map(|(alias, commit)| format!("{alias} {commit}\n"))
+        .collect::<String>();
+    let (_root_dir, root_repository, root_commit) = repository(&[
+        ("main.orna", include_str!("fixtures/attach-primary.orna")),
+        (PACKAGE_PIN_MANIFEST_PATH, &root_manifest),
+    ]);
+    let loader = ProjectLoader::default();
+    let primary = PinnedDatabase::resolve("app", root_repository, &root_commit, loader).unwrap();
+    let resolver = PackageResolver::new(
+        aliases
+            .iter()
+            .map(|alias| ((*alias).to_owned(), shared_repository.clone())),
+        loader,
+    )
+    .unwrap();
+
+    let mut current = resolver.resolve_for_parent(primary).unwrap();
+    for depth in 0..depth_count {
+        let original_current = current.clone();
+        let original_marker = if depth == 0 {
+            10 + depth
+        } else {
+            80 + depth * 10 + cycle_count - 1
+        };
+        let retained_markers: Vec<_> = (depth + 1..aliases.len())
+            .map(|alias_index| {
+                if depth == 0 {
+                    10 + alias_index
+                } else {
+                    150 + (depth - 1) * 20 + (cycle_count - 1) * 5 + alias_index
+                }
+            })
+            .collect();
+
+        if depth > 0 {
+            assert_module_route(
+                &current,
+                "main.orna",
+                &format!("= {}", 80 + (depth - 1) * 10 + cycle_count - 1),
+            );
+        }
+        for cycle in 0..cycle_count {
+            let replacement = PinnedDatabase::resolve(
+                aliases[depth],
+                shared_repository.clone(),
+                &replacement_commits[depth][cycle],
+                loader,
+            )
+            .unwrap();
+            current.detach_database(aliases[depth]).unwrap();
+            current.attach_database(replacement).unwrap();
+
+            assert_module_route(
+                &current,
+                &format!("{}.orna", aliases[depth]),
+                &format!("= {}", 80 + depth * 10 + cycle),
+            );
+            for (offset, alias_index) in (depth + 1..aliases.len()).enumerate() {
+                assert_module_route(
+                    &current,
+                    &format!("{}.orna", aliases[alias_index]),
+                    &format!("= {}", retained_markers[offset]),
+                );
+            }
+            assert_module_route(
+                &original_current,
+                &format!("{}.orna", aliases[depth]),
+                &format!("= {original_marker}"),
+            );
+        }
+
+        let selected = current.database(aliases[depth]).unwrap().clone();
+        assert_eq!(
+            selected.pin().commit().as_str(),
+            replacement_commits[depth][cycle_count - 1]
+        );
+        let next = resolver.resolve_for_parent(selected).unwrap();
+        assert_module_route(
+            &next,
+            "main.orna",
+            &format!("= {}", 80 + depth * 10 + cycle_count - 1),
+        );
+        for alias_index in depth + 1..aliases.len() {
+            let marker = if alias_index == depth + 1 {
+                if alias_index < depth_count {
+                    80 + alias_index * 10 + cycle_count - 1
+                } else {
+                    240 + cycle_count - 1
+                }
+            } else {
+                150 + depth * 20 + (cycle_count - 1) * 5 + alias_index
+            };
+            assert_module_route(
+                &next,
+                &format!("{}.orna", aliases[alias_index]),
+                &format!("= {marker}"),
+            );
+        }
+        current = next;
+    }
+
+    assert_eq!(
+        current
+            .database(aliases[depth_count])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        terminal_commits[cycle_count - 1]
+    );
+    assert_module_route(&current, "main.orna", "= 112");
+    assert_module_route(
+        &current,
+        &format!("{}.orna", aliases[depth_count]),
+        "= 242",
+    );
+}
+
+#[test]
 fn deep_rebind_chain_uses_exact_parent_aliases_at_each_depth() {
     let package_source = include_str!("fixtures/attach-package.orna");
     let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);

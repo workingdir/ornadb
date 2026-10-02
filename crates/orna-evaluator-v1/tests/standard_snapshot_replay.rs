@@ -304,6 +304,94 @@ fn module_upgrade_projects() -> (
     )
 }
 
+fn write_module_chain_version(
+    standard_path: &Path,
+    math: &str,
+    collection: &str,
+    entry: &str,
+    bridge: &str,
+    leaf: &str,
+) {
+    for (logical_path, source) in [
+        (
+            "main.orna",
+            include_str!("fixtures/module-chain-std-main.orna"),
+        ),
+        ("math.orna", math),
+        ("collection.orna", collection),
+        ("chain/entry.orna", entry),
+        ("chain/bridge.orna", bridge),
+        ("chain/leaf.orna", leaf),
+    ] {
+        let path = standard_path.join(logical_path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, source).unwrap();
+    }
+}
+
+fn module_chain_projects() -> (TempDir, LoadedProject, LoadedProject, [String; 2]) {
+    let directory = tempfile::tempdir().unwrap();
+    let project_path = directory.path().join("project");
+    fs::create_dir_all(&project_path).unwrap();
+    fs::write(
+        project_path.join("main.orna"),
+        include_str!("fixtures/module-chain-project.orna"),
+    )
+    .unwrap();
+    git_output_at(&project_path, &["init", "--quiet"]);
+    for (key, value) in [
+        ("user.email", "kieran@drewett.dev"),
+        ("user.name", "kierandrewett"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git_output_at(&project_path, &["config", key, value]);
+    }
+    fs::write(
+        project_path.join(".gitmodules"),
+        "[submodule \"std\"]\n\tpath = stdlib/std\n\turl = https://example.invalid/ornadb-std.git\n",
+    )
+    .unwrap();
+
+    let standard_path = project_path.join("stdlib/std");
+    fs::create_dir_all(&standard_path).unwrap();
+    initialize_repository(&standard_path).unwrap();
+    write_module_chain_version(
+        &standard_path,
+        include_str!("fixtures/module-chain-std-math-v1.orna"),
+        include_str!("fixtures/module-chain-std-collection-v1.orna"),
+        include_str!("fixtures/module-chain-std-entry-v1.orna"),
+        include_str!("fixtures/module-chain-std-bridge-v1.orna"),
+        include_str!("fixtures/module-chain-std-leaf-v1.orna"),
+    );
+    commit_directory(&standard_path, "standard module chain v1");
+    let snapshot_v1 = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+    let parent_v1 = capture_standard_gitlink(&project_path, &snapshot_v1, "capture chain v1");
+
+    write_module_chain_version(
+        &standard_path,
+        include_str!("fixtures/module-chain-std-math-v2.orna"),
+        include_str!("fixtures/module-chain-std-collection-v2.orna"),
+        include_str!("fixtures/module-chain-std-entry-v2.orna"),
+        include_str!("fixtures/module-chain-std-bridge-v2.orna"),
+        include_str!("fixtures/module-chain-std-leaf-v2.orna"),
+    );
+    commit_directory(&standard_path, "standard module chain v2");
+    let snapshot_v2 = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+    let parent_v2 = capture_standard_gitlink(&project_path, &snapshot_v2, "capture chain v2");
+
+    let repository = Repository::discover(&project_path).unwrap();
+    let loader = ProjectLoader::default();
+    let parent_v1 = repository.resolve_snapshot(&parent_v1).unwrap();
+    let parent_v2 = repository.resolve_snapshot(&parent_v2).unwrap();
+    let historical = loader
+        .load_committed_snapshot(&repository, &parent_v1)
+        .unwrap();
+    let upgraded = loader
+        .load_committed_snapshot(&repository, &parent_v2)
+        .unwrap();
+    (directory, historical, upgraded, [snapshot_v1, snapshot_v2])
+}
+
 #[test]
 fn project_gitlink_upgrade_keeps_historical_standard_sources_available() {
     let (
@@ -795,5 +883,153 @@ fn replayed_closure_uses_its_captured_dependency_snapshot_after_snapshot_changes
     assert_eq!(
         replay.submit(include_str!("fixtures/snapshot-replay-callback-nine.orna")),
         Ok(Some(ints(&[13])))
+    );
+}
+
+#[test]
+fn paired_snapshot_pins_reload_transitive_standard_module_sources() {
+    let (_directory, historical, upgraded, snapshots) = module_chain_projects();
+    assert_ne!(snapshots[0], snapshots[1]);
+
+    let expected_v1_sources = [
+        (
+            "std/math.orna",
+            include_str!("fixtures/module-chain-std-math-v1.orna"),
+        ),
+        (
+            "std/collection.orna",
+            include_str!("fixtures/module-chain-std-collection-v1.orna"),
+        ),
+        (
+            "std/chain/entry.orna",
+            include_str!("fixtures/module-chain-std-entry-v1.orna"),
+        ),
+        (
+            "std/chain/bridge.orna",
+            include_str!("fixtures/module-chain-std-bridge-v1.orna"),
+        ),
+        (
+            "std/chain/leaf.orna",
+            include_str!("fixtures/module-chain-std-leaf-v1.orna"),
+        ),
+    ];
+    let expected_v2_sources = [
+        (
+            "std/math.orna",
+            include_str!("fixtures/module-chain-std-math-v2.orna"),
+        ),
+        (
+            "std/collection.orna",
+            include_str!("fixtures/module-chain-std-collection-v2.orna"),
+        ),
+        (
+            "std/chain/entry.orna",
+            include_str!("fixtures/module-chain-std-entry-v2.orna"),
+        ),
+        (
+            "std/chain/bridge.orna",
+            include_str!("fixtures/module-chain-std-bridge-v2.orna"),
+        ),
+        (
+            "std/chain/leaf.orna",
+            include_str!("fixtures/module-chain-std-leaf-v2.orna"),
+        ),
+    ];
+    let expected_runtime_modules = [
+        "std/chain/bridge.orna",
+        "std/chain/entry.orna",
+        "std/chain/leaf.orna",
+        "std/collection.orna",
+        "std/math.orna",
+    ];
+
+    for (project, snapshot, expected_sources) in [
+        (&historical, &snapshots[0], &expected_v1_sources),
+        (&upgraded, &snapshots[1], &expected_v2_sources),
+    ] {
+        assert_eq!(project.standard_profile().unwrap().snapshot(), snapshot);
+        for (path, expected) in expected_sources {
+            assert_eq!(standard_source(project, path), *expected);
+        }
+        let runtime_modules = project
+            .standard_runtime_modules()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(runtime_modules, expected_runtime_modules);
+    }
+}
+
+#[test]
+fn repl_replays_and_rejects_mixed_transitive_module_pins() {
+    let (_directory, historical, upgraded, _snapshots) = module_chain_projects();
+    let mut historical_session = AdmittedReplSession::from_loaded_project(
+        &historical,
+        historical.standard_sources().iter().cloned(),
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        historical_session.submit(include_str!("fixtures/module-chain-use-replay.orna")),
+        Ok(None)
+    );
+    assert_eq!(
+        historical_session.submit(include_str!("fixtures/module-chain-call-replay.orna")),
+        Ok(Some(ints(&[20])))
+    );
+
+    let mut upgraded_session = AdmittedReplSession::from_loaded_project(
+        &upgraded,
+        upgraded.standard_sources().iter().cloned(),
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        upgraded_session.submit(include_str!("fixtures/module-chain-use-replay.orna")),
+        Ok(None)
+    );
+    assert_eq!(
+        upgraded_session.submit(include_str!("fixtures/module-chain-call-replay.orna")),
+        Ok(Some(ints(&[155])))
+    );
+
+    let mut replay = historical_session.clone();
+    assert_eq!(
+        replay.submit(include_str!("fixtures/module-chain-call-replay.orna")),
+        Ok(Some(ints(&[20])))
+    );
+
+    let mut historical_with_new_leaf = historical.standard_sources().to_vec();
+    historical_with_new_leaf
+        .iter_mut()
+        .find(|(path, _)| path == "std/chain/leaf.orna")
+        .unwrap()
+        .1 = include_str!("fixtures/module-chain-std-leaf-v2.orna").into();
+    assert_eq!(
+        AdmittedReplSession::from_loaded_project(
+            &historical,
+            historical_with_new_leaf,
+            Limits::default(),
+        )
+        .unwrap_err()
+        .code(),
+        "ORNA-REPL-STANDARD"
+    );
+
+    let mut upgraded_with_old_bridge = upgraded.standard_sources().to_vec();
+    upgraded_with_old_bridge
+        .iter_mut()
+        .find(|(path, _)| path == "std/chain/bridge.orna")
+        .unwrap()
+        .1 = include_str!("fixtures/module-chain-std-bridge-v1.orna").into();
+    assert_eq!(
+        AdmittedReplSession::from_loaded_project(
+            &upgraded,
+            upgraded_with_old_bridge,
+            Limits::default(),
+        )
+        .unwrap_err()
+        .code(),
+        "ORNA-REPL-STANDARD"
     );
 }
