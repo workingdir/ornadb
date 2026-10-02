@@ -732,4 +732,46 @@ mod tests {
             vec![first, second, outer, terminal]
         );
     }
+
+    #[test]
+    fn cloned_prefixes_keep_deep_union_joins_without_flattening() {
+        let prefix = FilterBatch::from_values(vec![
+            Value::Bool(true),
+            Value::String("shared prefix".into()),
+        ]);
+        let retained_prefix = Arc::clone(&prefix);
+        let suffix = FilterBatch::from_values(vec![Value::Bool(false)]);
+        let leaf = |name: &str| {
+            RelationPlan::new(name.into())
+                .with_stage(RelationStage::SharedFilter(Arc::clone(&prefix)))
+        };
+        let plan = RelationPlan::union(
+            RelationPlan::union(leaf("UnknownLeft"), leaf("UnknownMiddle")),
+            RelationPlan::union(leaf("UnknownRight"), leaf("UnknownTail")),
+        )
+        .with_stage(RelationStage::SharedFilter(suffix))
+        .flush_filter_cascade();
+
+        let batch_for = |leaf: &RelationPlan| match leaf.stages.as_slice() {
+            [RelationStage::SharedFilter(batch)] => Arc::clone(batch),
+            stages => panic!("expected one shared batch, got {stages:?}"),
+        };
+        let (left, right) = plan.source_union.as_ref().expect("outer union remains");
+        let (left_left, left_right) = left.source_union.as_ref().expect("left nested union");
+        let (right_left, right_right) = right.source_union.as_ref().expect("right nested union");
+        let batches = [
+            batch_for(left_left),
+            batch_for(left_right),
+            batch_for(right_left),
+            batch_for(right_right),
+        ];
+
+        assert!(batches[1..]
+            .iter()
+            .all(|batch| Arc::ptr_eq(&batches[0], batch)));
+        assert!(
+            retained_prefix.flattened.get().is_none(),
+            "cloned prefixes should hit the identity cache before value flattening"
+        );
+    }
 }
