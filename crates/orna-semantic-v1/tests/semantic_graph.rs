@@ -3537,6 +3537,29 @@ fn nested_callable_cascade_keeps_intermediate_bridge_pins_distinct() {
 }
 
 #[test]
+fn structural_storms_preserve_curried_cascade_pins_at_every_depth() {
+    let source = include_str!("fixtures/historical-pinned-closure-cascade-structural-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-cascade-structural-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "structurally rebound cascades at every record depth must retain their pin owners: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
