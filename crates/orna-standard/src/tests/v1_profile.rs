@@ -20,6 +20,13 @@ use crate::{
 };
 
 #[test]
+fn pinned_std_entrypoint_imports_random_and_hash_modules() {
+    let entrypoint = include_str!("../../../../stdlib/std/main.orna");
+    assert!(entrypoint.lines().any(|line| line.trim() == "use hash;"));
+    assert!(entrypoint.lines().any(|line| line.trim() == "use random;"));
+}
+
+#[test]
 fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     let sources = reference_standard_sources_v1();
     assert_eq!(sources[0].0, REFERENCE_STANDARD_MATH_PATH_V1);
