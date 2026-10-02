@@ -271,8 +271,25 @@ pub enum BranchMergeTombstoneHistoryError {
     OutOfOrder { expected: u64, actual: u64 },
     /// This position is already buffered or has already been released.
     DuplicateOrStale { order: u64 },
+    /// A depth fragment index is outside its declared fragment count.
+    InvalidFragment { fragment: usize, fragment_count: usize },
+    /// A depth fragment repeats a fragment already buffered for this position.
+    DuplicateFragment { order: u64, fragment: usize },
+    /// Fragments for one position disagree about how many pieces it contains.
+    FragmentCountMismatch { order: u64, expected: usize, actual: usize },
+    /// A whole paired plan and split depth fragments were both submitted for one position.
+    ConflictingSubmission { order: u64 },
     /// The history already consumed the final representable lineage position.
     OrderExhausted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum BufferedBranchMergeTombstoneDelta {
+    WholePlan(Vec<(ObjectId, CanonicalValue)>),
+    DepthFragments {
+        fragment_count: usize,
+        fragments: BTreeMap<usize, Vec<(ObjectId, CanonicalValue)>>,
+    },
 }
 
 /// Append-only tombstone history for committed paired merge plans.
@@ -284,12 +301,14 @@ pub enum BranchMergeTombstoneHistoryError {
 /// tombstones. A later deletion of a restored key is therefore a new event at
 /// its own commit position. Concurrent completions may be submitted out of
 /// order; future deltas wait until every earlier paired position is present.
-/// A paired step is checked and appended atomically.
+/// A paired step is checked and appended atomically. A wave split into depth
+/// fragments waits until every fragment arrives, then its events are flattened
+/// in canonical table/key order before advancing the lineage.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeTombstoneHistory {
     next_order: Option<u64>,
     events: Vec<BranchMergeTombstoneEvent>,
-    pending_deltas: BTreeMap<u64, Vec<(ObjectId, CanonicalValue)>>,
+    pending_deltas: BTreeMap<u64, BufferedBranchMergeTombstoneDelta>,
 }
 
 impl BranchMergeTombstoneHistory {
@@ -338,19 +357,108 @@ impl BranchMergeTombstoneHistory {
             });
         }
 
-        self.pending_deltas.insert(step.order, step.ordered_row_tombstones.clone());
+        self.pending_deltas.insert(
+            step.order,
+            BufferedBranchMergeTombstoneDelta::WholePlan(step.ordered_row_tombstones.clone()),
+        );
+        Ok(self.release_contiguous())
+    }
+
+    /// Submits one depth-local piece of a paired merge. A lineage position is
+    /// released only after all `fragment_count` pieces arrive; their tombstones
+    /// are then normalized by table and canonical key, regardless of fragment
+    /// completion order. An empty fragment still counts toward completeness.
+    pub fn submit_depth_merge_fragment(
+        &mut self,
+        order: u64,
+        fragment: usize,
+        fragment_count: usize,
+        tombstones: &[(ObjectId, CanonicalValue)],
+    ) -> Result<Vec<BranchMergeTombstoneEvent>, BranchMergeTombstoneHistoryError> {
+        let Some(expected) = self.next_order else {
+            return Err(BranchMergeTombstoneHistoryError::OrderExhausted);
+        };
+        if order < expected {
+            return Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order });
+        }
+        if fragment_count == 0 || fragment >= fragment_count {
+            return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+                fragment,
+                fragment_count,
+            });
+        }
+
+        match self.pending_deltas.get(&order) {
+            Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => {
+                return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+            }
+            Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
+                fragment_count: expected_count,
+                fragments,
+            }) => {
+                if *expected_count != fragment_count {
+                    return Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+                        order,
+                        expected: *expected_count,
+                        actual: fragment_count,
+                    });
+                }
+                if fragments.contains_key(&fragment) {
+                    return Err(BranchMergeTombstoneHistoryError::DuplicateFragment {
+                        order,
+                        fragment,
+                    });
+                }
+            }
+            None => {}
+        }
+
+        let buffered = self.pending_deltas.entry(order).or_insert_with(|| {
+            BufferedBranchMergeTombstoneDelta::DepthFragments {
+                fragment_count,
+                fragments: BTreeMap::new(),
+            }
+        });
+        let BufferedBranchMergeTombstoneDelta::DepthFragments { fragments, .. } = buffered else {
+            unreachable!("whole-plan submissions are rejected before inserting a fragment")
+        };
+        fragments.insert(fragment, tombstones.to_vec());
+        Ok(self.release_contiguous())
+    }
+
+    fn release_contiguous(&mut self) -> Vec<BranchMergeTombstoneEvent> {
         let first_new_event = self.events.len();
         while let Some(order) = self.next_order {
-            let Some(delta) = self.pending_deltas.remove(&order) else {
-                break;
+            let ready = match self.pending_deltas.get(&order) {
+                Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => true,
+                Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
+                    fragment_count,
+                    fragments,
+                }) => fragments.len() == *fragment_count,
+                None => false,
             };
-            self.events.extend(delta.into_iter().map(|(table, key)| {
+            if !ready {
+                break;
+            }
+            let delta = self.pending_deltas.remove(&order).expect("ready delta is buffered");
+            let mut tombstones = match delta {
+                BufferedBranchMergeTombstoneDelta::WholePlan(tombstones) => tombstones,
+                BufferedBranchMergeTombstoneDelta::DepthFragments { fragments, .. } => {
+                    fragments.into_values().flatten().collect()
+                }
+            };
+            tombstones.sort_by(|(left_table, left_key), (right_table, right_key)| {
+                left_table.cmp(right_table).then_with(|| {
+                    compare_primary_keys(left_key, right_key).unwrap_or(Ordering::Equal)
+                })
+            });
+            self.events.extend(tombstones.into_iter().map(|(table, key)| {
                 BranchMergeTombstoneEvent { order, table, key }
             }));
             self.next_order = order.checked_add(1);
         }
 
-        Ok(self.events[first_new_event..].to_vec())
+        self.events[first_new_event..].to_vec()
     }
 
     /// Returns the next lineage position required by this history.
