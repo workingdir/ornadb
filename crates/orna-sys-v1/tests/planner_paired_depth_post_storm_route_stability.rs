@@ -1,7 +1,10 @@
+use std::collections::BTreeMap;
+
 use orna_sys_v1::{
     DisjunctStormBranchDescription, DisjunctStormCascadeDescription,
     DisjunctStormLimitRebindDescription, ExpressionRef, ObjectRef, PlanByteCapScopeSegment,
-    PlanDetail, PlanNodeKind, QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
+    PlanByteCapHandoffRoute, PlanDetail, PlanNodeKind, QueryPlanDescription,
+    QuerySourceStatistics, SnapshotRef,
     explain_query_with_disjunct_storm_branch_limit_chains,
 };
 
@@ -114,6 +117,34 @@ fn routes_for_stage<'a>(
     }
 }
 
+fn typed_route_summary(
+    routes: &[PlanByteCapHandoffRoute],
+    include_input_scope: bool,
+) -> String {
+    let mut by_depth = BTreeMap::<usize, Vec<String>>::new();
+    for route in routes {
+        let input_bytes = route
+            .input_bytes
+            .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        let output_bytes = route
+            .output_bytes
+            .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        let scope = if include_input_scope {
+            format!("{}=>{}", route.input_scope, route.output_scope)
+        } else {
+            route.output_scope.clone()
+        };
+        by_depth.entry(route.depth).or_default().push(format!(
+            "{scope}={input_bytes}>{output_bytes}"
+        ));
+    }
+    by_depth
+        .iter()
+        .map(|(depth, routes)| format!("{depth}:{}", routes.join(",")))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
 #[test]
 fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
     let parsed = orna_syntax_v1::parse_module(FIXTURE);
@@ -158,6 +189,21 @@ fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
             Some(PlanDetail::Text(scopes)) => scopes,
             other => panic!("expected handoff scopes by depth, got {other:?}"),
         };
+        assert_eq!(
+            scope_summary,
+            &typed_route_summary(routes_for_stage(&explained, stage), false)
+        );
+        let route_summary = match filter
+            .details()
+            .get("limit_chain_rebind_byte_cap_handoff_routes_by_depth")
+        {
+            Some(PlanDetail::Text(routes)) => routes,
+            other => panic!("expected routes by depth, got {other:?}"),
+        };
+        assert_eq!(
+            route_summary,
+            &typed_route_summary(routes_for_stage(&explained, stage), true)
+        );
         for depth in scope_summary.split(';') {
             let (_, scopes) = depth.split_once(':').expect("depth scope entry");
             for handoff in scopes.split(',') {
