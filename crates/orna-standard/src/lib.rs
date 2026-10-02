@@ -101,6 +101,11 @@ pub const REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1: &str = "std/time/calendar.or
 pub const REFERENCE_STANDARD_STREAM_PATH_V1: &str = "std/stream.orna";
 pub const REFERENCE_STANDARD_RANDOM_PATH_V1: &str = "std/random.orna";
 pub const REFERENCE_STANDARD_HASH_PATH_V1: &str = "std/hash.orna";
+pub const REFERENCE_STANDARD_ENCODING_PATH_V1: &str = "std/encoding/main.orna";
+pub const REFERENCE_STANDARD_ENCODING_ORNA_PATH_V1: &str = "std/encoding/orna.orna";
+pub const REFERENCE_STANDARD_ENCODING_OVB_PATH_V1: &str = "std/encoding/ovb.orna";
+pub const REFERENCE_STANDARD_ENCODING_JSON_PATH_V1: &str = "std/encoding/json.orna";
+pub const REFERENCE_STANDARD_ENCODING_BASE64_PATH_V1: &str = "std/encoding/base64.orna";
 pub const REFERENCE_STANDARD_TIME_COMPACT_PATH_V1: &str = "std/time/duration/compact.orna";
 pub const REFERENCE_STANDARD_TIME_CLOCK_PATH_V1: &str = "std/time/duration/clock.orna";
 pub const REFERENCE_STANDARD_TIME_WORDS_PATH_V1: &str = "std/time/duration/words.orna";
@@ -128,6 +133,16 @@ const REFERENCE_STANDARD_TIME_CALENDAR_SOURCE_V1: &str =
 const REFERENCE_STANDARD_STREAM_SOURCE_V1: &str = include_str!("../../../stdlib/std/stream.orna");
 const REFERENCE_STANDARD_RANDOM_SOURCE_V1: &str = include_str!("../../../stdlib/std/random.orna");
 const REFERENCE_STANDARD_HASH_SOURCE_V1: &str = include_str!("../../../stdlib/std/hash.orna");
+const REFERENCE_STANDARD_ENCODING_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/encoding/main.orna");
+const REFERENCE_STANDARD_ENCODING_ORNA_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/encoding/orna.orna");
+const REFERENCE_STANDARD_ENCODING_OVB_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/encoding/ovb.orna");
+const REFERENCE_STANDARD_ENCODING_JSON_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/encoding/json.orna");
+const REFERENCE_STANDARD_ENCODING_BASE64_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/encoding/base64.orna");
 const REFERENCE_STANDARD_TIME_COMPACT_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/time/duration/compact.orna");
 const REFERENCE_STANDARD_TIME_CLOCK_SOURCE_V1: &str =
@@ -152,7 +167,7 @@ const REFERENCE_STANDARD_CONCURRENT_SOURCE_V1: &str =
 /// This is the current source-backed standard boundary. The retained `orna.std/1`–
 /// `orna.std/11` APIs below model older, explicitly versioned snapshots.
 #[must_use]
-pub fn reference_standard_sources_v1() -> [(String, String); 24] {
+pub fn reference_standard_sources_v1() -> [(String, String); 29] {
     [
         (
             REFERENCE_STANDARD_MATH_PATH_V1.into(),
@@ -249,6 +264,26 @@ pub fn reference_standard_sources_v1() -> [(String, String); 24] {
         (
             REFERENCE_STANDARD_HASH_PATH_V1.into(),
             REFERENCE_STANDARD_HASH_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_ENCODING_PATH_V1.into(),
+            REFERENCE_STANDARD_ENCODING_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_ENCODING_ORNA_PATH_V1.into(),
+            REFERENCE_STANDARD_ENCODING_ORNA_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_ENCODING_OVB_PATH_V1.into(),
+            REFERENCE_STANDARD_ENCODING_OVB_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_ENCODING_JSON_PATH_V1.into(),
+            REFERENCE_STANDARD_ENCODING_JSON_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_ENCODING_BASE64_PATH_V1.into(),
+            REFERENCE_STANDARD_ENCODING_BASE64_SOURCE_V1.into(),
         ),
     ]
 }
