@@ -1,5 +1,5 @@
 use orna_evaluator_v1::{AdmittedReplSession, Limits, SysHostBindingRegistry};
-use orna_foundation_v1::CanonicalValue;
+use orna_foundation_v1::{CanonicalValue, OvbRaw};
 use orna_sys_v1::{ClockProvider, EnvironmentProvider, ProcessProvider};
 use orna_value_v1::Raw;
 use std::{
@@ -13,6 +13,18 @@ fn bool_value(value: bool) -> CanonicalValue {
 
 fn text_value(value: &str) -> CanonicalValue {
     CanonicalValue::new(Raw::Text(value.to_owned())).unwrap()
+}
+
+fn optional_text_value(value: Option<&str>) -> CanonicalValue {
+    let mut fields = vec![OvbRaw::Int(if value.is_some() {
+        1.into()
+    } else {
+        0.into()
+    })];
+    if let Some(value) = value {
+        fields.push(OvbRaw::Text(value.to_owned()));
+    }
+    CanonicalValue::new(OvbRaw::Tag(60013, Box::new(OvbRaw::Array(fields)))).unwrap()
 }
 
 #[test]
@@ -83,7 +95,7 @@ fn typed_sys_environment_bindings_execute_native_allowlisted_provider() {
             include_str!("fixtures/stdlib-io-environment-get-host-call-xbf3n.orna"),
             &mut bindings,
         ),
-        Ok(Some(text_value("fixture-home")))
+        Ok(Some(optional_text_value(Some("fixture-home"))))
     );
     assert_eq!(
         session.submit_with_sys_host_bindings(
@@ -97,7 +109,7 @@ fn typed_sys_environment_bindings_execute_native_allowlisted_provider() {
             include_str!("fixtures/stdlib-io-environment-get-unset-host-call-xufpz.orna"),
             &mut bindings,
         ),
-        Ok(Some(CanonicalValue::new(Raw::Null).unwrap()))
+        Ok(Some(optional_text_value(None)))
     );
     assert_eq!(
         session

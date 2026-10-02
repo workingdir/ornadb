@@ -77,6 +77,39 @@ fn core_intrinsics_work_without_the_optional_collection_modules() {
 }
 
 #[test]
+fn pinned_list_exports_execute_without_unsupported_runtime_paths() {
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-use-list-i7bat.orna")),
+        Ok(None)
+    );
+    for (index, behavior) in [
+        "list.singleton(7) == [7]",
+        "list.length([1, 2, 3]) == 3",
+        "list.is_empty([1]) == false",
+        "list.append([1, 2], 3) == [1, 2, 3]",
+        "list.prepend([2, 3], 1) == [1, 2, 3]",
+        "list.concat([1, 2], [3]) == [1, 2, 3]",
+        "list.first([9, 8]) != null",
+        "list.last([9, 8]) != null",
+        "list.contains([1, 2, 3], 2)",
+        "list.take([1, 2, 3], 2) == [1, 2]",
+        "list.drop([1, 2, 3], 2) == [3]",
+        "list.unique([1, 2, 1]) == [1, 2]",
+        "list.reverse([1, 2, 3]) == [3, 2, 1]",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            session.submit(behavior),
+            Ok(Some(bool_value(true))),
+            "list behavior {index}: {behavior}"
+        );
+    }
+}
+
+#[test]
 fn pinned_stream_iteration_surface_is_optional_and_does_not_replace_core() {
     let mut with_std = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
     assert_eq!(
@@ -110,7 +143,7 @@ fn pinned_stream_iteration_surface_is_optional_and_does_not_replace_core() {
 
 #[test]
 fn list_backed_stream_replays_values_and_returns_unit_after_each_callback() {
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    let mut session = AdmittedReplSession::new(Limits::default());
     let actual = session
         .submit(include_str!(
             "fixtures/stdlib-stream-for-each-unit-6844.orna"

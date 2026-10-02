@@ -1,0 +1,13 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn tuple_checkpoint_rebind_rejects_collapsed_identity() {
+    let rolling = (
+        factory_at(sys.snapshot("HEAD~12")),
+        factory_at(sys.snapshot("HEAD~12")),
+    );
+    rolling = (
+        factory_at(sys.snapshot("HEAD~10")),
+        factory_at(sys.snapshot("HEAD~9")),
+    );
+}
