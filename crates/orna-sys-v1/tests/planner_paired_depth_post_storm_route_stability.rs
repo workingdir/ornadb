@@ -491,6 +491,21 @@ fn unknown_byte_route_serialization_derives_labels_from_typed_paths() {
         PlanByteCapScopeSegment::Rebind { position: 1 },
         PlanByteCapScopeSegment::Cascade { index: 1 },
     ]);
+    let canonical_route = PlanByteCapHandoffRoute::from_typed_paths(
+        2,
+        input_path.clone(),
+        output_path.clone(),
+        None,
+        None,
+    );
+    assert_eq!(
+        canonical_route.input_scope,
+        "root/storm1/storm_stage_output1/storm2/branch1/limit1"
+    );
+    assert_eq!(
+        canonical_route.output_scope,
+        "root/storm1/storm_stage_output1/storm2/branch1/limit1/rebind1/cascade1"
+    );
     let route = PlanByteCapHandoffRoute {
         depth: 1,
         input_path,
