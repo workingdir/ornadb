@@ -19983,6 +19983,16 @@ fn paired_restore_waves_reject_pending_logical_tombstone_duplicates() {
         orna_foundation_v1::compare_primary_keys(&array_key, &tuple_key),
         Ok(std::cmp::Ordering::Equal),
     );
+    let whole_plan = |order, key| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: vec![(id(1), key)],
+    };
 
     let mut history = BranchMergeTombstoneHistory::new(0);
     history
@@ -19997,14 +20007,21 @@ fn paired_restore_waves_reject_pending_logical_tombstone_duplicates() {
         }),
         "different pending restore waves cannot both claim one logical tombstone",
     );
-    assert_eq!(history, before_cross_wave_duplicate);
+    assert_eq!(history.events(), before_cross_wave_duplicate.events());
+    assert_eq!(history.next_order(), before_cross_wave_duplicate.next_order());
+    assert_eq!(
+        history.submit(&whole_plan(1, tuple_key.clone())),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "the first rejected fragment fixes this position's retry mode",
+    );
+    let after_reserved_mode = history.clone();
 
     assert_eq!(
         history.submit_depth_merge_fragment(2, 1, 2, &[(id(1), tuple_key.clone())]),
         Err(BranchMergeTombstoneHistoryError::DuplicateTombstone { order: 2 }),
         "one wave also rejects alternate canonical encodings of its key",
     );
-    assert_eq!(history, before_cross_wave_duplicate);
+    assert_eq!(history, after_reserved_mode);
 
     history
         .submit_depth_merge_fragment(1, 0, 1, &[(id(1), string("root"))])
@@ -20091,7 +20108,13 @@ fn paired_restore_waves_reject_logical_duplicates_across_submission_modes() {
             second_order: 2,
         }),
     );
-    assert_eq!(whole_then_fragments, before_duplicate);
+    assert_eq!(whole_then_fragments.events(), before_duplicate.events());
+    assert_eq!(whole_then_fragments.next_order(), before_duplicate.next_order());
+    assert_eq!(
+        whole_then_fragments.submit(&whole_plan(1, repeated_key.clone())),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a rejected fragment reserves fragment mode without buffering tombstones",
+    );
 
     // The reverse arrival order follows the same logical-key rule.
     let mut fragments_then_whole = BranchMergeTombstoneHistory::new(0);
@@ -20107,7 +20130,13 @@ fn paired_restore_waves_reject_logical_duplicates_across_submission_modes() {
             second_order: 2,
         }),
     );
-    assert_eq!(fragments_then_whole, before_duplicate);
+    assert_eq!(fragments_then_whole.events(), before_duplicate.events());
+    assert_eq!(fragments_then_whole.next_order(), before_duplicate.next_order());
+    assert_eq!(
+        fragments_then_whole.submit_depth_merge_fragment(1, 0, 1, &[(id(1), equivalent_key.clone())]),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a rejected whole plan reserves whole-plan mode without buffering tombstones",
+    );
 
     // Mixing APIs for the same position is a conflicting submission in both
     // directions, distinct from replaying a whole plan or stale lineage.
@@ -20648,7 +20677,7 @@ fn paired_mixed_mode_priority_survives_cloned_wave_snapshots() {
 }
 
 #[test]
-fn paired_duplicate_rejection_does_not_reserve_depth_mode() {
+fn paired_duplicate_rejection_reserves_whole_plan_mode() {
     let fixture_keys = TOMBSTONE_DEPTH_COMMIT_ORDER
         .split("\n\n")
         .map(|record| parse_fixture(record, RowKeyKind::Explicit))
@@ -20670,66 +20699,60 @@ fn paired_duplicate_rejection_does_not_reserve_depth_mode() {
     history
         .submit(&whole_plan(1, vec![existing_key.clone()]))
         .unwrap();
-    let before_rejected_retries = history.clone();
     assert_eq!(
-        history.submit(&whole_plan(2, vec![existing_key.clone()])),
+        history.submit(&whole_plan(2, vec![existing_key])),
         Err(BranchMergeTombstoneHistoryError::ConcurrentDuplicateTombstone {
             first_order: 1,
             second_order: 2,
         }),
-        "a duplicate whole-plan retry does not reserve its lineage position",
+        "a cross-position duplicate reports both paired positions",
     );
-    assert_eq!(
-        history.submit_depth_merge_fragment(2, 0, 2, &[(id(1), existing_key)]),
-        Err(BranchMergeTombstoneHistoryError::ConcurrentDuplicateTombstone {
-            first_order: 1,
-            second_order: 2,
-        }),
-        "a duplicate fragment retry also leaves the position unreserved",
-    );
-    assert_eq!(history, before_rejected_retries);
 
+    let after_reserved_retry = history.clone();
+    assert_eq!(
+        history.submit_depth_merge_fragment(2, 0, 2, &[(id(1), accepted_key.clone())]),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "the rejected whole plan reserves its mode before fragment validation",
+    );
+    assert_eq!(history, after_reserved_retry);
     assert!(history
-        .submit_depth_merge_fragment(2, 0, 2, &[(id(1), accepted_key.clone())])
+        .submit(&whole_plan(2, vec![accepted_key.clone()]))
         .unwrap()
         .is_empty());
     let before_mode_conflict = history.clone();
     assert_eq!(
-        history.submit(&whole_plan(2, vec![accepted_key.clone(), accepted_key.clone()])),
+        history.submit_depth_merge_fragment(2, 0, 0, &[]),
         Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
-        "the first valid split submission establishes priority before duplicate validation",
+        "a corrected same-mode plan succeeds and then excludes fragments",
     );
     assert_eq!(history, before_mode_conflict);
 
     assert_eq!(
         history.submit(&whole_plan(0, Vec::new())).unwrap(),
-        vec![BranchMergeTombstoneEvent {
-            order: 1,
-            table: id(1),
-            key: fixture_keys[0].clone(),
-        }],
-        "filling the prefix releases the earlier whole-plan wave while the split wave waits",
+        vec![
+            BranchMergeTombstoneEvent {
+                order: 1,
+                table: id(1),
+                key: fixture_keys[0].clone(),
+            },
+            BranchMergeTombstoneEvent {
+                order: 2,
+                table: id(1),
+                key: accepted_key.clone(),
+            },
+        ],
+        "filling the prefix releases both whole-plan waves in lineage order",
     );
     assert_eq!(
-        history
-            .submit_depth_merge_fragment(2, 1, 2, &[])
-            .unwrap(),
-        vec![BranchMergeTombstoneEvent {
-            order: 2,
-            table: id(1),
-            key: accepted_key.clone(),
-        }],
-        "the accepted split mode survives completion and release",
-    );
-    assert_eq!(
-        history.submit(&whole_plan(2, vec![accepted_key.clone()])),
+        history.submit_depth_merge_fragment(2, 0, 2, &[]),
         Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
-        "the released split wave still rejects a whole-plan retry",
+        "the released whole-plan mode remains authoritative",
     );
+    assert_eq!(history.events()[0].key, fixture_keys[0]);
 }
 
 #[test]
-fn paired_duplicate_rejection_does_not_reserve_whole_plan_mode() {
+fn paired_duplicate_rejection_reserves_depth_mode() {
     let fixture_keys = TOMBSTONE_DEPTH_COMMIT_ORDER
         .split("\n\n")
         .map(|record| parse_fixture(record, RowKeyKind::Explicit))
@@ -20751,26 +20774,30 @@ fn paired_duplicate_rejection_does_not_reserve_whole_plan_mode() {
     history
         .submit_depth_merge_fragment(2, 0, 2, &[(id(1), existing_key.clone())])
         .unwrap();
-    let before_rejected_retry = history.clone();
     assert_eq!(
-        history.submit(&whole_plan(1, vec![existing_key.clone()])),
+        history.submit_depth_merge_fragment(1, 0, 1, &[(id(1), existing_key.clone())]),
         Err(BranchMergeTombstoneHistoryError::ConcurrentDuplicateTombstone {
             first_order: 1,
             second_order: 2,
         }),
-        "a cross-position duplicate does not reserve the intervening whole-plan slot",
+        "a cross-position duplicate reports both paired positions",
     );
-    assert_eq!(history, before_rejected_retry);
-
+    let after_reserved_retry = history.clone();
+    assert_eq!(
+        history.submit(&whole_plan(1, vec![accepted_key.clone()])),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "the rejected fragment reserves its mode before a whole-plan retry",
+    );
+    assert_eq!(history, after_reserved_retry);
     assert!(history
-        .submit(&whole_plan(1, vec![accepted_key.clone()]))
+        .submit_depth_merge_fragment(1, 0, 1, &[(id(1), accepted_key.clone())])
         .unwrap()
         .is_empty());
     let before_mode_conflict = history.clone();
     assert_eq!(
-        history.submit_depth_merge_fragment(1, 3, 0, &[]),
+        history.submit(&whole_plan(1, vec![accepted_key.clone()])),
         Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
-        "the first valid whole-plan submission establishes priority before fragment validation",
+        "a corrected same-mode fragment succeeds and then excludes whole plans",
     );
     assert_eq!(history, before_mode_conflict);
 
@@ -20781,7 +20808,7 @@ fn paired_duplicate_rejection_does_not_reserve_whole_plan_mode() {
             table: id(1),
             key: accepted_key.clone(),
         }],
-        "filling the prefix releases the accepted whole-plan mode while the split wave waits",
+        "filling the prefix releases the accepted split mode while the later wave waits",
     );
     assert_eq!(
         history
@@ -20792,12 +20819,12 @@ fn paired_duplicate_rejection_does_not_reserve_whole_plan_mode() {
             table: id(1),
             key: existing_key.clone(),
         }],
-        "the later paired fragment wave completes in lineage order",
+        "the later split wave completes in lineage order",
     );
     assert_eq!(
-        history.submit_depth_merge_fragment(1, 0, 0, &[]),
+        history.submit(&whole_plan(1, vec![accepted_key.clone()])),
         Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
-        "the released whole-plan wave still rejects a fragment retry",
+        "the released fragment wave still rejects a whole-plan retry",
     );
     assert_eq!(
         history.submit(&whole_plan(2, vec![existing_key.clone(), existing_key])),
