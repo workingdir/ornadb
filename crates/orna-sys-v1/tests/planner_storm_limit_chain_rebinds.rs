@@ -23,6 +23,8 @@ const UNKNOWN_REBIND_NESTED_CAPS_FIXTURE: &str =
     include_str!("fixtures/planner_storm_unknown_rebind_nested_caps.orna");
 const DEEP_UNKNOWN_REBIND_CAPS_FIXTURE: &str =
     include_str!("fixtures/planner_storm_deep_unknown_rebind_caps.orna");
+const REBIND_CAP_SCOPE_DEPTH_FIXTURE: &str =
+    include_str!("fixtures/planner_storm_rebind_cap_scope_depth.orna");
 
 fn branch(
     limits: &[u64],
@@ -1052,6 +1054,86 @@ fn byte_caps_stay_local_through_deep_unknown_rebind_chains() {
             "immediate_post_limit_branch_bytes_at_every_rebind_nesting_depth".to_owned()
         ))
     );
+}
+
+#[test]
+fn nested_rebind_byte_cap_scope_exposes_deepest_unknown_cascade_level() {
+    let parsed = orna_syntax_v1::parse_module(REBIND_CAP_SCOPE_DEPTH_FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    let wrap_rebind = |predicate: &str, child| {
+        storm(
+            predicate,
+            vec![branch(&[100, 50], 1, vec![rebind(1, vec![child])])],
+        )
+    };
+    let leaf = storm(
+        "expr:scope-leaf",
+        vec![branch(&[80], 1, vec![])],
+    );
+    let level_four = wrap_rebind("expr:scope-level-four", leaf);
+    let level_three = wrap_rebind("expr:scope-level-three", level_four);
+    let level_two = wrap_rebind("expr:scope-level-two", level_three.clone());
+    let deepest = wrap_rebind("expr:scope-deepest", level_two);
+    let medium = wrap_rebind("expr:scope-medium", level_three);
+    let stages = [
+        deepest.clone(),
+        medium,
+        deepest,
+    ];
+    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+        &query(None, Some(2_048)),
+        &stages,
+        &[],
+    )
+    .expect("nested cap scope remains visible with unknown row estimates");
+
+    let mut filters = explained
+        .nodes()
+        .iter()
+        .filter(|node| {
+            node.kind() == PlanNodeKind::Filter && node.details().contains_key("disjunct_storm")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(filters.len(), 3);
+    filters.sort_by_key(|filter| match filter.details().get("disjunct_storm") {
+        Some(PlanDetail::Integer(index)) => *index,
+        _ => unreachable!("top-level storm stages carry their one-based index"),
+    });
+    assert_eq!(
+        filters
+            .iter()
+            .map(|filter| filter.estimated_rows())
+            .collect::<Vec<_>>(),
+        vec![None, None, None]
+    );
+    let byte_estimates = filters
+        .iter()
+        .map(|filter| filter.estimated_bytes().expect("known byte estimate"))
+        .collect::<Vec<_>>();
+    assert!(byte_estimates[0] <= 2_048);
+    assert!(byte_estimates.windows(2).all(|pair| pair[1] <= pair[0]));
+    assert_eq!(
+        filters
+            .iter()
+            .map(|filter| match filter
+                .details()
+                .get("limit_chain_rebind_max_nested_depth")
+            {
+                Some(PlanDetail::Integer(depth)) => Some(*depth),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![Some(4), Some(3), Some(4)]
+    );
+    assert!(filters.iter().all(|filter| matches!(
+        filter
+            .details()
+            .get("nested_limit_chain_rebind_byte_cap_scope"),
+        Some(PlanDetail::Text(scope))
+            if scope == "immediate_post_limit_branch_bytes_at_every_rebind_nesting_depth"
+    )));
 }
 
 #[test]

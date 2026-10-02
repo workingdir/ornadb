@@ -1,0 +1,15 @@
+use std.collection as collection;
+use std.query as query;
+
+pub fn chunks(values: [Int]): [[Int]] = collection.chunk(values, 2);
+pub fn flattened(values: [[Int]]): [Int] = collection.flatten(values);
+pub fn partitioned(values: [Int]): ([Int], [Int]) = collection.partition(values, value => value > 0);
+pub fn zipped(left: [Int], right: [Str]): [(Int, Str)] = collection.zip(left, right);
+pub fn zipped_exact(left: [Int], right: [Str]): [(Int, Str)] = collection.zip_exact(left, right);
+pub fn unique(values: [Int]): [Int] = collection.unique(values);
+pub fn grouped(values: [Int]): [(Int, [Int])] = collection.group_by(values, value => value % 2);
+pub fn pairs(values: [Int]): [(Int, Int)] = collection.pairs(values);
+pub fn windows(values: [Int]): [[Int]] = collection.window(values, 2, 1);
+pub fn split(values: [Int]): [[Int]] = collection.split_when(values, value => value == 0);
+pub fn ranked(values: [Int]): [(Int, Int)] = collection.rank(values, value => value);
+pub fn query_chunks(values: [Int]): [[Int]] = query.chunk(values, 2);

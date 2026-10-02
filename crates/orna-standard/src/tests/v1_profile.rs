@@ -6,6 +6,7 @@ use crate::{
     REFERENCE_STANDARD_TEXT_PATH_V1, REFERENCE_STANDARD_STATS_PATH_V1,
     REFERENCE_STANDARD_TIME_PATH_V1,
     REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1,
+    REFERENCE_STANDARD_STREAM_PATH_V1,
     REFERENCE_STANDARD_TIME_COMPACT_PATH_V1, REFERENCE_STANDARD_TIME_CLOCK_PATH_V1,
     REFERENCE_STANDARD_TIME_WORDS_PATH_V1, REFERENCE_STANDARD_TIME_ISO_PATH_V1,
     REFERENCE_STANDARD_OPTION_PATH_V1, REFERENCE_STANDARD_RESULT_PATH_V1,
@@ -69,6 +70,52 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn day_of_year(year: Int, month: Int, day: Int): Int?",
     ] {
         assert!(sources[20].1.contains(declaration), "missing `{declaration}`");
+    }
+    for name in [
+        "chunk", "flatten", "partition", "zip", "zip_exact", "unique", "group_by", "pairs",
+        "window", "split_when", "rank", "bucket_by",
+    ] {
+        assert!(sources[1].1.contains(&format!("pub fn {name}<")), "std.collection.{name}");
+        assert!(sources[2].1.contains(&format!("pub fn {name}<")), "std.query.{name}");
+    }
+    assert_eq!(sources[21].0, REFERENCE_STANDARD_STREAM_PATH_V1);
+    for declaration in [
+        "pub fn from_list<T>(values: [T], source_identity: Str): Stream<T>",
+        "pub fn for_each<T>(stream: Stream<T>, action: fn(T): Unit): Unit",
+        "pub fn batch<T>(stream: Stream<T>, size: Int): Stream<[T]>",
+        "pub fn buffer<T>(stream: Stream<T>, capacity: Int): Stream<T>",
+        "pub fn merge<T>(streams: [Stream<T>]): Stream<T>",
+        "pub fn throttle<T>(",
+        "pub fn debounce<T>(",
+        "pub fn retry<T>(",
+        "pub fn recover<T>(stream: Stream<T>, handler: fn(Error): T): Stream<T>",
+    ] {
+        assert!(sources[21].1.contains(declaration), "missing stream declaration `{declaration}`");
+    }
+    for contract in [
+        "canonical typed digest",
+        "Process one item at a time",
+        "default backpressure",
+        "observed arrival order",
+        "explicit policy",
+        "without advancing the checkpoint",
+        "cannot acknowledge an ordered delivery by silently skipping it",
+    ] {
+        assert!(sources[21].1.contains(contract), "missing stream contract `{contract}`");
+    }
+    for contract in [
+        "consecutive nonempty groups",
+        "partition returns (matching, remaining)",
+        "zip stops at the shorter input",
+        "unique keeps each lawful equality class's first occurrence",
+        "lawful keys while preserving input order inside each group",
+        "adjacent and overlapping",
+        "window emits complete windows only",
+        "split_when starts a group before a matching item",
+        "competition ranks (ties share a rank",
+    ] {
+        assert!(sources[1].1.contains(contract), "missing collection contract `{contract}`");
+        assert!(sources[2].1.contains(contract), "missing query contract `{contract}`");
     }
     assert_eq!(sources[11].0, REFERENCE_STANDARD_OPTION_PATH_V1);
     assert!(sources[11].1.contains("pub fn and_then<T, U>"));
@@ -181,6 +228,11 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     assert!(profile
         .verify_source(REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1, &changed_calendar_source)
         .is_err());
+    let mut changed_stream_source = sources[21].1.clone();
+    changed_stream_source.push_str("\n// changed after the captured snapshot\n");
+    assert!(profile
+        .verify_source(REFERENCE_STANDARD_STREAM_PATH_V1, &changed_stream_source)
+        .is_err());
 
     let catalogue = reference_standard_catalogue_v1().expect("the standard module checks");
     for (path, source) in &sources[13..] {
@@ -204,6 +256,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     let concurrent_consumer = include_str!("fixtures/v1_concurrent_consumer.orna");
     let error_result_consumer = include_str!("fixtures/v1_error_result_consumer.orna");
     let time_calendar_consumer = include_str!("fixtures/v1_time_calendar_consumer.orna");
+    let iteration_consumer = include_str!("fixtures/v1_iteration_consumer.orna");
     for (path, source) in [
         ("list_consumer.orna", include_str!("fixtures/v1_list_consumer.orna")),
         ("map_consumer.orna", include_str!("fixtures/v1_map_consumer.orna")),
@@ -232,6 +285,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
             ModuleInput::new("concurrent_consumer.orna", concurrent_consumer),
             ModuleInput::new("error_result_consumer.orna", error_result_consumer),
             ModuleInput::new("time_calendar_consumer.orna", time_calendar_consumer),
+            ModuleInput::new("iteration_consumer.orna", iteration_consumer),
         ],
         &catalogue,
     );

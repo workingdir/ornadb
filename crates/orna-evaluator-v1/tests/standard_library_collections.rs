@@ -61,3 +61,29 @@ fn core_intrinsics_work_without_the_optional_collection_modules() {
         Ok(Some(bool_value(true)))
     );
 }
+
+#[test]
+fn pinned_stream_iteration_surface_is_optional_and_does_not_replace_core() {
+    let mut with_std = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    assert_eq!(
+        with_std.submit(include_str!("fixtures/stdlib-use-stream-n8phe.orna")),
+        Ok(None)
+    );
+
+    let mut without_std = AdmittedReplSession::new(Limits::default());
+    assert_eq!(
+        without_std.submit(include_str!("fixtures/stdlib-core-without-collections-i7bat.orna")),
+        Ok(Some(bool_value(true)))
+    );
+    assert_eq!(
+        without_std
+            .submit(include_str!("fixtures/stdlib-stream-without-snapshot-n8phe.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-S010-IMPORT"
+    );
+    assert_eq!(
+        without_std.submit(include_str!("fixtures/stdlib-core-without-collections-i7bat.orna")),
+        Ok(Some(bool_value(true)))
+    );
+}
