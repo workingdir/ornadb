@@ -708,9 +708,9 @@ pub struct PlanByteCapHandoffRoute {
     pub input_path: Vec<PlanByteCapScopeSegment>,
     /// Typed path to the nested cascade receiving the byte estimate.
     pub output_path: Vec<PlanByteCapScopeSegment>,
-    /// The branch or preceding rebind scope supplying the byte estimate.
+    /// Human-readable label derived from the complete typed input ancestry.
     pub input_scope: String,
-    /// The nested cascade scope receiving the byte estimate.
+    /// Human-readable label derived from the complete typed output ancestry.
     pub output_scope: String,
     /// Known input byte estimate; `None` means the estimate is unknown.
     pub input_bytes: Option<u64>,
@@ -2957,13 +2957,50 @@ fn rebind_byte_cap_handoff_route_records(
                 depth: *depth,
                 input_path: handoff.input_path.clone(),
                 output_path: handoff.output_path.clone(),
-                input_scope: handoff.input_scope.clone(),
-                output_scope: handoff.scope.clone(),
+                input_scope: byte_cap_scope_path_label(&handoff.input_path),
+                output_scope: byte_cap_scope_path_label(&handoff.output_path),
                 input_bytes: handoff.input_bytes,
                 output_bytes: handoff.output_bytes,
             })
         })
         .collect()
+}
+
+fn byte_cap_scope_path_label(path: &[PlanByteCapScopeSegment]) -> String {
+    let root_stage_has_output = matches!(
+        (path.first(), path.get(1)),
+        (
+            Some(PlanByteCapScopeSegment::StormStage { index: 1 }),
+            Some(PlanByteCapScopeSegment::StormStageOutput { index: 1 })
+        )
+    );
+    let mut scope = "root".to_owned();
+    for (position, segment) in path.iter().enumerate() {
+        let label = match segment {
+            PlanByteCapScopeSegment::StormStage { index }
+                if position == 0 && *index == 1 && !root_stage_has_output =>
+            {
+                continue;
+            }
+            PlanByteCapScopeSegment::StormStage { index } => format!("storm{index}"),
+            PlanByteCapScopeSegment::StormStageOutput { .. } => "output".to_owned(),
+            PlanByteCapScopeSegment::Branch { index } => format!("branch{index}"),
+            PlanByteCapScopeSegment::Limit { position } => format!("limit{position}"),
+            PlanByteCapScopeSegment::BranchOutput { index } => format!("branch_output{index}"),
+            PlanByteCapScopeSegment::Rebind { position } => format!("rebind{position}"),
+            PlanByteCapScopeSegment::Cascade { index } => format!("cascade{index}"),
+            PlanByteCapScopeSegment::RebindCascadeOutput { position, index } => {
+                format!("rebind_output{position}_{index}")
+            }
+            PlanByteCapScopeSegment::NestedStorm { index } => format!("nested{index}"),
+            PlanByteCapScopeSegment::NestedStormOutput { index } => {
+                format!("nested_output{index}")
+            }
+        };
+        scope.push('/');
+        scope.push_str(&label);
+    }
+    scope
 }
 
 fn stabilize_rebind_byte_cap_handoff_routes(
