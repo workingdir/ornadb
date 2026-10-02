@@ -213,8 +213,8 @@ fn unknown_nested_storm_routes_retain_bounded_branch_output_ancestry() {
     assert_eq!(
         first_route["scope_labels"],
         serde_json::json!({
-            "input": "root/branch1/limit1",
-            "output": "root/branch1/limit1/rebind1/cascade1",
+            "input": "root/storm1/branch1/limit1",
+            "output": "root/storm1/branch1/limit1/rebind1/cascade1",
         })
     );
 
