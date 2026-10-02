@@ -693,6 +693,8 @@ pub enum PlanDetail {
     Boolean(bool),
     Expressions(Vec<ExpressionRef>),
     Ordering(Vec<PlanOrdering>),
+    /// Routes are ordered by nesting depth, typed input path, then typed
+    /// output path.
     ByteCapHandoffRoutes(Vec<PlanByteCapHandoffRoute>),
 }
 
@@ -2141,6 +2143,8 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             );
         let limit_chain_rebind_byte_cap_handoff_route_records =
             rebind_byte_cap_handoff_route_records(&byte_cap_handoff_estimates_by_depth);
+        let has_limit_chain_rebind_byte_cap_handoff_routes =
+            !limit_chain_rebind_byte_cap_handoff_route_records.is_empty();
         let limit_chain_rebind_predicates = storm
             .branches
             .iter()
@@ -2286,6 +2290,14 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
                 PlanDetail::Text(
                     "bounded_branch_output_after_limits_rebinds_and_conjuncts_then_prior_nested_storm_outputs"
                         .to_owned(),
+                ),
+            );
+        }
+        if has_limit_chain_rebind_byte_cap_handoff_routes {
+            details.insert(
+                "limit_chain_rebind_byte_cap_handoff_route_order".to_owned(),
+                PlanDetail::Text(
+                    "ascending_depth_then_typed_input_path_then_typed_output_path".to_owned(),
                 ),
             );
         }
