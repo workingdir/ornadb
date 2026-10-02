@@ -20159,6 +20159,67 @@ fn paired_whole_plan_conflict_precedes_invalid_fragment_classification() {
 }
 
 #[test]
+fn paired_mixed_mode_conflicts_precede_logical_duplicate_validation() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = fixture_rows
+        .iter()
+        .find(|row| row.key == string("a/child/deep"))
+        .expect("the in-crate depth fixture supplies the repeated tombstone")
+        .key
+        .clone();
+    let tuple_key = CanonicalValue::new(OvbRaw::Tag(
+        60015,
+        Box::new(OvbRaw::Array(vec![OvbRaw::Text("a/child/deep".into())])),
+    ))
+    .unwrap();
+    assert_eq!(
+        orna_foundation_v1::compare_primary_keys(&fixture_key, &tuple_key),
+        Ok(std::cmp::Ordering::Equal),
+    );
+
+    let whole_plan = |keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order: 2,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+
+    let mut fragment_first = BranchMergeTombstoneHistory::new(0);
+    fragment_first
+        .submit_depth_merge_fragment(2, 0, 2, &[(id(1), fixture_key.clone())])
+        .unwrap();
+    let before_conflict = fragment_first.clone();
+    assert_eq!(
+        fragment_first.submit(&whole_plan(vec![fixture_key.clone(), tuple_key.clone()])),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "mode conflict takes precedence over duplicates in a whole-plan payload",
+    );
+    assert_eq!(fragment_first, before_conflict);
+
+    let mut whole_plan_first = BranchMergeTombstoneHistory::new(0);
+    whole_plan_first.submit(&whole_plan(vec![fixture_key.clone()])).unwrap();
+    let before_conflict = whole_plan_first.clone();
+    assert_eq!(
+        whole_plan_first.submit_depth_merge_fragment(
+            2,
+            0,
+            2,
+            &[(id(1), fixture_key), (id(1), tuple_key)],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "mode conflict takes precedence over duplicates in a fragment payload",
+    );
+    assert_eq!(whole_plan_first, before_conflict);
+}
+
+#[test]
 fn paired_depth_storm_tombstone_history_stabilizes_across_restore_waves() {
     let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
         .split("\n\n")
