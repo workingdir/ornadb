@@ -17413,6 +17413,7 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
         }
         (Type::Tuple(expected), Type::Tuple(actual)) => {
             expected.len() == actual.len()
+                && tuple_pin_identity_topology_matches(expected, actual)
                 && expected
                     .iter()
                     .zip(actual)
@@ -17453,6 +17454,180 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
                 && pinned_snapshot_shape_matches(expected_unit, actual_unit)
         }
         _ => false,
+    }
+}
+
+/// A tuple rebind may rename snapshot selectors, but it must keep the
+/// cross-slot identity relationships intact. Compare selector overlap for
+/// corresponding pin maps after traversing the tuple's structural shape. The
+/// reference defines historical pinning but is silent on local tuple rebinds
+/// across checkpoint compaction; preserving overlap prevents compaction from
+/// splitting one pin identity or folding distinct tuple pins together.
+fn tuple_pin_identity_topology_matches(expected: &[Type], actual: &[Type]) -> bool {
+    let mut pin_maps = Vec::new();
+    for (expected, actual) in expected.iter().zip(actual) {
+        if !collect_corresponding_snapshot_context_maps(expected, actual, &mut pin_maps) {
+            return false;
+        }
+    }
+
+    pin_maps.iter().enumerate().all(|(index, (expected, actual))| {
+        expected.len() == actual.len()
+            && pin_maps[index + 1..]
+                .iter()
+                .all(|(other_expected, other_actual)| {
+                    expected.intersection(other_expected).count()
+                        == actual.intersection(other_actual).count()
+                })
+    })
+}
+
+fn collect_corresponding_snapshot_context_maps(
+    expected: &Type,
+    actual: &Type,
+    into: &mut Vec<(BTreeSet<String>, BTreeSet<String>)>,
+) -> bool {
+    // Generic SnapshotRef formals have no concrete checkpoint identity to
+    // preserve. Bottom leaves likewise represent values that were not made.
+    if expected == &Type::Named("sys.SnapshotRef".into())
+        || actual == &Type::Named("sys.SnapshotRef".into())
+        || matches!(expected, Type::Bottom)
+        || matches!(actual, Type::Bottom)
+    {
+        return true;
+    }
+    if is_contextual_snapshot_ref(expected) || is_contextual_snapshot_ref(actual) {
+        let (
+            Type::Applied {
+                arguments: expected,
+                ..
+            },
+            Type::Applied {
+                arguments: actual,
+                ..
+            },
+        ) = (expected, actual)
+        else {
+            return false;
+        };
+        let (Some(Type::Named(expected)), Some(Type::Named(actual))) =
+            (expected.first(), actual.first())
+        else {
+            return false;
+        };
+        into.push((
+            BTreeSet::from([expected.clone()]),
+            BTreeSet::from([actual.clone()]),
+        ));
+        return true;
+    }
+    if is_snapshot_context_map_shape(expected) || is_snapshot_context_map_shape(actual) {
+        let (
+            Type::Applied {
+                arguments: expected,
+                ..
+            },
+            Type::Applied {
+                arguments: actual,
+                ..
+            },
+        ) = (expected, actual)
+        else {
+            return false;
+        };
+        let selectors = |arguments: &[Type]| {
+            arguments
+                .iter()
+                .filter_map(|argument| match argument {
+                    Type::Named(selector) => Some(selector.clone()),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        let expected = selectors(expected);
+        let actual = selectors(actual);
+        if expected.len() != actual.len() {
+            return false;
+        }
+        into.push((expected, actual));
+        return true;
+    }
+
+    match (expected, actual) {
+        (Type::List(expected), Type::List(actual))
+        | (Type::Range(expected), Type::Range(actual))
+        | (Type::Relation(expected), Type::Relation(actual))
+        | (Type::Stream(expected), Type::Stream(actual))
+        | (Type::Optional(expected), Type::Optional(actual)) => {
+            collect_corresponding_snapshot_context_maps(expected, actual, into)
+        }
+        (Type::Tuple(expected), Type::Tuple(actual)) if expected.len() == actual.len() => {
+            expected.iter().zip(actual).all(|(expected, actual)| {
+                collect_corresponding_snapshot_context_maps(expected, actual, into)
+            })
+        }
+        (Type::Record(expected), Type::Record(actual)) if expected.len() == actual.len() => {
+            expected.iter().all(|(name, expected)| {
+                actual.get(name).is_some_and(|actual| {
+                    collect_corresponding_snapshot_context_maps(expected, actual, into)
+                })
+            })
+        }
+        (
+            Type::Function {
+                parameters: expected_parameters,
+                result: expected_result,
+                ..
+            },
+            Type::Function {
+                parameters: actual_parameters,
+                result: actual_result,
+                ..
+            },
+        ) if expected_parameters.len() == actual_parameters.len() => {
+            expected_parameters
+                .iter()
+                .zip(actual_parameters)
+                .all(|(expected, actual)| {
+                    collect_corresponding_snapshot_context_maps(expected, actual, into)
+                })
+                && collect_corresponding_snapshot_context_maps(
+                    expected_result,
+                    actual_result,
+                    into,
+                )
+        }
+        (
+            Type::Applied {
+                base: expected_base,
+                arguments: expected_arguments,
+            },
+            Type::Applied {
+                base: actual_base,
+                arguments: actual_arguments,
+            },
+        ) if expected_base == actual_base && expected_arguments.len() == actual_arguments.len() => {
+            expected_arguments
+                .iter()
+                .zip(actual_arguments)
+                .all(|(expected, actual)| {
+                    collect_corresponding_snapshot_context_maps(expected, actual, into)
+                })
+        }
+        (
+            Type::MoneyPerUnit {
+                currency: expected_currency,
+                unit: expected_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: actual_currency,
+                unit: actual_unit,
+            },
+        ) => {
+            collect_corresponding_snapshot_context_maps(expected_currency, actual_currency, into)
+                && collect_corresponding_snapshot_context_maps(expected_unit, actual_unit, into)
+        }
+        _ => true,
     }
 }
 
