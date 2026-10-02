@@ -3635,6 +3635,29 @@ fn chained_rebind_round_trips_keep_intermediate_structural_pins_distinct() {
 }
 
 #[test]
+fn shared_ancestor_pin_survives_sibling_cascade_rebind_storms() {
+    let source = include_str!("fixtures/historical-pinned-closure-sibling-cascade-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-sibling-cascade-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "sibling cascades must share the same ancestor pin while retaining their own child pins: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
