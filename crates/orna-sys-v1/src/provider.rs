@@ -12,6 +12,8 @@ use crate::{SystemEffect, TypedValue};
 
 const GENERATED_PROVIDER_ABI: &str =
     include_str!(concat!(env!("OUT_DIR"), "/system_provider_abi.json"));
+const GENERATED_PROVIDER_ABI_SCHEMA: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/system_provider_abi.schema.json"));
 const PROVIDER_FAILURE_CODES: [&str; 3] = [
     "sys.abi.precondition_failed",
     "sys.abi.unavailable",
@@ -299,6 +301,7 @@ pub enum ProviderAbiError {
     InvalidEffect,
     DuplicateOperation,
     DuplicateRole,
+    DuplicateRoleOperation,
     RoleOperationMissing,
     OperationRoleMismatch,
     OperationRoleVersionMismatch,
@@ -423,6 +426,10 @@ impl SystemProviderAbi {
                 replaceable: raw_role.replaceable,
                 builtin_provider: raw_role.builtin_provider.map(ProviderId::new).transpose()?,
             };
+            let unique_operations = role.operations.iter().collect::<BTreeSet<_>>();
+            if unique_operations.len() != role.operations.len() {
+                return Err(ProviderAbiError::DuplicateRoleOperation);
+            }
             if role.operations.is_empty()
                 || role.operations.iter().any(|operation_id| {
                     operations
@@ -444,10 +451,13 @@ impl SystemProviderAbi {
             }
         }
         for operation in operations.values() {
-            if let Some(role) = &operation.role
-                && !roles.contains_key(role)
-            {
-                return Err(ProviderAbiError::OperationRoleMismatch);
+            if let Some(role_id) = &operation.role {
+                let Some(role) = roles.get(role_id) else {
+                    return Err(ProviderAbiError::OperationRoleMismatch);
+                };
+                if !role.operations.contains(&operation.id) {
+                    return Err(ProviderAbiError::OperationRoleMismatch);
+                }
             }
         }
         Ok(Self {
@@ -587,6 +597,12 @@ pub fn system_dispatch_table() -> &'static SystemDispatchTable {
 #[doc(hidden)]
 pub fn system_provider_abi_json() -> &'static str {
     GENERATED_PROVIDER_ABI
+}
+
+/// JSON Schema generated beside and embedded with the typed provider dispatch
+/// registry. The dev-only conformance exporter emits these exact bytes.
+pub fn system_provider_abi_schema_json() -> &'static str {
+    GENERATED_PROVIDER_ABI_SCHEMA
 }
 
 /// Source-compatible name for consumers that only need provider-role metadata.

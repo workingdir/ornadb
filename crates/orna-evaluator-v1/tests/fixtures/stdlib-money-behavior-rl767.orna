@@ -1,0 +1,5 @@
+std.money.allocate(12.34, [1, 1, 1, 1], 2)
+    == [3.09, 3.09, 3.08, 3.08]
+&& std.money.allocate(-0.05, [1, 1, 1], 2) == [-0.02, -0.02, -0.01]
+&& std.money.quantize(1.005, 2, "half_even") == 1.00
+&& std.money.quantize(1.005, 2, "half_up") == 1.01
