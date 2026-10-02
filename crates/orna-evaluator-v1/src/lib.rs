@@ -4792,83 +4792,31 @@ impl Context<'_, '_> {
                 return self.effect_value(&value);
             }
         }
-        let native_math = native_standard_module_operation(
+        let source_export_available = function_name(callee)
+            .is_some_and(|name| self.functions.contains_key(&name));
+        let native_binding = registered_standard_binding(
             callee,
             resolved_function.as_deref(),
             scope,
             !self.restrict_function_names,
-            function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
-            "math",
-            &["increment", "decrement", "is_zero", "min", "max", "clamp"],
+            source_export_available,
+            captured_timezone_snapshot_matches(self.functions),
         );
-        let native_text = native_standard_module_operation(
-            callee,
-            resolved_function.as_deref(),
-            scope,
-            !self.restrict_function_names,
-            function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
-            "text",
-            &[
-                "trim",
-                "split",
-                "join",
-                "starts_with",
-                "ends_with",
-                "contains",
-                "replace",
-                "normalise",
-                "lower",
-                "upper",
-            ],
-        );
-        let native_bits = native_standard_module_operation(
-            callee,
-            resolved_function.as_deref(),
-            scope,
-            !self.restrict_function_names,
-            function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
-            "bits",
-            &[
-                "bit_or",
-                "bit_and",
-                "bit_xor",
-                "bit_not",
-                "shift_left",
-                "shift_right",
-            ],
-        );
-        let native_stats = native_standard_module_operation(
-            callee,
-            resolved_function.as_deref(),
-            scope,
-            !self.restrict_function_names,
-            function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
-            "stats",
-            &["mean", "median", "percentile"],
-        );
-        // The zone rules shipped by this evaluator are valid only for the
-        // edition declared by the imported, captured std.time source. A
-        // different historical source keeps its ordinary fail-closed body.
-        let native_time = captured_timezone_snapshot_matches(self.functions)
-            .then(|| {
-                native_standard_module_operation(
-                    callee,
-                    resolved_function.as_deref(),
-                    scope,
-                    false,
-                    function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
-                    "time",
-                    &[
-                        "offset_at",
-                        "resolve_local",
-                        "duration.compact.format",
-                        "duration.clock.format",
-                        "duration.words.format",
-                        "duration.iso.format",
-                    ],
-                )
-            })
-            .flatten();
+        let native_math = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::Math)
+            .map(|binding| binding.operation);
+        let native_text = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::Text)
+            .map(|binding| binding.operation);
+        let native_bits = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::Bits)
+            .map(|binding| binding.operation);
+        let native_stats = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::Stats)
+            .map(|binding| binding.operation);
+        let native_time = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::Time)
+            .map(|binding| binding.operation);
         let qualified_math = (!scope.0.contains_key("std"))
             .then(|| math_name(callee))
             .flatten();
@@ -4894,13 +4842,8 @@ impl Context<'_, '_> {
         {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
-        let native_collection = is_native_collection_binding(
-            callee,
-            resolved_function.as_deref(),
-            scope,
-            !self.restrict_function_names,
-            function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
-        );
+        let native_collection = native_binding
+            .is_some_and(|binding| binding.kind == StandardBindingKind::Collection);
         let native_asof_join = resolved_function.as_deref().is_some_and(|name| {
             matches!(name, "std.collection.asof_join" | "std.query.asof_join")
         })
@@ -4916,11 +4859,9 @@ impl Context<'_, '_> {
         {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
-        // The portable std.collection/std.query exports and asof_join are
-        // source-declared evaluator bindings. Once the exact pinned export is
-        // available, execute its bounded intrinsic instead of the fail-closed
-        // source stub. Other standard-source functions execute their pinned
-        // bodies normally.
+        // Registered std exports execute their evaluator binding after the
+        // pinned source admits the name. Host effects such as environment
+        // reads remain on the separate, allowlisted system binding path above.
         if !native_asof_join
             && !native_collection
             && native_math.is_none()
@@ -5183,6 +5124,13 @@ impl Context<'_, '_> {
             && self.functions.contains_key(alias)
         {
             return Some(alias.clone());
+        }
+        if self.functions.contains_key(&name)
+            && orna_sys_v1::system_host_operation_registry()
+                .operation(&name)
+                .is_some()
+        {
+            return Some(name);
         }
         if !self.restrict_function_names && self.functions.contains_key(&name) {
             return Some(name);
@@ -7263,6 +7211,121 @@ fn standard_collection_function_operation(name: &str) -> Option<&str> {
         .or_else(|| name.strip_prefix("std.query."))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StandardBindingKind {
+    Collection,
+    Math,
+    Text,
+    Bits,
+    Stats,
+    Time,
+}
+
+#[derive(Clone, Copy)]
+struct StandardBindingModule {
+    prefix: &'static str,
+    kind: StandardBindingKind,
+    operations: &'static [&'static str],
+}
+
+#[derive(Clone, Copy)]
+struct RegisteredStandardBinding {
+    kind: StandardBindingKind,
+    operation: &'static str,
+}
+
+// The registry connects pinned source identities to bounded evaluator
+// intrinsics. System host effects use their separate generated registry.
+const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
+    StandardBindingModule {
+        prefix: "std.collection.",
+        kind: StandardBindingKind::Collection,
+        operations: &[
+            "chunk", "flatten", "filter", "map", "flat_map", "sort_by", "rank", "take",
+            "drop", "distinct", "unique", "union", "count", "first", "one", "sum", "min",
+            "max", "every", "exists", "partition", "zip", "zip_exact", "group_by", "pairs",
+            "window", "split_when", "bucket_by", "asof_join",
+        ],
+    },
+    StandardBindingModule {
+        prefix: "std.query.",
+        kind: StandardBindingKind::Collection,
+        operations: &[
+            "chunk", "flatten", "filter", "map", "flat_map", "sort_by", "rank", "take",
+            "drop", "distinct", "unique", "union", "count", "first", "one", "sum", "min",
+            "max", "every", "exists", "partition", "zip", "zip_exact", "group_by", "pairs",
+            "window", "split_when", "bucket_by", "asof_join",
+        ],
+    },
+    StandardBindingModule {
+        prefix: "std.math.",
+        kind: StandardBindingKind::Math,
+        operations: &["increment", "decrement", "is_zero", "min", "max", "clamp"],
+    },
+    StandardBindingModule {
+        prefix: "std.text.",
+        kind: StandardBindingKind::Text,
+        operations: &[
+            "trim", "split", "join", "starts_with", "ends_with", "contains", "replace",
+            "normalise", "lower", "upper",
+        ],
+    },
+    StandardBindingModule {
+        prefix: "std.bits.",
+        kind: StandardBindingKind::Bits,
+        operations: &[
+            "bit_or", "bit_and", "bit_xor", "bit_not", "shift_left", "shift_right",
+        ],
+    },
+    StandardBindingModule {
+        prefix: "std.stats.",
+        kind: StandardBindingKind::Stats,
+        operations: &["mean", "median", "percentile"],
+    },
+    StandardBindingModule {
+        prefix: "std.time.",
+        kind: StandardBindingKind::Time,
+        operations: &[
+            "offset_at", "resolve_local", "duration.compact.format", "duration.clock.format",
+            "duration.words.format", "duration.iso.format",
+        ],
+    },
+];
+
+fn registered_standard_binding(
+    callee: &Expr,
+    resolved_function: Option<&str>,
+    scope: &Scope,
+    allow_unresolved_qualified: bool,
+    source_export_available: bool,
+    captured_timezone_matches: bool,
+) -> Option<RegisteredStandardBinding> {
+    let spelling = function_name(callee);
+    let name = resolved_function.or(spelling.as_deref())?;
+    let (module, operation) = STANDARD_BINDING_MODULES.iter().find_map(|module| {
+        let operation = name.strip_prefix(module.prefix)?;
+        module
+            .operations
+            .iter()
+            .copied()
+            .find(|registered| *registered == operation)
+            .map(|operation| (*module, operation))
+    })?;
+    if module.kind == StandardBindingKind::Time && !captured_timezone_matches {
+        return None;
+    }
+    if resolved_function.is_none()
+        && (scope.0.contains_key("std")
+            || (!allow_unresolved_qualified && !source_export_available))
+    {
+        return None;
+    }
+    Some(RegisteredStandardBinding {
+        kind: module.kind,
+        operation,
+    })
+}
+
 fn is_native_collection_binding(
     callee: &Expr,
     resolved_function: Option<&str>,
@@ -7270,87 +7333,15 @@ fn is_native_collection_binding(
     allow_unresolved_qualified: bool,
     source_export_available: bool,
 ) -> bool {
-    // A source export in the loaded pinned module is the admission record for
-    // the intrinsic; an unresolved explicit path is accepted only by the
-    // unrestricted standalone evaluator. Lexical `std` values still win.
-    if scope.0.contains_key("std") && resolved_function.is_none() {
-        return false;
-    }
-    let resolved_operation = resolved_function.and_then(standard_collection_function_operation);
-    let Some(operation) = resolved_operation.or_else(|| portable_collection_name(callee)) else {
-        return false;
-    };
-    if !matches!(
-        operation,
-        "chunk"
-            | "flatten"
-            | "filter"
-            | "map"
-            | "flat_map"
-            | "sort_by"
-            | "rank"
-            | "take"
-            | "drop"
-            | "distinct"
-            | "unique"
-            | "union"
-            | "count"
-            | "first"
-            | "one"
-            | "sum"
-            | "min"
-            | "max"
-            | "every"
-            | "exists"
-            | "partition"
-            | "zip"
-            | "zip_exact"
-            | "group_by"
-            | "pairs"
-            | "window"
-            | "split_when"
-            | "bucket_by"
-            | "asof_join"
-    ) {
-        return false;
-    }
-    match resolved_function {
-        Some(_) => resolved_operation.is_some(),
-        None => allow_unresolved_qualified || source_export_available,
-    }
-}
-
-fn native_standard_module_operation<'a>(
-    callee: &'a Expr,
-    resolved_function: Option<&'a str>,
-    scope: &Scope,
-    allow_unresolved_qualified: bool,
-    source_export_available: bool,
-    module: &str,
-    operations: &[&str],
-) -> Option<&'a str> {
-    let prefix = match module {
-        "math" => "std.math.",
-        "text" => "std.text.",
-        "bits" => "std.bits.",
-        "stats" => "std.stats.",
-        "time" => "std.time.",
-        _ => return None,
-    };
-    if let Some(operation) = resolved_function.and_then(|name| name.strip_prefix(prefix)) {
-        return operations.contains(&operation).then_some(operation);
-    }
-    // A qualified fallback is admitted only when the pinned export was
-    // loaded (or by the intentionally unrestricted standalone evaluator).
-    // This keeps absent optional modules from receiving an implicit host
-    // implementation, while preserving lexical shadowing of the std root.
-    if scope.0.contains_key("std") {
-        return None;
-    }
-    let operation = standard_name(callee, module)?;
-    (operations.contains(&operation)
-        && (allow_unresolved_qualified || source_export_available))
-    .then_some(operation)
+    registered_standard_binding(
+        callee,
+        resolved_function,
+        scope,
+        allow_unresolved_qualified,
+        source_export_available,
+        true,
+    )
+    .is_some_and(|binding| binding.kind == StandardBindingKind::Collection)
 }
 
 fn captured_timezone_snapshot_matches(functions: &Functions) -> bool {
@@ -8338,6 +8329,54 @@ fn unescape_string_body(body: &str) -> Result<String, EvaluationError> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn registry_covers_pinned_intrinsic_and_sys_host_stubs() {
+        let scope = Scope(
+            BTreeMap::new(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            NominalDefinitions::new(),
+            BTreeSet::new(),
+        );
+        let mut registered = 0;
+        for (path, source) in orna_standard::reference_standard_sources_v1() {
+            let parsed = orna_syntax_v1::parse_module(&source);
+            assert!(parsed.is_ok(), "{path}: {:?}", parsed.diagnostics);
+            let namespace = path
+                .strip_prefix("std/")
+                .and_then(|path| path.strip_suffix(".orna"))
+                .expect("standard module path")
+                .replace('/', ".");
+            for item in parsed.value.items {
+                let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration
+                else {
+                    continue;
+                };
+                if !format!("{body:?}").contains("requires its") {
+                    continue;
+                }
+                let qualified = format!("std.{namespace}.{}", signature.name);
+                let call = orna_syntax_v1::parse_expression(&format!("{qualified}()"));
+                assert!(call.is_ok(), "{qualified}: {:?}", call.diagnostics);
+                let intrinsic = registered_standard_binding(
+                    &call.value,
+                    Some(&qualified),
+                    &scope,
+                    false,
+                    true,
+                    true,
+                );
+                let system_host = orna_sys_v1::system_host_operation_registry()
+                    .operation(&qualified)
+                    .is_some();
+                if intrinsic.is_some() || system_host {
+                    registered += 1;
+                }
+            }
+        }
+        assert!(registered >= 80, "expected the registered pinned host surface, got {registered}");
+    }
 
     fn evaluate_recovery(source: &str) -> CanonicalValue {
         evaluate_expression(source, &Environment::new(), Limits::default())
