@@ -474,6 +474,75 @@ fn module_chain_upgrade_projects() -> (
     )
 }
 
+fn incremental_transitive_upgrade_projects() -> (TempDir, Vec<LoadedProject>, Vec<String>) {
+    let (directory, project_path, standard_path) = module_chain_repository();
+    write_module_chain_version(
+        &standard_path,
+        include_str!("fixtures/module-chain-std-math-v1.orna"),
+        include_str!("fixtures/module-chain-std-collection-v1.orna"),
+        include_str!("fixtures/module-chain-std-entry-v1.orna"),
+        include_str!("fixtures/module-chain-std-bridge-v1.orna"),
+        include_str!("fixtures/module-chain-std-leaf-v1.orna"),
+    );
+    commit_directory(&standard_path, "transitive standard v1");
+    let mut standard_snapshots = vec![git_output_at(&standard_path, &["rev-parse", "HEAD"])];
+    let mut parent_snapshots = vec![capture_standard_gitlink(
+        &project_path,
+        &standard_snapshots[0],
+        "capture transitive v1",
+    )];
+
+    for (path, source, message) in [
+        (
+            "chain/leaf.orna",
+            include_str!("fixtures/module-chain-std-leaf-v2.orna"),
+            "upgrade transitive leaf",
+        ),
+        (
+            "math.orna",
+            include_str!("fixtures/module-chain-std-math-v2.orna"),
+            "upgrade transitive math",
+        ),
+        (
+            "collection.orna",
+            include_str!("fixtures/module-chain-std-collection-v2.orna"),
+            "upgrade transitive collection",
+        ),
+        (
+            "chain/bridge.orna",
+            include_str!("fixtures/module-chain-std-bridge-v2.orna"),
+            "upgrade transitive bridge",
+        ),
+        (
+            "chain/entry.orna",
+            include_str!("fixtures/module-chain-std-entry-v2.orna"),
+            "upgrade transitive entry",
+        ),
+    ] {
+        fs::write(standard_path.join(path), source).unwrap();
+        commit_directory(&standard_path, message);
+        standard_snapshots.push(git_output_at(&standard_path, &["rev-parse", "HEAD"]));
+        parent_snapshots.push(capture_standard_gitlink(
+            &project_path,
+            standard_snapshots.last().unwrap(),
+            message,
+        ));
+    }
+
+    let repository = Repository::discover(&project_path).unwrap();
+    let loader = ProjectLoader::default();
+    let projects = parent_snapshots
+        .iter()
+        .map(|parent| {
+            let snapshot = repository.resolve_snapshot(parent).unwrap();
+            loader
+                .load_committed_snapshot(&repository, &snapshot)
+                .unwrap()
+        })
+        .collect();
+    (directory, projects, standard_snapshots)
+}
+
 #[test]
 fn project_gitlink_upgrade_keeps_historical_standard_sources_available() {
     let (
@@ -1366,6 +1435,138 @@ fn transitive_replay_keeps_each_pin_across_three_upgrade_generations() {
         AdmittedReplSession::from_loaded_project(
             &historical,
             historical_with_new_leaf,
+            Limits::default(),
+        )
+        .unwrap_err()
+        .code(),
+        "ORNA-REPL-STANDARD"
+    );
+}
+
+#[test]
+fn incremental_transitive_upgrade_pins_capture_cumulative_module_sources() {
+    let (_directory, projects, snapshots) = incremental_transitive_upgrade_projects();
+    assert_eq!(projects.len(), 6);
+    assert_eq!(snapshots.len(), projects.len());
+    assert!(snapshots.windows(2).all(|pair| pair[0] != pair[1]));
+
+    let expected_modules = [
+        "std/chain/bridge.orna",
+        "std/chain/entry.orna",
+        "std/chain/leaf.orna",
+        "std/collection.orna",
+        "std/math.orna",
+    ];
+    let expected_sources = [
+        [
+            include_str!("fixtures/module-chain-std-math-v1.orna"),
+            include_str!("fixtures/module-chain-std-collection-v1.orna"),
+            include_str!("fixtures/module-chain-std-entry-v1.orna"),
+            include_str!("fixtures/module-chain-std-bridge-v1.orna"),
+            include_str!("fixtures/module-chain-std-leaf-v1.orna"),
+        ],
+        [
+            include_str!("fixtures/module-chain-std-math-v1.orna"),
+            include_str!("fixtures/module-chain-std-collection-v1.orna"),
+            include_str!("fixtures/module-chain-std-entry-v1.orna"),
+            include_str!("fixtures/module-chain-std-bridge-v1.orna"),
+            include_str!("fixtures/module-chain-std-leaf-v2.orna"),
+        ],
+        [
+            include_str!("fixtures/module-chain-std-math-v2.orna"),
+            include_str!("fixtures/module-chain-std-collection-v1.orna"),
+            include_str!("fixtures/module-chain-std-entry-v1.orna"),
+            include_str!("fixtures/module-chain-std-bridge-v1.orna"),
+            include_str!("fixtures/module-chain-std-leaf-v2.orna"),
+        ],
+        [
+            include_str!("fixtures/module-chain-std-math-v2.orna"),
+            include_str!("fixtures/module-chain-std-collection-v2.orna"),
+            include_str!("fixtures/module-chain-std-entry-v1.orna"),
+            include_str!("fixtures/module-chain-std-bridge-v1.orna"),
+            include_str!("fixtures/module-chain-std-leaf-v2.orna"),
+        ],
+        [
+            include_str!("fixtures/module-chain-std-math-v2.orna"),
+            include_str!("fixtures/module-chain-std-collection-v2.orna"),
+            include_str!("fixtures/module-chain-std-entry-v1.orna"),
+            include_str!("fixtures/module-chain-std-bridge-v2.orna"),
+            include_str!("fixtures/module-chain-std-leaf-v2.orna"),
+        ],
+        [
+            include_str!("fixtures/module-chain-std-math-v2.orna"),
+            include_str!("fixtures/module-chain-std-collection-v2.orna"),
+            include_str!("fixtures/module-chain-std-entry-v2.orna"),
+            include_str!("fixtures/module-chain-std-bridge-v2.orna"),
+            include_str!("fixtures/module-chain-std-leaf-v2.orna"),
+        ],
+    ];
+
+    for ((project, snapshot), sources) in projects.iter().zip(&snapshots).zip(expected_sources) {
+        assert_eq!(project.standard_profile().unwrap().snapshot(), snapshot);
+        for (path, expected) in [
+            "std/math.orna",
+            "std/collection.orna",
+            "std/chain/entry.orna",
+            "std/chain/bridge.orna",
+            "std/chain/leaf.orna",
+        ]
+        .into_iter()
+        .zip(sources)
+        {
+            assert_eq!(standard_source(project, path), expected);
+        }
+        assert_eq!(
+            project
+                .standard_runtime_modules()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            expected_modules
+        );
+    }
+
+    let mut sessions = projects
+        .iter()
+        .map(|project| {
+            AdmittedReplSession::from_loaded_project(
+                project,
+                project.standard_sources().iter().cloned(),
+                Limits::default(),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    for session in &mut sessions {
+        assert_eq!(
+            session.submit(include_str!("fixtures/module-chain-use-replay.orna")),
+            Ok(None)
+        );
+    }
+
+    let replay_source = include_str!("fixtures/module-chain-call-replay.orna");
+    let expected_results = [20, 47, 92, 128, 146, 155];
+    for (session, expected) in sessions.iter_mut().zip(expected_results) {
+        assert_eq!(session.submit(replay_source), Ok(Some(ints(&[expected]))));
+    }
+    for (index, expected) in (0..sessions.len())
+        .rev()
+        .zip(expected_results.into_iter().rev())
+    {
+        let mut replay = sessions[index].clone();
+        assert_eq!(replay.submit(replay_source), Ok(Some(ints(&[expected]))));
+    }
+
+    let mut historical_with_current_leaf = projects[0].standard_sources().to_vec();
+    historical_with_current_leaf
+        .iter_mut()
+        .find(|(path, _)| path == "std/chain/leaf.orna")
+        .unwrap()
+        .1 = include_str!("fixtures/module-chain-std-leaf-v2.orna").into();
+    assert_eq!(
+        AdmittedReplSession::from_loaded_project(
+            &projects[0],
+            historical_with_current_leaf,
             Limits::default(),
         )
         .unwrap_err()
