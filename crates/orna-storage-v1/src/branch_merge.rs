@@ -305,6 +305,10 @@ pub enum BranchMergeTombstoneHistoryError {
     EmptyDepthWaveRestartBatch,
     /// A batch wave-restart request names one position more than once.
     DuplicateDepthWaveRestart { order: u64 },
+    /// A batch retry-plan binding request must include at least one position.
+    EmptyDepthFragmentRetryPlanBindingBatch,
+    /// A batch retry-plan binding request names one position more than once.
+    DuplicateDepthFragmentRetryPlanBinding { order: u64 },
     /// A fragment-recovery request must include at least one fragment.
     EmptyDepthFragmentRecoveryBatch,
     /// A fragment-recovery request names one position and index more than once.
@@ -634,6 +638,47 @@ impl BranchMergeTombstoneHistory {
             return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
         }
         identities.insert(order, identity);
+        Ok(())
+    }
+
+    /// Atomically binds paired retry identities to several complete depth
+    /// fragment waves. Positions are validated in ascending lineage order so
+    /// the reported error is independent of caller order. Every position must
+    /// be unique and refer to a complete pending or committed fragment wave;
+    /// if any binding fails, none of the identities are retained. An empty
+    /// batch and repeated positions are rejected.
+    ///
+    /// MERGE-1 is silent on binding multiple paired plans to one recovery
+    /// chain. This v1 policy treats the batch as one all-or-nothing identity
+    /// update while leaving the single-wave binding API available to callers
+    /// that recover positions independently.
+    pub fn bind_depth_fragment_retry_plans(
+        &mut self,
+        steps: &[SequencedBranchMergePlan],
+    ) -> Result<(), BranchMergeTombstoneHistoryError> {
+        if steps.is_empty() {
+            return Err(
+                BranchMergeTombstoneHistoryError::EmptyDepthFragmentRetryPlanBindingBatch,
+            );
+        }
+
+        let mut steps = steps.to_vec();
+        steps.sort_unstable_by_key(|step| step.order);
+        for pair in steps.windows(2) {
+            if pair[0].order == pair[1].order {
+                return Err(
+                    BranchMergeTombstoneHistoryError::DuplicateDepthFragmentRetryPlanBinding {
+                        order: pair[0].order,
+                    },
+                );
+            }
+        }
+
+        let mut candidate = self.clone();
+        for step in &steps {
+            candidate.bind_depth_fragment_retry_plan(step)?;
+        }
+        *self = candidate;
         Ok(())
     }
 
