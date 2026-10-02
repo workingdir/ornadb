@@ -1,0 +1,11 @@
+collection_ops.asof_join(
+    [{ time: 5, id: "left", group: "g" }],
+    [
+        { time: 4, id: "b", group: "g" },
+        { time: 4, id: "z", group: "g" },
+        { time: 6, id: "future", group: "g" },
+        { time: 4, id: "other-group", group: "other" }
+    ],
+    row => row.time,
+    row => row.group
+)
