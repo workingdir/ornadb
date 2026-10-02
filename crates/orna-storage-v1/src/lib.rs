@@ -16,6 +16,7 @@ mod publication_policy;
 pub use branch_merge::{
     BranchMergeBudget, BranchMergeConflict, BranchMergeError, BranchMergePlan,
     BranchMergePlanSequenceError, BranchMergePlanSequencer, BranchMergeReport,
+    SequencedBranchMergePlan,
     BranchRowSource, CheckpointId, KeyRange, MergeSide, MergedSegment, MergedTable,
     RowSegmentManifest, TableManifest, ThreeWaySnapshot, merge_three_way_snapshots,
 };
