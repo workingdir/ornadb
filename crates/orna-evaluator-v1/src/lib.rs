@@ -50,7 +50,7 @@ pub use sys_bindings::SysHostBindingRegistry;
 /// crate verifies its pinned profile before either boundary admits an import.
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
-pub fn reference_standard_sources() -> [(String, String); 47] {
+pub fn reference_standard_sources() -> [(String, String); 48] {
     orna_standard::reference_standard_sources_v1()
 }
 
@@ -2314,6 +2314,12 @@ impl Context<'_, '_> {
                 statements, tail, ..
             } => self.block(statements, tail.as_deref(), scope, depth),
             Expr::Call {
+                callee, arguments, ..
+            } => self.call(callee, arguments, None, scope, depth),
+            // Generic arguments are checked statically and erased at runtime.
+            // Executing the ordinary call path preserves the resolved source
+            // function while retaining the same bounded argument evaluation.
+            Expr::GenericCall {
                 callee, arguments, ..
             } => self.call(callee, arguments, None, scope, depth),
             Expr::Index { base, index, .. } => {
@@ -4633,6 +4639,25 @@ impl Context<'_, '_> {
             }
             return self.ui_action(arguments, scope, depth);
         }
+        // `Some(value)` constructs the language's core Optional value. It is
+        // available without importing std and remains shadowable by an
+        // explicit lexical or admitted function binding.
+        if matches!(callee, Expr::Name { text, .. } if text == "Some")
+            && !scope.0.contains_key("Some")
+            && self.resolve_function_name(callee, scope).is_none()
+        {
+            if input.is_some()
+                || arguments.len() != 1
+                || arguments[0].name.is_some()
+            {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            }
+            let value = self.evaluate(&arguments[0].value, scope, depth + 1)?;
+            if self.transfer.is_some() {
+                return Ok(Value::Null);
+            }
+            return Ok(Value::Option(Some(Box::new(value))));
+        }
         // `now()` is an activation-scoped intrinsic. It is deliberately
         // offered only through the existing effect boundary so the evaluator
         // never reads a wall clock and callers without an activation handler
@@ -4885,15 +4910,14 @@ impl Context<'_, '_> {
         {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
-        let native_collection = native_binding
-            .is_some_and(|binding| binding.kind == StandardBindingKind::Collection);
-        let native_asof_join = resolved_function.as_deref().is_some_and(|name| {
-            matches!(name, "std.collection.asof_join" | "std.query.asof_join")
-        })
-            || (portable_collection_name(callee) == Some("asof_join")
-                && !self.restrict_function_names
-                && !scope.0.contains_key("std")
-                && resolved_function.is_none());
+        let native_collection = native_binding.is_some_and(|binding| {
+            binding.kind == StandardBindingKind::Collection
+                && binding.operation.starts_with("__")
+        });
+        let native_asof_join = portable_collection_name(callee) == Some("asof_join")
+            && !self.restrict_function_names
+            && !scope.0.contains_key("std")
+            && resolved_function.is_none();
         if portable_collection_operation(callee, resolved_function.as_deref()).is_some()
             && self.restrict_function_names
             && resolved_function.is_none()
@@ -4902,9 +4926,10 @@ impl Context<'_, '_> {
         {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
-        // Registered std exports execute their evaluator binding after the
-        // pinned source admits the name. Host effects such as environment
-        // reads remain on the separate, allowlisted system binding path above.
+        // Portable collection/query exports and selected exact arithmetic
+        // leaves are admitted by their captured source declarations. Public
+        // functions execute their Orna bodies; private leaves provide bounded
+        // primitives for operations whose values are erased at runtime.
         if !native_asof_join
             && !native_collection
             && native_math.is_none()
@@ -5131,10 +5156,23 @@ impl Context<'_, '_> {
             self.text(name, values)
         } else if stats.is_some() {
             let value = self.stats(name, values)?;
-            if self.restrict_function_names && !matches!(value, Value::Null) {
-                // The admitted std.stats signatures expose nullable results;
-                // keep successful aggregates in `Some` while the standalone
-                // evaluator's legacy intrinsic surface remains unwrapped.
+            let nullable = matches!(
+                name,
+                "__mean"
+                    | "__median"
+                    | "__percentile"
+                    | "__min"
+                    | "__max"
+                    | "__range"
+                    | "__variance"
+                    | "__standard_deviation"
+                    | "__rate"
+                    | "__integrate"
+            );
+            if self.restrict_function_names
+                && nullable
+                && !matches!(value, Value::Null | Value::Option(_))
+            {
                 Ok(Value::Option(Some(Box::new(value))))
             } else {
                 Ok(value)
@@ -5173,6 +5211,12 @@ impl Context<'_, '_> {
                 .operation(&name)
                 .is_some()
         {
+            return Some(name);
+        }
+        // Captured std modules are admitted source. Resolve their exact
+        // qualified identities in the bounded REPL so public Orna wrappers
+        // execute before private bounded primitives are dispatched.
+        if name.starts_with("std.") && self.functions.contains_key(&name) {
             return Some(name);
         }
         if !self.restrict_function_names && self.functions.contains_key(&name) {
@@ -5252,6 +5296,7 @@ impl Context<'_, '_> {
         }
     }
     fn bits(&self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
+        let name = name.strip_prefix("__").unwrap_or(name);
         match (name, values.as_slice()) {
             ("bit_or", [Value::Int(left), Value::Int(right)]) => {
                 Ok(Value::Int(self.integer(left | right)?))
@@ -5278,6 +5323,7 @@ impl Context<'_, '_> {
         }
     }
     fn text(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
+        let name = name.strip_prefix("__").unwrap_or(name);
         match (name, values.as_slice()) {
             ("trim", [Value::String(value)]) => {
                 // The bounded profile trims the Unicode White_Space set used
@@ -5458,6 +5504,40 @@ impl Context<'_, '_> {
         depth: usize,
     ) -> Result<Value, EvaluationError> {
         match (name, values.as_slice()) {
+            ("__list_length", [Value::List(values)]) => self.count(values),
+            ("__list_concat", [Value::List(left), Value::List(right)]) => self.union(left, right),
+            ("__numeric_sum", [Value::List(values)]) => self.sum(values),
+            ("__stable_sort", [Value::List(values), key]) => self.sort_by(values, key, depth),
+            ("__minimum", [Value::List(values)]) => self.extreme("min", values),
+            ("__maximum", [Value::List(values)]) => self.extreme("max", values),
+            ("__group_by", [Value::List(values), key]) => self.group_by(values, key, depth),
+            ("__rank", [Value::List(values), key]) => self.rank(values, key, depth),
+            ("__asof_join", [Value::List(left), Value::List(right), time, by]) => {
+                self.asof_join(left, right, time, by, depth)
+            }
+            ("__bucket_by", [Value::List(rows), period, zone]) => {
+                let spec = bucket_by_spec(period, Some(zone))?;
+                let mut state = RelationBucketState::try_new(spec).map_err(bucket_error)?;
+                self.items(rows.len())?;
+                let mut groups = Vec::new();
+                for row in rows {
+                    self.step()?;
+                    if let Some(bucket) = state
+                        .push(row.clone())
+                        .map_err(bucket_error)?
+                    {
+                        self.items(bucket.values.len())?;
+                        groups.push(Value::List(bucket.values));
+                        self.items(groups.len())?;
+                    }
+                }
+                if let Some(bucket) = state.finish() {
+                    self.items(bucket.values.len())?;
+                    groups.push(Value::List(bucket.values));
+                    self.items(groups.len())?;
+                }
+                Ok(Value::List(groups))
+            }
             ("chunk", [Value::List(values), Value::Int(size)]) => {
                 self.items(values.len())?;
                 let size = self.positive_collection_size(size)?;
@@ -5566,8 +5646,14 @@ impl Context<'_, '_> {
             | ("split_when", [_, _])
             | ("group_by", [_, _])
             | ("asof_join", [_, _, _, _])
+            | ("__bucket_by", [_, _, _])
             | ("zip" | "zip_exact", [_, _])
             | ("window", [_, _] | [_, _, _]) => Err(error("ORNA-EVAL-TYPE")),
+            ("__list_length" | "__numeric_sum", [_])
+            | ("__list_concat", [_, _])
+            | ("__stable_sort" | "__group_by" | "__rank", [_, _])
+            | ("__minimum" | "__maximum", [_])
+            | ("__asof_join", [_, _, _, _]) => Err(error("ORNA-EVAL-TYPE")),
             ("asof_join", _) => Err(error("ORNA-EVAL-ARGUMENT")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
@@ -5834,6 +5920,9 @@ impl Context<'_, '_> {
         if values.is_empty() {
             return Ok(None);
         }
+        if matches!(values, [Value::Null, Value::Null]) {
+            return Ok(None);
+        }
         if values.len() != 2 {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
@@ -5903,13 +5992,389 @@ impl Context<'_, '_> {
         }
     }
 
+    fn numeric_decimal(&self, value: &Value) -> Result<(DecimalValue, bool), EvaluationError> {
+        match value {
+            Value::Int(value) => Ok((DecimalValue::new(value.clone(), BigInt::zero())?, false)),
+            Value::Decimal(value) => Ok((value.clone(), true)),
+            _ => Err(error("ORNA-EVAL-TYPE")),
+        }
+    }
+
+    fn variance(
+        &mut self,
+        values: &[Value],
+        options: Option<(usize, bool)>,
+    ) -> Result<Value, EvaluationError> {
+        self.items(values.len())?;
+        let Some(first) = values.first() else {
+            return Ok(Value::Null);
+        };
+        if values.iter().all(|value| matches!(value, Value::Float(_))) {
+            let mut sum = 0.0;
+            for value in values {
+                self.step()?;
+                let Value::Float(bits) = value else {
+                    unreachable!()
+                };
+                sum += f64::from_bits(*bits);
+            }
+            let mean = sum / values.len() as f64;
+            let mut squares = 0.0;
+            for value in values {
+                self.step()?;
+                let Value::Float(bits) = value else {
+                    unreachable!()
+                };
+                let delta = f64::from_bits(*bits) - mean;
+                squares += delta * delta;
+            }
+            return finite_float(squares / values.len() as f64);
+        }
+        if !matches!(first, Value::Int(_) | Value::Decimal(_))
+            || !values
+                .iter()
+                .all(|value| matches!(value, Value::Int(_) | Value::Decimal(_)))
+        {
+            return Err(error("ORNA-EVAL-TYPE"));
+        }
+        let preserve_decimal = values
+            .iter()
+            .any(|value| matches!(value, Value::Decimal(_)));
+        let zero = DecimalValue::new(BigInt::zero(), BigInt::zero())?;
+        let mut sum = zero.clone();
+        let mut squares = zero;
+        for value in values {
+            self.step()?;
+            let (value, _) = self.numeric_decimal(value)?;
+            sum = sum.add(&value)?;
+            squares = squares.add(&value.multiply(&value)?)?;
+        }
+        let count = DecimalValue::new(BigInt::from(values.len()), BigInt::zero())?;
+        let numerator = squares.multiply(&count)?.add(
+            &DecimalValue::new(-sum.coefficient.clone(), sum.exponent10.clone())?.multiply(&sum)?,
+        )?;
+        let denominator = DecimalValue::new(
+            BigInt::from(values.len()) * BigInt::from(values.len()),
+            BigInt::zero(),
+        )?;
+        self.divide_stats(&numerator, &denominator, options, preserve_decimal)
+    }
+
+    fn square_root(
+        &self,
+        value: &DecimalValue,
+        options: Option<(usize, bool)>,
+        preserve_decimal: bool,
+    ) -> Result<Value, EvaluationError> {
+        if value.coefficient.is_negative() {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        let mut coefficient = value.coefficient.clone();
+        let mut exponent = value.exponent10.clone();
+        if exponent.is_odd() {
+            coefficient *= 10;
+            exponent -= 1;
+        }
+        let root = coefficient.sqrt();
+        if &root * &root == coefficient {
+            let result = DecimalValue::new(root, exponent / 2)?;
+            return self.exact_decimal_result(result, preserve_decimal);
+        }
+        let Some((scale, _)) = options else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        let scale_i32 = i32::try_from(scale).map_err(|_| error("ORNA-EVAL-LIMIT"))?;
+        let shift = value.exponent10.clone() + BigInt::from(scale_i32 * 2);
+        let (numerator, denominator) = if shift.is_negative() {
+            let power = (-shift)
+                .to_u32()
+                .filter(|power| *power <= self.limits.max_integer_digits as u32)
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            (value.coefficient.clone(), BigInt::from(10u8).pow(power))
+        } else {
+            let power = shift
+                .to_u32()
+                .filter(|power| *power <= self.limits.max_integer_digits as u32)
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            (
+                &value.coefficient * BigInt::from(10u8).pow(power),
+                BigInt::from(1u8),
+            )
+        };
+        let floor = (&numerator / &denominator).sqrt();
+        let exact = &floor * &floor * &denominator == numerator;
+        let rounded = if exact {
+            floor
+        } else {
+            let midpoint_twice = &floor * 2 + 1;
+            let lhs = &numerator * 4;
+            let rhs = &denominator * &midpoint_twice * &midpoint_twice;
+            if lhs > rhs || (lhs == rhs && floor.is_odd()) {
+                floor + 1
+            } else {
+                floor
+            }
+        };
+        self.exact_decimal_result(
+            DecimalValue::new(rounded, -BigInt::from(scale_i32))?,
+            preserve_decimal,
+        )
+    }
+
+    fn standard_deviation(
+        &mut self,
+        values: &[Value],
+        options: Option<(usize, bool)>,
+    ) -> Result<Value, EvaluationError> {
+        let variance = self.variance(values, options)?;
+        match variance {
+            Value::Null => Ok(Value::Null),
+            Value::Float(bits) => finite_float(f64::from_bits(bits).sqrt()),
+            Value::Int(_) | Value::Decimal(_) => {
+                let (variance, preserve_decimal) = self.numeric_decimal(&variance)?;
+                self.square_root(&variance, options, preserve_decimal)
+            }
+            _ => Err(error("ORNA-EVAL-TYPE")),
+        }
+    }
+
+    fn stats_range(&mut self, values: &[Value]) -> Result<Value, EvaluationError> {
+        let low = self.extreme("min", values)?;
+        let high = self.extreme("max", values)?;
+        let (Value::Option(Some(low)), Value::Option(Some(high))) = (low, high) else {
+            return Ok(Value::Null);
+        };
+        self.apply_binary("-", *high, *low)
+    }
+
+    fn stats_mode(&mut self, values: &[Value]) -> Result<Value, EvaluationError> {
+        self.items(values.len())?;
+        let mut counts: Vec<(Value, usize)> = Vec::new();
+        for value in values {
+            self.step()?;
+            if let Some((_, count)) = counts.iter_mut().find(|(current, _)| {
+                matches!(
+                    self.apply_binary("==", current.clone(), value.clone()),
+                    Ok(Value::Bool(true))
+                )
+            }) {
+                *count = count
+                    .checked_add(1)
+                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            } else {
+                counts.push((value.clone(), 1));
+                self.items(counts.len())?;
+            }
+        }
+        let max_count = counts.iter().map(|(_, count)| *count).max().unwrap_or(0);
+        Ok(Value::List(
+            counts
+                .into_iter()
+                .filter_map(|(value, count)| (count == max_count && max_count > 0).then_some(value))
+                .collect(),
+        ))
+    }
+
+    fn stats_histogram(
+        &mut self,
+        values: &[Value],
+        bins: &[Value],
+        include_final_upper: bool,
+    ) -> Result<Value, EvaluationError> {
+        self.items(values.len())?;
+        self.items(bins.len())?;
+        let mut bounds = Vec::with_capacity(bins.len());
+        let mut previous_upper: Option<&Value> = None;
+        for bin in bins {
+            let Value::Tuple(pair) = bin else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            let [lower, upper] = pair.as_slice() else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            let overlaps_previous = if let Some(previous) = previous_upper {
+                compare_sort_keys(previous, lower)?.is_gt()
+            } else {
+                false
+            };
+            if compare_sort_keys(lower, upper)?.is_ge() || overlaps_previous {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+            bounds.push((lower.clone(), upper.clone()));
+            previous_upper = Some(upper);
+        }
+        let mut counts = vec![0usize; bounds.len()];
+        for value in values {
+            self.step()?;
+            for (index, (lower, upper)) in bounds.iter().enumerate() {
+                let lower_ok = compare_sort_keys(value, lower)?.is_ge();
+                let upper_order = compare_sort_keys(value, upper)?;
+                let final_inclusive = include_final_upper && index + 1 == bounds.len();
+                if lower_ok && (upper_order.is_lt() || (final_inclusive && upper_order.is_eq())) {
+                    counts[index] = counts[index]
+                        .checked_add(1)
+                        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                    break;
+                }
+            }
+        }
+        Ok(Value::List(
+            counts
+                .into_iter()
+                .map(|count| Value::Int(BigInt::from(count)))
+                .collect(),
+        ))
+    }
+
+    fn elapsed_seconds(&self, start: &Value, end: &Value) -> Result<DecimalValue, EvaluationError> {
+        let (
+            Value::Instant {
+                unix_seconds: start_seconds,
+                nanosecond: start_nanos,
+            },
+            Value::Instant {
+                unix_seconds: end_seconds,
+                nanosecond: end_nanos,
+            },
+        ) = (start, end)
+        else {
+            return Err(error("ORNA-EVAL-TYPE"));
+        };
+        let nanoseconds = elapsed_total_nanoseconds(&BigInt::from(*end_seconds), *end_nanos)
+            - elapsed_total_nanoseconds(&BigInt::from(*start_seconds), *start_nanos);
+        if nanoseconds <= BigInt::zero() {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        DecimalValue::new(nanoseconds, BigInt::from(-9))
+    }
+
+    fn series_points<'a>(
+        &self,
+        points: &'a [Value],
+    ) -> Result<Vec<(&'a Value, &'a Value)>, EvaluationError> {
+        let mut result: Vec<(&Value, &Value)> = Vec::with_capacity(points.len());
+        for point in points {
+            let Value::Tuple(pair) = point else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            let [time, value] = pair.as_slice() else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            if !matches!(time, Value::Instant { .. }) {
+                return Err(error("ORNA-EVAL-TYPE"));
+            }
+            if let Some((previous, _)) = result.last()
+                && compare_values(previous, time)?.is_ge()
+            {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+            result.push((time, value));
+        }
+        if result.len() < 2 {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        Ok(result)
+    }
+
+    fn series_slope(
+        &self,
+        start_time: &Value,
+        start_value: &Value,
+        end_time: &Value,
+        end_value: &Value,
+    ) -> Result<Value, EvaluationError> {
+        let elapsed = self.elapsed_seconds(start_time, end_time)?;
+        match (start_value, end_value) {
+            (Value::Float(start), Value::Float(end)) => finite_float(
+                (f64::from_bits(*end) - f64::from_bits(*start)) / decimal_to_f64(&elapsed)?,
+            ),
+            (Value::Int(_) | Value::Decimal(_), Value::Int(_) | Value::Decimal(_)) => {
+                let (start, start_decimal) = self.numeric_decimal(start_value)?;
+                let (end, end_decimal) = self.numeric_decimal(end_value)?;
+                let delta = end.add(&DecimalValue::new(-start.coefficient, start.exponent10)?)?;
+                self.divide_stats(&delta, &elapsed, None, start_decimal || end_decimal)
+            }
+            _ => Err(error("ORNA-EVAL-TYPE")),
+        }
+    }
+
+    fn stats_rate(&self, points: &[Value]) -> Result<Value, EvaluationError> {
+        let points = self.series_points(points)?;
+        let (start_time, start_value) = points[0];
+        let (end_time, end_value) = points[points.len() - 1];
+        self.series_slope(start_time, start_value, end_time, end_value)
+    }
+
+    fn stats_derivative(&mut self, points: &[Value]) -> Result<Value, EvaluationError> {
+        let points = self.series_points(points)?;
+        let mut derivatives = Vec::with_capacity(points.len() - 1);
+        for pair in points.windows(2) {
+            self.step()?;
+            derivatives.push(Value::Tuple(vec![
+                pair[1].0.clone(),
+                self.series_slope(pair[0].0, pair[0].1, pair[1].0, pair[1].1)?,
+            ]));
+            self.items(derivatives.len())?;
+        }
+        Ok(Value::List(derivatives))
+    }
+
+    fn stats_integrate(&self, points: &[Value]) -> Result<Value, EvaluationError> {
+        let points = self.series_points(points)?;
+        if points
+            .iter()
+            .all(|(_, value)| matches!(value, Value::Float(_)))
+        {
+            let mut total = 0.0;
+            for pair in points.windows(2) {
+                let (Value::Float(left), Value::Float(right)) = (pair[0].1, pair[1].1) else {
+                    unreachable!()
+                };
+                let elapsed = decimal_to_f64(&self.elapsed_seconds(pair[0].0, pair[1].0)?)?;
+                total += (f64::from_bits(*left) + f64::from_bits(*right)) * 0.5 * elapsed;
+            }
+            return finite_float(total);
+        }
+        let mut total = DecimalValue::new(BigInt::zero(), BigInt::zero())?;
+        let mut preserve_decimal = false;
+        for pair in points.windows(2) {
+            let (left, left_decimal) = self.numeric_decimal(pair[0].1)?;
+            let (right, right_decimal) = self.numeric_decimal(pair[1].1)?;
+            preserve_decimal |= left_decimal || right_decimal;
+            let sum = left.add(&right)?;
+            let average = self.divide_stats(
+                &sum,
+                &DecimalValue::new(BigInt::from(2), BigInt::zero())?,
+                None,
+                preserve_decimal,
+            )?;
+            let (average, average_decimal) = self.numeric_decimal(&average)?;
+            preserve_decimal |= average_decimal;
+            let area = average.multiply(&self.elapsed_seconds(pair[0].0, pair[1].0)?)?;
+            total = total.add(&area)?;
+        }
+        self.exact_decimal_result(total, preserve_decimal)
+    }
+
     fn stats(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
-        let (rows, options) = match name {
-            "mean" | "median" => {
+        let name = name.strip_prefix("__").unwrap_or(name);
+        match name {
+            "mean" | "median" | "variance" | "standard_deviation" => {
                 let [Value::List(rows), rest @ ..] = values.as_slice() else {
                     return Err(error("ORNA-EVAL-TYPE"));
                 };
-                (rows.as_slice(), self.stats_options(rest)?)
+                let options = self.stats_options(rest)?;
+                self.items(rows.len())?;
+                if rows.is_empty() {
+                    return Ok(Value::Null);
+                }
+                match name {
+                    "mean" => self.mean(rows, options),
+                    "median" => self.median(rows, options),
+                    "variance" => self.variance(rows, options),
+                    "standard_deviation" => self.standard_deviation(rows, options),
+                    _ => unreachable!(),
+                }
             }
             "percentile" => {
                 let [Value::List(rows), probability, Value::String(interpolation), rest @ ..] =
@@ -5917,18 +6382,54 @@ impl Context<'_, '_> {
                 else {
                     return Err(error("ORNA-EVAL-TYPE"));
                 };
-                let options = self.stats_options(rest)?;
-                return self.percentile(rows, probability, interpolation, options);
+                self.percentile(rows, probability, interpolation, self.stats_options(rest)?)
             }
-            _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
-        };
-        self.items(rows.len())?;
-        if rows.is_empty() {
-            return Ok(Value::Null);
-        }
-        match name {
-            "mean" => self.mean(rows, options),
-            "median" => self.median(rows, options),
+            "sum" => {
+                let [Value::List(rows)] = values.as_slice() else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                self.sum(rows)
+            }
+            "min" | "max" => {
+                let [Value::List(rows)] = values.as_slice() else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                self.extreme(name, rows)
+            }
+            "range" => {
+                let [Value::List(rows)] = values.as_slice() else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                self.stats_range(rows)
+            }
+            "mode" => {
+                let [Value::List(rows)] = values.as_slice() else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                self.stats_mode(rows)
+            }
+            "histogram" => {
+                let [
+                    Value::List(rows),
+                    Value::List(bins),
+                    Value::Bool(include_final_upper),
+                ] = values.as_slice()
+                else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                self.stats_histogram(rows, bins, *include_final_upper)
+            }
+            "rate" | "derivative" | "integrate" => {
+                let [Value::List(points)] = values.as_slice() else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                match name {
+                    "rate" => self.stats_rate(points),
+                    "derivative" => self.stats_derivative(points),
+                    "integrate" => self.stats_integrate(points),
+                    _ => unreachable!(),
+                }
+            }
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
@@ -6627,12 +7128,10 @@ impl Context<'_, '_> {
         by: &Value,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
-        // ORNA-LIB-003 names the selectors but leaves their shape and the
-        // result schema open. This evaluator uses one callback per selector,
-        // applied to rows from either list, and returns (left, right-or-null)
-        // tuples in left input order. "Nearest" means minimum absolute time
-        // distance, so a later right time may win. Equal distances choose the
-        // last matching row in right source order, not a canonical-key order.
+        // Selectors are applied to finite rows, and results retain left input
+        // order as `(left, right-or-null)` tuples. For each row, only right
+        // timestamps at or before the left timestamp are eligible. The latest
+        // eligible timestamp wins; canonical row bytes break equal-time ties.
         self.items(left.len())?;
         self.items(right.len())?;
         if left.is_empty() {
@@ -6659,34 +7158,47 @@ impl Context<'_, '_> {
             self.step()?;
             let group_key = self.invoke_predicate(by, row.clone(), depth + 1)?;
             lawful_group_key(&group_key)?;
-            right_keys.push((time_key, group_key));
+            let canonical_key = row
+                .clone()
+                .canonical()?
+                .encode()
+                .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+            right_keys.push((time_key, group_key, canonical_key));
             self.items(right_keys.len())?;
         }
 
         let mut joined = Vec::with_capacity(left.len());
         for (left_row, (left_time, left_group)) in left.iter().zip(left_keys) {
-            let mut nearest = None::<(Value, Value)>;
-            for (right_row, (right_time, right_group)) in right.iter().zip(&right_keys) {
+            let mut selected = None::<(Value, Vec<u8>, Value)>;
+            for (right_row, (right_time, right_group, canonical_key)) in
+                right.iter().zip(&right_keys)
+            {
                 self.step()?;
                 if compare_group_keys(&left_group, right_group)? != std::cmp::Ordering::Equal {
                     continue;
                 }
-                let distance = asof_time_distance(&left_time, right_time)?;
-                let replace = match &nearest {
+                if compare_values(right_time, &left_time)? == std::cmp::Ordering::Greater {
+                    continue;
+                }
+                let replace = match &selected {
                     None => true,
-                    Some((best_distance, _)) => {
-                        compare_values(&distance, best_distance)? != std::cmp::Ordering::Greater
+                    Some((best_time, best_key, _)) => {
+                        match compare_values(right_time, best_time)? {
+                            std::cmp::Ordering::Greater => true,
+                            std::cmp::Ordering::Equal => canonical_key > best_key,
+                            std::cmp::Ordering::Less => false,
+                        }
                     }
                 };
                 if replace {
-                    // Replacing on equality makes the rightmost equal-distance
-                    // row win, matching the documented source-order tie rule.
-                    nearest = Some((distance, right_row.clone()));
+                    selected = Some((right_time.clone(), canonical_key.clone(), right_row.clone()));
                 }
             }
             joined.push(Value::Tuple(vec![
                 left_row.clone(),
-                nearest.map_or(Value::Null, |(_, row)| row),
+                selected.map_or(Value::Null, |(_, _, row)| {
+                    Value::Option(Some(Box::new(row)))
+                }),
             ]));
             self.items(joined.len())?;
         }
@@ -7101,8 +7613,19 @@ fn named_arguments(
     implicit: usize,
     collection: bool,
 ) -> Result<Vec<Value>, EvaluationError> {
-    if !matches!(function, "mean" | "median" | "percentile")
-        && arguments.iter().all(|argument| argument.name.is_none())
+    if !matches!(
+        function,
+        "mean"
+            | "median"
+            | "percentile"
+            | "variance"
+            | "standard_deviation"
+            | "__mean"
+            | "__median"
+            | "__percentile"
+            | "__variance"
+            | "__standard_deviation"
+    ) && arguments.iter().all(|argument| argument.name.is_none())
     {
         return Ok(values);
     }
@@ -7136,17 +7659,26 @@ fn named_arguments(
         "flatten" | "unique" | "pairs" => &["values"],
         "distinct" | "count" => &["rows"],
         "last" => &["rows"],
-        "sum" => &["rows"],
-        "mean" | "median" => match values.len() {
+        "sum" | "__sum" | "__min" | "__max" | "__range" | "__mode" => &["rows"],
+        "mean"
+        | "median"
+        | "variance"
+        | "standard_deviation"
+        | "__mean"
+        | "__median"
+        | "__variance"
+        | "__standard_deviation" => match values.len() {
             1 => &["rows"],
             3 => &["rows", "scale", "rounding"],
             _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
         },
-        "percentile" => match values.len() {
+        "percentile" | "__percentile" => match values.len() {
             3 => &["rows", "p", "interpolation"],
             5 => &["rows", "p", "interpolation", "scale", "rounding"],
             _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
         },
+        "__histogram" => &["rows", "bins", "include_final_upper"],
+        "__rate" | "__derivative" | "__integrate" => &["points"],
         "first" => &["rows"],
         "one" => match values.len() {
             1 => &["rows"],
@@ -7159,6 +7691,12 @@ fn named_arguments(
         "map" | "flat_map" => &["rows", "transform"],
         "sort_by" => &["rows", "key"],
         "rank" => &["values", "key"],
+        "__list_length" | "__numeric_sum" => &["values"],
+        "__minimum" | "__maximum" => &["values"],
+        "__list_concat" => &["left", "right"],
+        "__stable_sort" | "__group_by" | "__rank" => &["values", "key"],
+        "__asof_join" => &["left", "right", "time", "by"],
+        "__bucket_by" => &["rows", "period", "zone"],
         "filter" => &["rows", "predicate"],
         "partition" | "split_when" => &["values", "predicate"],
         "group_by" => &["values", "key"],
@@ -7287,7 +7825,9 @@ const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
             "chunk", "flatten", "filter", "map", "flat_map", "sort_by", "rank", "take",
             "drop", "distinct", "unique", "union", "count", "first", "one", "sum", "min",
             "max", "every", "exists", "partition", "zip", "zip_exact", "group_by", "pairs",
-            "window", "split_when", "bucket_by", "asof_join",
+            "window", "split_when", "bucket_by", "asof_join", "__list_length",
+            "__list_concat", "__numeric_sum", "__stable_sort", "__minimum", "__maximum",
+            "__group_by", "__rank", "__asof_join", "__bucket_by",
         ],
     },
     StandardBindingModule {
@@ -7297,33 +7837,39 @@ const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
             "chunk", "flatten", "filter", "map", "flat_map", "sort_by", "rank", "take",
             "drop", "distinct", "unique", "union", "count", "first", "one", "sum", "min",
             "max", "every", "exists", "partition", "zip", "zip_exact", "group_by", "pairs",
-            "window", "split_when", "bucket_by", "asof_join",
+            "window", "split_when", "bucket_by", "asof_join", "__list_length",
+            "__list_concat", "__numeric_sum", "__stable_sort", "__minimum", "__maximum",
+            "__group_by", "__rank", "__asof_join", "__bucket_by",
         ],
     },
     StandardBindingModule {
         prefix: "std.math.",
         kind: StandardBindingKind::Math,
-        operations: &["increment", "decrement", "is_zero", "min", "max", "clamp"],
+        operations: &[],
     },
     StandardBindingModule {
         prefix: "std.text.",
         kind: StandardBindingKind::Text,
         operations: &[
-            "trim", "split", "join", "starts_with", "ends_with", "contains", "replace",
-            "normalise", "lower", "upper",
+            "__trim", "__split", "__join", "__starts_with", "__ends_with", "__contains",
+            "__replace", "__normalise", "__lower", "__upper",
         ],
     },
     StandardBindingModule {
         prefix: "std.bits.",
         kind: StandardBindingKind::Bits,
         operations: &[
-            "bit_or", "bit_and", "bit_xor", "bit_not", "shift_left", "shift_right",
+            "__bit_or", "__bit_and", "__bit_xor", "__bit_not", "__shift_left", "__shift_right",
         ],
     },
     StandardBindingModule {
         prefix: "std.stats.",
         kind: StandardBindingKind::Stats,
-        operations: &["mean", "median", "percentile"],
+        operations: &[
+            "__mean", "__median", "__percentile", "__sum", "__min", "__max", "__range",
+            "__mode", "__variance", "__standard_deviation", "__histogram", "__rate",
+            "__derivative", "__integrate",
+        ],
     },
     StandardBindingModule {
         prefix: "std.time.",
@@ -8197,79 +8743,6 @@ fn lawful_group_key(value: &Value) -> Result<(), EvaluationError> {
 fn lawful_asof_time(value: &Value) -> Result<(), EvaluationError> {
     match value {
         Value::Int(_) | Value::Decimal(_) | Value::Date(_) | Value::Instant { .. } => Ok(()),
-        _ => Err(error("ORNA-EVAL-TYPE")),
-    }
-}
-fn asof_time_distance(left: &Value, right: &Value) -> Result<Value, EvaluationError> {
-    match (left, right) {
-        (Value::Int(left), Value::Int(right)) => {
-            let distance = (left - right).abs();
-            if distance.to_str_radix(10).len() > DEFAULT_INTEGER_DIGITS {
-                return Err(error("ORNA-EVAL-LIMIT"));
-            }
-            Ok(Value::Int(distance))
-        }
-        (Value::Decimal(left), Value::Decimal(right)) => {
-            let exponent = left.exponent10.clone().min(right.exponent10.clone());
-            let left_shift = (&left.exponent10 - &exponent)
-                .to_usize()
-                .filter(|shift| *shift <= DEFAULT_INTEGER_DIGITS)
-                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-            let right_shift = (&right.exponent10 - &exponent)
-                .to_usize()
-                .filter(|shift| *shift <= DEFAULT_INTEGER_DIGITS)
-                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-            let left_coefficient = &left.coefficient * BigInt::from(10u8).pow(left_shift as u32);
-            let right_coefficient = &right.coefficient * BigInt::from(10u8).pow(right_shift as u32);
-            let difference = (left_coefficient - right_coefficient).abs();
-            if difference.to_str_radix(10).len() > DEFAULT_INTEGER_DIGITS {
-                return Err(error("ORNA-EVAL-LIMIT"));
-            }
-            Ok(Value::Decimal(DecimalValue::new(difference, exponent)?))
-        }
-        (Value::Date(left), Value::Date(right)) => {
-            let date_days = |date: &str| -> Result<BigInt, EvaluationError> {
-                if !valid_date_literal(date) {
-                    return Err(error("ORNA-EVAL-VALUE"));
-                }
-                let year = date[0..4]
-                    .parse::<u32>()
-                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
-                let month = date[5..7]
-                    .parse::<u32>()
-                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
-                let day = date[8..10]
-                    .parse::<u32>()
-                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
-                days_since_unix_epoch(year, month, day)
-                    .map(BigInt::from)
-                    .ok_or_else(|| error("ORNA-EVAL-VALUE"))
-            };
-            let distance = (date_days(left)? - date_days(right)?).abs();
-            if distance.to_str_radix(10).len() > DEFAULT_INTEGER_DIGITS {
-                return Err(error("ORNA-EVAL-LIMIT"));
-            }
-            Ok(Value::Int(distance))
-        }
-        (
-            Value::Instant {
-                unix_seconds: left_seconds,
-                nanosecond: left_nanosecond,
-            },
-            Value::Instant {
-                unix_seconds: right_seconds,
-                nanosecond: right_nanosecond,
-            },
-        ) => {
-            let billion = BigInt::from(1_000_000_000u32);
-            let left = BigInt::from(*left_seconds) * &billion + BigInt::from(*left_nanosecond);
-            let right = BigInt::from(*right_seconds) * billion + BigInt::from(*right_nanosecond);
-            let distance = (left - right).abs();
-            if distance.to_str_radix(10).len() > DEFAULT_INTEGER_DIGITS {
-                return Err(error("ORNA-EVAL-LIMIT"));
-            }
-            Ok(Value::Int(distance))
-        }
         _ => Err(error("ORNA-EVAL-TYPE")),
     }
 }
