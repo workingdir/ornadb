@@ -399,6 +399,12 @@ impl RelationPlan {
 
     pub(super) fn with_stage(mut self, stage: RelationStage) -> Self {
         match stage {
+            RelationStage::Drop(0) => {
+                // A zero-row drop is an identity. Remove it so a following
+                // filter cascade can still reach union leaves, while demand-
+                // changing stages such as Take remain pushdown barriers.
+                return self;
+            }
             RelationStage::Filter(mut predicates) => {
                 // A filter directly above a union is equivalent to applying
                 // that ordered predicate cascade to each child before their
