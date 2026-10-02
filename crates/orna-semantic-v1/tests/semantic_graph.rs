@@ -5537,25 +5537,25 @@ fn paired_checkpoint_outputs_keep_lane_to_snapshot_mapping() {
         let Type::Record(depths) = ty else {
             panic!("{lane} must expose checkpoint depth records");
         };
-        let fields = checkpoint_output_fields(
-            depths
-                .get("outputs")
-                .expect("output checkpoint field"),
-        );
-        for (field, expected_context) in [
-            ("root", root),
-            ("bridge", bridge),
-            ("leaf", leaf),
-            ("terminal", root),
-        ] {
-            let ty = fields.get(field).expect("pinned output field");
-            let mut contexts = BTreeSet::new();
-            collect_snapshot_contexts(ty, &mut contexts);
-            assert_eq!(
-                contexts,
-                BTreeSet::from([expected_context.to_owned()]),
-                "{lane}.outputs.{field} must retain its paired snapshot context"
+        for depth in ["roots", "bridges", "leaves", "outputs"] {
+            let fields = checkpoint_output_fields(
+                depths.get(depth).expect("checkpoint depth field"),
             );
+            for (field, expected_context) in [
+                ("root", root),
+                ("bridge", bridge),
+                ("leaf", leaf),
+                ("terminal", root),
+            ] {
+                let ty = fields.get(field).expect("pinned output field");
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(ty, &mut contexts);
+                assert_eq!(
+                    contexts,
+                    BTreeSet::from([expected_context.to_owned()]),
+                    "{lane}.{depth}.{field} must retain its paired snapshot context"
+                );
+            }
         }
     }
 }
