@@ -18724,6 +18724,278 @@ fn paired_depth_restore_storm_retries_rebuild_after_later_table_failure() {
 }
 
 #[test]
+fn paired_depth_restore_retries_rebuild_after_chained_merge_waves() {
+    // Each completed wave becomes the next base. A later failed restoration
+    // storm must restart from that chained base, retaining prior restores and
+    // emitting only the current wave's exact tombstone delta.
+    let chain_rows = TOMBSTONE_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let restored_rows = TOMBSTONE_DELTA_RESTORES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    assert_eq!(chain_rows.len(), 7);
+    assert_eq!(restored_rows.len(), 2);
+    let deep_restore = chain_rows
+        .iter()
+        .find(|row| row.key == string("root/child/deep"))
+        .expect("the in-crate chain fixture includes the deep row")
+        .clone();
+    let leaf_restore = chain_rows
+        .iter()
+        .find(|row| row.key == string("root/child/deep/leaf"))
+        .expect("the in-crate chain fixture includes the leaf row")
+        .clone();
+
+    let (base, left, right, mut source) = paired_chained_storm_inputs(
+        &chain_rows,
+        &["root"],
+        &["root/child"],
+        0,
+        false,
+        "chained-restore-wave-one",
+    );
+    let wave_one = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 38, max_conflicts: 0 },
+    )
+    .expect("the first wave commits the paired ancestor deletions");
+    let first_delta = ["root", "root/child"].map(string);
+    for table in [id(1), id(2)] {
+        assert_eq!(table_row_tombstones(&wave_one, table), first_delta);
+    }
+
+    let table_one_wave_one = table_live_rows(&wave_one, id(1));
+    let table_two_wave_one = table_live_rows(&wave_one, id(2));
+    let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+        &[&table_one_wave_one, &table_two_wave_one],
+        &["root/child/deep"],
+        &["root/child/deep/leaf"],
+        1,
+        true,
+        "chained-restore-wave-two",
+    );
+    add_chained_storm_fixture_rows(
+        &left,
+        &mut source,
+        MergeSide::Left,
+        id(1),
+        &[restored_rows[0].clone()],
+    );
+    add_chained_storm_fixture_rows(
+        &right,
+        &mut source,
+        MergeSide::Right,
+        id(1),
+        &[restored_rows[0].clone()],
+    );
+    add_chained_storm_fixture_rows(
+        &left,
+        &mut source,
+        MergeSide::Left,
+        id(2),
+        &[restored_rows[1].clone()],
+    );
+    add_chained_storm_fixture_rows(
+        &right,
+        &mut source,
+        MergeSide::Right,
+        id(2),
+        &[restored_rows[1].clone()],
+    );
+    let wave_two = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 64, max_conflicts: 0 },
+    )
+    .expect("the second wave restores ancestors and deletes deeper keys");
+    let second_delta = ["root/child/deep", "root/child/deep/leaf"].map(string);
+    for table in [id(1), id(2)] {
+        assert_eq!(table_row_tombstones(&wave_two, table), second_delta);
+    }
+    let mut expected_root = restored_rows[0].clone();
+    expected_root.table = id(1);
+    let mut expected_child = restored_rows[1].clone();
+    expected_child.table = id(2);
+    assert!(table_live_rows(&wave_two, id(1)).contains(&expected_root));
+    assert!(table_live_rows(&wave_two, id(2)).contains(&expected_child));
+
+    let table_one_wave_two = table_live_rows(&wave_two, id(1));
+    let table_two_wave_two = table_live_rows(&wave_two, id(2));
+    let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+        &[&table_one_wave_two, &table_two_wave_two],
+        &["root/child/deep/leaf/twig"],
+        &["root/child/deep/leaf/twig/bud"],
+        0,
+        false,
+        "chained-restore-wave-three-failed",
+    );
+    for (table, restored) in [(id(1), &deep_restore), (id(2), &leaf_restore)] {
+        add_chained_storm_fixture_rows(
+            &left,
+            &mut source,
+            MergeSide::Left,
+            table,
+            &[restored.clone()],
+        );
+        add_chained_storm_fixture_rows(
+            &right,
+            &mut source,
+            MergeSide::Right,
+            table,
+            &[restored.clone()],
+        );
+    }
+    let mut interrupted = FailOnTableAfterRowsFixtureRows {
+        source,
+        table: id(2),
+        side: MergeSide::Base,
+        fail_after_rows: 1,
+        rows_delivered: 0,
+        failed_at: None,
+    };
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: 64, max_conflicts: 0 },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed after a partial row prefix".into(),
+        }),
+    );
+    assert_eq!(interrupted.rows_delivered, 1);
+    assert_eq!(
+        interrupted.failed_at.as_ref().map(|(table, side, _)| (*table, *side)),
+        Some((id(2), MergeSide::Base)),
+    );
+    assert!(interrupted.source.visited.iter().any(|(_, locator)| {
+        locator.starts_with(b"chained-restore-wave-three-failed-table-0-")
+    }));
+
+    const RETRIES: usize = 8;
+    let start = Arc::new(Barrier::new(RETRIES));
+    let mut workers = Vec::with_capacity(RETRIES);
+    for retry in 0..RETRIES {
+        let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+            &[&table_one_wave_two, &table_two_wave_two],
+            &["root/child/deep/leaf/twig"],
+            &["root/child/deep/leaf/twig/bud"],
+            (retry / 2) % 2,
+            false,
+            "chained-restore-wave-three-recovered",
+        );
+        for (table, restored) in [(id(1), &deep_restore), (id(2), &leaf_restore)] {
+            add_chained_storm_fixture_rows(
+                &left,
+                &mut source,
+                MergeSide::Left,
+                table,
+                &[restored.clone()],
+            );
+            add_chained_storm_fixture_rows(
+                &right,
+                &mut source,
+                MergeSide::Right,
+                table,
+                &[restored.clone()],
+            );
+        }
+        if retry % 4 >= 2 {
+            for rows in source.rows.values_mut() {
+                rows.reverse();
+            }
+        }
+        let reverse_branches = retry % 2 == 1;
+        if reverse_branches {
+            let original_rows = std::mem::take(&mut source.rows);
+            source.rows = original_rows
+                .into_iter()
+                .map(|((side, locator), rows)| {
+                    let side = match side {
+                        MergeSide::Left => MergeSide::Right,
+                        MergeSide::Right => MergeSide::Left,
+                        MergeSide::Base => MergeSide::Base,
+                    };
+                    ((side, locator), rows)
+                })
+                .collect();
+        }
+        let gate = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+            let (merge_left, merge_right) = if reverse_branches {
+                (&right, &left)
+            } else {
+                (&left, &right)
+            };
+            merge_three_way_snapshots(
+                &base,
+                merge_left,
+                merge_right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 64, max_conflicts: 0 },
+            )
+            .expect("the recovered chained restoration retry fits its budget")
+        }));
+    }
+
+    let final_delta = [
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .map(string);
+    let expected_table_one = ["root", "root/child/deep", "z"].map(string);
+    let expected_table_two = ["root/child", "root/child/deep/leaf", "z"].map(string);
+    let mut committed_wave_three = None;
+    for worker in workers {
+        let plan = worker.join().expect("chained restoration retry worker completes");
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        for (table, expected_keys) in [
+            (id(1), &expected_table_one),
+            (id(2), &expected_table_two),
+        ] {
+            assert_eq!(table_row_tombstones(&plan, table), final_delta);
+            assert_eq!(table_live_row_keys(&plan, table), *expected_keys);
+        }
+        let mut expected_deep = deep_restore.clone();
+        expected_deep.table = id(1);
+        let mut expected_leaf = leaf_restore.clone();
+        expected_leaf.table = id(2);
+        assert!(table_live_rows(&plan, id(1)).contains(&expected_deep));
+        assert!(table_live_rows(&plan, id(2)).contains(&expected_leaf));
+        if committed_wave_three.is_none() {
+            committed_wave_three = Some(plan);
+        }
+    }
+    let wave_three = committed_wave_three.expect("a chained restore retry completes");
+    let expected_history = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .map(string);
+    for table in [id(1), id(2)] {
+        let mut history = table_row_tombstones(&wave_one, table);
+        history.extend(table_row_tombstones(&wave_two, table));
+        history.extend(table_row_tombstones(&wave_three, table));
+        assert_eq!(history, expected_history);
+    }
+}
+
+#[test]
 fn unequal_depth_paired_chain_read_failure_discards_partial_order() {
     let (base, left, right, source) = paired_distinct_depth_chain_inputs(true, true, false);
     let mut interrupted = FailAfterRowsFixtureRows {
