@@ -4321,6 +4321,29 @@ fn paired_nested_chain_rebind_consistency_keeps_rebuilt_pair_sides_distinct() {
 }
 
 #[test]
+fn paired_nested_chain_reproductions_stay_consistent_at_each_storm_depth() {
+    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-checkpoints.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-chain-rebind-checkpoints.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "fresh paired-chain reproductions after root, bridge, and leaf storms must retain identical pins at every downstream depth: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
