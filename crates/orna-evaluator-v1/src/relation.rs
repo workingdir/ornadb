@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use num_bigint::BigInt;
@@ -9,6 +10,12 @@ use super::{
     timezone::{resolve_time_zone, Instant, LocalDateTime, LocalTimeResolution, TimeZone, TimeZoneError},
     Value,
 };
+
+static NEXT_RELATION_SOURCE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_relation_source_id() -> u64 {
+    NEXT_RELATION_SOURCE_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 /// The two boundary models admitted by `bucket_by`.
 ///
@@ -268,14 +275,25 @@ fn days_in_month(year: i32, month: u8) -> u8 {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(super) struct RelationPlan {
     pub(super) source: String,
+    pub(super) source_identity: u64,
     pub(super) source_union: Option<(Box<RelationPlan>, Box<RelationPlan>)>,
     pub(super) stages: Vec<RelationStage>,
 }
 
-type FilterContinuationScope = Option<String>;
+impl PartialEq for RelationPlan {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+            && self.source_union == other.source_union
+            && self.stages == other.stages
+    }
+}
+
+impl Eq for RelationPlan {}
+
+type FilterContinuationScope = Option<u64>;
 
 /// Ordered filter chunks shared when a cascade fans out through a union.
 #[derive(Debug)]
@@ -285,7 +303,8 @@ pub(super) struct FilterBatch {
     // Weak entries allow cloned shared prefixes to reuse joins without cycles.
     continuations: Mutex<HashMap<(FilterContinuationScope, usize), Weak<FilterBatch>>>,
     // Cloned leaf plans can carry equal, separately owned filter prefixes.
-    // Keep their joins shared when they append the same outer suffix.
+    // Keep their joins shared within the same source identity when they append
+    // the same outer suffix.
     prefixed_batches: Mutex<Vec<(FilterContinuationScope, Weak<FilterBatch>)>>,
 }
 
@@ -337,8 +356,12 @@ impl FilterBatch {
         })
     }
 
-    fn followed_by_shared_prefix(prefix: &Arc<Self>, next: &Arc<Self>, source: &str) -> Arc<Self> {
-        let scope = Some(source.to_owned());
+    fn followed_by_shared_prefix(
+        prefix: &Arc<Self>,
+        next: &Arc<Self>,
+        source_identity: u64,
+    ) -> Arc<Self> {
+        let scope = Some(source_identity);
         let next_key = Arc::as_ptr(next) as usize;
         let mut continuations = prefix
             .continuations
@@ -404,8 +427,8 @@ impl FilterBatch {
         batch
     }
 
-    fn prefixed_by(values: Vec<Value>, next: &Arc<Self>, source: &str) -> Arc<Self> {
-        Self::followed_by_shared_prefix(&Self::from_values(values), next, source)
+    fn prefixed_by(values: Vec<Value>, next: &Arc<Self>, source_identity: u64) -> Arc<Self> {
+        Self::followed_by_shared_prefix(&Self::from_values(values), next, source_identity)
     }
 
     pub(super) fn chunks(&self) -> &[Arc<Vec<Value>>] {
@@ -584,6 +607,7 @@ impl RelationPlan {
     pub(super) fn new(source: String) -> Self {
         Self {
             source,
+            source_identity: next_relation_source_id(),
             source_union: None,
             stages: Vec::new(),
         }
@@ -597,6 +621,7 @@ impl RelationPlan {
         let right = right.flush_filter_cascade();
         Self {
             source: String::new(),
+            source_identity: next_relation_source_id(),
             source_union: Some((Box::new(left), Box::new(right))),
             stages: Vec::new(),
         }
@@ -627,7 +652,7 @@ impl RelationPlan {
                             FilterBatch::followed_by_shared_prefix(
                                 &previous,
                                 &next,
-                                &self.source,
+                                self.source_identity,
                             )
                         };
                         self.stages.push(RelationStage::SharedFilter(
@@ -709,7 +734,7 @@ impl RelationPlan {
         match self.stages.pop() {
             Some(RelationStage::Filter(previous)) => {
                 self.stages.push(RelationStage::SharedFilter(
-                    FilterBatch::prefixed_by(previous, &predicates, &self.source),
+                    FilterBatch::prefixed_by(previous, &predicates, self.source_identity),
                 ));
             }
             Some(RelationStage::SharedFilter(previous)) => {
@@ -717,7 +742,7 @@ impl RelationPlan {
                     FilterBatch::followed_by_shared_prefix(
                         &previous,
                         &predicates,
-                        &self.source,
+                        self.source_identity,
                     ),
                 ));
             }
@@ -766,15 +791,14 @@ mod tests {
     fn continuation_cache_does_not_cross_relation_sources() {
         let prefix = FilterBatch::from_values(vec![Value::Bool(true)]);
         let suffix = FilterBatch::from_values(vec![Value::Bool(false)]);
-        let left = FilterBatch::followed_by_shared_prefix(&prefix, &suffix, "UnknownLeft");
-        let cloned_left =
-            FilterBatch::followed_by_shared_prefix(&prefix, &suffix, "UnknownLeft");
+        let left = FilterBatch::followed_by_shared_prefix(&prefix, &suffix, 1);
+        let cloned_left = FilterBatch::followed_by_shared_prefix(&prefix, &suffix, 1);
         let equal_left = FilterBatch::followed_by_shared_prefix(
             &FilterBatch::from_values(vec![Value::Bool(true)]),
             &suffix,
-            "UnknownLeft",
+            1,
         );
-        let right = FilterBatch::followed_by_shared_prefix(&prefix, &suffix, "UnknownRight");
+        let right = FilterBatch::followed_by_shared_prefix(&prefix, &suffix, 2);
 
         assert!(Arc::ptr_eq(&left, &cloned_left));
         assert!(Arc::ptr_eq(&left, &equal_left));
@@ -785,7 +809,46 @@ mod tests {
     }
 
     #[test]
-    fn equal_compiled_prefixes_share_nested_union_suffixes() {
+    fn cloned_sources_reuse_continuations_but_equal_named_unknowns_stay_local() {
+        let prefix = FilterBatch::from_values(vec![Value::Bool(true)]);
+        let source = RelationPlan::new("Unknown".into())
+            .with_stage(RelationStage::SharedFilter(Arc::clone(&prefix)));
+        let cloned_source = source.clone();
+        let sibling_source = RelationPlan::new("Unknown".into())
+            .with_stage(RelationStage::SharedFilter(prefix));
+        let append = |plan: RelationPlan| {
+            plan.with_stage(RelationStage::Filter(vec![Value::String(
+                "same continuation".into(),
+            )]))
+        };
+
+        let source_continuation = append(source);
+        let cloned_continuation = append(cloned_source);
+        let sibling_continuation = append(sibling_source);
+        let batch = |plan: &RelationPlan| match plan.stages.as_slice() {
+            [RelationStage::SharedFilter(batch)] => Arc::clone(batch),
+            stages => panic!("expected one shared batch, got {stages:?}"),
+        };
+
+        assert!(Arc::ptr_eq(
+            &batch(&source_continuation),
+            &batch(&cloned_continuation)
+        ));
+        assert!(!Arc::ptr_eq(
+            &batch(&source_continuation),
+            &batch(&sibling_continuation)
+        ));
+        assert_eq!(
+            batch(&sibling_continuation)
+                .values()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![Value::Bool(true), Value::String("same continuation".into())]
+        );
+    }
+
+    #[test]
+    fn independently_compiled_unknown_sources_do_not_share_equal_prefix_suffixes() {
         let first = Value::Bool(true);
         let second = Value::Bool(false);
         let outer = Value::String("outer".into());
@@ -820,8 +883,9 @@ mod tests {
         let middle_batch = batch_for(middle);
         let right_batch = batch_for(right);
 
-        assert!(Arc::ptr_eq(&left_batch, &middle_batch));
-        assert!(Arc::ptr_eq(&left_batch, &right_batch));
+        assert!(!Arc::ptr_eq(&left_batch, &middle_batch));
+        assert!(!Arc::ptr_eq(&left_batch, &right_batch));
+        assert!(!Arc::ptr_eq(&middle_batch, &right_batch));
         assert_eq!(
             left_batch.values().cloned().collect::<Vec<_>>(),
             vec![first, second, outer, terminal]
@@ -836,13 +900,11 @@ mod tests {
         ]);
         let retained_prefix = Arc::clone(&prefix);
         let suffix = FilterBatch::from_values(vec![Value::Bool(false)]);
-        let leaf = |_name: &str| {
-            RelationPlan::new("Unknown".into())
-                .with_stage(RelationStage::SharedFilter(Arc::clone(&prefix)))
-        };
+        let leaf = RelationPlan::new("Unknown".into())
+            .with_stage(RelationStage::SharedFilter(Arc::clone(&prefix)));
         let plan = RelationPlan::union(
-            RelationPlan::union(leaf("UnknownLeft"), leaf("UnknownMiddle")),
-            RelationPlan::union(leaf("UnknownRight"), leaf("UnknownTail")),
+            RelationPlan::union(leaf.clone(), leaf.clone()),
+            RelationPlan::union(leaf.clone(), leaf),
         )
         .with_stage(RelationStage::SharedFilter(suffix))
         .flush_filter_cascade();
@@ -875,13 +937,11 @@ mod tests {
         let prefix = FilterBatch::from_values(vec![Value::Bool(true)]);
         let retained_prefix = Arc::clone(&prefix);
         let first_suffix = FilterBatch::from_values(vec![Value::Bool(false)]);
-        let make_leaf = |_name: &str| {
-            RelationPlan::new("Unknown".into())
-                .with_stage(RelationStage::SharedFilter(Arc::clone(&prefix)))
-        };
+        let make_leaf = RelationPlan::new("Unknown".into())
+            .with_stage(RelationStage::SharedFilter(Arc::clone(&prefix)));
         let first_flush = RelationPlan::union(
-            RelationPlan::union(make_leaf("UnknownLeft"), make_leaf("UnknownMiddle")),
-            RelationPlan::union(make_leaf("UnknownRight"), make_leaf("UnknownTail")),
+            RelationPlan::union(make_leaf.clone(), make_leaf.clone()),
+            RelationPlan::union(make_leaf.clone(), make_leaf),
         )
         .with_stage(RelationStage::SharedFilter(first_suffix))
         .flush_filter_cascade();
@@ -948,15 +1008,20 @@ mod tests {
             batch_for(right_right),
         ];
 
-        assert!(batches[1..]
-            .iter()
-            .all(|batch| Arc::ptr_eq(&batches[0], batch)));
+        assert!(Arc::ptr_eq(&batches[0], &batches[2]));
+        assert!(Arc::ptr_eq(&batches[1], &batches[3]));
+        assert!(
+            !Arc::ptr_eq(&batches[0], &batches[1]),
+            "cloned continuations stay source-local across unknown union operands"
+        );
         let continuations = prefix.continuations.lock().unwrap();
-        assert_eq!(continuations.len(), 2);
+        assert_eq!(continuations.len(), 4);
         assert!(continuations.values().all(|continuation| {
             continuation
                 .upgrade()
-                .is_some_and(|batch| Arc::ptr_eq(&batch, &batches[0]))
+                .is_some_and(|batch| {
+                    Arc::ptr_eq(&batch, &batches[0]) || Arc::ptr_eq(&batch, &batches[1])
+                })
         }));
     }
 
