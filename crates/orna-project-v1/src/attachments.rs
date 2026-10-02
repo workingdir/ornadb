@@ -400,6 +400,9 @@ impl PackageResolver {
     /// A later paired depth storm also leaves those rebound terminal
     /// snapshots intact. Newly opened terminal closures start from their
     /// latest exact deep pins and follow those pins' manifest routes.
+    /// The reference is silent on terminal rebinds in those reopened
+    /// sessions, so v1 updates only each selected sibling's route and keeps
+    /// every retained manifest snapshot on its original pin-to-module route.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
