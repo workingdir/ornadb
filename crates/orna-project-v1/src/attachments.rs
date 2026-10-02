@@ -523,6 +523,31 @@ impl PackageResolver {
         })
     }
 
+    /// Applies replacements one closure depth at a time and resolves the
+    /// resulting terminal route. One pre-rebind snapshot is retained per
+    /// depth. The whole path is atomic from the caller's view: if any later
+    /// replacement or closure fails, no partial result is returned and
+    /// `parent` remains unchanged. An empty path returns a clone of `parent`.
+    pub fn resolve_nested_rebind_path(
+        &self,
+        parent: &AttachedDatabaseSession,
+        replacements: &[PinnedDatabase],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let mut current = parent.clone();
+        let mut retained_sessions = Vec::with_capacity(replacements.len());
+        for replacement in replacements {
+            let (next, mut retained) = self
+                .resolve_nested_rebind(&current, replacement.clone())?
+                .into_parts();
+            retained_sessions.append(&mut retained);
+            current = next;
+        }
+        Ok(ReboundPathResolution {
+            final_session: current,
+            retained_sessions,
+        })
+    }
+
     /// Resolves a chain of exact aliases from a retained session snapshot.
     /// Each edge is selected from the session opened at the preceding edge;
     /// a failure leaves the caller's snapshot untouched.
