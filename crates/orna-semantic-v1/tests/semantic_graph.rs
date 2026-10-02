@@ -6376,6 +6376,126 @@ fn paired_checkpoint_lists_preserve_field_specific_pin_maps() {
         }
     }
 }
+
+#[test]
+fn paired_checkpoint_maps_merge_distinct_lambda_binders_without_cross_field_loss() {
+    let source = include_str!(
+        "fixtures/historical-paired-checkpoint-distinct-binder-field-map-storm.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-checkpoint-distinct-binder-field-map-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_checkpoint_distinct_binder_field_maps_across_storms")
+        })
+        .expect("paired distinct-binder checkpoint module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_checkpoint_distinct_binder_field_maps_across_storms"].ty
+    else {
+        panic!("paired distinct-binder checkpoints must be callable");
+    };
+    let Type::Record(lanes) = result.as_ref() else {
+        panic!("paired distinct-binder checkpoints must retain both lanes");
+    };
+
+    let mut lane_child_maps = BTreeMap::new();
+    for (lane, expected_stages) in [
+        (
+            "left",
+            [
+                ("saved", &["840", "838"][..]),
+                ("after_storm", &["835", "834"][..]),
+                ("restored", &["840", "838"][..]),
+            ],
+        ),
+        (
+            "right",
+            [
+                ("saved", &["830", "828"][..]),
+                ("after_storm", &["825", "824"][..]),
+                ("restored", &["830", "828"][..]),
+            ],
+        ),
+    ] {
+        let Type::Record(stages) = lanes.get(lane).expect("paired lane") else {
+            panic!("{lane} must retain saved, storm, and restored maps");
+        };
+        let mut lane_child_map = None;
+        for (stage, expected_roots) in expected_stages {
+            let fields = checkpoint_output_fields(stages.get(stage).expect("checkpoint stage"));
+            let expected_roots = expected_roots
+                .iter()
+                .map(|root| format!("selector:HEAD~{root}"))
+                .collect::<BTreeSet<_>>();
+            for field in ["root_pin", "root"] {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(
+                    fields.get(field).expect("root checkpoint field"),
+                    &mut contexts,
+                );
+                assert_eq!(
+                    contexts, expected_roots,
+                    "{lane}.{stage}.{field} must retain only that lane's root map"
+                );
+            }
+
+            let mut child_contexts = BTreeSet::new();
+            for field in ["child_pin", "child"] {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(
+                    fields.get(field).expect("child checkpoint field"),
+                    &mut contexts,
+                );
+                assert_eq!(
+                    contexts.len(),
+                    2,
+                    "{lane}.{stage}.{field} must retain both distinct lambda binders: {contexts:?}"
+                );
+                assert!(
+                    contexts
+                        .iter()
+                        .all(|context| context.starts_with("selector:binder:")),
+                    "{lane}.{stage}.{field} must not absorb either root selector: {contexts:?}"
+                );
+                if field == "child_pin" {
+                    child_contexts = contexts;
+                } else {
+                    assert_eq!(
+                        contexts, child_contexts,
+                        "{lane}.{stage} child pin and callable fields must preserve the same map"
+                    );
+                }
+            }
+            if let Some(expected) = &lane_child_map {
+                assert_eq!(
+                    &child_contexts, expected,
+                    "{lane}.{stage} must retain its original child binder map through storms"
+                );
+            } else {
+                lane_child_map = Some(child_contexts);
+            }
+        }
+        lane_child_maps.insert(lane, lane_child_map.expect("child map"));
+    }
+    assert_ne!(
+        lane_child_maps.get("left"),
+        lane_child_maps.get("right"),
+        "the two lanes' child binders must remain distinct"
+    );
+}
+
 #[test]
 fn paired_reproduction_checkpoint_types_stay_stable_across_interleaved_analyses() {
     const FUNCTION: &str =
