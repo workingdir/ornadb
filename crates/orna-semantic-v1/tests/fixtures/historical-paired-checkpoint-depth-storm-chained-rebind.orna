@@ -1,0 +1,183 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn left_checkpoint_first(root_pin: sys.SnapshotRef) =
+    (middle_pin: sys.SnapshotRef) => (leaf_pin: sys.SnapshotRef) => {
+        root_pin: sys.snapshot(root_pin),
+        middle_pin: sys.snapshot(middle_pin),
+        leaf_pin: sys.snapshot(leaf_pin),
+        root: factory_at(root_pin),
+        middle: factory_at(middle_pin),
+        leaf: factory_at(leaf_pin),
+    };
+
+pub fn left_checkpoint_second(root_pin: sys.SnapshotRef) =
+    (middle_pin: sys.SnapshotRef) => (leaf_pin: sys.SnapshotRef) => {
+        root_pin: sys.snapshot(root_pin),
+        middle_pin: sys.snapshot(middle_pin),
+        leaf_pin: sys.snapshot(leaf_pin),
+        root: factory_at(root_pin),
+        middle: factory_at(middle_pin),
+        leaf: factory_at(leaf_pin),
+    };
+
+pub fn right_checkpoint_first(root_pin: sys.SnapshotRef) =
+    (middle_pin: sys.SnapshotRef) => (leaf_pin: sys.SnapshotRef) => {
+        root_pin: sys.snapshot(root_pin),
+        middle_pin: sys.snapshot(middle_pin),
+        leaf_pin: sys.snapshot(leaf_pin),
+        root: factory_at(root_pin),
+        middle: factory_at(middle_pin),
+        leaf: factory_at(leaf_pin),
+    };
+
+pub fn right_checkpoint_second(root_pin: sys.SnapshotRef) =
+    (middle_pin: sys.SnapshotRef) => (leaf_pin: sys.SnapshotRef) => {
+        root_pin: sys.snapshot(root_pin),
+        middle_pin: sys.snapshot(middle_pin),
+        leaf_pin: sys.snapshot(leaf_pin),
+        root: factory_at(root_pin),
+        middle: factory_at(middle_pin),
+        leaf: factory_at(leaf_pin),
+    };
+
+pub fn paired_checkpoint_depth_storm_chained_rebind_retains_maps() {
+    let left_root_saved = [
+        left_checkpoint_first(sys.snapshot("HEAD~950")),
+        left_checkpoint_second(sys.snapshot("HEAD~948")),
+    ];
+    let left_root_rolling = left_root_saved;
+    left_root_rolling = [
+        left_checkpoint_first(sys.snapshot("HEAD~947")),
+        left_checkpoint_second(sys.snapshot("HEAD~946")),
+    ];
+    left_root_rolling = [
+        left_checkpoint_first(sys.snapshot("HEAD~945")),
+        left_checkpoint_second(sys.snapshot("HEAD~944")),
+    ];
+    let left_root_after_storm = left_root_rolling;
+    left_root_rolling = left_root_saved;
+    let left_root_restored = left_root_rolling;
+
+    let left_middle_saved = [
+        left_checkpoint_first(sys.snapshot("HEAD~950"))(sys.snapshot("HEAD~850")),
+        left_checkpoint_second(sys.snapshot("HEAD~948"))(sys.snapshot("HEAD~848")),
+    ];
+    let left_middle_rolling = left_middle_saved;
+    left_middle_rolling = [
+        left_checkpoint_first(sys.snapshot("HEAD~947"))(sys.snapshot("HEAD~847")),
+        left_checkpoint_second(sys.snapshot("HEAD~946"))(sys.snapshot("HEAD~846")),
+    ];
+    left_middle_rolling = [
+        left_checkpoint_first(sys.snapshot("HEAD~945"))(sys.snapshot("HEAD~845")),
+        left_checkpoint_second(sys.snapshot("HEAD~944"))(sys.snapshot("HEAD~844")),
+    ];
+    let left_middle_after_storm = left_middle_rolling;
+    left_middle_rolling = left_middle_saved;
+    let left_middle_restored = left_middle_rolling;
+
+    let left_leaf_saved = [
+        left_checkpoint_first(sys.snapshot("HEAD~950"))(sys.snapshot("HEAD~850"))(sys.snapshot("HEAD~750")),
+        left_checkpoint_second(sys.snapshot("HEAD~948"))(sys.snapshot("HEAD~848"))(sys.snapshot("HEAD~748")),
+    ];
+    let left_leaf_rolling = left_leaf_saved;
+    left_leaf_rolling = [
+        left_checkpoint_first(sys.snapshot("HEAD~947"))(sys.snapshot("HEAD~847"))(sys.snapshot("HEAD~747")),
+        left_checkpoint_second(sys.snapshot("HEAD~946"))(sys.snapshot("HEAD~846"))(sys.snapshot("HEAD~746")),
+    ];
+    left_leaf_rolling = [
+        left_checkpoint_first(sys.snapshot("HEAD~945"))(sys.snapshot("HEAD~845"))(sys.snapshot("HEAD~745")),
+        left_checkpoint_second(sys.snapshot("HEAD~944"))(sys.snapshot("HEAD~844"))(sys.snapshot("HEAD~744")),
+    ];
+    let left_leaf_after_storm = left_leaf_rolling;
+    left_leaf_rolling = left_leaf_saved;
+    let left_leaf_restored = left_leaf_rolling;
+
+    let right_root_saved = [
+        right_checkpoint_first(sys.snapshot("HEAD~930")),
+        right_checkpoint_second(sys.snapshot("HEAD~928")),
+    ];
+    let right_root_rolling = right_root_saved;
+    right_root_rolling = [
+        right_checkpoint_first(sys.snapshot("HEAD~927")),
+        right_checkpoint_second(sys.snapshot("HEAD~926")),
+    ];
+    right_root_rolling = [
+        right_checkpoint_first(sys.snapshot("HEAD~925")),
+        right_checkpoint_second(sys.snapshot("HEAD~924")),
+    ];
+    let right_root_after_storm = right_root_rolling;
+    right_root_rolling = right_root_saved;
+    let right_root_restored = right_root_rolling;
+
+    let right_middle_saved = [
+        right_checkpoint_first(sys.snapshot("HEAD~930"))(sys.snapshot("HEAD~830")),
+        right_checkpoint_second(sys.snapshot("HEAD~928"))(sys.snapshot("HEAD~828")),
+    ];
+    let right_middle_rolling = right_middle_saved;
+    right_middle_rolling = [
+        right_checkpoint_first(sys.snapshot("HEAD~927"))(sys.snapshot("HEAD~827")),
+        right_checkpoint_second(sys.snapshot("HEAD~926"))(sys.snapshot("HEAD~826")),
+    ];
+    right_middle_rolling = [
+        right_checkpoint_first(sys.snapshot("HEAD~925"))(sys.snapshot("HEAD~825")),
+        right_checkpoint_second(sys.snapshot("HEAD~924"))(sys.snapshot("HEAD~824")),
+    ];
+    let right_middle_after_storm = right_middle_rolling;
+    right_middle_rolling = right_middle_saved;
+    let right_middle_restored = right_middle_rolling;
+
+    let right_leaf_saved = [
+        right_checkpoint_first(sys.snapshot("HEAD~930"))(sys.snapshot("HEAD~830"))(sys.snapshot("HEAD~730")),
+        right_checkpoint_second(sys.snapshot("HEAD~928"))(sys.snapshot("HEAD~828"))(sys.snapshot("HEAD~728")),
+    ];
+    let right_leaf_rolling = right_leaf_saved;
+    right_leaf_rolling = [
+        right_checkpoint_first(sys.snapshot("HEAD~927"))(sys.snapshot("HEAD~827"))(sys.snapshot("HEAD~727")),
+        right_checkpoint_second(sys.snapshot("HEAD~926"))(sys.snapshot("HEAD~826"))(sys.snapshot("HEAD~726")),
+    ];
+    right_leaf_rolling = [
+        right_checkpoint_first(sys.snapshot("HEAD~925"))(sys.snapshot("HEAD~825"))(sys.snapshot("HEAD~725")),
+        right_checkpoint_second(sys.snapshot("HEAD~924"))(sys.snapshot("HEAD~824"))(sys.snapshot("HEAD~724")),
+    ];
+    let right_leaf_after_storm = right_leaf_rolling;
+    right_leaf_rolling = right_leaf_saved;
+    let right_leaf_restored = right_leaf_rolling;
+
+    {
+        left: {
+            root: {
+                saved: left_root_saved,
+                after_storm: left_root_after_storm,
+                restored: left_root_restored,
+            },
+            middle: {
+                saved: left_middle_saved,
+                after_storm: left_middle_after_storm,
+                restored: left_middle_restored,
+            },
+            leaf: {
+                saved: left_leaf_saved,
+                after_storm: left_leaf_after_storm,
+                restored: left_leaf_restored,
+            },
+        },
+        right: {
+            root: {
+                saved: right_root_saved,
+                after_storm: right_root_after_storm,
+                restored: right_root_restored,
+            },
+            middle: {
+                saved: right_middle_saved,
+                after_storm: right_middle_after_storm,
+                restored: right_middle_restored,
+            },
+            leaf: {
+                saved: right_leaf_saved,
+                after_storm: right_leaf_after_storm,
+                restored: right_leaf_restored,
+            },
+        },
+    }
+}
