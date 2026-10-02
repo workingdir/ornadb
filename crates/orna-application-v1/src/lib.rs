@@ -1442,16 +1442,14 @@ impl EffectHandler for SourceMutationEffectHandler {
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-UNADMITTED"));
                 }
                 let key = encoded_key(key)?;
-                if self.current_row_if_known(&table, &key)?.is_none()
-                    && self.captured_rows.is_some()
-                {
+                if self.current_row(&table, &key)?.is_none() {
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-MISSING-ROW"));
                 }
-                self.record(&table, key, None)?;
+                self.record(&table, key.clone(), None)?;
                 self.overlay
                     .entry(table.to_owned())
                     .or_default()
-                    .insert(encoded_key(&arguments[0])?, None);
+                    .insert(key, None);
                 Ok(Some(CanonicalValue::unit()))
             }
             "rekey" => {
@@ -2763,22 +2761,79 @@ mod tests {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
         let admitted = authority
-            .admit_module("main.orna", note_source("Note.delete(7);"), "main")
-            .expect("source should be admitted");
-        let staged = authority
-            .evaluate_staged(&admitted, &Environment::new())
-            .expect("admitted delete effect should stage");
-        assert_eq!(staged.mutations().len(), 1);
-        let mutation = &staged.mutations()[0];
+            .admit_module(
+                "delete-existing-row-om35q.orna",
+                include_str!("../tests/fixtures/core-table-delete-existing-om35q.orna"),
+                "main",
+            )
+            .expect("delete fixture should be admitted");
+        let int = |value: i64| {
+            CanonicalValue::new(OvbRaw::Int(value.into())).expect("integer is canonical")
+        };
+        let key = int(7).encode().expect("key is canonical");
+        let row = CanonicalValue::new(OvbRaw::Map(vec![
+            (OvbRaw::Text("id".into()), OvbRaw::Int(7.into())),
+            (OvbRaw::Text("text".into()), OvbRaw::Text("retained".into())),
+        ]))
+        .expect("snapshot row is canonical")
+        .encode()
+        .expect("snapshot row encodes");
+        let rows = BTreeMap::from([("Note".to_owned(), vec![(key.clone(), row)])]);
+        let mut effects = SourceMutationEffectHandler::with_table_rows(
+            admitted_table_schemas(&admitted.module_header),
+            rows,
+        )
+        .expect("existing row snapshot should be valid");
+        let value = invoke_named_with_effects(
+            &admitted.entry,
+            &admitted.functions,
+            &Environment::new(),
+            admitted.limits,
+            &mut effects,
+        )
+        .expect("delete should return Unit for an existing row");
+        assert_eq!(value, CanonicalValue::unit());
+
+        let mutations = effects
+            .into_mutations()
+            .expect("delete mutation should be canonical");
+        assert_eq!(mutations.len(), 1);
+        let mutation = &mutations[0];
         assert_eq!(mutation.table(), "Note");
+        assert_eq!(mutation.key(), key);
         assert_eq!(mutation.value(), None);
-        let key = orna_foundation_v1::Value::decode(mutation.key())
-            .expect("mutation key must be canonical OVB");
-        let expected_key = orna_foundation_v1::Value::new(orna_foundation_v1::OvbRaw::Int(
-            num_bigint::BigInt::from(7_i64),
-        ))
-        .expect("canonical integer");
-        assert_eq!(key, expected_key);
+    }
+
+    #[test]
+    fn staged_evaluation_rejects_delete_for_missing_snapshot_row() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let admitted = authority
+            .admit_module(
+                "delete-missing-row-om35q.orna",
+                include_str!("../tests/fixtures/core-table-delete-missing-om35q.orna"),
+                "main",
+            )
+            .expect("missing-row delete fixture should be admitted");
+        let mut effects = SourceMutationEffectHandler::with_table_rows(
+            admitted_table_schemas(&admitted.module_header),
+            BTreeMap::from([("Note".to_owned(), Vec::new())]),
+        )
+        .expect("empty table snapshot should be valid");
+
+        let error = invoke_named_with_effects(
+            &admitted.entry,
+            &admitted.functions,
+            &Environment::new(),
+            admitted.limits,
+            &mut effects,
+        )
+        .expect_err("deleting an absent key must fail");
+        assert_eq!(error.code(), "ORNA-EVAL-TABLE-MISSING-ROW");
+        assert!(effects
+            .into_mutations()
+            .expect("rejected delete leaves an empty mutation log")
+            .is_empty());
     }
 
     #[test]
