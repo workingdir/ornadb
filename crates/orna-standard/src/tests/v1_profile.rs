@@ -7,6 +7,7 @@ use crate::{
     REFERENCE_STANDARD_TIME_PATH_V1,
     REFERENCE_STANDARD_TIME_COMPACT_PATH_V1, REFERENCE_STANDARD_TIME_CLOCK_PATH_V1,
     REFERENCE_STANDARD_TIME_WORDS_PATH_V1, REFERENCE_STANDARD_TIME_ISO_PATH_V1,
+    REFERENCE_STANDARD_OPTION_PATH_V1, REFERENCE_STANDARD_RESULT_PATH_V1,
     reference_standard_catalogue_v1,
     reference_standard_profile_v1, reference_standard_sources_v1,
 };
@@ -39,6 +40,25 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         assert_eq!(sources[index].0, path);
         assert!(sources[index].1.contains(&format!("std.time.duration.{operation}.format")));
     }
+    assert_eq!(sources[11].0, REFERENCE_STANDARD_OPTION_PATH_V1);
+    assert!(sources[11].1.contains("pub fn and_then<T, U>"));
+    assert_eq!(sources[12].0, REFERENCE_STANDARD_RESULT_PATH_V1);
+    assert!(sources[12].1.contains("pub enum Result<T, E>"));
+    assert!(sources[12].1.contains("pub fn map_error<T, E, F>"));
+    let option_module_analysis = analyze_with_catalogue(
+        &[ModuleInput::new("option.orna", &sources[11].1)],
+        &orna_semantic_v1::Catalogue::authoritative_core(),
+    );
+    assert!(
+        option_module_analysis.is_ok(),
+        "{}",
+        option_module_analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
 
     let profile = reference_standard_profile_v1();
     assert_eq!(profile.snapshot(), "orna.std/v1-reference-library");
@@ -51,12 +71,23 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     let catalogue = reference_standard_catalogue_v1().expect("the standard module checks");
     let consumer = include_str!("fixtures/v1_collection_operations_consumer.orna");
     let asof_consumer = include_str!("fixtures/v1_standard_consumer.orna");
+    let option_result_consumer = include_str!("fixtures/v1_option_result_consumer.orna");
     let analysis = analyze_with_catalogue(
         &[
             ModuleInput::new("asof_consumer.orna", asof_consumer),
             ModuleInput::new("collection_ops.orna", consumer),
+            ModuleInput::new("option_result_consumer.orna", option_result_consumer),
         ],
         &catalogue,
     );
-    assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
+    assert!(
+        analysis.is_ok(),
+        "{}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
 }
