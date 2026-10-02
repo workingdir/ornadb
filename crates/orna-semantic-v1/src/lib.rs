@@ -16140,7 +16140,8 @@ fn snapshot_selector_context(
 /// Substitute a selector parameter in a function result with the caller's
 /// selector identity. Literal and built-in selectors retain canonical
 /// identities. Dynamic arguments use the call occurrence because this pass
-/// does not evaluate selector values.
+/// does not evaluate selector values. Returned function parameters shadow
+/// same-named selectors from the caller while the returned function is dormant.
 fn specialize_dynamic_parameter_snapshot_contexts(
     ty: &Type,
     parameter_names: Option<&[String]>,
@@ -16150,11 +16151,34 @@ fn specialize_dynamic_parameter_snapshot_contexts(
     call_span: &SyntaxSpan,
     historical_context: Option<&Type>,
 ) -> Type {
+    specialize_dynamic_parameter_snapshot_contexts_scoped(
+        ty,
+        parameter_names,
+        arguments,
+        argument_types,
+        local,
+        call_span,
+        historical_context,
+        &BTreeSet::new(),
+    )
+}
+
+fn specialize_dynamic_parameter_snapshot_contexts_scoped(
+    ty: &Type,
+    parameter_names: Option<&[String]>,
+    arguments: &[orna_syntax_v1::Argument],
+    argument_types: &[Type],
+    local: &BTreeMap<String, Symbol>,
+    call_span: &SyntaxSpan,
+    historical_context: Option<&Type>,
+    shadowed_parameters: &BTreeSet<String>,
+) -> Type {
     match ty {
         Type::Applied { base, arguments: values }
             if base == "sys.SnapshotRefContext"
                 && let [Type::Named(selector)] = values.as_slice()
-                && let Some(parameter) = selector.strip_prefix("selector:parameter:") =>
+                && let Some(parameter) = selector.strip_prefix("selector:parameter:")
+                && !shadowed_parameters.contains(parameter) =>
         {
             let argument_index = parameter_names
                 .and_then(|names| names.iter().position(|name| name == parameter))
@@ -16198,35 +16222,43 @@ fn specialize_dynamic_parameter_snapshot_contexts(
             parameter_names: function_parameter_names,
             default_parameters,
             result,
-        } => Type::Function {
-            parameters: parameters
-                .iter()
-                .map(|parameter| {
-                    specialize_dynamic_parameter_snapshot_contexts(
-                        parameter,
-                        parameter_names,
-                        arguments,
-                        argument_types,
-                        local,
-                        call_span,
-                        historical_context,
-                    )
-                })
-                .collect(),
-            parameter_names: function_parameter_names.clone(),
-            default_parameters: default_parameters.clone(),
-            result: Box::new(specialize_dynamic_parameter_snapshot_contexts(
-                result,
-                parameter_names,
-                arguments,
-                argument_types,
-                local,
-                call_span,
-                historical_context,
-            )),
+        } => {
+            let mut nested_shadowed_parameters = shadowed_parameters.clone();
+            if let Some(names) = function_parameter_names {
+                nested_shadowed_parameters.extend(names.iter().cloned());
+            }
+            Type::Function {
+                parameters: parameters
+                    .iter()
+                    .map(|parameter| {
+                        specialize_dynamic_parameter_snapshot_contexts_scoped(
+                            parameter,
+                            parameter_names,
+                            arguments,
+                            argument_types,
+                            local,
+                            call_span,
+                            historical_context,
+                            shadowed_parameters,
+                        )
+                    })
+                    .collect(),
+                parameter_names: function_parameter_names.clone(),
+                default_parameters: default_parameters.clone(),
+                result: Box::new(specialize_dynamic_parameter_snapshot_contexts_scoped(
+                    result,
+                    parameter_names,
+                    arguments,
+                    argument_types,
+                    local,
+                    call_span,
+                    historical_context,
+                    &nested_shadowed_parameters,
+                )),
+            }
         },
         Type::List(element) => Type::List(Box::new(
-            specialize_dynamic_parameter_snapshot_contexts(
+            specialize_dynamic_parameter_snapshot_contexts_scoped(
                 element,
                 parameter_names,
                 arguments,
@@ -16234,10 +16266,11 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 local,
                 call_span,
                 historical_context,
+                shadowed_parameters,
             ),
         )),
         Type::Range(element) => Type::Range(Box::new(
-            specialize_dynamic_parameter_snapshot_contexts(
+            specialize_dynamic_parameter_snapshot_contexts_scoped(
                 element,
                 parameter_names,
                 arguments,
@@ -16245,10 +16278,11 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 local,
                 call_span,
                 historical_context,
+                shadowed_parameters,
             ),
         )),
         Type::Relation(element) => Type::Relation(Box::new(
-            specialize_dynamic_parameter_snapshot_contexts(
+            specialize_dynamic_parameter_snapshot_contexts_scoped(
                 element,
                 parameter_names,
                 arguments,
@@ -16256,10 +16290,11 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 local,
                 call_span,
                 historical_context,
+                shadowed_parameters,
             ),
         )),
         Type::Stream(element) => Type::Stream(Box::new(
-            specialize_dynamic_parameter_snapshot_contexts(
+            specialize_dynamic_parameter_snapshot_contexts_scoped(
                 element,
                 parameter_names,
                 arguments,
@@ -16267,10 +16302,11 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 local,
                 call_span,
                 historical_context,
+                shadowed_parameters,
             ),
         )),
         Type::Optional(element) => Type::Optional(Box::new(
-            specialize_dynamic_parameter_snapshot_contexts(
+            specialize_dynamic_parameter_snapshot_contexts_scoped(
                 element,
                 parameter_names,
                 arguments,
@@ -16278,6 +16314,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 local,
                 call_span,
                 historical_context,
+                shadowed_parameters,
             ),
         )),
         Type::Record(fields) => Type::Record(
@@ -16286,7 +16323,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 .map(|(name, value)| {
                     (
                         name.clone(),
-                        specialize_dynamic_parameter_snapshot_contexts(
+                        specialize_dynamic_parameter_snapshot_contexts_scoped(
                             value,
                             parameter_names,
                             arguments,
@@ -16294,6 +16331,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                             local,
                             call_span,
                             historical_context,
+                            shadowed_parameters,
                         ),
                     )
                 })
@@ -16303,7 +16341,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
             elements
                 .iter()
                 .map(|element| {
-                    specialize_dynamic_parameter_snapshot_contexts(
+                    specialize_dynamic_parameter_snapshot_contexts_scoped(
                         element,
                         parameter_names,
                         arguments,
@@ -16311,6 +16349,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                         local,
                         call_span,
                         historical_context,
+                        shadowed_parameters,
                     )
                 })
                 .collect(),
@@ -16320,7 +16359,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
             arguments: values
                 .iter()
                 .map(|value| {
-                    specialize_dynamic_parameter_snapshot_contexts(
+                    specialize_dynamic_parameter_snapshot_contexts_scoped(
                         value,
                         parameter_names,
                         arguments,
@@ -16328,6 +16367,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                         local,
                         call_span,
                         historical_context,
+                        shadowed_parameters,
                     )
                 })
                 .collect(),
