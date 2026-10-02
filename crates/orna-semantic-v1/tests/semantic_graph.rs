@@ -1392,6 +1392,38 @@ fn table_assertion_elaborates_reference_relation_predicates_without_an_evaluator
 }
 
 #[test]
+fn all_unique_accepts_structural_nullable_keys_and_rejects_float_components() {
+    let lawful = analyze(&[ModuleInput::new(
+        "nullable-key.orna",
+        include_str!("fixtures/table-all-unique-nullable-tuple-key.orna"),
+    )]);
+    assert!(lawful.is_ok(), "{:?}", lawful.diagnostics);
+
+    let unlawful = analyze(&[ModuleInput::new(
+        "float-key.orna",
+        include_str!("fixtures/table-all-unique-float-tuple-key.orna"),
+    )]);
+    assert!(has(&unlawful, DIAG_TYPE), "{:?}", unlawful.diagnostics);
+    assert!(
+        unlawful.diagnostics.iter().any(|diagnostic| diagnostic
+            .message()
+            .contains("all_unique selector must return a lawful equality key")),
+        "the Float restriction should explain the rejected contract: {:?}",
+        unlawful.diagnostics
+    );
+
+    let nested_float_distinct = analyze(&[ModuleInput::new(
+        "relation-float-distinct.orna",
+        include_str!("fixtures/relation-distinct-float-tuple-key.orna"),
+    )]);
+    assert!(
+        has(&nested_float_distinct, DIAG_TYPE),
+        "relation distinct must reject a tuple key containing Float: {:?}",
+        nested_float_distinct.diagnostics
+    );
+}
+
+#[test]
 fn module_assertion_elaborates_the_reference_projects_nested_relation_predicate() {
     let result = analyze(&[ModuleInput::new(
         "library.orna",
