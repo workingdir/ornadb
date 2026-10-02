@@ -548,6 +548,26 @@ impl PackageResolver {
         })
     }
 
+    /// Continues a resolved rebind path with another wave of replacements.
+    /// Snapshots from the earlier wave stay in order, followed by the prior
+    /// terminal session and any new intermediate routes. A failed extension
+    /// leaves `previous` available with its original final route.
+    pub fn extend_nested_rebind_path(
+        &self,
+        previous: &ReboundPathResolution,
+        replacements: &[PinnedDatabase],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let extension =
+            self.resolve_nested_rebind_path(previous.final_session(), replacements)?;
+        let (final_session, mut retained_sessions) = extension.into_parts();
+        let mut all_retained = previous.retained_sessions.clone();
+        all_retained.append(&mut retained_sessions);
+        Ok(ReboundPathResolution {
+            final_session,
+            retained_sessions: all_retained,
+        })
+    }
+
     /// Resolves a chain of exact aliases from a retained session snapshot.
     /// Each edge is selected from the session opened at the preceding edge;
     /// a failure leaves the caller's snapshot untouched.
