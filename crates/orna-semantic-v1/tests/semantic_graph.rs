@@ -4125,6 +4125,29 @@ fn paired_nested_closure_chain_depth_storms_reject_cross_chain_leaf_mixing() {
 }
 
 #[test]
+fn paired_nested_chain_rebind_cascades_preserve_each_captured_depth() {
+    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-cascades.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-chain-rebind-cascades.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired root, bridge, and leaf closures must preserve their captured pins through chained rebind cascades: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
