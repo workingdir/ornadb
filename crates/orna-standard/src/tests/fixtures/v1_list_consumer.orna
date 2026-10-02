@@ -1,0 +1,4 @@
+use std.list as list;
+
+pub fn list_operations(values: [Int]): [Int] =
+    list.reverse(list.append(values, 5));
