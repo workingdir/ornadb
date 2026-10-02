@@ -23827,6 +23827,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_chained_filter_storm_selectivity_stops_at_second_lookup_match() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=20)
+            .map(|row_id| {
+                let title = if matches!(row_id, 8 | 16) {
+                    "later"
+                } else {
+                    "current"
+                };
+                let target = if row_id == 20 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(159), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference guarantees ordered base scans and order-preserving
+        // filters, but leaves page demand for a chain of selective filters
+        // unspecified. The chain reduces fourteen rows to candidates 8, 16,
+        // and 20; after two lookup matches, row 20 must remain unopened.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-relation-scan-chained-filter-selectivity.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(2u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 10),
+            "selective rejects consume source pages through id 16, then take closes before id 20"
+        );
+    }
+
+    #[tokio::test]
     async fn query_take_two_preserves_results_across_conjunct_filter_splits() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
