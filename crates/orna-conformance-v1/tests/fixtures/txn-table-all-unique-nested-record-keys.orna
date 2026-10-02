@@ -1,0 +1,15 @@
+pub table Account(id: Int) {
+    region: Str,
+    nickname: Str?,
+    handle: Str,
+    assert all_unique(account => {
+        profile: { region: account.region, nickname: account.nickname },
+        identity: (account.nickname, account.handle),
+    });
+}
+
+fn parent() {
+    Account.insert({ id: 1, region: "north", nickname: null, handle: "ada" });
+    Account.insert({ id: 2, region: "north", nickname: "a", handle: "ada" });
+    Account.insert({ id: 3, region: "north", nickname: null, handle: "lin" });
+}

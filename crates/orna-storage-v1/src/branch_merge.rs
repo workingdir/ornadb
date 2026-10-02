@@ -461,6 +461,7 @@ pub struct BranchMergeTombstoneHistory {
     pending_plan_identities: BTreeMap<u64, [u8; 32]>,
     committed_modes: BTreeMap<u64, BranchMergeTombstoneSubmissionMode>,
     committed_fragment_counts: BTreeMap<u64, usize>,
+    committed_fragment_retry_identities: BTreeMap<u64, BTreeMap<usize, [u8; 32]>>,
     committed_plan_identities: BTreeMap<u64, [u8; 32]>,
     duplicate_retry_modes: BTreeMap<u64, BranchMergeTombstoneSubmissionMode>,
     applied_fragment_retry_transactions: Vec<AppliedDepthFragmentRetryTransaction>,
@@ -476,6 +477,7 @@ impl BranchMergeTombstoneHistory {
             pending_plan_identities: BTreeMap::new(),
             committed_modes: BTreeMap::new(),
             committed_fragment_counts: BTreeMap::new(),
+            committed_fragment_retry_identities: BTreeMap::new(),
             committed_plan_identities: BTreeMap::new(),
             duplicate_retry_modes: BTreeMap::new(),
             applied_fragment_retry_transactions: Vec::new(),
@@ -561,7 +563,13 @@ impl BranchMergeTombstoneHistory {
     /// completion order. An empty fragment still counts toward completeness.
     /// For an existing wave, a changed fragment count is reported before an
     /// index that is invalid under the caller's changed count, preserving the
-    /// wave's authoritative depth label in diagnostics.
+    /// wave's authoritative depth label in diagnostics. After a wave commits,
+    /// its count, valid index range, and per-fragment tombstone identity remain
+    /// authoritative for stale retries too. Changed labels report
+    /// `FragmentCountMismatch` or `InvalidFragment`, and changed fragment data
+    /// reports `ConflictingSubmission`, before the generic stale-position
+    /// error. MERGE-1 is silent on validating retry bodies after a fold; this
+    /// v1 policy retains a fingerprint for each fragment's tombstone delta.
     pub fn submit_depth_merge_fragment(
         &mut self,
         order: u64,
@@ -569,6 +577,28 @@ impl BranchMergeTombstoneHistory {
         fragment_count: usize,
         tombstones: &[(ObjectId, CanonicalValue)],
     ) -> Result<Vec<BranchMergeTombstoneEvent>, BranchMergeTombstoneHistoryError> {
+        self.classify_submission_mode_conflict(
+            order,
+            BranchMergeTombstoneSubmissionMode::DepthFragments,
+        )?;
+        if let Some(expected_count) = self.committed_fragment_counts.get(&order).copied()
+            && expected_count != fragment_count
+        {
+            return Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+                order,
+                expected: expected_count,
+                actual: fragment_count,
+            });
+        }
+        if let Some(expected_count) = self.committed_fragment_counts.get(&order).copied()
+            && fragment >= expected_count
+        {
+            return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+                fragment,
+                fragment_count: expected_count,
+            });
+        }
+        self.validate_committed_fragment_retry_identity(order, fragment, tombstones)?;
         self.classify_submission_position(
             order,
             BranchMergeTombstoneSubmissionMode::DepthFragments,
@@ -1337,6 +1367,30 @@ impl BranchMergeTombstoneHistory {
                     fragment_count: recovery.fragment_count,
                 });
             }
+            self.validate_committed_fragment_retry_identity(
+                recovery.order,
+                recovery.fragment,
+                &recovery.tombstones,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn validate_committed_fragment_retry_identity(
+        &self,
+        order: u64,
+        fragment: usize,
+        tombstones: &[(ObjectId, CanonicalValue)],
+    ) -> Result<(), BranchMergeTombstoneHistoryError> {
+        let Some(expected_identity) = self
+            .committed_fragment_retry_identities
+            .get(&order)
+            .and_then(|fragments| fragments.get(&fragment))
+        else {
+            return Ok(());
+        };
+        if *expected_identity != depth_fragment_retry_identity(tombstones) {
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
         }
         Ok(())
     }
@@ -1358,13 +1412,23 @@ impl BranchMergeTombstoneHistory {
             let delta = self.pending_deltas.remove(&order).expect("ready delta is buffered");
             let mode = delta.submission_mode();
             if let BufferedBranchMergeTombstoneDelta::DepthFragments {
-                fragment_count, ..
+                fragment_count,
+                fragments,
             } = &delta
             {
                 // The fold drops buffered fragments, but retry diagnostics
                 // still need the wave's label after its events commit.
                 self.committed_fragment_counts
                     .insert(order, *fragment_count);
+                self.committed_fragment_retry_identities.insert(
+                    order,
+                    fragments
+                        .iter()
+                        .map(|(fragment, tombstones)| {
+                            (*fragment, depth_fragment_retry_identity(tombstones))
+                        })
+                        .collect(),
+                );
             }
             self.duplicate_retry_modes.remove(&order);
             if let Some(identity) = self.pending_plan_identities.remove(&order) {
@@ -1641,6 +1705,33 @@ fn update_retry_identity_debug(hash: &mut Sha256, value: &impl fmt::Debug) {
 
 fn update_retry_identity_count(hash: &mut Sha256, count: usize) {
     hash.update(u64::try_from(count).unwrap_or(u64::MAX).to_be_bytes());
+}
+
+/// Retains one depth fragment's exact tombstone delta without keeping its
+/// canonical values in committed retry history. Ordering is normalized so a
+/// retry may submit the same fragment members in any order.
+fn depth_fragment_retry_identity(tombstones: &[(ObjectId, CanonicalValue)]) -> [u8; 32] {
+    let mut encoded = tombstones
+        .iter()
+        .map(|(table, key)| {
+            (
+                table.bytes(),
+                key.encode()
+                    .expect("validated canonical primary keys remain encodable"),
+            )
+        })
+        .collect::<Vec<_>>();
+    encoded.sort_unstable();
+
+    let mut hash = Sha256::new();
+    hash.update(b"orna-storage-depth-fragment-retry-v1");
+    update_retry_identity_count(&mut hash, encoded.len());
+    for (table, key) in encoded {
+        hash.update(table);
+        update_retry_identity_count(&mut hash, key.len());
+        hash.update(key);
+    }
+    hash.finalize().into()
 }
 
 fn update_retry_identity_value(hash: &mut Sha256, value: &CanonicalValue) {
