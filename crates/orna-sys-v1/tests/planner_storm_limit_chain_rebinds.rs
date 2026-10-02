@@ -2062,6 +2062,7 @@ fn typed_handoff_routes_preserve_nested_outputs_with_unknown_rows() {
 
 #[test]
 fn typed_handoff_routes_preserve_nested_outputs_after_unknown_rebinds() {
+    // Unknown rebind estimates do not erase source provenance from typed paths.
     let parsed = orna_syntax_v1::parse_module(UNKNOWN_REBIND_ANCESTRY_FIXTURE);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
     assert_eq!(parsed.value.items.len(), 2);
@@ -2173,6 +2174,29 @@ fn typed_handoff_routes_preserve_nested_outputs_after_unknown_rebinds() {
         PlanByteCapScopeSegment::Limit { position: 1 },
     ]);
     assert_eq!(routes[4].input_path, third_nested_input);
+
+    let serialized = serde_json::to_value(&explained).expect("explained plans serialize");
+    let serialized_filter = serialized["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["details"]["disjunct_storm"] == 1)
+        .expect("outer storm is serialized");
+    assert!(serialized_filter.get("estimated_rows").is_none());
+    assert!(serialized_filter.get("estimated_bytes").is_none());
+    let serialized_routes = serialized_filter["details"]
+        ["limit_chain_rebind_byte_cap_handoff_route_records"]
+        .as_array()
+        .expect("typed routes serialize as an array");
+    assert_eq!(serialized_routes.len(), 5);
+    assert!(serialized_routes.iter().all(|route| {
+        route["input_bytes"] == serde_json::Value::Null
+            && route["output_bytes"] == serde_json::Value::Null
+    }));
+    assert!(serialized_routes[4]["input_path"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!({ "kind": "nested_storm_output", "index": 2 })));
 }
 
 #[test]
