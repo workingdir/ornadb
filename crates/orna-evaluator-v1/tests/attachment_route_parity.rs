@@ -947,14 +947,48 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         Ok(Some(Value::int(96.into())))
     );
 
-    let fixed_depth_storm = resolver
-        .extend_nested_terminal_pair_storm_from_wave(
+    let initial_depth_label = first_stage.retained_depth_label(0, 0).unwrap();
+    assert_eq!(initial_depth_label.wave(), 0);
+    assert_eq!(initial_depth_label.depth(), 0);
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_storm_from_wave(&first_stage, 0, 9, &[]),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let distinct_depth_route = resolver
+        .resolve_nested_rebind_path(
+            &first_stage.retained_wave(0).unwrap()[1],
+            &[PinnedDatabase::resolve(
+                aliases[3],
+                package_repository.clone(),
+                &route_three_final,
+                loader,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+    let distinct_depth_label = distinct_depth_route.retained_depth_label(0, 0).unwrap();
+    assert_ne!(distinct_depth_label, initial_depth_label);
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_storm_from_label(
             &first_stage,
-            0,
-            0,
+            &distinct_depth_label,
+            &[],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
+    let fixed_depth_storm = resolver
+        .extend_nested_terminal_pair_storm_from_label(
+            &first_stage,
+            &initial_depth_label,
             &[first_pair.clone(), same_depth_second_pair],
         )
         .unwrap_or_else(|error| panic!("fixed-depth pair storm failed: {error:?}"));
+    assert_eq!(
+        fixed_depth_storm.retained_depth_label(0, 0).unwrap(),
+        initial_depth_label,
+        "the source depth label retains its exact pin route across each fold"
+    );
     assert_eq!(
         fixed_depth_storm.final_session().primary().pin().name(),
         aliases[3]
