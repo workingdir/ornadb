@@ -1393,7 +1393,7 @@ fn unknown_row_byte_caps_report_scoped_handoff_routes_by_nested_depth() {
             .collect::<Vec<_>>(),
         vec![
             Some(&PlanDetail::Text(
-                "1:root/branch1/limit1/rebind1/cascade1=2048>512,root/branch1/limit1/rebind1/cascade2=512>128,root/branch1/limit2/rebind2/cascade1=128>32;2:root/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=2048>1024,root/branch1/limit1/rebind1/cascade2/branch1/limit1/rebind1/cascade1=512>256,root/branch1/limit2/rebind2/cascade1/branch1/limit1/rebind1/cascade1=128>64".to_owned()
+                "1:root/storm1/branch1/limit1/rebind1/cascade1=2048>512,root/storm1/branch1/limit1/rebind1/cascade2=512>128,root/storm1/branch1/limit2/rebind2/cascade1=128>32;2:root/storm1/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=2048>1024,root/storm1/branch1/limit1/rebind1/cascade2/branch1/limit1/rebind1/cascade1=512>256,root/storm1/branch1/limit2/rebind2/cascade1/branch1/limit1/rebind1/cascade1=128>64".to_owned()
             )),
             Some(&PlanDetail::Text(
                 "1:root/storm1/output/storm2/branch1/limit1/rebind1/cascade1=1040>260;2:root/storm1/output/storm2/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=1040>520".to_owned()
@@ -1409,7 +1409,7 @@ fn unknown_row_byte_caps_report_scoped_handoff_routes_by_nested_depth() {
             .collect::<Vec<_>>(),
         vec![
             Some(&PlanDetail::Text(
-                "1:root/branch1/limit1=>root/branch1/limit1/rebind1/cascade1=2048>512,root/branch1/limit1/rebind1/cascade1=>root/branch1/limit1/rebind1/cascade2=512>128,root/branch1/limit1/rebind1/cascade2/limit2=>root/branch1/limit2/rebind2/cascade1=128>32;2:root/branch1/limit1/rebind1/cascade1/branch1/limit1=>root/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=2048>1024,root/branch1/limit1/rebind1/cascade2/branch1/limit1=>root/branch1/limit1/rebind1/cascade2/branch1/limit1/rebind1/cascade1=512>256,root/branch1/limit2/rebind2/cascade1/branch1/limit1=>root/branch1/limit2/rebind2/cascade1/branch1/limit1/rebind1/cascade1=128>64".to_owned()
+                "1:root/storm1/branch1/limit1=>root/storm1/branch1/limit1/rebind1/cascade1=2048>512,root/storm1/branch1/limit1/rebind1/cascade1=>root/storm1/branch1/limit1/rebind1/cascade2=512>128,root/storm1/branch1/limit1/rebind1/cascade2/limit2=>root/storm1/branch1/limit2/rebind2/cascade1=128>32;2:root/storm1/branch1/limit1/rebind1/cascade1/branch1/limit1=>root/storm1/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=2048>1024,root/storm1/branch1/limit1/rebind1/cascade2/branch1/limit1=>root/storm1/branch1/limit1/rebind1/cascade2/branch1/limit1/rebind1/cascade1=512>256,root/storm1/branch1/limit2/rebind2/cascade1/branch1/limit1=>root/storm1/branch1/limit2/rebind2/cascade1/branch1/limit1/rebind1/cascade1=128>64".to_owned()
             )),
             Some(&PlanDetail::Text(
                 "1:root/storm1/output/storm2/branch1/limit1=>root/storm1/output/storm2/branch1/limit1/rebind1/cascade1=1040>260;2:root/storm1/output/storm2/branch1/limit1/rebind1/cascade1/branch1/limit1=>root/storm1/output/storm2/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=1040>520".to_owned()
@@ -1456,8 +1456,8 @@ fn unknown_row_byte_caps_report_scoped_handoff_routes_by_nested_depth() {
                 PlanByteCapScopeSegment::Rebind { position: 1 },
                 PlanByteCapScopeSegment::Cascade { index: 1 },
             ],
-            input_scope: "root/branch1/limit1".to_owned(),
-            output_scope: "root/branch1/limit1/rebind1/cascade1".to_owned(),
+            input_scope: "root/storm1/branch1/limit1".to_owned(),
+            output_scope: "root/storm1/branch1/limit1/rebind1/cascade1".to_owned(),
             input_bytes: Some(2_048),
             output_bytes: Some(512),
         }
@@ -1505,8 +1505,8 @@ fn unknown_row_byte_caps_report_scoped_handoff_routes_by_nested_depth() {
                 PlanByteCapScopeSegment::Rebind { position: 2 },
                 PlanByteCapScopeSegment::Cascade { index: 1 },
             ],
-            input_scope: "root/branch1/limit1/rebind1/cascade2/limit2".to_owned(),
-            output_scope: "root/branch1/limit2/rebind2/cascade1".to_owned(),
+            input_scope: "root/storm1/branch1/limit1/rebind1/cascade1/rebind_output1_1/rebind1/cascade2/rebind_output1_2/limit2".to_owned(),
+            output_scope: "root/storm1/branch1/limit1/rebind1/cascade1/rebind_output1_1/rebind1/cascade2/rebind_output1_2/limit2/rebind2/cascade1".to_owned(),
             input_bytes: Some(128),
             output_bytes: Some(32),
         }
@@ -1570,8 +1570,8 @@ fn unknown_row_byte_caps_report_scoped_handoff_routes_by_nested_depth() {
                 { "kind": "rebind", "position": 1 },
                 { "kind": "cascade", "index": 1 },
             ],
-            "input_scope": "root/branch1/limit1",
-            "output_scope": "root/branch1/limit1/rebind1/cascade1",
+            "input_scope": "root/storm1/branch1/limit1",
+            "output_scope": "root/storm1/branch1/limit1/rebind1/cascade1",
             "input_bytes": 2048,
             "output_bytes": 512,
         })
@@ -1634,9 +1634,8 @@ fn typed_handoff_routes_preserve_nested_storm_steps_and_unknown_bytes() {
                 PlanByteCapScopeSegment::Rebind { position: 1 },
                 PlanByteCapScopeSegment::Cascade { index: 1 },
             ],
-            input_scope: "root/branch1/nested1/branch1/limit1".to_owned(),
-            output_scope:
-                "root/branch1/nested1/branch1/limit1/rebind1/cascade1".to_owned(),
+            input_scope: "root/storm1/branch1/limit1/branch_output1/nested1/branch1/limit1".to_owned(),
+            output_scope: "root/storm1/branch1/limit1/branch_output1/nested1/branch1/limit1/rebind1/cascade1".to_owned(),
             input_bytes: None,
             output_bytes: None,
         }

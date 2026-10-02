@@ -24436,6 +24436,172 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_cascade_storm_merge_stops_before_unknown_batch_tail() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=40)
+            .map(|row_id| {
+                let title = if row_id == 10 { "later" } else { "current" };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, row_id)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(173), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference specifies filter order and left-first union order,
+        // but not demand for a long cascade over unknown batch operands. Keep
+        // those operands unopened after the first ordered match.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-cascade-storm-unknown-batch.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Bool(true)).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (1, 4),
+            "the merged cascade finds its first row before either unadmitted union batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_cascade_storm_merge_reaches_unknown_batch_after_known_leaves() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=40)
+            .map(|row_id| {
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, "current", row_id)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(174), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // Pragmatically, exhaust each admitted leaf in order before reporting
+        // the first unknown batch operand when the cascade finds no match.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-cascade-storm-unknown-batch.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (6, 68),
+            "the ordered filter batch exhausts both admitted leaves before surfacing the unknown tail"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_unknown_operand_batches_stay_lazy_under_outer_cascade_storm() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=40)
+            .map(|row_id| {
+                let title = if row_id == 10 { "later" } else { "current" };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, row_id)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(175), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // Unknown operands carry their own filter batches as well as the
+        // outer cascade. Keep both batches deferred until ordered demand
+        // reaches an unknown source.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-unknown-operand-batches-through-cascade-storm.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Bool(true)).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (1, 4),
+            "the first admitted leaf satisfies exists before either filtered unknown batch opens"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_unknown_operand_batches_preserve_outer_cascade_exhaustion_order() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=40)
+            .map(|row_id| {
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, "current", row_id)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(176), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-unknown-operand-batches-through-cascade-storm.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (6, 68),
+            "the known leaves exhaust in order before the first unknown operand batch fails"
+        );
+    }
+
+    #[tokio::test]
     async fn query_take_two_preserves_results_across_conjunct_filter_splits() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;

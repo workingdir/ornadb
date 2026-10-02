@@ -708,9 +708,9 @@ pub struct PlanByteCapHandoffRoute {
     pub input_path: Vec<PlanByteCapScopeSegment>,
     /// Typed path to the nested cascade receiving the byte estimate.
     pub output_path: Vec<PlanByteCapScopeSegment>,
-    /// The branch or preceding rebind scope supplying the byte estimate.
+    /// Human-readable label derived from the complete typed input ancestry.
     pub input_scope: String,
-    /// The nested cascade scope receiving the byte estimate.
+    /// Human-readable label derived from the complete typed output ancestry.
     pub output_scope: String,
     /// Known input byte estimate; `None` means the estimate is unknown.
     pub input_bytes: Option<u64>,
@@ -2015,7 +2015,6 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
         current_cardinality = cardinality;
     }
     let mut prior_storm_stage_path = Vec::new();
-    let mut prior_storm_stage_scope = "root".to_owned();
     for (storm_index, storm) in disjunct_storm_cascades.iter().enumerate() {
         let storm_stage_index = storm_index + 1;
         let storm_index =
@@ -2027,11 +2026,7 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
         storm_scope_path.push(PlanByteCapScopeSegment::StormStage {
             index: storm_stage_index,
         });
-        let storm_scope = if storm_stage_index == 1 {
-            prior_storm_stage_scope.clone()
-        } else {
-            format!("{prior_storm_stage_scope}/storm{storm_stage_index}")
-        };
+        let storm_scope = byte_cap_scope_path_label(&storm_scope_path);
         let (cardinality, work, overflowed) = disjunct_storm_cascade_cardinality_and_work(
             current_cardinality,
             storm,
@@ -2320,13 +2315,6 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             work,
         );
         current_cardinality = cardinality;
-        // Match human-readable handoff labels to the complete typed ancestry
-        // path while preserving the established root label for the first stage.
-        prior_storm_stage_scope = if storm_stage_index == 1 {
-            format!("{storm_scope}/storm{storm_stage_index}/output")
-        } else {
-            format!("{storm_scope}/output")
-        };
         prior_storm_stage_path = storm_scope_path;
         prior_storm_stage_path.push(PlanByteCapScopeSegment::StormStageOutput {
             index: storm_stage_index,
@@ -2966,13 +2954,38 @@ fn rebind_byte_cap_handoff_route_records(
                 depth: *depth,
                 input_path: handoff.input_path.clone(),
                 output_path: handoff.output_path.clone(),
-                input_scope: handoff.input_scope.clone(),
-                output_scope: handoff.scope.clone(),
+                input_scope: byte_cap_scope_path_label(&handoff.input_path),
+                output_scope: byte_cap_scope_path_label(&handoff.output_path),
                 input_bytes: handoff.input_bytes,
                 output_bytes: handoff.output_bytes,
             })
         })
         .collect()
+}
+
+fn byte_cap_scope_path_label(path: &[PlanByteCapScopeSegment]) -> String {
+    let mut scope = "root".to_owned();
+    for segment in path {
+        let label = match segment {
+            PlanByteCapScopeSegment::StormStage { index } => format!("storm{index}"),
+            PlanByteCapScopeSegment::StormStageOutput { .. } => "output".to_owned(),
+            PlanByteCapScopeSegment::Branch { index } => format!("branch{index}"),
+            PlanByteCapScopeSegment::Limit { position } => format!("limit{position}"),
+            PlanByteCapScopeSegment::BranchOutput { index } => format!("branch_output{index}"),
+            PlanByteCapScopeSegment::Rebind { position } => format!("rebind{position}"),
+            PlanByteCapScopeSegment::Cascade { index } => format!("cascade{index}"),
+            PlanByteCapScopeSegment::RebindCascadeOutput { position, index } => {
+                format!("rebind_output{position}_{index}")
+            }
+            PlanByteCapScopeSegment::NestedStorm { index } => format!("nested{index}"),
+            PlanByteCapScopeSegment::NestedStormOutput { index } => {
+                format!("nested_output{index}")
+            }
+        };
+        scope.push('/');
+        scope.push_str(&label);
+    }
+    scope
 }
 
 fn stabilize_rebind_byte_cap_handoff_routes(

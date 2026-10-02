@@ -256,6 +256,26 @@ pub struct SequencedBranchMergePlan {
     pub ordered_row_tombstones: Vec<(ObjectId, CanonicalValue)>,
 }
 
+/// One incomplete paired depth wave and the replacement fragments to apply
+/// during an atomic recovery transaction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeDepthWaveRecovery {
+    pub order: u64,
+    pub fragment_count: usize,
+    pub fragments: BTreeMap<usize, Vec<(ObjectId, CanonicalValue)>>,
+}
+
+/// Replacement or completion data for one fragment in an already buffered
+/// paired depth wave. Applying this record replaces that fragment if present
+/// and preserves all other buffered fragments in the wave.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeDepthFragmentRecovery {
+    pub order: u64,
+    pub fragment: usize,
+    pub fragment_count: usize,
+    pub tombstones: Vec<(ObjectId, CanonicalValue)>,
+}
+
 /// One exact-key tombstone event retained in committed paired history.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeTombstoneEvent {
@@ -283,6 +303,10 @@ pub enum BranchMergeTombstoneHistoryError {
     EmptyDepthWaveRestartBatch,
     /// A batch wave-restart request names one position more than once.
     DuplicateDepthWaveRestart { order: u64 },
+    /// A fragment-recovery request must include at least one fragment.
+    EmptyDepthFragmentRecoveryBatch,
+    /// A fragment-recovery request names one position and index more than once.
+    DuplicateDepthFragmentRecovery { order: u64, fragment: usize },
     /// Overlapping fragments attempted to record one table/key twice in a wave.
     DuplicateTombstone { order: u64 },
     /// Two concurrently buffered lineage positions record one table/key.
@@ -345,6 +369,9 @@ enum BranchMergeTombstoneSubmissionMode {
 /// queued append unchanged.
 /// A recovery batch may also include new whole-plan appends, which are applied
 /// after the restarts and participate in the same all-or-nothing transaction.
+/// Recovery can include replacement fragments as well; restarts, appends, and
+/// fragment submissions commit together, with released events returned only
+/// after the entire transaction succeeds.
 /// Unrecorded stale order precedes
 /// buffered and retry-mode checks, and mixed-mode conflicts precede
 /// fragment-index or tombstone-content validation.
@@ -613,6 +640,155 @@ impl BranchMergeTombstoneHistory {
 
         *self = candidate;
         Ok(())
+    }
+
+    /// Atomically recovers multiple incomplete depth waves with replacement
+    /// fragments and adds whole-plan appends to the same lineage queue.
+    /// Wave restarts and appends are normalized by lineage order; fragments
+    /// within each wave are applied by fragment index. Any invalid restart,
+    /// append, or replacement fragment leaves the original history unchanged,
+    /// including events that a partial attempt would otherwise release.
+    pub fn recover_depth_merge_waves_with_appends(
+        &mut self,
+        recoveries: &[BranchMergeDepthWaveRecovery],
+        appends: &[SequencedBranchMergePlan],
+    ) -> Result<Vec<BranchMergeTombstoneEvent>, BranchMergeTombstoneHistoryError> {
+        let restarts = recoveries
+            .iter()
+            .map(|recovery| (recovery.order, recovery.fragment_count))
+            .collect::<Vec<_>>();
+        let mut candidate = self.clone();
+        candidate.restart_depth_merge_waves(&restarts)?;
+
+        let mut appends = appends.to_vec();
+        appends.sort_unstable_by_key(|step| step.order);
+        for step in &appends {
+            candidate.append(step)?;
+        }
+
+        let mut recoveries = recoveries.to_vec();
+        recoveries.sort_unstable_by_key(|recovery| recovery.order);
+        let mut released = Vec::new();
+        for recovery in &recoveries {
+            for (fragment, tombstones) in &recovery.fragments {
+                released.extend(candidate.submit_depth_merge_fragment(
+                    recovery.order,
+                    *fragment,
+                    recovery.fragment_count,
+                    tombstones,
+                )?);
+            }
+        }
+
+        *self = candidate;
+        Ok(released)
+    }
+
+    /// Atomically replaces or completes selected fragments in buffered depth
+    /// waves and adds whole-plan appends to the same queue. Unlike a wave
+    /// restart, unmentioned fragments remain buffered. The supplied fragment
+    /// count must match each wave's current count; a fragment index replaces
+    /// its buffered value or fills a missing slot. Appends are queued first,
+    /// then fragment updates run in lineage and index order. Any failure leaves
+    /// the original wave contents, queue, and released events unchanged.
+    pub fn recover_depth_merge_fragments_with_appends(
+        &mut self,
+        recoveries: &[BranchMergeDepthFragmentRecovery],
+        appends: &[SequencedBranchMergePlan],
+    ) -> Result<Vec<BranchMergeTombstoneEvent>, BranchMergeTombstoneHistoryError> {
+        if recoveries.is_empty() {
+            return Err(BranchMergeTombstoneHistoryError::EmptyDepthFragmentRecoveryBatch);
+        }
+
+        let mut recoveries = recoveries.to_vec();
+        recoveries.sort_unstable_by_key(|recovery| (recovery.order, recovery.fragment));
+        for pair in recoveries.windows(2) {
+            if pair[0].order == pair[1].order && pair[0].fragment == pair[1].fragment {
+                return Err(BranchMergeTombstoneHistoryError::DuplicateDepthFragmentRecovery {
+                    order: pair[0].order,
+                    fragment: pair[0].fragment,
+                });
+            }
+        }
+
+        let mut candidate = self.clone();
+        let mut appends = appends.to_vec();
+        appends.sort_unstable_by_key(|step| step.order);
+        for step in &appends {
+            candidate.append(step)?;
+        }
+
+        let mut released = Vec::new();
+        for recovery in &recoveries {
+            released.extend(candidate.recover_buffered_depth_fragment(recovery)?);
+        }
+
+        *self = candidate;
+        Ok(released)
+    }
+
+    fn recover_buffered_depth_fragment(
+        &mut self,
+        recovery: &BranchMergeDepthFragmentRecovery,
+    ) -> Result<Vec<BranchMergeTombstoneEvent>, BranchMergeTombstoneHistoryError> {
+        self.classify_submission_position(
+            recovery.order,
+            BranchMergeTombstoneSubmissionMode::DepthFragments,
+        )?;
+        if recovery.fragment_count == 0 || recovery.fragment >= recovery.fragment_count {
+            return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+                fragment: recovery.fragment,
+                fragment_count: recovery.fragment_count,
+            });
+        }
+
+        let fragments = match self.pending_deltas.get(&recovery.order) {
+            Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
+                fragment_count,
+                fragments,
+            }) => {
+                if *fragment_count != recovery.fragment_count {
+                    return Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+                        order: recovery.order,
+                        expected: *fragment_count,
+                        actual: recovery.fragment_count,
+                    });
+                }
+                fragments
+            }
+            Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => unreachable!(
+                "whole-plan mode conflicts are classified before fragment recovery"
+            ),
+            None => {
+                return Err(BranchMergeTombstoneHistoryError::NoIncompleteDepthWave {
+                    order: recovery.order,
+                });
+            }
+        };
+
+        let mut combined = fragments
+            .iter()
+            .filter(|(fragment, _)| **fragment != recovery.fragment)
+            .flat_map(|(_, tombstones)| tombstones.iter().cloned())
+            .collect::<Vec<_>>();
+        combined.extend_from_slice(&recovery.tombstones);
+        if has_duplicate_tombstones_in_wave(&combined) {
+            return Err(BranchMergeTombstoneHistoryError::DuplicateTombstone {
+                order: recovery.order,
+            });
+        }
+        if let Some(other_order) = self.pending_duplicate_order(recovery.order, &combined) {
+            return Err(concurrent_duplicate_error(recovery.order, other_order));
+        }
+
+        self.duplicate_retry_modes.remove(&recovery.order);
+        let Some(BufferedBranchMergeTombstoneDelta::DepthFragments { fragments, .. }) =
+            self.pending_deltas.get_mut(&recovery.order)
+        else {
+            unreachable!("the recovered depth wave remains buffered after validation")
+        };
+        fragments.insert(recovery.fragment, recovery.tombstones.clone());
+        Ok(self.release_contiguous())
     }
 
     fn release_contiguous(&mut self) -> Vec<BranchMergeTombstoneEvent> {

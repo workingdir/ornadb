@@ -3560,15 +3560,27 @@ impl Context<'_, '_> {
                 };
                 return Ok(Value::Relation(RelationPlan::union(left, right)));
             }
+            if name == "filter" {
+                let mut filter_arguments = ordered.into_iter();
+                let Some(Value::Relation(plan)) = filter_arguments.next() else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                let Some(predicate) = filter_arguments.next() else {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                };
+                // Filter compilation extends the owned plan directly. A
+                // chain of filters over a nested union storm should copy the
+                // tree only when the cascade is split between union children,
+                // not once for every stage added to that tree.
+                return Ok(Value::Relation(
+                    plan.with_stage(RelationStage::Filter(vec![predicate])),
+                ));
+            }
             let Value::Relation(mut plan) = ordered[0].clone() else {
                 return Err(error("ORNA-EVAL-TYPE"));
             };
 
             match name {
-                "filter" => {
-                    plan = plan.with_stage(RelationStage::Filter(vec![ordered[1].clone()]));
-                    Ok(Value::Relation(plan))
-                }
                 // The reference specifies relation composition and order but
                 // no separate projection grammar. `project` is the named
                 // result-shaping spelling of the same lazy one-to-one map.
@@ -4139,6 +4151,25 @@ impl Context<'_, '_> {
         }
     }
 
+    fn relation_filter_passes<'a>(
+        &mut self,
+        value: &Value,
+        predicates: impl Iterator<Item = &'a Value>,
+        depth: usize,
+    ) -> Result<bool, EvaluationError> {
+        for predicate in predicates {
+            self.step()?;
+            let result = self.invoke_predicate(predicate, value.clone(), depth)?;
+            let Value::Bool(result) = result else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            if !result {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     fn apply_relation_stages(
         &mut self,
         mut value: Value,
@@ -4154,26 +4185,34 @@ impl Context<'_, '_> {
             let index = stage_offset + local_index;
             match stage {
                 RelationStage::Filter(predicates) => {
-                    for predicate in predicates {
-                        self.step()?;
-                        let result = self.invoke_predicate(predicate, value.clone(), depth + 1)?;
-                        let Value::Bool(result) = result else {
-                            return Err(error("ORNA-EVAL-TYPE"));
-                        };
-                        if !result {
-                            let mut rows = vec![RelationRow::Skip];
-                            // Once a preceding take has consumed its bound, a
-                            // downstream filter rejection still exhausts that
-                            // bounded relation. Propagate the stop now so the
-                            // source is not evaluated once more just to discover
-                            // the already-reached bound.
-                            if stages.iter().enumerate().any(|(offset, stage)| {
-                                matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
-                            }) {
-                                rows.push(RelationRow::End);
-                            }
-                            return Ok(rows);
+                    if !self.relation_filter_passes(&value, predicates.iter(), depth + 1)? {
+                        let mut rows = vec![RelationRow::Skip];
+                        // Once a preceding take has consumed its bound, a
+                        // downstream filter rejection still exhausts that
+                        // bounded relation. Propagate the stop now so the
+                        // source is not evaluated once more just to discover
+                        // the already-reached bound.
+                        if stages.iter().enumerate().any(|(offset, stage)| {
+                            matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
+                        }) {
+                            rows.push(RelationRow::End);
                         }
+                        return Ok(rows);
+                    }
+                }
+                RelationStage::SharedFilter(batch) => {
+                    let predicates = batch
+                        .chunks
+                        .iter()
+                        .flat_map(|chunk| chunk.iter());
+                    if !self.relation_filter_passes(&value, predicates, depth + 1)? {
+                        let mut rows = vec![RelationRow::Skip];
+                        if stages.iter().enumerate().any(|(offset, stage)| {
+                            matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
+                        }) {
+                            rows.push(RelationRow::End);
+                        }
+                        return Ok(rows);
                     }
                 }
                 RelationStage::Map(transform) => {
