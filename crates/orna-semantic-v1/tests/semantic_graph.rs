@@ -5345,7 +5345,6 @@ fn bottom_incomplete_tuple_argument_does_not_rebind_sibling_snapshot_pin() {
     );
 }
 
-
 #[test]
 fn concurrent_callback_tuples_reject_cross_lane_identity_mix_after_rebind() {
     let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind-mixed.orna");
