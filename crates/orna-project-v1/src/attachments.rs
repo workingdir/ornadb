@@ -247,6 +247,12 @@ impl PackageResolver {
     /// explicitly resolving it later reads its own manifest after the source
     /// session has moved on. Since the reference is silent on storm history,
     /// v1 treats the explicitly passed pin as the caller's closure choice.
+    /// Repeating detach/attach runs on one session replaces only the selected
+    /// exact alias in sequence. At the end of each run, that session's current
+    /// pin alone supplies the next manifest; previous run candidates remain
+    /// selectable only when the caller kept their pins separately. The
+    /// reference does not define how repeated runs compose, so v1 uses the
+    /// last attached pin for the session's current exact alias.
     ///
     /// Rebinding prefix-related aliases in one session keeps them as
     /// independent exact-key entries. The session retains every unmodified
