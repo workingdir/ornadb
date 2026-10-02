@@ -13110,7 +13110,31 @@ fn infer_success_pipeline(
 }
 
 fn is_default_float_equality_type(ty: &Type) -> bool {
-    matches!(ty, Type::Float) || matches!(ty, Type::Applied { base, .. } if base == "Float")
+    match ty {
+        Type::Float => true,
+        Type::Applied { base, arguments } => {
+            base == "Float" || arguments.iter().any(is_default_float_equality_type)
+        }
+        Type::List(element) | Type::Optional(element) | Type::Range(element) => {
+            is_default_float_equality_type(element)
+        }
+        Type::Tuple(elements) => elements.iter().any(is_default_float_equality_type),
+        Type::Record(fields) => fields.values().any(is_default_float_equality_type),
+        Type::MoneyPerUnit { currency, unit } => {
+            is_default_float_equality_type(currency) || is_default_float_equality_type(unit)
+        }
+        Type::Relation(_) | Type::Stream(_) | Type::Function { .. } => false,
+        Type::Int
+        | Type::Decimal
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null
+        | Type::Named(_)
+        | Type::Bottom
+        | Type::Error => false,
+    }
 }
 
 fn infer_recovery_pipeline(
@@ -18662,10 +18686,52 @@ fn infer_table_assertion(
     let mut local = BTreeMap::new();
     insert_local_binding(name, row.clone(), &mut local, diagnostics);
     let inferred = infer(body, scope, &local, diagnostics);
-    let valid = text == "all_unique" || inferred.ty == Type::Bool;
+    let valid = match text.as_str() {
+        "every" => inferred.ty == Type::Bool,
+        "all_unique" => is_lawful_all_unique_key_type(&inferred.ty),
+        _ => unreachable!("table predicate constructors were matched above"),
+    };
+    if text == "all_unique" && inferred.ty != Type::Error && !valid {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "all_unique selector must return a lawful equality key; Float and noncanonical values are not valid keys",
+        ));
+    }
     Inferred {
         ty: if valid { Type::Bool } else { Type::Error },
         effects: inferred.effects,
+    }
+}
+
+/// `all_unique` compares complete canonical selected values. Function and
+/// relation values have no stable value identity, and default Float equality
+/// is intentionally unavailable; nested keys inherit those restrictions.
+fn is_lawful_all_unique_key_type(ty: &Type) -> bool {
+    match ty {
+        Type::Error => false,
+        Type::Float => false,
+        Type::Applied { base, arguments } => {
+            base != "Float" && arguments.iter().all(is_lawful_all_unique_key_type)
+        }
+        Type::List(element) | Type::Optional(element) => {
+            is_lawful_all_unique_key_type(element)
+        }
+        Type::Tuple(elements) => elements.iter().all(is_lawful_all_unique_key_type),
+        Type::Record(fields) => fields.values().all(is_lawful_all_unique_key_type),
+        Type::Range(_)
+        | Type::Relation(_)
+        | Type::Stream(_)
+        | Type::Function { .. }
+        | Type::MoneyPerUnit { .. } => false,
+        Type::Int
+        | Type::Decimal
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null
+        | Type::Named(_)
+        | Type::Bottom => true,
     }
 }
 
