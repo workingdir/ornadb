@@ -1,0 +1,59 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn rebind_storm(
+    pin_0: sys.SnapshotRef,
+    pin_1: sys.SnapshotRef,
+    pin_2: sys.SnapshotRef,
+    pin_3: sys.SnapshotRef,
+) {
+    let rolling_pin = pin_0;
+    let stage_0 = chained_factory(rolling_pin);
+    rolling_pin = pin_1;
+    let stage_1 = chained_factory(rolling_pin);
+    let pin_2_alias = pin_2;
+    rolling_pin = pin_2_alias;
+    let stage_2 = chained_factory(rolling_pin);
+    rolling_pin = pin_3;
+    let stage_3 = chained_factory(rolling_pin);
+    {
+        stage_0: stage_0,
+        stage_1: stage_1,
+        stage_2: stage_2,
+        stage_3: stage_3,
+    }
+}
+
+pub fn forwarded_storm(
+    pin_0: sys.SnapshotRef,
+    pin_1: sys.SnapshotRef,
+    pin_2: sys.SnapshotRef,
+    pin_3: sys.SnapshotRef,
+) = rebind_storm(pin_0, pin_1, pin_2, pin_3);
+
+pub fn deep_storm(
+    pin_0: sys.SnapshotRef,
+    pin_1: sys.SnapshotRef,
+    pin_2: sys.SnapshotRef,
+    pin_3: sys.SnapshotRef,
+) = forwarded_storm(pin_0, pin_1, pin_2, pin_3);
+
+pub fn distinct_storms_and_stages_cannot_mix() {
+    let alpha = deep_storm(
+        sys.snapshot("HEAD~80"),
+        sys.snapshot("HEAD~70"),
+        sys.snapshot("HEAD~60"),
+        sys.snapshot("HEAD~50"),
+    );
+    let beta = deep_storm(
+        sys.snapshot("HEAD~81"),
+        sys.snapshot("HEAD~71"),
+        sys.snapshot("HEAD~61"),
+        sys.snapshot("HEAD~51"),
+    );
+    [alpha.stage_0, beta.stage_0, alpha.stage_2, beta.stage_3]
+}
