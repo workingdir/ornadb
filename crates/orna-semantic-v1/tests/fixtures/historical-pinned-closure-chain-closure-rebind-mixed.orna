@@ -1,0 +1,13 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn different_rebound_closures_do_not_compose() {
+    let current = chained_factory(sys.snapshot("HEAD~20"));
+    let original = current;
+    current = chained_factory(sys.snapshot("HEAD~10"));
+    [original, current]
+}
