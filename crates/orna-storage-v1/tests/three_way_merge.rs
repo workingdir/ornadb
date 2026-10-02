@@ -22008,7 +22008,7 @@ fn paired_fragment_retry_bindings_are_atomic_across_uneven_chains() {
 }
 
 #[test]
-fn paired_fragment_retry_binding_and_recovery_commit_as_one_transaction() {
+fn paired_fragment_retry_binding_recovery_and_replay_are_atomic() {
     let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
         .split("\n\n")
         .map(|record| parse_fixture(record, RowKeyKind::Explicit))
@@ -22116,6 +22116,38 @@ fn paired_fragment_retry_binding_and_recovery_commit_as_one_transaction() {
     assert_eq!(released[0].key, fixture_key("z"));
     assert_eq!(history.events(), released);
     assert_eq!(history.next_order(), Some(3));
+
+    let committed = history.clone();
+    let replayed = history
+        .bind_depth_fragment_retry_plans_with_recovery(
+            &[make_step(1, 8, true)],
+            &[repair(2, 2, 3), repair(0, 1, 2), repair(2, 1, 3)],
+            &[make_step(1, 8, false)],
+        )
+        .unwrap();
+    assert!(replayed.is_empty(), "a committed transaction replay emits no duplicate events");
+    assert_eq!(history, committed);
+    assert_eq!(
+        history.events(),
+        &[BranchMergeTombstoneEvent {
+            order: 1,
+            table: id(1),
+            key: fixture_key("z"),
+        }],
+        "the successful transaction exposes the real paired tombstone event exactly once",
+    );
+
+    let before_changed_replay = history.clone();
+    assert_eq!(
+        history.bind_depth_fragment_retry_plans_with_recovery(
+            &[make_step(1, 9, false)],
+            &[repair(0, 1, 2), repair(2, 1, 3), repair(2, 2, 3)],
+            &[make_step(1, 9, true)],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a changed checkpoint identity is not treated as a replay",
+    );
+    assert_eq!(history, before_changed_replay);
 }
 
 #[test]

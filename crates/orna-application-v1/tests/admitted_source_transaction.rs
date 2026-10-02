@@ -190,6 +190,18 @@ fn transaction(response: LiveEvalResponse) -> (Envelope, orna_live_v1::LiveEvalT
     (response, transaction)
 }
 
+fn assert_computed_result(response: &Envelope) {
+    let Message::Result {
+        status: ResultStatus::Success,
+        value: Some(value),
+        ..
+    } = &response.message
+    else {
+        panic!("the live source request must return its computed result");
+    };
+    assert_eq!(value.raw(), &OvbRaw::Int(34.into()));
+}
+
 #[test]
 fn admitted_source_table_mutation_commits_rolls_back_and_replays_terminally() {
     let runtime = runtime();
@@ -225,6 +237,7 @@ fn admitted_source_table_mutation_commits_rolls_back_and_replays_terminally() {
         failed_fingerprint,
         &failed_context,
     )));
+    assert_computed_result(&failed_response);
     assert!(matches!(
         failed_response.message,
         Message::Result {
@@ -340,6 +353,7 @@ fn admitted_source_table_mutation_commits_rolls_back_and_replays_terminally() {
             committed_fingerprint,
             &committed_context,
         )));
+    assert_computed_result(&committed_response);
     let committed_mutation = committed_transaction.mutations[0].clone();
     assert_ne!(
         failed_mutation.id(),
@@ -399,18 +413,15 @@ fn admitted_source_table_mutation_commits_rolls_back_and_replays_terminally() {
         CanonicalValue::decode(&committed_mutation.key())
             .unwrap()
             .raw(),
-        &OvbRaw::Int(7.into())
+        &OvbRaw::Int(12.into())
     );
     assert_eq!(
         CanonicalValue::decode(committed_mutation.value().unwrap())
-            .unwrap()
-            .raw(),
+        .unwrap()
+        .raw(),
         &OvbRaw::Map(vec![
-            (OvbRaw::Text("id".to_owned()), OvbRaw::Int(7.into()),),
-            (
-                OvbRaw::Text("text".to_owned()),
-                OvbRaw::Text("committed from admitted source".to_owned()),
-            ),
+            (OvbRaw::Text("id".to_owned()), OvbRaw::Int(12.into()),),
+            (OvbRaw::Text("doubled".to_owned()), OvbRaw::Int(17.into()),),
         ])
     );
 
