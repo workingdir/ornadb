@@ -203,7 +203,20 @@ fn unknown_nested_storm_routes_retain_bounded_branch_output_ancestry() {
             serialized["paired_scope_label"],
             format!("{input_scope}=>{output_scope}")
         );
+        assert_eq!(
+            serialized["scope_labels"],
+            serde_json::json!({ "input": input_scope, "output": output_scope })
+        );
     }
+
+    let first_route = serde_json::to_value(&routes[0]).expect("real route serializes");
+    assert_eq!(
+        first_route["scope_labels"],
+        serde_json::json!({
+            "input": "root/branch1/limit1",
+            "output": "root/branch1/limit1/rebind1/cascade1",
+        })
+    );
 
     let serialized = serde_json::to_value(&explained).expect("unknown plan serializes");
     let serialized_filter = serialized["nodes"]
