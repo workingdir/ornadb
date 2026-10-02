@@ -21,6 +21,7 @@ use crate::{
     REFERENCE_STANDARD_IO_PATH_V1, REFERENCE_STANDARD_FS_PATH_V1,
     REFERENCE_STANDARD_CONCURRENT_PATH_V1, REFERENCE_STANDARD_ERROR_PATH_V1,
     REFERENCE_STANDARD_TEST_PATH_V1,
+    REFERENCE_STANDARD_GENERICS_PATH_V1, REFERENCE_STANDARD_TYPE_UTILS_PATH_V1,
     reference_standard_catalogue_v1,
     reference_standard_profile_v1, reference_standard_sources_v1,
 };
@@ -36,6 +37,8 @@ fn pinned_std_entrypoint_imports_optional_content_modules() {
     assert!(entrypoint.lines().any(|line| line.trim() == "use url;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use net;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use test;"));
+    assert!(entrypoint.lines().any(|line| line.trim() == "use generics;"));
+    assert!(entrypoint.lines().any(|line| line.trim() == "use type_utils;"));
 }
 
 #[test]
@@ -71,7 +74,8 @@ fn pinned_test_module_resolves_against_core_without_importing_optional_std() {
     );
     assert!(
         analysis.is_ok(),
-        "{}",
+        "{:#?}\n{}",
+        analysis.diagnostics,
         analysis
             .diagnostics
             .iter()
@@ -456,6 +460,47 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
+    assert_eq!(sources.len(), 36);
+    assert_eq!(sources[34].0, REFERENCE_STANDARD_GENERICS_PATH_V1);
+    for declaration in [
+        "pub fn identity<T>(value: T): T",
+        "pub fn constant<T, U>(value: T, ignored: U): T",
+        "pub fn apply<T, U>(value: T, transform: fn(T): U): U",
+        "pub fn compose<T, U, V>(first: fn(T): U, then: fn(U): V): fn(T): V",
+        "pub fn both<T, U, V>(",
+        "pub fn pipe<T, U, V>(",
+    ] {
+        assert!(sources[34].1.contains(declaration), "missing std.generics declaration `{declaration}`");
+    }
+    for contract in [
+        "do not box values or add runtime reflection",
+        "second value is ignored after evaluation",
+        "Composition applies `first` before `then`",
+        "transform_left runs before transform_right",
+    ] {
+        assert!(sources[34].1.contains(contract), "missing std.generics contract `{contract}`");
+    }
+    assert_eq!(sources[35].0, REFERENCE_STANDARD_TYPE_UTILS_PATH_V1);
+    for declaration in [
+        "pub fn pair<A, B>(first: A, second: B): (A, B)",
+        "pub fn first_of<A, B>(value: (A, B)): A",
+        "pub fn second_of<A, B>(value: (A, B)): B",
+        "pub fn swap_pair<A, B>(value: (A, B)): (B, A)",
+        "pub fn map_first<A, B, C>(",
+        "pub fn map_second<A, B, C>(",
+        "pub fn map_pair<A, B, C, D>(",
+        "pub fn some<T>(value: T): T?",
+        "pub fn map_option<T, U>(value: T?, transform: fn(T): U): U?",
+    ] {
+        assert!(sources[35].1.contains(declaration), "missing std.type_utils declaration `{declaration}`");
+    }
+    for contract in [
+        "preserve each component's inferred type",
+        "dynamic Any are not introduced",
+        "Transform the first component before the second",
+    ] {
+        assert!(sources[35].1.contains(contract), "missing std.type_utils contract `{contract}`");
+    }
     assert_eq!(sources[19].0, REFERENCE_STANDARD_ERROR_PATH_V1);
     assert!(sources[19].1.contains("pub fn make(code: Str, message: Str): Error"));
     assert!(sources[19]
@@ -539,6 +584,8 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         (REFERENCE_STANDARD_NET_HTTP_PATH_V1, 31),
         (REFERENCE_STANDARD_NET_WEBSOCKET_PATH_V1, 32),
         (REFERENCE_STANDARD_TEST_PATH_V1, 33),
+        (REFERENCE_STANDARD_GENERICS_PATH_V1, 34),
+        (REFERENCE_STANDARD_TYPE_UTILS_PATH_V1, 35),
     ] {
         let mut changed_source = sources[source_index].1.clone();
         changed_source.push_str("\n// changed after the captured snapshot\n");
@@ -578,6 +625,8 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     let serialization_consumer = include_str!("fixtures/v1_serialization_consumer.orna");
     let network_consumer = include_str!("fixtures/v1_network_consumer.orna");
     let test_consumer = include_str!("fixtures/v1_test_consumer.orna");
+    let generics_type_utils_consumer =
+        include_str!("fixtures/v1_generics_type_utils_consumer.orna");
     for (path, source) in [
         ("list_consumer.orna", include_str!("fixtures/v1_list_consumer.orna")),
         ("map_consumer.orna", include_str!("fixtures/v1_map_consumer.orna")),
@@ -611,6 +660,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
             ModuleInput::new("serialization_consumer.orna", serialization_consumer),
             ModuleInput::new("network_consumer.orna", network_consumer),
             ModuleInput::new("test_consumer.orna", test_consumer),
+            ModuleInput::new("generics_type_utils_consumer.orna", generics_type_utils_consumer),
         ],
         &catalogue,
     );
