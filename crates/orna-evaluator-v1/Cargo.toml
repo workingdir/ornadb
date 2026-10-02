@@ -18,6 +18,7 @@ orna-semantic-v1 = { path = "../orna-semantic-v1" }
 orna-sys-v1 = { path = "../orna-sys-v1" }
 orna-syntax-v1 = { path = "../orna-syntax-v1" }
 orna-value-v1 = { path = "../orna-value-v1" }
+sha2 = "0.10.9"
 unicode-normalization = "=0.1.24"
 
 [dev-dependencies]
