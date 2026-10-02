@@ -9,7 +9,7 @@ use std::{
     fmt,
 };
 
-use serde::Serialize;
+use serde::{Serialize, ser::SerializeStruct};
 use sha2::{Digest, Sha256};
 
 use super::{Diagnostic, ObjectRef, PlanRef};
@@ -700,7 +700,7 @@ pub enum PlanDetail {
 
 /// One typed source-to-destination byte-cap handoff reported by a planner
 /// storm rebind. Unknown byte estimates remain `None`.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlanByteCapHandoffRoute {
     /// One-based nesting depth of the storm scope containing the rebind.
     pub depth: usize,
@@ -716,6 +716,31 @@ pub struct PlanByteCapHandoffRoute {
     pub input_bytes: Option<u64>,
     /// Known capped output byte estimate; `None` means the estimate is unknown.
     pub output_bytes: Option<u64>,
+}
+
+impl Serialize for PlanByteCapHandoffRoute {
+    // The typed paths are authoritative; derive serialized labels instead of
+    // trusting duplicated strings that may be stale on a manually built route.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut route = serializer.serialize_struct("PlanByteCapHandoffRoute", 7)?;
+        route.serialize_field("depth", &self.depth)?;
+        route.serialize_field("input_path", &self.input_path)?;
+        route.serialize_field("output_path", &self.output_path)?;
+        route.serialize_field(
+            "input_scope",
+            &byte_cap_scope_path_label(&self.input_path),
+        )?;
+        route.serialize_field(
+            "output_scope",
+            &byte_cap_scope_path_label(&self.output_path),
+        )?;
+        route.serialize_field("input_bytes", &self.input_bytes)?;
+        route.serialize_field("output_bytes", &self.output_bytes)?;
+        route.end()
+    }
 }
 
 /// One typed step in a nested storm byte-cap handoff route. A route path
