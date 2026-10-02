@@ -11,7 +11,7 @@ use crate::{
     REFERENCE_STANDARD_LIST_PATH_V1, REFERENCE_STANDARD_MAP_PATH_V1,
     REFERENCE_STANDARD_SET_PATH_V1,
     REFERENCE_STANDARD_IO_PATH_V1, REFERENCE_STANDARD_FS_PATH_V1,
-    REFERENCE_STANDARD_CONCURRENT_PATH_V1,
+    REFERENCE_STANDARD_CONCURRENT_PATH_V1, REFERENCE_STANDARD_ERROR_PATH_V1,
     reference_standard_catalogue_v1,
     reference_standard_profile_v1, reference_standard_sources_v1,
 };
@@ -113,6 +113,19 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[18].1.contains(contract), "missing contract: {contract}");
     }
+    assert_eq!(sources[19].0, REFERENCE_STANDARD_ERROR_PATH_V1);
+    assert!(sources[19].1.contains("pub fn make(code: Str, message: Str): Error"));
+    assert!(sources[19]
+        .1
+        .contains("pub fn caused_by(code: Str, message: Str, cause: Error): Error"));
+    for declaration in [
+        "pub fn fold<T, E, U>(",
+        "pub fn map_or<T, E, U>(",
+        "pub fn map_or_else<T, E, U>(",
+        "pub fn flatten<T, E>(result: Result<Result<T, E>, E>): Result<T, E>",
+    ] {
+        assert!(sources[12].1.contains(declaration), "missing `{declaration}`");
+    }
     let option_module_analysis = analyze_with_catalogue(
         &[ModuleInput::new("option.orna", &sources[11].1)],
         &orna_semantic_v1::Catalogue::authoritative_core(),
@@ -148,10 +161,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
             .verify_source(path, source)
             .expect("the exact 1.0 source is pinned");
     }
-    let mut changed_concurrent_source = sources[18].1.clone();
-    changed_concurrent_source.push_str("\n// changed after the captured snapshot\n");
+    let mut changed_error_source = sources[19].1.clone();
+    changed_error_source.push_str("\n// changed after the captured snapshot\n");
     assert!(profile
-        .verify_source(REFERENCE_STANDARD_CONCURRENT_PATH_V1, &changed_concurrent_source)
+        .verify_source(REFERENCE_STANDARD_ERROR_PATH_V1, &changed_error_source)
         .is_err());
 
     let catalogue = reference_standard_catalogue_v1().expect("the standard module checks");
@@ -174,6 +187,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     let text_numeric_consumer = include_str!("fixtures/v1_text_numeric_consumer.orna");
     let collections_consumer = include_str!("fixtures/v1_collections_consumer.orna");
     let concurrent_consumer = include_str!("fixtures/v1_concurrent_consumer.orna");
+    let error_result_consumer = include_str!("fixtures/v1_error_result_consumer.orna");
     for (path, source) in [
         ("list_consumer.orna", include_str!("fixtures/v1_list_consumer.orna")),
         ("map_consumer.orna", include_str!("fixtures/v1_map_consumer.orna")),
@@ -200,6 +214,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
             ModuleInput::new("text_numeric_consumer.orna", text_numeric_consumer),
             ModuleInput::new("collections_consumer.orna", collections_consumer),
             ModuleInput::new("concurrent_consumer.orna", concurrent_consumer),
+            ModuleInput::new("error_result_consumer.orna", error_result_consumer),
         ],
         &catalogue,
     );
