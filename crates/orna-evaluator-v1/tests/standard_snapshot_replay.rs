@@ -1525,4 +1525,52 @@ fn incremental_transitive_upgrade_pins_capture_cumulative_module_sources() {
             expected_modules
         );
     }
+
+    let mut sessions = projects
+        .iter()
+        .map(|project| {
+            AdmittedReplSession::from_loaded_project(
+                project,
+                project.standard_sources().iter().cloned(),
+                Limits::default(),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    for session in &mut sessions {
+        assert_eq!(
+            session.submit(include_str!("fixtures/module-chain-use-replay.orna")),
+            Ok(None)
+        );
+    }
+
+    let replay_source = include_str!("fixtures/module-chain-call-replay.orna");
+    let expected_results = [20, 47, 92, 128, 146, 155];
+    for (session, expected) in sessions.iter_mut().zip(expected_results) {
+        assert_eq!(session.submit(replay_source), Ok(Some(ints(&[expected]))));
+    }
+    for (index, expected) in (0..sessions.len())
+        .rev()
+        .zip(expected_results.into_iter().rev())
+    {
+        let mut replay = sessions[index].clone();
+        assert_eq!(replay.submit(replay_source), Ok(Some(ints(&[expected]))));
+    }
+
+    let mut historical_with_current_leaf = projects[0].standard_sources().to_vec();
+    historical_with_current_leaf
+        .iter_mut()
+        .find(|(path, _)| path == "std/chain/leaf.orna")
+        .unwrap()
+        .1 = include_str!("fixtures/module-chain-std-leaf-v2.orna").into();
+    assert_eq!(
+        AdmittedReplSession::from_loaded_project(
+            &projects[0],
+            historical_with_current_leaf,
+            Limits::default(),
+        )
+        .unwrap_err()
+        .code(),
+        "ORNA-REPL-STANDARD"
+    );
 }
