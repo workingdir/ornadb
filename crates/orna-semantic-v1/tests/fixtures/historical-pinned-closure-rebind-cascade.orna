@@ -1,0 +1,66 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn cascade_at(root_pin: sys.SnapshotRef, bridge_pin: sys.SnapshotRef) =
+    (leaf_pin: sys.SnapshotRef) => {
+        root: chained_factory(root_pin),
+        nested: {
+            bridge: chained_factory(bridge_pin)().read,
+            leaf: {
+                reader: chained_factory(leaf_pin)().read,
+                continuation: chained_factory(leaf_pin)().read(),
+            },
+        },
+    };
+
+pub fn curried_rebind_cascade_preserves_each_pin_owner() {
+    let rolling = cascade_at(sys.snapshot("HEAD~80"), sys.snapshot("HEAD~70"));
+    let first = rolling;
+    rolling = cascade_at(sys.snapshot("HEAD~79"), sys.snapshot("HEAD~69"));
+    let stage_1 = rolling;
+    rolling = cascade_at(sys.snapshot("HEAD~78"), sys.snapshot("HEAD~68"));
+    rolling = cascade_at(sys.snapshot("HEAD~77"), sys.snapshot("HEAD~67"));
+    rolling = cascade_at(sys.snapshot("HEAD~76"), sys.snapshot("HEAD~66"));
+    rolling = cascade_at(sys.snapshot("HEAD~75"), sys.snapshot("HEAD~65"));
+    rolling = first;
+    let returned = rolling;
+
+    let stage_value = stage_1(sys.snapshot("HEAD~60"));
+    let returned_value = returned(sys.snapshot("HEAD~60"));
+    {
+        stage_1: {
+            root: [stage_value.root, chained_factory(sys.snapshot("HEAD~79"))],
+            bridge: [
+                stage_value.nested.bridge,
+                chained_factory(sys.snapshot("HEAD~69"))().read,
+            ],
+            reader: [
+                stage_value.nested.leaf.reader,
+                chained_factory(sys.snapshot("HEAD~60"))().read,
+            ],
+            continuation: [
+                stage_value.nested.leaf.continuation,
+                chained_factory(sys.snapshot("HEAD~60"))().read(),
+            ],
+        },
+        returned: {
+            root: [returned_value.root, chained_factory(sys.snapshot("HEAD~80"))],
+            bridge: [
+                returned_value.nested.bridge,
+                chained_factory(sys.snapshot("HEAD~70"))().read,
+            ],
+            reader: [
+                returned_value.nested.leaf.reader,
+                chained_factory(sys.snapshot("HEAD~60"))().read,
+            ],
+            continuation: [
+                returned_value.nested.leaf.continuation,
+                chained_factory(sys.snapshot("HEAD~60"))().read(),
+            ],
+        },
+    }
+}
