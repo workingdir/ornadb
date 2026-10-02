@@ -1966,8 +1966,13 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
         let storm_index = u64::try_from(storm_index + 1).map_err(|_| ExplainError::TooManyNodes)?;
         let branch_count =
             u64::try_from(storm.branches.len()).map_err(|_| ExplainError::TooManyNodes)?;
-        let (cardinality, work, overflowed) =
-            disjunct_storm_cascade_cardinality_and_work(current_cardinality, storm);
+        let mut byte_cap_handoff_estimates_by_depth = BTreeMap::new();
+        let (cardinality, work, overflowed) = disjunct_storm_cascade_cardinality_and_work(
+            current_cardinality,
+            storm,
+            1,
+            &mut byte_cap_handoff_estimates_by_depth,
+        );
         let branch_limits = storm
             .branches
             .iter()
@@ -2058,6 +2063,10 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
                 .map(|(depth, count)| format!("{depth}:{count}"))
                 .collect::<Vec<_>>()
                 .join(",");
+        let limit_chain_rebind_byte_cap_handoff_estimates_by_depth_text =
+            rebind_byte_cap_handoff_estimates_by_depth_text(
+                &byte_cap_handoff_estimates_by_depth,
+            );
         let limit_chain_rebind_predicates = storm
             .branches
             .iter()
@@ -2107,6 +2116,10 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             (
                 "limit_chain_rebind_byte_cap_handoffs_by_depth".to_owned(),
                 PlanDetail::Text(limit_chain_rebind_byte_cap_handoffs_by_depth_text),
+            ),
+            (
+                "limit_chain_rebind_byte_cap_handoff_estimates_by_depth".to_owned(),
+                PlanDetail::Text(limit_chain_rebind_byte_cap_handoff_estimates_by_depth_text),
             ),
             (
                 "limit_chain_rebind_predicates".to_owned(),
@@ -2392,6 +2405,9 @@ struct Cardinality {
     rows: Option<u64>,
     bytes: Option<u64>,
 }
+
+type RebindByteCapHandoffEstimatesByDepth =
+    BTreeMap<usize, Vec<(Option<u64>, Option<u64>)>>;
 
 fn source_cardinality(statistics: Option<&QuerySourceStatistics>) -> Cardinality {
     statistics.map_or_else(Cardinality::default, |statistics| Cardinality {
@@ -2727,12 +2743,41 @@ fn disjunct_storm_rebind_cascade_counts_by_depth(
     rebind_counts
 }
 
+fn rebind_byte_cap_handoff_estimates_by_depth_text(
+    estimates: &RebindByteCapHandoffEstimatesByDepth,
+) -> String {
+    estimates
+        .iter()
+        .map(|(depth, handoffs)| {
+            let handoffs = handoffs
+                .iter()
+                .map(|(input_bytes, output_bytes)| {
+                    let input_bytes = input_bytes
+                        .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+                    let output_bytes = output_bytes
+                        .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+                    format!("{input_bytes}>{output_bytes}")
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{depth}:{handoffs}")
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
 fn disjunct_storm_cascade_cardinality_and_work(
     input: Cardinality,
     storm: &DisjunctStormCascadeDescription,
+    storm_depth: usize,
+    byte_cap_handoff_estimates_by_depth: &mut RebindByteCapHandoffEstimatesByDepth,
 ) -> (Cardinality, Option<u64>, bool) {
-    let (estimated, work, overflowed) =
-        disjunct_storm_branch_cascade_cardinality_and_work(input, &storm.branches);
+    let (estimated, work, overflowed) = disjunct_storm_branch_cascade_cardinality_and_work(
+        input,
+        &storm.branches,
+        storm_depth,
+        byte_cap_handoff_estimates_by_depth,
+    );
     (cap_cardinality_to_input(estimated, input), work, overflowed)
 }
 
@@ -2754,6 +2799,8 @@ fn cap_cardinality_to_input(estimated: Cardinality, input: Cardinality) -> Cardi
 fn disjunct_storm_branch_cascade_cardinality_and_work(
     input: Cardinality,
     branches: &[DisjunctStormBranchDescription],
+    storm_depth: usize,
+    byte_cap_handoff_estimates_by_depth: &mut RebindByteCapHandoffEstimatesByDepth,
 ) -> (Cardinality, Option<u64>, bool) {
     let mut work = Some(0u64);
     let mut overflowed = false;
@@ -2783,11 +2830,18 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
                 .filter(|rebind| rebind.after_limit == limit_index + 1)
             {
                 for rebind_storm in &rebind.storms {
+                    let handoff_input_bytes = branch_cardinality.bytes;
                     let (rebound, rebound_work, rebound_overflowed) =
                         disjunct_storm_cascade_cardinality_and_work(
                             branch_cardinality,
                             rebind_storm,
+                            storm_depth.saturating_add(1),
+                            byte_cap_handoff_estimates_by_depth,
                         );
+                    byte_cap_handoff_estimates_by_depth
+                        .entry(storm_depth)
+                        .or_default()
+                        .push((handoff_input_bytes, rebound.bytes));
                     overflowed |= rebound_overflowed;
                     match (work, rebound_work) {
                         (Some(total), Some(rebound_work)) => match total.checked_add(rebound_work) {
@@ -2824,7 +2878,12 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
 
         for nested_storm in &branch.nested_storms {
             let (nested_output, nested_work, nested_overflowed) =
-                disjunct_storm_cascade_cardinality_and_work(branch_output, nested_storm);
+                disjunct_storm_cascade_cardinality_and_work(
+                    branch_output,
+                    nested_storm,
+                    storm_depth.saturating_add(1),
+                    byte_cap_handoff_estimates_by_depth,
+                );
             overflowed |= nested_overflowed;
             match (work, nested_work) {
                 (Some(total), Some(nested_work)) => match total.checked_add(nested_work) {
