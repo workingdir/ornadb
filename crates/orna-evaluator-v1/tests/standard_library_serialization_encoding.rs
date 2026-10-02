@@ -140,6 +140,16 @@ fn pinned_encoding_modules_compute_canonical_values_and_reject_noncanonical_inpu
         eval_pinned(include_str!("fixtures/stdlib-codec-json-record-rl767.orna")),
         Ok(text_value("{\"answer\":42,\"label\":\"exact\"}"))
     );
+    for fixture in [
+        include_str!("fixtures/stdlib-codec-json-stream-rl767.orna"),
+        include_str!("fixtures/stdlib-codec-orna-stream-rl767.orna"),
+    ] {
+        assert_eq!(
+            eval_pinned(fixture).unwrap_err().code(),
+            "ORNA-EVAL-UNSUPPORTED",
+            "stream resources cannot be encoded as interchange data: {fixture}"
+        );
+    }
     for (fixture, source) in [
         (
             include_str!("fixtures/stdlib-codec-base64-invalid-rl767.orna"),

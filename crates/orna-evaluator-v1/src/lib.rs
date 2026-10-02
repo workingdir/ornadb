@@ -8228,6 +8228,7 @@ fn write_json_value(
         | Value::Period { .. }
         | Value::Error(_)
         | Value::Range { .. }
+        | Value::Stream { .. }
         | Value::Relation(_)
         | Value::NominalRecord { .. }
         | Value::Enum { .. }
@@ -8357,6 +8358,7 @@ fn encode_orna_value(value: &Value, depth: usize) -> Result<String, EvaluationEr
         Value::Period { .. }
         | Value::Error(_)
         | Value::Range { .. }
+        | Value::Stream { .. }
         | Value::Relation(_)
         | Value::NominalRecord { .. }
         | Value::Enum { .. }
