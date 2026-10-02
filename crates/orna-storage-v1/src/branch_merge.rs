@@ -593,7 +593,7 @@ impl BranchMergeTombstoneHistory {
         let order = step.order;
         let planned_tombstones = step.plan.ordered_row_tombstones();
         if has_duplicate_tombstones_in_wave(&planned_tombstones)
-            || !same_tombstone_delta(&planned_tombstones, &step.ordered_row_tombstones)
+            || !same_tombstone_encoding_delta(&planned_tombstones, &step.ordered_row_tombstones)
         {
             return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
         }
@@ -618,7 +618,7 @@ impl BranchMergeTombstoneHistory {
         let Some(existing) = existing else {
             return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
         };
-        if !same_tombstone_delta(&existing, &step.ordered_row_tombstones) {
+        if !same_tombstone_encoding_delta(&existing, &step.ordered_row_tombstones) {
             return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
         }
 
@@ -845,7 +845,7 @@ impl BranchMergeTombstoneHistory {
             if !replaces_same_order
                 && !has_duplicate_tombstones_in_wave(&step.ordered_row_tombstones)
                 && !has_duplicate_tombstones_in_wave(&plan_tombstones)
-                && same_tombstone_delta(&plan_tombstones, &step.ordered_row_tombstones)
+                && same_tombstone_encoding_delta(&plan_tombstones, &step.ordered_row_tombstones)
             {
                 let existing = match self.pending_deltas.get(&step.order) {
                     Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
@@ -863,16 +863,22 @@ impl BranchMergeTombstoneHistory {
                         ),
                     _ => None,
                 };
-                if existing.as_ref().is_some_and(|existing| {
-                    same_tombstone_delta(existing, &step.ordered_row_tombstones)
-                        && self
-                            .pending_plan_identities
-                            .get(&step.order)
-                            .or_else(|| self.committed_plan_identities.get(&step.order))
-                            .is_none_or(|identity| {
-                                *identity == paired_plan_retry_identity(&step.plan)
-                            })
-                }) {
+                let identity = self
+                    .pending_plan_identities
+                    .get(&step.order)
+                    .or_else(|| self.committed_plan_identities.get(&step.order));
+                let tombstones_match = existing.as_ref().is_some_and(|existing| {
+                    if identity.is_some() {
+                        same_tombstone_encoding_delta(existing, &step.ordered_row_tombstones)
+                    } else {
+                        same_tombstone_delta(existing, &step.ordered_row_tombstones)
+                    }
+                });
+                if tombstones_match
+                    && identity.is_none_or(|identity| {
+                        *identity == paired_plan_retry_identity(&step.plan)
+                    })
+                {
                     return Ok(());
                 }
             }
@@ -981,7 +987,7 @@ impl BranchMergeTombstoneHistory {
         }
         if self.pending_plan_identities.contains_key(&recovery.order) {
             let accepted = fragments.values().flatten().cloned().collect::<Vec<_>>();
-            if !same_tombstone_delta(&accepted, &combined) {
+            if !same_tombstone_encoding_delta(&accepted, &combined) {
                 return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission {
                     order: recovery.order,
                 });
@@ -1212,6 +1218,18 @@ fn same_tombstone_delta(
             right.iter().any(|(other_table, other_key)| {
                 table == other_table && same_primary_key(key, other_key)
             })
+        })
+}
+
+fn same_tombstone_encoding_delta(
+    left: &[(ObjectId, CanonicalValue)],
+    right: &[(ObjectId, CanonicalValue)],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().all(|(table, key)| {
+            right
+                .iter()
+                .any(|(other_table, other_key)| table == other_table && key == other_key)
         })
 }
 
