@@ -378,9 +378,13 @@ enum BranchMergeTombstoneSubmissionMode {
 /// whole-plan tombstone delta as an idempotent retry only when its table/key
 /// set matches the already queued or committed delta; table/key order within
 /// that delta does not matter. A changed delta at an accepted order returns
-/// `AppendRetryMismatch`, and mixed submission modes still return
-/// `ConflictingSubmission`. The history retains only tombstone deltas, so
-/// callers remain responsible for checking full paired-plan identity.
+/// `AppendRetryMismatch`. A recovery append may also match a complete depth
+/// fragment delta at that same order, independent of fragment count or
+/// boundaries, provided the batch does not replace fragments at that order.
+/// Incomplete or changed cross-mode deltas still return
+/// `ConflictingSubmission`; ordinary submission APIs remain mode-strict. The
+/// history retains only tombstone deltas, so callers remain responsible for
+/// checking full paired-plan identity.
 /// Unrecorded stale order precedes
 /// buffered and retry-mode checks, and mixed-mode conflicts precede
 /// fragment-index or tombstone-content validation.
@@ -701,7 +705,10 @@ impl BranchMergeTombstoneHistory {
     /// then fragment updates run in lineage and index order. Any failure leaves
     /// the original wave contents, queue, and released events unchanged. An
     /// exact same-order retry of an already queued or committed tombstone delta
-    /// is skipped, so recovery replay cannot append its chain events twice.
+    /// is skipped, including a whole-plan retry of a complete depth-fragment
+    /// delta when that order is not also being replaced in this batch. Thus
+    /// equivalent deltas deduplicate across uneven fragment boundaries while
+    /// incomplete or changing waves remain conflicts.
     /// A changed delta at that order fails with
     /// [`BranchMergeTombstoneHistoryError::AppendRetryMismatch`]. Standalone
     /// [`Self::append`] remains strict and rejects reused positions.
@@ -729,7 +736,8 @@ impl BranchMergeTombstoneHistory {
         let mut appends = appends.to_vec();
         appends.sort_unstable_by_key(|step| step.order);
         for step in &appends {
-            candidate.append_recovery_plan(step)?;
+            let replaces_same_order = recoveries.iter().any(|recovery| recovery.order == step.order);
+            candidate.append_recovery_plan(step, replaces_same_order)?;
         }
 
         let mut released = Vec::new();
@@ -744,10 +752,48 @@ impl BranchMergeTombstoneHistory {
     fn append_recovery_plan(
         &mut self,
         step: &SequencedBranchMergePlan,
+        replaces_same_order: bool,
     ) -> Result<(), BranchMergeTombstoneHistoryError> {
         if self.next_order.is_none() {
             return Err(BranchMergeTombstoneHistoryError::OrderExhausted);
         }
+
+        let existing_mode = self.committed_modes.get(&step.order).copied()
+            .or_else(|| {
+                self.pending_deltas
+                    .get(&step.order)
+                    .map(BufferedBranchMergeTombstoneDelta::submission_mode)
+            })
+            .or_else(|| self.duplicate_retry_modes.get(&step.order).copied());
+        if existing_mode == Some(BranchMergeTombstoneSubmissionMode::DepthFragments) {
+            if !replaces_same_order && !has_duplicate_tombstones_in_wave(&step.ordered_row_tombstones) {
+                let existing = match self.pending_deltas.get(&step.order) {
+                    Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
+                        fragment_count,
+                        fragments,
+                    }) if fragments.len() == *fragment_count => Some(
+                        fragments.values().flatten().cloned().collect::<Vec<_>>(),
+                    ),
+                    _ if self.committed_modes.get(&step.order)
+                        == Some(&BranchMergeTombstoneSubmissionMode::DepthFragments) => Some(
+                            self.events.iter()
+                                .filter(|event| event.order == step.order)
+                                .map(|event| (event.table, event.key.clone()))
+                                .collect::<Vec<_>>(),
+                        ),
+                    _ => None,
+                };
+                if existing.as_ref().is_some_and(|existing| {
+                    same_tombstone_delta(existing, &step.ordered_row_tombstones)
+                }) {
+                    return Ok(());
+                }
+            }
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission {
+                order: step.order,
+            });
+        }
+
         self.classify_submission_mode_conflict(
             step.order,
             BranchMergeTombstoneSubmissionMode::WholePlan,
