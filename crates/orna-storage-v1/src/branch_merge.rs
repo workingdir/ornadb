@@ -275,6 +275,15 @@ pub struct BranchMergePlan {
 /// committed live rows. Earlier wave deltas remain historical facts, while a
 /// later retry emits only its own exact-key tombstones and restored rows; a
 /// failed attempt cannot replay prior deletes or discard earlier restores.
+/// Paired tables may carry chains with different depths and split layouts.
+/// A retry still rebuilds each table's restored exact keys in that table's
+/// canonical order; failure in one chain discards the whole paired candidate,
+/// and the recovered plan preserves both table-local results and old history.
+/// A storm on the deeper chain does not change that contract: after its prior
+/// delete wave is committed, a retry may restore storm keys while tombstoning
+/// still-live keys in either paired table. The candidate contains only those
+/// new table-local deletes, and a later-chain read failure returns no part of
+/// the deeper table's or its peer's restore plan.
 ///
 /// A read failure at any table or range aborts the whole invocation. Facts
 /// gathered from earlier tables or depth ranges remain private; after source
