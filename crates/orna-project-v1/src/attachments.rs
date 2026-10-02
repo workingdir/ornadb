@@ -302,6 +302,9 @@ impl PackageResolver {
     /// A sibling expanded later from the retained ancestor still starts at
     /// that ancestor's manifest-selected child; an earlier sibling's terminal
     /// rebind does not supply a fallback for the late branch.
+    /// This remains true through additional nested edges: a late branch reads
+    /// each selected middle and deep manifest in turn, then applies terminal
+    /// alias storms only to the route reached through those exact pins.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
