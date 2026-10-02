@@ -34,6 +34,8 @@ const REBIND_CAP_HANDOFF_ROUTES_FIXTURE: &str =
     include_str!("fixtures/planner_storm_scoped_handoff_routes.orna");
 const UNKNOWN_LIMIT_CHAIN_ANCESTRY_FIXTURE: &str =
     include_str!("fixtures/planner_storm_unknown_limit_chain_output_ancestry.orna");
+const UNKNOWN_REBIND_ANCESTRY_FIXTURE: &str =
+    include_str!("fixtures/planner_storm_unknown_rebind_output_ancestry.orna");
 
 fn branch(
     limits: &[u64],
@@ -2056,6 +2058,145 @@ fn typed_handoff_routes_preserve_nested_outputs_with_unknown_rows() {
         .contains(&serde_json::json!({ "kind": "nested_storm_output", "index": 1 })));
     assert!(serialized_routes[3]["input_bytes"].as_u64().is_some());
     assert!(serialized_routes[3]["output_bytes"].as_u64().is_some());
+}
+
+#[test]
+fn typed_handoff_routes_preserve_nested_outputs_after_unknown_rebinds() {
+    // Unknown rebind estimates do not erase source provenance from typed paths.
+    let parsed = orna_syntax_v1::parse_module(UNKNOWN_REBIND_ANCESTRY_FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    let nested_storms = (1..=3)
+        .map(|nested_index| {
+            let leaf = storm(
+                &format!("expr:unknown-rebind-nested-leaf-{nested_index}"),
+                vec![branch(&[12], 1, vec![])],
+            );
+            storm(
+                &format!("expr:unknown-rebind-nested-stage-{nested_index}"),
+                vec![branch(&[24], 1, vec![rebind(1, vec![leaf])])],
+            )
+        })
+        .collect::<Vec<_>>();
+    let first_rebind = storm(
+        "expr:unknown-rebind-first-limit-output",
+        vec![branch(&[64], 1, vec![])],
+    );
+    let second_rebind = storm(
+        "expr:unknown-rebind-second-limit-output",
+        vec![branch(&[32], 1, vec![])],
+    );
+    let mut outer_branch = branch(
+        &[96, 48],
+        1,
+        vec![rebind(1, vec![first_rebind]), rebind(2, vec![second_rebind])],
+    );
+    outer_branch.nested_storms = nested_storms;
+    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+        &query(None, None),
+        &[storm(
+            "expr:unknown-rebind-output-ancestry",
+            vec![outer_branch],
+        )],
+        &[],
+    )
+    .expect("unknown rebind outputs preserve typed nested storm ancestry");
+    let filter = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Filter
+                && node.details().contains_key("disjunct_storm")
+        })
+        .expect("outer storm is visible");
+    assert_eq!(filter.estimated_rows(), None);
+    assert_eq!(filter.estimated_bytes(), None);
+
+    let routes = match filter
+        .details()
+        .get("limit_chain_rebind_byte_cap_handoff_route_records")
+    {
+        Some(PlanDetail::ByteCapHandoffRoutes(routes)) => routes,
+        other => panic!("expected typed byte-cap handoff routes, got {other:?}"),
+    };
+    assert_eq!(routes.len(), 5);
+    assert_eq!(routes[0].depth, 1);
+    assert_eq!(routes[1].depth, 1);
+    assert!(routes[2..].iter().all(|route| route.depth == 2));
+    assert!(routes
+        .iter()
+        .all(|route| route.input_bytes.is_none() && route.output_bytes.is_none()));
+
+    assert_eq!(
+        routes[0].input_path,
+        vec![
+            PlanByteCapScopeSegment::StormStage { index: 1 },
+            PlanByteCapScopeSegment::Branch { index: 1 },
+            PlanByteCapScopeSegment::Limit { position: 1 },
+        ]
+    );
+    let mut second_limit_input = routes[0].output_path.clone();
+    second_limit_input.push(PlanByteCapScopeSegment::Limit { position: 2 });
+    assert_eq!(routes[1].input_path, second_limit_input);
+    second_limit_input.extend([
+        PlanByteCapScopeSegment::Rebind { position: 2 },
+        PlanByteCapScopeSegment::Cascade { index: 1 },
+    ]);
+    assert_eq!(routes[1].output_path, second_limit_input);
+
+    let mut first_nested_input = routes[1].output_path.clone();
+    first_nested_input.extend([
+        PlanByteCapScopeSegment::NestedStorm { index: 1 },
+        PlanByteCapScopeSegment::Branch { index: 1 },
+        PlanByteCapScopeSegment::Limit { position: 1 },
+    ]);
+    assert_eq!(routes[2].input_path, first_nested_input);
+
+    let mut second_nested_input = routes[1].output_path.clone();
+    second_nested_input.extend([
+        PlanByteCapScopeSegment::NestedStorm { index: 1 },
+        PlanByteCapScopeSegment::NestedStormOutput { index: 1 },
+        PlanByteCapScopeSegment::NestedStorm { index: 2 },
+        PlanByteCapScopeSegment::Branch { index: 1 },
+        PlanByteCapScopeSegment::Limit { position: 1 },
+    ]);
+    assert_eq!(routes[3].input_path, second_nested_input);
+
+    let mut third_nested_input = routes[1].output_path.clone();
+    third_nested_input.extend([
+        PlanByteCapScopeSegment::NestedStorm { index: 1 },
+        PlanByteCapScopeSegment::NestedStormOutput { index: 1 },
+        PlanByteCapScopeSegment::NestedStorm { index: 2 },
+        PlanByteCapScopeSegment::NestedStormOutput { index: 2 },
+        PlanByteCapScopeSegment::NestedStorm { index: 3 },
+        PlanByteCapScopeSegment::Branch { index: 1 },
+        PlanByteCapScopeSegment::Limit { position: 1 },
+    ]);
+    assert_eq!(routes[4].input_path, third_nested_input);
+
+    let serialized = serde_json::to_value(&explained).expect("explained plans serialize");
+    let serialized_filter = serialized["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["details"]["disjunct_storm"] == 1)
+        .expect("outer storm is serialized");
+    assert!(serialized_filter.get("estimated_rows").is_none());
+    assert!(serialized_filter.get("estimated_bytes").is_none());
+    let serialized_routes = serialized_filter["details"]
+        ["limit_chain_rebind_byte_cap_handoff_route_records"]
+        .as_array()
+        .expect("typed routes serialize as an array");
+    assert_eq!(serialized_routes.len(), 5);
+    assert!(serialized_routes.iter().all(|route| {
+        route["input_bytes"] == serde_json::Value::Null
+            && route["output_bytes"] == serde_json::Value::Null
+    }));
+    assert!(serialized_routes[4]["input_path"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!({ "kind": "nested_storm_output", "index": 2 })));
 }
 
 #[test]
