@@ -1424,6 +1424,28 @@ fn all_unique_accepts_structural_nullable_keys_and_rejects_float_components() {
 }
 
 #[test]
+fn all_unique_checks_float_components_behind_nominal_keys() {
+    let lawful = analyze(&[ModuleInput::new(
+        "nested-nominal-key.orna",
+        include_str!("fixtures/table-all-unique-nested-nominal-key.orna"),
+    )]);
+    assert!(lawful.is_ok(), "{:?}", lawful.diagnostics);
+
+    let unlawful = analyze(&[ModuleInput::new(
+        "nominal-float-key.orna",
+        include_str!("fixtures/table-all-unique-nominal-float-key.orna"),
+    )]);
+    assert!(has(&unlawful, DIAG_TYPE), "{:?}", unlawful.diagnostics);
+    assert!(
+        unlawful.diagnostics.iter().any(|diagnostic| diagnostic
+            .message()
+            .contains("all_unique selector must return a lawful equality key")),
+        "a nominal key containing Float must be rejected with the key-law explanation: {:?}",
+        unlawful.diagnostics
+    );
+}
+
+#[test]
 fn module_assertion_elaborates_the_reference_projects_nested_relation_predicate() {
     let result = analyze(&[ModuleInput::new(
         "library.orna",
