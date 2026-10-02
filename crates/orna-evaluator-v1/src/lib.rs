@@ -48,7 +48,7 @@ pub use repl::{ReplSession, parse_admitted_repl};
 /// crate verifies its pinned profile before either boundary admits an import.
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
-pub fn reference_standard_sources() -> [(String, String); 42] {
+pub fn reference_standard_sources() -> [(String, String); 44] {
     orna_standard::reference_standard_sources_v1()
 }
 
@@ -4202,7 +4202,7 @@ impl Context<'_, '_> {
                 }
                 RelationStage::SharedFilter(batch) => {
                     let predicates = batch
-                        .chunks
+                        .chunks()
                         .iter()
                         .flat_map(|chunk| chunk.iter());
                     if !self.relation_filter_passes(&value, predicates, depth + 1)? {
@@ -8286,6 +8286,7 @@ fn unescape_string_body(body: &str) -> Result<String, EvaluationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn evaluate_recovery(source: &str) -> CanonicalValue {
         evaluate_expression(source, &Environment::new(), Limits::default())
@@ -9513,6 +9514,66 @@ mod tests {
             unknown_tail.stages,
             vec![RelationStage::Filter(vec![third, fourth])]
         );
+    }
+
+    #[test]
+    fn relation_plan_shares_persistent_outer_batch_across_unknown_union_leaves() {
+        let left_own = Value::Bool(true);
+        let right_map = Value::Int(7.into());
+        let middle_own = Value::Bool(false);
+        let outer_first = Value::Int(8.into());
+        let outer_second = Value::Int(9.into());
+        let outer_third = Value::Int(10.into());
+        let plan = RelationPlan::union(
+            RelationPlan::union(
+                RelationPlan::new("UnknownLeft".into())
+                    .with_stage(RelationStage::Filter(vec![left_own.clone()])),
+                RelationPlan::new("UnknownMiddle".into())
+                    .with_stage(RelationStage::Map(right_map.clone()))
+                    .with_stage(RelationStage::Filter(vec![middle_own.clone()])),
+            ),
+            RelationPlan::new("UnknownRight".into()),
+        )
+        .with_stage(RelationStage::Filter(vec![outer_first.clone()]))
+        .with_stage(RelationStage::Filter(vec![outer_second.clone()]))
+        .with_stage(RelationStage::Filter(vec![outer_third.clone()]))
+        .flush_filter_cascade();
+
+        let (left, right) = plan.source_union.as_ref().expect("outer union remains");
+        let (left_leaf, middle_leaf) = left.source_union.as_ref().expect("nested union remains");
+        let batch_for = |leaf: &RelationPlan| match leaf.stages.as_slice() {
+            [RelationStage::Map(_), RelationStage::SharedFilter(batch)]
+            | [RelationStage::SharedFilter(batch)] => Arc::clone(batch),
+            stages => panic!("expected one compiled leaf batch, got {stages:?}"),
+        };
+        let left_batch = batch_for(left_leaf);
+        let middle_batch = batch_for(middle_leaf);
+        let right_batch = batch_for(right);
+
+        assert_eq!(
+            left_batch
+                .chunks()
+                .iter()
+                .flat_map(|chunk| chunk.iter())
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![left_own, outer_first.clone(), outer_second.clone(), outer_third.clone()]
+        );
+        assert_eq!(
+            middle_batch
+                .chunks()
+                .iter()
+                .flat_map(|chunk| chunk.iter())
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![middle_own, outer_first, outer_second, outer_third]
+        );
+        let left_shared_suffix = left_batch.chunks().last().expect("outer batch suffix");
+        let middle_shared_suffix = middle_batch.chunks().last().expect("outer batch suffix");
+        let right_shared_batch = right_batch.chunks().first().expect("outer batch");
+        assert!(Arc::ptr_eq(left_shared_suffix, middle_shared_suffix));
+        assert!(Arc::ptr_eq(left_shared_suffix, right_shared_batch));
+        assert_eq!(middle_leaf.stages[0], RelationStage::Map(right_map));
     }
 
     #[test]
