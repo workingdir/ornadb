@@ -1,0 +1,114 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn cascade_at(root_pin: sys.SnapshotRef, bridge_pin: sys.SnapshotRef) =
+    (leaf_pin: sys.SnapshotRef) => {
+        root: chained_factory(root_pin),
+        nested: {
+            bridge: chained_factory(bridge_pin)().read,
+            leaf: {
+                reader: chained_factory(leaf_pin)().read,
+                continuation: chained_factory(leaf_pin)().read(),
+            },
+        },
+    };
+
+pub fn tuple_pin_cascades_survive_storm_rebinds() {
+    let rolling = (
+        sys.snapshot("HEAD~80"),
+        (sys.snapshot("HEAD~70"), sys.snapshot("HEAD~50")),
+    );
+    let stage_0 = rolling;
+    rolling = (
+        sys.snapshot("HEAD~79"),
+        (sys.snapshot("HEAD~69"), sys.snapshot("HEAD~49")),
+    );
+    rolling = (
+        sys.snapshot("HEAD~78"),
+        (sys.snapshot("HEAD~68"), sys.snapshot("HEAD~48")),
+    );
+    rolling = (
+        sys.snapshot("HEAD~77"),
+        (sys.snapshot("HEAD~67"), sys.snapshot("HEAD~47")),
+    );
+    let stage_3 = rolling;
+    rolling = (
+        sys.snapshot("HEAD~76"),
+        (sys.snapshot("HEAD~66"), sys.snapshot("HEAD~46")),
+    );
+    rolling = (
+        sys.snapshot("HEAD~75"),
+        (sys.snapshot("HEAD~65"), sys.snapshot("HEAD~45")),
+    );
+    rolling = (
+        sys.snapshot("HEAD~74"),
+        (sys.snapshot("HEAD~64"), sys.snapshot("HEAD~44")),
+    );
+    rolling = (
+        sys.snapshot("HEAD~73"),
+        (sys.snapshot("HEAD~63"), sys.snapshot("HEAD~43")),
+    );
+    let stage_7 = rolling;
+    rolling = stage_0;
+    let returned = rolling;
+
+    let (returned_root_pin, (returned_bridge_pin, returned_leaf_pin)) = returned;
+    let (stage_3_root_pin, (stage_3_bridge_pin, stage_3_leaf_pin)) = stage_3;
+    let (stage_7_root_pin, (stage_7_bridge_pin, stage_7_leaf_pin)) = stage_7;
+
+    let cascade_cursor = cascade_at(returned_root_pin, returned_bridge_pin);
+    let returned_alias = cascade_cursor;
+    cascade_cursor = cascade_at(stage_3_root_pin, stage_3_bridge_pin);
+    let stage_3_alias = cascade_cursor;
+    cascade_cursor = cascade_at(stage_7_root_pin, stage_7_bridge_pin);
+    let stage_7_alias = cascade_cursor;
+    cascade_cursor = returned_alias;
+    let returned_cascade = cascade_cursor;
+
+    let returned_value = returned_cascade(returned_leaf_pin);
+    let stage_3_value = stage_3_alias(stage_3_leaf_pin);
+    let stage_7_value = stage_7_alias(stage_7_leaf_pin);
+    {
+        returned: {
+            root: [returned_value.root, chained_factory(sys.snapshot("HEAD~80"))],
+            bridge: [
+                returned_value.nested.bridge,
+                chained_factory(sys.snapshot("HEAD~70"))().read,
+            ],
+            reader: [
+                returned_value.nested.leaf.reader,
+                chained_factory(sys.snapshot("HEAD~50"))().read,
+            ],
+            continuation: [
+                returned_value.nested.leaf.continuation,
+                chained_factory(sys.snapshot("HEAD~50"))().read(),
+            ],
+        },
+        stage_3: {
+            root: [stage_3_value.root, chained_factory(sys.snapshot("HEAD~77"))],
+            bridge: [
+                stage_3_value.nested.bridge,
+                chained_factory(sys.snapshot("HEAD~67"))().read,
+            ],
+            continuation: [
+                stage_3_value.nested.leaf.continuation,
+                chained_factory(sys.snapshot("HEAD~47"))().read(),
+            ],
+        },
+        stage_7: {
+            root: [stage_7_value.root, chained_factory(sys.snapshot("HEAD~73"))],
+            bridge: [
+                stage_7_value.nested.bridge,
+                chained_factory(sys.snapshot("HEAD~63"))().read,
+            ],
+            continuation: [
+                stage_7_value.nested.leaf.continuation,
+                chained_factory(sys.snapshot("HEAD~43"))().read(),
+            ],
+        },
+    }
+}

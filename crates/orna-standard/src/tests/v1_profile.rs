@@ -19,6 +19,12 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     let sources = reference_standard_sources_v1();
     assert_eq!(sources[0].0, REFERENCE_STANDARD_MATH_PATH_V1);
     assert!(sources[0].1.contains("pub fn increment(value: Int): Int"));
+    for name in [
+        "abs", "signum", "is_even", "is_odd", "square", "cube", "gcd", "lcm",
+        "pow_nonnegative",
+    ] {
+        assert!(sources[0].1.contains(&format!("pub fn {name}(")));
+    }
     assert_eq!(sources[1].0, REFERENCE_STANDARD_COLLECTION_PATH_V1);
     assert!(sources[1].1.contains("pub fn asof_join<T, Time, Key>"));
     assert_eq!(sources[2].0, REFERENCE_STANDARD_QUERY_PATH_V1);
@@ -83,7 +89,6 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
             .collect::<Vec<_>>()
             .join("; ")
     );
-
     let profile = reference_standard_profile_v1();
     assert_eq!(profile.snapshot(), "orna.std/v1-reference-library");
     for (path, source) in &sources {
