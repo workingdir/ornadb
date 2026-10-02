@@ -16679,8 +16679,15 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                     // also forwards the context already carried by its argument.
                     ty.clone()
                 } else {
+                    // An omitted sibling suppresses the entire binding wave.
+                    // Keep separate same-named tuple slots separate in the
+                    // resulting symbolic pin map by carrying their formal
+                    // binder identity alongside the shared call site.
+                    let binder_identity = binder
+                        .map(|binder| format!(":formal-binder:{binder}"))
+                        .unwrap_or_default();
                     contextual_snapshot_ref(&format!(
-                        "selector:dynamic-call:{}:{}..{}:parameter:{parameter}",
+                        "selector:dynamic-call:{}:{}..{}:parameter:{parameter}{binder_identity}",
                         call_span.file.as_deref().unwrap_or("<unknown>"),
                         call_span.start,
                         call_span.end,
@@ -19259,6 +19266,114 @@ fn diag(code: &'static str, message: impl Into<String>) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn suppressed_paired_rebind_keeps_same_named_tuple_pins_distinct() {
+        let left_selector = "selector:binder:pair.orna@10..18:parameter:selected";
+        let right_selector = "selector:binder:pair.orna@20..28:parameter:selected";
+        let formal_pair = Type::Tuple(vec![
+            contextual_snapshot_ref(left_selector),
+            contextual_snapshot_ref(right_selector),
+        ]);
+        let result = Type::Record(BTreeMap::from([
+            ("left".into(), contextual_snapshot_ref(left_selector)),
+            ("right".into(), contextual_snapshot_ref(right_selector)),
+            (
+                "paired_map".into(),
+                Type::Applied {
+                    base: "semantic.SnapshotContextMap".into(),
+                    arguments: vec![
+                        Type::Named(left_selector.into()),
+                        Type::Named(right_selector.into()),
+                    ],
+                },
+            ),
+        ]));
+        let call_span = SyntaxSpan::new(40, 72);
+        let arguments = vec![orna_syntax_v1::Argument {
+            name: None,
+            value: Expr::Name {
+                text: "pins".into(),
+                span: SyntaxSpan::new(48, 52),
+            },
+            span: SyntaxSpan::new(48, 52),
+        }];
+
+        let specialized = specialize_dynamic_parameter_snapshot_contexts(
+            &result,
+            &[formal_pair, Type::Text],
+            &BTreeSet::new(),
+            None,
+            &arguments,
+            &[Type::Tuple(vec![
+                contextual_snapshot_ref("selector:HEAD~2"),
+                contextual_snapshot_ref("selector:HEAD~1"),
+            ])],
+            &BTreeMap::new(),
+            &call_span,
+            None,
+        );
+        let Type::Record(fields) = specialized else {
+            panic!("suppressed paired rebind must retain its record result");
+        };
+        let mut left = BTreeSet::new();
+        collect_test_snapshot_contexts(&fields["left"], &mut left);
+        let mut right = BTreeSet::new();
+        collect_test_snapshot_contexts(&fields["right"], &mut right);
+        assert_eq!(left.len(), 1, "left pin slot must retain one identity: {left:?}");
+        assert_eq!(right.len(), 1, "right pin slot must retain one identity: {right:?}");
+        assert!(
+            left.iter().next().is_some_and(|selector| selector.contains("pair.orna@10..18")),
+            "the left symbolic pin must keep its formal binder: {left:?}"
+        );
+        assert!(
+            right.iter().next().is_some_and(|selector| selector.contains("pair.orna@20..28")),
+            "the right symbolic pin must keep its formal binder: {right:?}"
+        );
+        let Type::Applied {
+            base,
+            arguments: paired_map,
+        } = &fields["paired_map"]
+        else {
+            panic!("the suppressed paired checkpoint must retain a context map");
+        };
+        assert_eq!(base, "semantic.SnapshotContextMap");
+        assert_eq!(
+            paired_map.len(),
+            2,
+            "the paired symbolic map must retain its formal width: {paired_map:?}"
+        );
+        assert!(is_snapshot_context_map_shape(&fields["paired_map"]));
+        assert_ne!(
+            left, right,
+            "suppression must keep same-named paired pin slots at distinct widths"
+        );
+    }
+
+    fn collect_test_snapshot_contexts(ty: &Type, into: &mut BTreeSet<String>) {
+        if let Some(selector) = snapshot_ref_context_key(ty) {
+            into.insert(selector.to_owned());
+            return;
+        }
+        match ty {
+            Type::Record(fields) => {
+                for field in fields.values() {
+                    collect_test_snapshot_contexts(field, into);
+                }
+            }
+            Type::Tuple(elements) => {
+                for element in elements {
+                    collect_test_snapshot_contexts(element, into);
+                }
+            }
+            Type::Applied { arguments, .. } => {
+                for argument in arguments {
+                    collect_test_snapshot_contexts(argument, into);
+                }
+            }
+            _ => {}
+        }
+    }
+
     #[test]
     fn checkpoint_rebinds_require_canonical_snapshot_selector_maps() {
         let first = Type::Applied {
