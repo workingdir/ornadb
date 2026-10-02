@@ -1,0 +1,18 @@
+use std.time as time_ops;
+use std.time.calendar as calendar;
+
+pub fn captured_zone_surface(): Bool =
+    time_ops.timezone_data_version() == "orna-iana-2024a"
+    && time_ops.offset_at(2024-01-15T12:00:00Z, "Europe/London") == 0
+    && time_ops.resolve_local("2024-10-27T01:30:00", "Europe/London", ambiguous: "earlier")
+        == 2024-10-27T00:30:00Z
+    && time_ops.resolve_local("2024-10-27T01:30:00", "Europe/London", ambiguous: "later")
+        == 2024-10-27T01:30:00Z
+    && case calendar.add_days(2024, 2, 28, 1) {
+        Some(date): date == (2024, 2, 29),
+        null: false,
+    }
+    && case calendar.add_weeks(2024, 2, 28, 1) {
+        Some(date): date == (2024, 3, 6),
+        null: false,
+    };

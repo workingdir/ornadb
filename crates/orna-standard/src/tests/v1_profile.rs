@@ -19,10 +19,12 @@ use crate::{
     REFERENCE_STANDARD_LIST_PATH_V1, REFERENCE_STANDARD_MAP_PATH_V1,
     REFERENCE_STANDARD_SET_PATH_V1,
     REFERENCE_STANDARD_IO_PATH_V1, REFERENCE_STANDARD_FS_PATH_V1,
+    REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1, REFERENCE_STANDARD_IO_METADATA_PATH_V1,
+    REFERENCE_STANDARD_IO_PROCESS_PATH_V1, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1,
     REFERENCE_STANDARD_CONCURRENT_PATH_V1, REFERENCE_STANDARD_ERROR_PATH_V1,
     REFERENCE_STANDARD_TEST_PATH_V1,
     REFERENCE_STANDARD_GENERICS_PATH_V1, REFERENCE_STANDARD_TYPE_UTILS_PATH_V1,
-    REFERENCE_STANDARD_PATTERN_PATH_V1,
+    REFERENCE_STANDARD_PATTERN_PATH_V1, REFERENCE_STANDARD_REGEX_PATH_V1,
     REFERENCE_STANDARD_ITERATOR_PATH_V1, REFERENCE_STANDARD_LAZY_PATH_V1,
     REFERENCE_STANDARD_VIEWS_PATH_V1,
     REFERENCE_STANDARD_INTROSPECTION_PATH_V1, REFERENCE_STANDARD_REFLECTION_PATH_V1,
@@ -44,6 +46,7 @@ fn pinned_std_entrypoint_imports_optional_content_modules() {
     assert!(entrypoint.lines().any(|line| line.trim() == "use generics;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use type_utils;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use pattern;"));
+    assert!(entrypoint.lines().any(|line| line.trim() == "use regex;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use iterator;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use lazy;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use views;"));
@@ -61,6 +64,87 @@ fn pinned_pattern_surface_typechecks_exhaustive_matches_and_destructuring() {
     let parsed = orna_syntax_v1::parse_module_with_file(&source, REFERENCE_STANDARD_PATTERN_PATH_V1);
     assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
     reference_standard_catalogue_v1().expect("the pinned pattern module checks with std sources");
+}
+
+#[test]
+fn pinned_regex_and_pattern_surfaces_are_versioned_and_snapshot_bound() {
+    let sources = reference_standard_sources_v1();
+    let (regex_index, (regex_path, regex_source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_REGEX_PATH_V1)
+        .expect("the regex package is included in the captured source bundle");
+    assert_eq!(regex_index, 46, "new source units append to preserve existing indexes");
+    assert_eq!(regex_path, REFERENCE_STANDARD_REGEX_PATH_V1);
+    for declaration in [
+        "pub enum Regex",
+        "pub enum Match",
+        "pub fn dialect_version(): Str",
+        "pub fn compile(pattern: Str): Regex",
+        "pub fn is_match(regex: Regex, text: Str): Bool",
+        "pub fn find(regex: Regex, text: Str): Match?",
+        "pub fn find_all(regex: Regex, text: Str): [Match]",
+        "pub fn count_matches(regex: Regex, text: Str): Int",
+        "pub fn matched_text(value: Match): Str",
+        "pub fn start(value: Match): Int",
+        "pub fn end(value: Match): Int",
+        "pub fn captures(value: Match): [Str?]",
+        "pub fn replace_all(regex: Regex, text: Str, replacement: Str): Str",
+        "pub fn split(regex: Regex, text: Str): [Str]",
+        "pub fn escape_literal(text: Str): Str",
+    ] {
+        assert!(regex_source.contains(declaration), "missing {declaration}");
+    }
+    for contract in [
+        "orna.regex/1",
+        "Unicode 16.0.0",
+        "Look-around, backreferences",
+        "earliest-starting match",
+        "Zero-width matches",
+        "preserve empty fields",
+        "silently truncated",
+    ] {
+        assert!(regex_source.contains(contract), "missing regex contract `{contract}`");
+    }
+
+    let profile = reference_standard_profile_v1();
+    profile
+        .verify_source(regex_path, regex_source)
+        .expect("the regex declarations are recorded by the standard snapshot");
+    let mut modified_regex = regex_source.clone();
+    modified_regex.push_str("\n// changed after capture\n");
+    assert!(profile.verify_source(regex_path, &modified_regex).is_err());
+
+    let (pattern_path, pattern_source) = sources
+        .iter()
+        .find(|(path, _)| path == REFERENCE_STANDARD_PATTERN_PATH_V1)
+        .expect("the pattern module is included in the captured source bundle");
+    for declaration in [
+        "pub fn fold<L, R, U>(",
+        "pub fn map_left<L, R, U>(",
+        "pub fn map_right<L, R, U>(",
+        "pub fn bimap<L, R, A, B>(",
+    ] {
+        assert!(pattern_source.contains(declaration), "missing {declaration}");
+    }
+    profile
+        .verify_source(pattern_path, pattern_source)
+        .expect("pattern combinators are captured in the same standard snapshot");
+
+    let parsed = orna_syntax_v1::parse_module_with_file(regex_source, regex_path);
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    let catalogue = reference_standard_catalogue_v1()
+        .expect("regex and pattern declarations resolve within the pinned std profile");
+    let consumer = include_str!("fixtures/v1_regex_pattern_consumer_g8rd3.orna");
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("regex_pattern_consumer.orna", consumer)],
+        &catalogue,
+    );
+    assert!(
+        analysis.is_ok(),
+        "{:#?}",
+        analysis.diagnostics
+    );
 }
 
 #[test]
@@ -102,6 +186,73 @@ fn pinned_collection_views_and_slices_typecheck_as_an_ordinary_std_module() {
             .collect::<Vec<_>>()
             .join("; ")
     );
+}
+
+#[test]
+fn pinned_calendar_arithmetic_source_typechecks_against_core() {
+    let source = reference_standard_sources_v1()
+        .into_iter()
+        .find(|(path, _)| path == REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1)
+        .expect("the pinned source bundle includes std.time.calendar")
+        .1;
+    let parsed = orna_syntax_v1::parse_module_with_file(
+        &source,
+        REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1,
+    );
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("calendar.orna", source)],
+        &orna_semantic_v1::Catalogue::authoritative_core(),
+    );
+    assert!(
+        analysis.is_ok(),
+        "{}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+}
+
+#[test]
+fn pinned_timezone_and_calendar_surfaces_typecheck_and_publish_in_snapshot() {
+    let sources = reference_standard_sources_v1();
+    assert_eq!(sources[6].0, REFERENCE_STANDARD_TIME_PATH_V1);
+    let time = &sources[6].1;
+    for declaration in [
+        "pub fn timezone_data_version(): Str",
+        "pub fn offset_at(instant: Instant, zone: Str): Int",
+        "pub fn resolve_local(local: Str, zone: Str, ambiguous: Str): Instant",
+    ] {
+        assert!(time.contains(declaration), "missing std.time declaration `{declaration}`");
+    }
+    assert!(time.contains("orna-iana-2024a"));
+    let parsed = orna_syntax_v1::parse_module_with_file(time, REFERENCE_STANDARD_TIME_PATH_V1);
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    let catalogue = reference_standard_catalogue_v1()
+        .expect("time-zone APIs and calendar helpers resolve in the captured std profile");
+    let consumer = include_str!("fixtures/v1_timezone_calendar_consumer_b8tgd.orna");
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("timezone_calendar_consumer.orna", consumer)],
+        &catalogue,
+    );
+    assert!(
+        analysis.is_ok(),
+        "{}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+    let mut changed_time = time.clone();
+    changed_time.push_str("\n// changed after the captured snapshot\n");
+    assert!(reference_standard_profile_v1()
+        .verify_source(REFERENCE_STANDARD_TIME_PATH_V1, &changed_time)
+        .is_err());
 }
 
 #[test]
@@ -988,4 +1139,127 @@ fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions(
     let reads = consumer.symbols.get("reads").expect("filesystem wrapper");
     assert!(reads.effects.effects.contains("filesystem"));
     assert!(reads.effects.may_fail);
+}
+
+#[test]
+fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
+    let sources = reference_standard_sources_v1();
+    assert_eq!(sources.len(), 46);
+    for (index, path) in [
+        (42, REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1),
+        (43, REFERENCE_STANDARD_IO_METADATA_PATH_V1),
+    ] {
+        assert_eq!(sources[index].0, path);
+        let parsed = orna_syntax_v1::parse_module_with_file(&sources[index].1, path);
+        assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
+    }
+
+    let profile = reference_standard_profile_v1();
+    for path in [
+        REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1,
+        REFERENCE_STANDARD_IO_METADATA_PATH_V1,
+    ] {
+        let source = sources
+            .iter()
+            .find(|(source_path, _)| source_path == path)
+            .expect("filesystem path and metadata source is pinned");
+        profile
+            .verify_source(path, &source.1)
+            .expect("source bytes match the captured std snapshot");
+        let mut changed_source = source.1.clone();
+        changed_source.push_str("\n// changed after snapshot capture\n");
+        assert!(profile.verify_source(path, &changed_source).is_err());
+    }
+
+    let catalogue = reference_standard_catalogue_v1()
+        .expect("the path and metadata modules resolve in the captured std profile");
+    let consumer_source =
+        include_str!("fixtures/v1_filesystem_paths_metadata_consumer_l80o5.orna");
+    let parsed = orna_syntax_v1::parse_module_with_file(
+        consumer_source,
+        "filesystem_paths_metadata_consumer.orna",
+    );
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "filesystem_paths_metadata_consumer.orna",
+            consumer_source,
+        )],
+        &catalogue,
+    );
+    assert!(
+        analysis.is_ok(),
+        "{}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+    let consumer = analysis
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "filesystem_paths_metadata_consumer")
+        .expect("filesystem consumer module");
+    assert!(consumer.symbols.contains_key("child_path"));
+}
+
+#[test]
+fn pinned_process_and_environment_modules_are_captured_and_typecheck() {
+    let sources = reference_standard_sources_v1();
+    assert_eq!(sources.len(), 46);
+    for (index, path) in [
+        (44, REFERENCE_STANDARD_IO_PROCESS_PATH_V1),
+        (45, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1),
+    ] {
+        assert_eq!(sources[index].0, path);
+        let parsed = orna_syntax_v1::parse_module_with_file(&sources[index].1, path);
+        assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
+    }
+
+    let profile = reference_standard_profile_v1();
+    for path in [
+        REFERENCE_STANDARD_IO_PROCESS_PATH_V1,
+        REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1,
+    ] {
+        let source = sources
+            .iter()
+            .find(|(source_path, _)| source_path == path)
+            .expect("process and environment modules are pinned");
+        profile
+            .verify_source(path, &source.1)
+            .expect("source bytes match the captured std snapshot");
+        let mut changed_source = source.1.clone();
+        changed_source.push_str("\n// changed after snapshot capture\n");
+        assert!(profile.verify_source(path, &changed_source).is_err());
+    }
+
+    let io_entrypoint = include_str!("../../../../stdlib/std/io/main.orna");
+    assert!(io_entrypoint.lines().any(|line| line.trim() == "use process;"));
+    assert!(io_entrypoint
+        .lines()
+        .any(|line| line.trim() == "use environment;"));
+    let catalogue = reference_standard_catalogue_v1()
+        .expect("process and environment modules resolve in the captured std profile");
+    let consumer = include_str!("fixtures/v1_process_environment_consumer_xbf3n.orna");
+    let parsed = orna_syntax_v1::parse_module_with_file(
+        consumer,
+        "process_environment_consumer.orna",
+    );
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("process_environment_consumer.orna", consumer)],
+        &catalogue,
+    );
+    assert!(
+        analysis.is_ok(),
+        "{}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
 }

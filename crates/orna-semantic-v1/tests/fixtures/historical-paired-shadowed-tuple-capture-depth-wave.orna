@@ -1,0 +1,42 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+// The tuple callback shadows two local pins at once. The next callback
+// shadows one captured name again; both tuple captures must stay depth-scoped.
+pub fn tuple_capture_wave_at(root_pin: sys.SnapshotRef) {
+    let selected = root_pin;
+    let sibling = root_pin;
+    ((selected, sibling): (sys.SnapshotRef, sys.SnapshotRef)) => {
+        let selected_capture = selected;
+        let sibling_capture = sibling;
+        (selected: sys.SnapshotRef) => {
+            let terminal_capture = selected;
+            {
+                selected: factory_at(selected_capture),
+                sibling: factory_at(sibling_capture),
+                terminal: factory_at(terminal_capture),
+            }
+        }
+    }
+}
+
+pub fn paired_tuple_shadow_waves_preserve_local_pin_scope() {
+    let roots = (
+        tuple_capture_wave_at(sys.snapshot("HEAD~500")),
+        tuple_capture_wave_at(sys.snapshot("HEAD~490")),
+    );
+    let (left_root, right_root) = roots;
+    let left_middle = left_root((sys.snapshot("HEAD~450"), sys.snapshot("HEAD~440")));
+    let right_middle = right_root((sys.snapshot("HEAD~430"), sys.snapshot("HEAD~420")));
+    let left_values = left_middle(sys.snapshot("HEAD~400"));
+    let right_values = right_middle(sys.snapshot("HEAD~390"));
+
+    {
+        left_selected: std.concurrent.parallel([() => left_values.selected, () => left_values.selected]),
+        left_sibling: std.concurrent.parallel([() => left_values.sibling, () => left_values.sibling]),
+        left_terminal: std.concurrent.parallel([() => left_values.terminal, () => left_values.terminal]),
+        right_selected: std.concurrent.parallel([() => right_values.selected, () => right_values.selected]),
+        right_sibling: std.concurrent.parallel([() => right_values.sibling, () => right_values.sibling]),
+        right_terminal: std.concurrent.parallel([() => right_values.terminal, () => right_values.terminal]),
+    }
+}
