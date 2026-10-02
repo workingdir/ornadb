@@ -5902,7 +5902,7 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
     eval_outcome: UnitEvalOutcome,
 ) {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
-    const HANDOFFS: u8 = 8;
+    const HANDOFF_PAIRS: u8 = 4;
 
     let (root, repository) = durable_repository();
     let runtime = open_durable_state(&repository);
@@ -6019,11 +6019,22 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
     let mut current_owner = owner;
     drop(host);
 
-    for handoff in 0..HANDOFFS {
-        let replacement_id = [76 + handoff; 16];
+    for handoff_pair in 0..HANDOFF_PAIRS {
+        // Chain two owner takeovers before reopening the host. The completed
+        // snapshot pair must survive the whole transfer pair without replay.
+        let intermediate_owner_id = [76 + handoff_pair * 2; 16];
+        let recovery_runtime = open_durable_state(&repository);
+        let intermediate_owner = block_on(
+            recovery_runtime.recover_abandoned(current_owner.owner_id, intermediate_owner_id),
+        )
+        .unwrap();
+        assert_eq!(intermediate_owner.owner_id, intermediate_owner_id);
+        drop(recovery_runtime);
+
+        let replacement_id = [77 + handoff_pair * 2; 16];
         let recovery_runtime = open_durable_state(&repository);
         let replacement = block_on(
-            recovery_runtime.recover_abandoned(current_owner.owner_id, replacement_id),
+            recovery_runtime.recover_abandoned(intermediate_owner.owner_id, replacement_id),
         )
         .unwrap();
         assert_eq!(replacement.owner_id, replacement_id);
@@ -6032,24 +6043,24 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
         let mut host = durable_host_after_takeover(
             open_durable_state(&repository),
             replacement.owner_id,
-            RequestOwner::from(current_owner),
+            RequestOwner::from(intermediate_owner),
         );
-        let mut issuer = Issuer(2 + handoff, None);
+        let mut issuer = Issuer(2 + handoff_pair, None);
         let credential = create_with_expiration(&mut host, &mut issuer, 10_000);
-        let attachment = [6 + handoff; 16];
+        let attachment = [6 + handoff_pair; 16];
         block_on(host.resume(ResumeRequest {
             id: session,
             origin: &origin(),
             credential: &credential,
             attachment,
-            now: 2 + u64::from(handoff),
+            now: 2 + u64::from(handoff_pair),
         }))
         .unwrap();
 
         let mut current_attachment = attachment;
         for reconnect in 0..=2 {
             if reconnect > 0 {
-                let next_attachment = [40 + handoff * 2 + reconnect - 1; 16];
+                let next_attachment = [40 + handoff_pair * 4 + reconnect - 1; 16];
                 let outcome = block_on(host.resume(ResumeRequest {
                     id: session,
                     origin: &origin(),
@@ -6066,15 +6077,27 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
                 current_attachment = next_attachment;
             }
 
-            replay_durable_status_snapshots(
-                &mut host,
-                current_attachment,
-                &snapshots,
-                &mut sequence,
-                &mut application,
-            );
+            // Alternate replay direction within each reconnect pair so both
+            // identities remain stable regardless of their relative age.
+            if reconnect % 2 == 0 {
+                replay_durable_status_snapshots(
+                    &mut host,
+                    current_attachment,
+                    &snapshots,
+                    &mut sequence,
+                    &mut application,
+                );
+            } else {
+                replay_durable_status_snapshots_reverse(
+                    &mut host,
+                    current_attachment,
+                    &snapshots,
+                    &mut sequence,
+                    &mut application,
+                );
+            }
 
-            let first_pair_request = 83 + handoff * 6 + reconnect * 2;
+            let first_pair_request = 83 + handoff_pair * 12 + reconnect * 2;
             let mut fresh_pair = Vec::with_capacity(2);
             for request_id in [first_pair_request, first_pair_request + 1] {
                 let fresh_request = status_request([request_id; 16]);
@@ -6124,6 +6147,7 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
         drop(host);
     }
 
+    assert_eq!(current_owner.owner_id, [83; 16]);
     assert_eq!(application.calls, 1);
     remove_test_repository(&root);
 }
