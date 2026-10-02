@@ -5346,6 +5346,83 @@ fn bottom_incomplete_tuple_argument_does_not_rebind_sibling_snapshot_pin() {
 }
 
 #[test]
+fn malformed_tuple_wave_suppresses_rebinding_across_sibling_captures() {
+    let source = include_str!("fixtures/historical-tuple-pin-sibling-capture-suppression.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-tuple-pin-sibling-capture-suppression.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "the malformed tuple leaf must remain a type error"
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("malformed_tuple_sibling_capture_wave")
+        })
+        .expect("sibling capture suppression fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["malformed_tuple_sibling_capture_wave"].ty
+    else {
+        panic!("sibling capture suppression proof must be a function");
+    };
+    let Type::Record(cases) = result.as_ref() else {
+        panic!("sibling capture suppression proof must expose both waves");
+    };
+    let incomplete = cases.get("incomplete").expect("incomplete wave");
+    let mut incomplete_contexts = BTreeSet::new();
+    collect_snapshot_contexts(incomplete, &mut incomplete_contexts);
+    for selector in [
+        "HEAD~600",
+        "HEAD~590",
+        "HEAD~580",
+        "HEAD~550",
+        "HEAD~530",
+    ] {
+        assert!(
+            !incomplete_contexts
+                .iter()
+                .any(|context| context.contains(selector)),
+            "malformed tuple wave leaked {selector} into a sibling capture: {incomplete_contexts:?}"
+        );
+    }
+    let unresolved_siblings = incomplete_contexts
+        .iter()
+        .filter(|context| context.starts_with("selector:dynamic-call:"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        unresolved_siblings.len(),
+        4,
+        "failed tuple wave must preserve distinct unresolved identities for all four tuple captures: {incomplete_contexts:?}"
+    );
+    assert!(
+        incomplete_contexts.contains("selector:HEAD~570"),
+        "the completed sibling leaf argument must keep its own selector: {incomplete_contexts:?}"
+    );
+    let complete = cases.get("complete").expect("complete wave");
+    let mut complete_contexts = BTreeSet::new();
+    collect_snapshot_contexts(complete, &mut complete_contexts);
+    for selector in ["HEAD~560", "HEAD~550", "HEAD~540", "HEAD~530", "HEAD~520"] {
+        assert!(
+            complete_contexts.contains(&format!("selector:{selector}")),
+            "complete tuple wave lost sibling capture {selector}: {complete_contexts:?}"
+        );
+    }
+}
+
+#[test]
 fn concurrent_callback_tuples_reject_cross_lane_identity_mix_after_rebind() {
     let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
