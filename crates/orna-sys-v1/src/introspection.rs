@@ -996,6 +996,45 @@ pub fn explain_query_with_input_limit_conjunct_disjunct_chain(
     )
 }
 
+/// Explains nested input limits, disjunct expansion, and then a separate
+/// left-to-right conjunct chain followed by the query's outer limit and any
+/// additional limits.
+///
+/// The input limits run once after source and join work and before the
+/// disjunctive predicate. Disjunct expansion charges each arm for the capped
+/// input; the conjunct chain then charges each term for the rows surviving
+/// its predecessors. ORNA-PLAN leaves these estimates unspecified, so the
+/// same deterministic 50%-per-arm and 50%-per-conjunct fallback is used.
+/// `query.predicate` describes the disjunction and `conjunct_predicate`
+/// describes the later AND chain. At least one nested limit, one disjunct,
+/// and one conjunct are required.
+pub fn explain_query_with_input_limit_disjunct_conjunct_chain(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    nested_input_limits: &[u64],
+    conjunct_predicate: ExpressionRef,
+    conjunct_count: u64,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0
+        || nested_input_limits.is_empty()
+        || conjunct_count == 0
+        || query.predicate.is_none()
+    {
+        return Err(ExplainError::InvalidExpression);
+    }
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        Some(conjunct_count),
+        None,
+        nested_input_limits,
+        &[],
+        Some(&conjunct_predicate),
+        additional_limits,
+    )
+}
+
 /// Explains an expanded disjunction, a nested limit chain, and then a
 /// left-to-right conjunct chain followed by the query's outer limit and any
 /// additional limits.
@@ -1053,11 +1092,9 @@ fn explain_query_with_predicate_pressure(
             || conjunct_count_per_disjunct.is_some())
             && query.predicate.is_none())
         || (!limits_between_disjunct_and_conjunct.is_empty()
-            && (conjunct_count.is_none()
-                || conjunct_count_per_disjunct.is_some()
-                || post_expansion_conjunct.is_none()))
-        || (limits_between_disjunct_and_conjunct.is_empty()
-            && post_expansion_conjunct.is_some())
+            && post_expansion_conjunct.is_none())
+        || (post_expansion_conjunct.is_some()
+            && (conjunct_count.is_none() || conjunct_count_per_disjunct.is_some()))
     {
         return Err(ExplainError::InvalidExpression);
     }
@@ -1097,9 +1134,7 @@ fn explain_query_with_predicate_pressure(
         .saturating_add(usize::from(query.limit.is_some()))
         .saturating_add(nested_input_limits.len())
         .saturating_add(limits_between_disjunct_and_conjunct.len())
-        .saturating_add(usize::from(
-            !limits_between_disjunct_and_conjunct.is_empty(),
-        ))
+        .saturating_add(usize::from(post_expansion_conjunct.is_some()))
         .saturating_add(additional_limits.len())
         .saturating_add(query.mutations.len())
         .saturating_add(usize::from(query.materialize_into.is_some()));
@@ -1204,7 +1239,7 @@ fn explain_query_with_predicate_pressure(
         // Expression references are opaque to this planner. The selected API
         // shape supplies any branch/conjunct counts; the default count of one
         // preserves the historical single-filter fallback.
-        let (cardinality, work, mut details) = if !limits_between_disjunct_and_conjunct.is_empty() {
+        let (cardinality, work, mut details) = if post_expansion_conjunct.is_some() {
             (
                 disjunction_cardinality(current_cardinality, disjunct_count),
                 current_cardinality
@@ -1329,7 +1364,7 @@ fn explain_query_with_predicate_pressure(
             work,
         );
         current_cardinality = cardinality;
-        if !limits_between_disjunct_and_conjunct.is_empty() {
+        if post_expansion_conjunct.is_some() {
             for limit in limits_between_disjunct_and_conjunct {
                 let cardinality = limit_cardinality(current_cardinality, *limit);
                 let work = current_cardinality.rows;
