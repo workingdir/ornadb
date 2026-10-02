@@ -1370,6 +1370,8 @@ dependencies = [
  "orna-syntax-v1",
  "orna-sys-v1",
  "orna-value-v1",
+ "serde",
+ "serde_json",
  "tempfile",
  "unicode-normalization",
 ]

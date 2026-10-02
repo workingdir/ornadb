@@ -11,6 +11,8 @@ publish = false
 num-bigint = "0.4.6"
 num-integer = "0.1.47"
 num-traits = "0.2.19"
+serde = "1.0"
+serde_json = { version = "1.0.151", features = ["arbitrary_precision"] }
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-project-v1 = { path = "../orna-project-v1" }
 orna-standard = { path = "../orna-standard" }
