@@ -300,9 +300,10 @@ enum BufferedBranchMergeTombstoneDelta {
 /// overlapping depth fragments. This v1 policy accepts paired plans at their
 /// exact lineage positions, appends table/key-ordered deletions without
 /// deduplicating across waves, and advances through restore-only empty deltas.
-/// Duplicate table/key events within one wave are rejected as soon as the
-/// overlapping fragment arrives, while the same key at a later position
-/// remains a new event.
+/// Duplicate table/key events within one lineage position are rejected as
+/// soon as the overlapping fragment arrives. Duplicate checks are scoped to
+/// that position even while several restore waves are buffered concurrently:
+/// the same key at a later position remains a new event.
 /// Concurrent completions may arrive out of order; future deltas wait until
 /// every earlier paired position is present. Split waves wait until every
 /// fragment arrives, then flatten in canonical table/key order atomically.
@@ -358,7 +359,7 @@ impl BranchMergeTombstoneHistory {
                 order: step.order,
             });
         }
-        if has_duplicate_tombstones(&step.ordered_row_tombstones) {
+        if has_duplicate_tombstones_in_wave(&step.ordered_row_tombstones) {
             return Err(BranchMergeTombstoneHistoryError::DuplicateTombstone {
                 order: step.order,
             });
@@ -427,7 +428,7 @@ impl BranchMergeTombstoneHistory {
             _ => Vec::new(),
         };
         combined.extend_from_slice(tombstones);
-        if has_duplicate_tombstones(&combined) {
+        if has_duplicate_tombstones_in_wave(&combined) {
             return Err(BranchMergeTombstoneHistoryError::DuplicateTombstone { order });
         }
 
@@ -490,7 +491,7 @@ impl BranchMergeTombstoneHistory {
     }
 }
 
-fn has_duplicate_tombstones(tombstones: &[(ObjectId, CanonicalValue)]) -> bool {
+fn has_duplicate_tombstones_in_wave(tombstones: &[(ObjectId, CanonicalValue)]) -> bool {
     let mut ordered = tombstones.to_vec();
     ordered.sort_by(|(left_table, left_key), (right_table, right_key)| {
         left_table.cmp(right_table).then_with(|| {
