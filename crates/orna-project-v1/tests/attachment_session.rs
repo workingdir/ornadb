@@ -6541,7 +6541,7 @@ fn interleaved_sibling_storms_keep_shared_terminal_routes_independent() {
         assert_terminal_route(&sibling_terminals[sibling], candidate);
     }
 
-    for (sibling, final_candidate) in [(0, 2), (1, 1), (2, 0)].into_iter().enumerate() {
+    for (sibling, final_candidate) in [(0, 2), (1, 1), (2, 0)] {
         assert_terminal_route(&sibling_terminals[sibling], final_candidate);
         assert_terminal_route(&manifest_routes[sibling], 0);
     }
