@@ -266,6 +266,11 @@ pub struct BranchMergePlan {
 /// loading a later paired table, that prefix is discarded with the attempt.
 /// Recovered retries rebuild the full branch-symmetric conflict set from the
 /// same committed base; failed work cannot duplicate or bias a later delta.
+/// The same restart rule applies to successful restoration waves: if a later
+/// paired-table read fails after an earlier table found restored rows, no
+/// partial upsert plan is returned. Concurrent retries from the unchanged
+/// post-delete base independently rebuild the complete restored row set and
+/// emit no old tombstones; commit one successful retry as the wave's delta.
 ///
 /// A read failure at any table or range aborts the whole invocation. Facts
 /// gathered from earlier tables or depth ranges remain private; after source
