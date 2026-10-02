@@ -14193,7 +14193,7 @@ fn require_same(expected: &Type, actual: &Type, diagnostics: &mut Vec<Diagnostic
 
 fn types_match(expected: &Type, actual: &Type) -> bool {
     if expected == actual {
-        return true;
+        return checkpoint_snapshot_maps_are_valid(expected);
     }
     if matches!(actual, Type::Bottom) {
         return true;
