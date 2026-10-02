@@ -1283,3 +1283,93 @@ fn transitive_module_upgrade_chain_loads_each_captured_snapshot() {
         );
     }
 }
+
+#[test]
+fn transitive_replay_keeps_each_pin_across_three_upgrade_generations() {
+    let (_directory, historical, intermediate, upgraded, snapshots) =
+        module_chain_upgrade_projects();
+    assert!(snapshots.windows(2).all(|pair| pair[0] != pair[1]));
+
+    let mut historical_session = AdmittedReplSession::from_loaded_project(
+        &historical,
+        historical.standard_sources().iter().cloned(),
+        Limits::default(),
+    )
+    .unwrap();
+    let mut intermediate_session = AdmittedReplSession::from_loaded_project(
+        &intermediate,
+        intermediate.standard_sources().iter().cloned(),
+        Limits::default(),
+    )
+    .unwrap();
+    let mut upgraded_session = AdmittedReplSession::from_loaded_project(
+        &upgraded,
+        upgraded.standard_sources().iter().cloned(),
+        Limits::default(),
+    )
+    .unwrap();
+    for session in [
+        &mut historical_session,
+        &mut intermediate_session,
+        &mut upgraded_session,
+    ] {
+        assert_eq!(
+            session.submit(include_str!("fixtures/module-chain-use-replay.orna")),
+            Ok(None)
+        );
+    }
+
+    let replay_source = include_str!("fixtures/module-chain-call-replay.orna");
+    assert_eq!(
+        historical_session.submit(replay_source),
+        Ok(Some(ints(&[20])))
+    );
+    assert_eq!(
+        intermediate_session.submit(replay_source),
+        Ok(Some(ints(&[155])))
+    );
+    assert_eq!(
+        upgraded_session.submit(replay_source),
+        Ok(Some(ints(&[1505])))
+    );
+    assert_eq!(
+        intermediate_session.submit(replay_source),
+        Ok(Some(ints(&[155])))
+    );
+    assert_eq!(
+        historical_session.submit(replay_source),
+        Ok(Some(ints(&[20])))
+    );
+    assert_eq!(
+        upgraded_session.submit(replay_source),
+        Ok(Some(ints(&[1505])))
+    );
+
+    let mut historical_replay = historical_session.clone();
+    let mut intermediate_replay = intermediate_session.clone();
+    let mut upgraded_replay = upgraded_session.clone();
+    for (session, expected) in [
+        (&mut upgraded_replay, 1505),
+        (&mut intermediate_replay, 155),
+        (&mut historical_replay, 20),
+    ] {
+        assert_eq!(session.submit(replay_source), Ok(Some(ints(&[expected]))));
+    }
+
+    let mut historical_with_new_leaf = historical.standard_sources().to_vec();
+    historical_with_new_leaf
+        .iter_mut()
+        .find(|(path, _)| path == "std/chain/leaf.orna")
+        .unwrap()
+        .1 = include_str!("fixtures/module-chain-std-leaf-v3.orna").into();
+    assert_eq!(
+        AdmittedReplSession::from_loaded_project(
+            &historical,
+            historical_with_new_leaf,
+            Limits::default(),
+        )
+        .unwrap_err()
+        .code(),
+        "ORNA-REPL-STANDARD"
+    );
+}
