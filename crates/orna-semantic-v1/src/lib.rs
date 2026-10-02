@@ -13110,7 +13110,31 @@ fn infer_success_pipeline(
 }
 
 fn is_default_float_equality_type(ty: &Type) -> bool {
-    matches!(ty, Type::Float) || matches!(ty, Type::Applied { base, .. } if base == "Float")
+    match ty {
+        Type::Float => true,
+        Type::Applied { base, arguments } => {
+            base == "Float" || arguments.iter().any(is_default_float_equality_type)
+        }
+        Type::List(element) | Type::Optional(element) | Type::Range(element) => {
+            is_default_float_equality_type(element)
+        }
+        Type::Tuple(elements) => elements.iter().any(is_default_float_equality_type),
+        Type::Record(fields) => fields.values().any(is_default_float_equality_type),
+        Type::MoneyPerUnit { currency, unit } => {
+            is_default_float_equality_type(currency) || is_default_float_equality_type(unit)
+        }
+        Type::Relation(_) | Type::Stream(_) | Type::Function { .. } => false,
+        Type::Int
+        | Type::Decimal
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null
+        | Type::Named(_)
+        | Type::Bottom
+        | Type::Error => false,
+    }
 }
 
 fn infer_recovery_pipeline(
@@ -17594,6 +17618,45 @@ fn tuple_checkpoint_promotion_matches(left: &[Type], right: &[Type]) -> bool {
             .iter()
             .zip(right)
             .all(|(left, right)| checkpoint_pin_map_widths_match(left, right))
+        && tuple_checkpoint_compaction_fold_preserves_pin_identity(left, right)
+}
+
+/// A folded tuple map must not invent cross-slot identity by unioning maps
+/// from opposite rows. The reference does not define that compaction case;
+/// only promote when every identity shared after the fold was shared within
+/// at least one input row.
+fn tuple_checkpoint_compaction_fold_preserves_pin_identity(
+    left: &[Type],
+    right: &[Type],
+) -> bool {
+    let mut pin_maps = Vec::new();
+    for (left, right) in left.iter().zip(right) {
+        if !collect_corresponding_snapshot_context_maps(left, right, &mut pin_maps) {
+            return false;
+        }
+    }
+
+    pin_maps.iter().enumerate().all(|(index, (left, right))| {
+        let folded = left.union(right).cloned().collect::<BTreeSet<_>>();
+        pin_maps[index + 1..]
+            .iter()
+            .all(|(other_left, other_right)| {
+                let folded_other = other_left
+                    .union(other_right)
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let shared_before = left
+                    .intersection(other_left)
+                    .chain(right.intersection(other_right))
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let shared_after = folded
+                    .intersection(&folded_other)
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                shared_after == shared_before
+            })
+    })
 }
 
 fn checkpoint_pin_map_widths_match(left: &Type, right: &Type) -> bool {
@@ -18652,10 +18715,52 @@ fn infer_table_assertion(
     let mut local = BTreeMap::new();
     insert_local_binding(name, row.clone(), &mut local, diagnostics);
     let inferred = infer(body, scope, &local, diagnostics);
-    let valid = text == "all_unique" || inferred.ty == Type::Bool;
+    let valid = match text.as_str() {
+        "every" => inferred.ty == Type::Bool,
+        "all_unique" => is_lawful_all_unique_key_type(&inferred.ty),
+        _ => unreachable!("table predicate constructors were matched above"),
+    };
+    if text == "all_unique" && inferred.ty != Type::Error && !valid {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "all_unique selector must return a lawful equality key; Float and noncanonical values are not valid keys",
+        ));
+    }
     Inferred {
         ty: if valid { Type::Bool } else { Type::Error },
         effects: inferred.effects,
+    }
+}
+
+/// `all_unique` compares complete canonical selected values. Function and
+/// relation values have no stable value identity, and default Float equality
+/// is intentionally unavailable; nested keys inherit those restrictions.
+fn is_lawful_all_unique_key_type(ty: &Type) -> bool {
+    match ty {
+        Type::Error => false,
+        Type::Float => false,
+        Type::Applied { base, arguments } => {
+            base != "Float" && arguments.iter().all(is_lawful_all_unique_key_type)
+        }
+        Type::List(element) | Type::Optional(element) => {
+            is_lawful_all_unique_key_type(element)
+        }
+        Type::Tuple(elements) => elements.iter().all(is_lawful_all_unique_key_type),
+        Type::Record(fields) => fields.values().all(is_lawful_all_unique_key_type),
+        Type::Range(_)
+        | Type::Relation(_)
+        | Type::Stream(_)
+        | Type::Function { .. }
+        | Type::MoneyPerUnit { .. } => false,
+        Type::Int
+        | Type::Decimal
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null
+        | Type::Named(_)
+        | Type::Bottom => true,
     }
 }
 

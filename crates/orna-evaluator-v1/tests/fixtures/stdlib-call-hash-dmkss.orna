@@ -1,1 +1,1 @@
-hashing.sha256_text("hello")
+hashing.to_hex(hashing.sha256_text("hello"))

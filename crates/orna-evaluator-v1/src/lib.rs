@@ -10,6 +10,7 @@ use std::{
     rc::Rc,
 };
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use num_bigint::{BigInt, Sign};
 use num_integer::Integer;
 use num_traits::{Signed, ToPrimitive, Zero};
@@ -23,6 +24,7 @@ use orna_value_v1::{
     CANONICAL_NAN_BITS, ErrorValue as CanonicalErrorValue, Raw, float_max, float_min,
     float_ordinary_eq, float_total_cmp,
 };
+use sha2::{Digest as _, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
 mod admitted_repl;
@@ -4885,6 +4887,12 @@ impl Context<'_, '_> {
         let native_time = native_binding
             .filter(|binding| binding.kind == StandardBindingKind::Time)
             .map(|binding| binding.operation);
+        let native_hash = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::Hash)
+            .map(|binding| binding.operation);
+        let native_base64 = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::Base64)
+            .map(|binding| binding.operation);
         let qualified_math = (!scope.0.contains_key("std"))
             .then(|| math_name(callee))
             .flatten();
@@ -4937,6 +4945,8 @@ impl Context<'_, '_> {
             && native_bits.is_none()
             && native_stats.is_none()
             && native_time.is_none()
+            && native_hash.is_none()
+            && native_base64.is_none()
             && (qualified_math.is_none()
                 && qualified_bits.is_none()
                 && qualified_text.is_none()
@@ -5118,6 +5128,8 @@ impl Context<'_, '_> {
             .or(text)
             .or(stats)
             .or(time)
+            .or(native_hash)
+            .or(native_base64)
             .or(collection)
             .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
         let implicit = usize::from(input.is_some());
@@ -5147,7 +5159,18 @@ impl Context<'_, '_> {
             }
         }
         values.extend(explicit);
-        let values = named_arguments(name, arguments, values, implicit, collection.is_some())?;
+        let signature_name = match native_binding.map(|binding| binding.kind) {
+            Some(StandardBindingKind::Hash) => format!("hash.{name}"),
+            Some(StandardBindingKind::Base64) => format!("base64.{name}"),
+            _ => name.to_owned(),
+        };
+        let values = named_arguments(
+            &signature_name,
+            arguments,
+            values,
+            implicit,
+            collection.is_some(),
+        )?;
         if math.is_some() {
             self.math(name, values)
         } else if bits.is_some() {
@@ -5179,6 +5202,10 @@ impl Context<'_, '_> {
             }
         } else if time.is_some() {
             self.time(name, values)
+        } else if native_hash.is_some() {
+            self.hash(name, values)
+        } else if native_base64.is_some() {
+            self.base64(name, values)
         } else {
             self.collection(name, values, depth)
         }
@@ -5319,6 +5346,91 @@ impl Context<'_, '_> {
             {
                 Err(error("ORNA-EVAL-TYPE"))
             }
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+    fn hash(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
+        self.step()?;
+        match (name, values.as_slice()) {
+            ("sha256", [Value::Blob(input)]) => {
+                if input.len() > self.limits.max_string_bytes {
+                    return Err(error("ORNA-EVAL-LIMIT"));
+                }
+                Ok(Value::Blob(Sha256::digest(input).to_vec()))
+            }
+            ("sha256_text", [Value::String(input)]) => {
+                Ok(Value::Blob(Sha256::digest(input.as_bytes()).to_vec()))
+            }
+            ("domain_sha256", [Value::String(domain), Value::Blob(payload)]) => {
+                if domain.is_empty()
+                    || !domain.is_ascii()
+                    || domain.as_bytes().contains(&0)
+                    || payload.len() > self.limits.max_string_bytes
+                {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                let mut digest = Sha256::new();
+                digest.update(domain.as_bytes());
+                digest.update([0]);
+                digest.update(payload);
+                Ok(Value::Blob(digest.finalize().to_vec()))
+            }
+            ("to_hex", [Value::Blob(digest)]) if digest.len() == 32 => {
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                let mut output = String::with_capacity(64);
+                for byte in digest {
+                    output.push(char::from(HEX[usize::from(byte >> 4)]));
+                    output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+                }
+                self.string(output).map(Value::String)
+            }
+            ("from_hex", [Value::String(encoded)]) => {
+                let decoded = if encoded.len() == 64
+                    && encoded
+                        .as_bytes()
+                        .iter()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+                {
+                    let mut bytes = Vec::with_capacity(32);
+                    for pair in encoded.as_bytes().chunks_exact(2) {
+                        let high = (pair[0] as char).to_digit(16).expect("validated hex digit");
+                        let low = (pair[1] as char).to_digit(16).expect("validated hex digit");
+                        bytes.push(((high << 4) | low) as u8);
+                    }
+                    Some(Box::new(Value::Blob(bytes)))
+                } else {
+                    None
+                };
+                Ok(Value::Option(decoded))
+            }
+            ("sha256" | "sha256_text" | "domain_sha256" | "to_hex" | "from_hex", _) => {
+                Err(error("ORNA-EVAL-TYPE"))
+            }
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+    fn base64(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
+        self.step()?;
+        match (name, values.as_slice()) {
+            ("encode", [Value::Blob(input)]) => {
+                if input.len() > self.limits.max_string_bytes {
+                    return Err(error("ORNA-EVAL-LIMIT"));
+                }
+                self.string(BASE64_STANDARD.encode(input)).map(Value::String)
+            }
+            ("decode", [Value::String(input)]) => {
+                if input.len() > self.limits.max_string_bytes {
+                    return Err(error("ORNA-EVAL-LIMIT"));
+                }
+                let decoded = BASE64_STANDARD
+                    .decode(input.as_bytes())
+                    .map_err(|_| error("ORNA-EVAL-ERROR"))?;
+                if decoded.len() > self.limits.max_string_bytes {
+                    return Err(error("ORNA-EVAL-LIMIT"));
+                }
+                Ok(Value::Blob(decoded))
+            }
+            ("encode" | "decode", _) => Err(error("ORNA-EVAL-TYPE")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
@@ -7655,6 +7767,9 @@ fn named_arguments(
         "bit_or" | "bit_and" | "bit_xor" => &["left", "right"],
         "bit_not" => &["value"],
         "shift_left" | "shift_right" => &["value", "count"],
+        "hash.sha256" | "hash.sha256_text" | "hash.to_hex" | "hash.from_hex"
+        | "base64.encode" | "base64.decode" => &["input"],
+        "hash.domain_sha256" => &["domain", "payload"],
         "chunk" => &["values", "size"],
         "flatten" | "unique" | "pairs" => &["values"],
         "distinct" | "count" => &["rows"],
@@ -7800,6 +7915,8 @@ enum StandardBindingKind {
     Bits,
     Stats,
     Time,
+    Hash,
+    Base64,
 }
 
 #[derive(Clone, Copy)]
@@ -7878,6 +7995,18 @@ const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
             "offset_at", "resolve_local", "duration.compact.format", "duration.clock.format",
             "duration.words.format", "duration.iso.format",
         ],
+    },
+    StandardBindingModule {
+        prefix: "std.hash.",
+        kind: StandardBindingKind::Hash,
+        operations: &[
+            "sha256", "sha256_text", "domain_sha256", "to_hex", "from_hex",
+        ],
+    },
+    StandardBindingModule {
+        prefix: "std.encoding.base64.",
+        kind: StandardBindingKind::Base64,
+        operations: &["encode", "decode"],
     },
 ];
 
