@@ -1,0 +1,20 @@
+if true {
+    let unknown_base = sys.MaintenanceJob
+        | union(sys.MaintenanceJob)
+        | filter(job => job.id >= 8);
+    let unknown_left = unknown_base
+        | filter(job => job.id >= 10);
+    let unknown_right = unknown_base
+        | filter(job => job.id >= 10);
+    let nested_unknown = unknown_left
+        | union(unknown_right);
+
+    sys.Storage
+        | filter(storage => storage.id >= 7)
+        | filter(storage => storage.id == 99)
+        | union(nested_unknown)
+        | filter(job => job.id >= 10)
+        | filter(job => job.id == 99)
+        | exists(job => true)
+        |? (failure => failure.code)
+} else { 0 }
