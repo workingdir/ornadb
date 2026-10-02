@@ -716,7 +716,9 @@ pub struct PlanByteCapHandoffRoute {
     pub output_bytes: Option<u64>,
 }
 
-/// One typed step in a nested storm byte-cap handoff route.
+/// One typed step in a nested storm byte-cap handoff route. A route path
+/// preserves every preceding handoff output in its ancestry, including when a
+/// later limit or cascade consumes that bounded result.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PlanByteCapScopeSegment {
@@ -2975,7 +2977,6 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
         branch_byte_scope_path.push(PlanByteCapScopeSegment::Branch {
             index: branch_index + 1,
         });
-        let mut branch_route_scope_path = branch_byte_scope_path.clone();
         for (limit_index, limit) in branch.nested_limits.iter().enumerate() {
             match (work, branch_cardinality.rows) {
                 (Some(total), Some(limit_work)) => match total.checked_add(limit_work) {
@@ -2991,9 +2992,6 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
             branch_cardinality = limit_cardinality(branch_cardinality, *limit);
             branch_byte_scope = format!("{branch_byte_scope}/limit{}", limit_index + 1);
             branch_byte_scope_path.push(PlanByteCapScopeSegment::Limit {
-                position: limit_index + 1,
-            });
-            branch_route_scope_path.push(PlanByteCapScopeSegment::Limit {
                 position: limit_index + 1,
             });
             for (rebind_index, rebind) in branch
@@ -3013,7 +3011,10 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
                         rebind_index + 1,
                         cascade_index + 1
                     );
-                    let mut handoff_scope_path = branch_route_scope_path.clone();
+                    // The typed destination path extends the actual bounded
+                    // source path. This carries earlier cascade outputs
+                    // through later cascades and limit positions.
+                    let mut handoff_scope_path = handoff_input_path.clone();
                     handoff_scope_path.push(PlanByteCapScopeSegment::Rebind {
                         position: rebind_index + 1,
                     });
