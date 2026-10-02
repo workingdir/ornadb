@@ -5930,6 +5930,86 @@ fn paired_pin_identities_survive_omissions_at_outer_and_middle_depths() {
 }
 
 #[test]
+fn unknown_direct_pair_sibling_suppresses_pin_promotion() {
+    let source = include_str!(
+        "fixtures/historical-direct-paired-pin-rebind-suppression.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-direct-paired-pin-rebind-suppression.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(result.diagnostics.len(), 1);
+    assert_eq!(
+        result.diagnostics[0].code(),
+        "ORNA-S012-UNRESOLVED",
+        "only the intentionally unknown sibling should be diagnosed: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("unknown_sibling_suppresses_direct_pair_rebind")
+        })
+        .expect("direct paired-rebind fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["unknown_sibling_suppresses_direct_pair_rebind"].ty
+    else {
+        panic!("direct paired-rebind proof must be a function");
+    };
+    let Type::Record(stages) = result.as_ref() else {
+        panic!("direct paired-rebind proof must retain its result record: {result:?}");
+    };
+    for (stage, expected_symbolic) in [("complete", 0), ("suppressed", 2)] {
+        let value = stages.get(stage).expect("computed pair value");
+        let Type::List(element) = value else {
+            panic!("{stage} must remain a computed historical list: {value:?}");
+        };
+        let Type::Record(row) = element.as_ref() else {
+            panic!("{stage} must retain computed checkpoint rows: {element:?}");
+        };
+        assert!(
+            matches!(row.get("capture"), Some(Type::Applied { base, .. }) if base == "sys.HistoricalCallable"),
+            "{stage} must keep real historical callable values: {row:?}"
+        );
+        assert_canonical_snapshot_context_maps(value);
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(value, &mut contexts);
+        assert_eq!(contexts.len(), 2, "{stage} lost a paired pin: {contexts:?}");
+        let symbolic = contexts
+            .iter()
+            .filter(|context| context.starts_with("selector:dynamic-call:"))
+            .count();
+        assert_eq!(
+            symbolic, expected_symbolic,
+            "{stage} must not promote only one sibling pin: {contexts:?}"
+        );
+        if stage == "complete" {
+            assert!(contexts.contains("selector:HEAD~60"));
+            assert!(contexts.contains("selector:HEAD~59"));
+        } else {
+            assert!(
+                contexts
+                    .iter()
+                    .all(|context| context.starts_with("selector:dynamic-call:")),
+                "an unknown sibling must leave both pair identities symbolic: {contexts:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn missing_outer_tuple_keeps_sibling_pins_symbolic_across_later_depths() {
     let source =
         include_str!("fixtures/historical-missing-outer-tuple-preserves-sibling-pins.orna");

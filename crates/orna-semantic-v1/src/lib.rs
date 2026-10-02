@@ -16688,13 +16688,42 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                     || contains_type_error(actual)
                     || !types_match(formal, actual))
         });
+    let paired_direct_binders = formal_parameters
+        .iter()
+        .filter_map(|formal| snapshot_ref_context_key(formal).and_then(snapshot_ref_binder_id))
+        .collect::<BTreeSet<_>>();
+    let incomplete_paired_direct_rebind = paired_direct_binders.len() > 1
+        && formal_parameters
+            .iter()
+            .enumerate()
+            .any(|(parameter_index, formal)| {
+                if snapshot_ref_context_key(formal)
+                    .and_then(snapshot_ref_binder_id)
+                    .is_none()
+                {
+                    return false;
+                }
+                let Some(argument_index) = call_argument_index_for_position(
+                    parameter_names,
+                    parameter_index,
+                    arguments,
+                ) else {
+                    return false;
+                };
+                argument_types
+                    .get(argument_index)
+                    .is_none_or(|actual| !is_contextual_snapshot_ref(actual))
+            });
     // The reference specifies pin identity but leaves recovery after a call
     // that cannot reach the callee unspecified. Treat its binding wave
     // transactionally:
     // a malformed tuple at any depth in an argument signature, or any missing
     // required argument, must not rebind otherwise valid siblings captured by
-    // the returned callable. Omitted defaults are valid.
-    let suppress_rebinding = nonreturning_argument || incomplete_argument;
+    // the returned callable. Paired direct pin parameters share that wave too;
+    // an unknown sibling must not promote the other pin alone. Omitted defaults
+    // are valid.
+    let suppress_rebinding =
+        nonreturning_argument || incomplete_argument || incomplete_paired_direct_rebind;
     if !suppress_rebinding {
         for (parameter_index, formal) in formal_parameters.iter().enumerate() {
             let Some(argument_index) = call_argument_index_for_position(
@@ -19730,6 +19759,56 @@ mod tests {
         assert_ne!(
             left, right,
             "suppression must keep same-named paired pin slots at distinct widths"
+        );
+    }
+
+    #[test]
+    fn unknown_direct_pair_sibling_suppresses_valid_pin_promotion() {
+        let left = contextual_snapshot_ref(
+            "selector:binder:pair.orna@10..18:parameter:left_pin",
+        );
+        let right = contextual_snapshot_ref(
+            "selector:binder:pair.orna@20..28:parameter:right_pin",
+        );
+        let result = Type::Record(BTreeMap::from([
+            ("left".into(), left.clone()),
+            ("right".into(), right.clone()),
+        ]));
+        let arguments = (0..2)
+            .map(|index| orna_syntax_v1::Argument {
+                name: None,
+                value: Expr::Name {
+                    text: format!("pair_pin_{index}"),
+                    span: SyntaxSpan::new(40 + index * 12, 48 + index * 12),
+                },
+                span: SyntaxSpan::new(40 + index * 12, 48 + index * 12),
+            })
+            .collect::<Vec<_>>();
+
+        let specialized = specialize_dynamic_parameter_snapshot_contexts(
+            &result,
+            &[left, right],
+            &BTreeSet::new(),
+            None,
+            &arguments,
+            &[contextual_snapshot_ref("selector:HEAD~12"), Type::Error],
+            &BTreeMap::new(),
+            &SyntaxSpan::new(30, 68),
+            None,
+        );
+
+        let mut contexts = BTreeSet::new();
+        collect_test_snapshot_contexts(&specialized, &mut contexts);
+        assert_eq!(contexts.len(), 2, "both pins must remain represented: {contexts:?}");
+        assert!(
+            contexts
+                .iter()
+                .all(|context| context.starts_with("selector:dynamic-call:")),
+            "an unknown pair sibling must suppress every sibling promotion: {contexts:?}"
+        );
+        assert!(
+            !contexts.iter().any(|context| context.contains("HEAD~12")),
+            "the valid sibling must not be promoted independently: {contexts:?}"
         );
     }
 
