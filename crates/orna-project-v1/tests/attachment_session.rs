@@ -12309,6 +12309,193 @@ fn chained_sibling_terminal_pairs_continue_from_latest_wave_tails() {
     }
 }
 
+#[test]
+fn nested_terminal_pair_chains_continue_across_three_rebound_depths() {
+    let package_source = include_str!("fixtures/attach-package.orna");
+    let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
+    let aliases = [
+        "archive",
+        "archive_copy",
+        "archive_copy_archive",
+        "archive_copy_archive_archive",
+        "archive_copy_archive_archive_archive",
+        "archive_copy_archive_archive_archive_archive",
+    ];
+    let write = |marker: &str, manifest: Option<&str>, message: &str| {
+        write_package_snapshot(shared_dir.path(), package_source, marker, manifest, message)
+    };
+
+    let leaves = ["900", "901", "902"]
+        .into_iter()
+        .map(|marker| write(marker, None, &format!("nested leaf {marker}")))
+        .collect::<Vec<_>>();
+    let child_initial_manifest = format!("{} {}\n", aliases[5], leaves[0]);
+    let child_initial = write(
+        "940",
+        Some(&child_initial_manifest),
+        "initial fifth-depth route",
+    );
+    let child_middle_manifest = format!("{} {}\n", aliases[5], leaves[1]);
+    let child_middle = write(
+        "941",
+        Some(&child_middle_manifest),
+        "middle fifth-depth route",
+    );
+    let child_final_manifest = format!("{} {}\n", aliases[5], leaves[2]);
+    let child_final = write(
+        "942",
+        Some(&child_final_manifest),
+        "final fifth-depth route",
+    );
+
+    let route_three_initial_manifest = format!("{} {}\n", aliases[4], child_initial);
+    let route_three_initial = write(
+        "930",
+        Some(&route_three_initial_manifest),
+        "initial third-depth route",
+    );
+    let route_three_middle_manifest = format!("{} {}\n", aliases[4], child_middle);
+    let route_three_middle = write(
+        "931",
+        Some(&route_three_middle_manifest),
+        "middle third-depth route",
+    );
+    let route_three_final_manifest = format!("{} {}\n", aliases[4], child_final);
+    let route_three_final = write(
+        "932",
+        Some(&route_three_final_manifest),
+        "final third-depth route",
+    );
+
+    let route_two_initial_manifest = format!("{} {}\n", aliases[3], route_three_initial);
+    let route_two_initial = write(
+        "920",
+        Some(&route_two_initial_manifest),
+        "initial second-depth route",
+    );
+    let route_two_chain_manifest = format!("{} {}\n", aliases[3], route_three_initial);
+    let route_two_chain = write(
+        "921",
+        Some(&route_two_chain_manifest),
+        "first pair second-depth route",
+    );
+    let route_two_deep_manifest = format!("{} {}\n", aliases[3], route_three_middle);
+    let route_two_deep = write(
+        "922",
+        Some(&route_two_deep_manifest),
+        "second pair second-depth route",
+    );
+
+    let route_one_initial_manifest = format!("{} {}\n", aliases[2], route_two_initial);
+    let route_one_initial = write(
+        "910",
+        Some(&route_one_initial_manifest),
+        "initial first-depth route",
+    );
+    let route_one_chain_manifest = format!("{} {}\n", aliases[2], route_two_chain);
+    let route_one_chain = write(
+        "911",
+        Some(&route_one_chain_manifest),
+        "first pair first-depth route",
+    );
+    let middle_manifest = format!("{} {}\n", aliases[1], route_one_initial);
+    let middle = write("980", Some(&middle_manifest), "initial root route");
+    let parent_manifest = format!("{} {}\n", aliases[0], middle);
+    let parent_commit = write("990", Some(&parent_manifest), "nested route root");
+
+    let loader = ProjectLoader::default();
+    let resolve_pin = |name: &str, commit: &str| {
+        PinnedDatabase::resolve(name.to_owned(), shared_repository.clone(), commit, loader).unwrap()
+    };
+    let resolver = PackageResolver::new(
+        aliases
+            .iter()
+            .map(|alias| ((*alias).to_owned(), shared_repository.clone())),
+        loader,
+    )
+    .unwrap();
+    let assert_pin = |session: &AttachedDatabaseSession, alias: &str, commit: &str| {
+        assert_eq!(
+            session.database(alias).unwrap().pin().commit().as_str(),
+            commit,
+            "unexpected pin for alias {alias}"
+        );
+    };
+    let parent = resolver
+        .resolve_for_parent(resolve_pin("app", &parent_commit))
+        .unwrap();
+    let history = resolver
+        .resolve_nested_rebind_path(
+            &parent,
+            &[
+                resolve_pin(aliases[0], &middle),
+                resolve_pin(aliases[1], &route_one_initial),
+            ],
+        )
+        .unwrap();
+
+    let first_pair = [
+        resolve_pin(aliases[1], &route_one_chain),
+        resolve_pin(aliases[2], &route_two_chain),
+    ];
+    let second_pair = [
+        resolve_pin(aliases[2], &route_two_deep),
+        resolve_pin(aliases[3], &route_three_middle),
+    ];
+    let third_pair = [
+        resolve_pin(aliases[3], &route_three_final),
+        resolve_pin(aliases[4], &child_final),
+    ];
+    let chained = resolver
+        .extend_nested_terminal_pair_chain(
+            &history,
+            &[first_pair.clone(), second_pair.clone(), third_pair.clone()],
+        )
+        .unwrap();
+
+    assert_eq!(chained.retained_wave(2).unwrap().len(), 2);
+    assert_pin(
+        &chained.retained_wave(2).unwrap()[1],
+        aliases[2],
+        &route_two_chain,
+    );
+    assert_eq!(chained.retained_wave(4).unwrap().len(), 2);
+    assert_pin(
+        &chained.retained_wave(4).unwrap()[1],
+        aliases[3],
+        &route_three_middle,
+    );
+    let last_pair_wave = chained.retained_wave(6).unwrap();
+    assert_eq!(last_pair_wave.len(), 2);
+    assert_pin(&last_pair_wave[0], aliases[2], &route_two_deep);
+    assert_pin(&last_pair_wave[1], aliases[3], &route_three_final);
+    assert_pin(&last_pair_wave[1], aliases[4], &child_final);
+    assert_module_route(&last_pair_wave[1], "main.orna", "= 932");
+    assert_pin(chained.final_session(), aliases[4], &child_final);
+    assert_pin(chained.final_session(), aliases[5], &leaves[2]);
+    assert_module_route(chained.final_session(), "main.orna", "= 942");
+    assert_module_route(
+        chained.final_session(),
+        "archive_copy_archive_archive_archive_archive.orna",
+        "= 902",
+    );
+
+    let invalid_third_pair = [
+        resolve_pin(aliases[3], &route_three_final),
+        resolve_pin("unavailable", &child_final),
+    ];
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_chain(
+            &history,
+            &[first_pair, second_pair, invalid_third_pair],
+        ),
+        Err(AttachmentError::AttachmentNotFound)
+    ));
+    assert_pin(history.final_session(), aliases[1], &route_one_initial);
+    assert_pin(history.final_session(), aliases[2], &route_two_initial);
+}
+
+
 fn assert_module_route(session: &AttachedDatabaseSession, path: &str, source_marker: &str) {
     assert!(
         session
