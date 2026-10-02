@@ -839,11 +839,11 @@ impl PackageResolver {
         Ok(SiblingRebindResolution { routes })
     }
 
-    /// Applies one identical terminal-depth pair to every sibling's current
-    /// final route. Each branch resolves from its own exact pins, retains its
-    /// displaced terminal route as the next wave, and keeps all prior waves.
-    /// The reference is silent on shared post-storm continuations; v1 resolves
-    /// siblings independently and returns no partial batch if any branch fails.
+    /// Applies one identical terminal-depth pair to the latest retained-wave
+    /// root of every sibling route. The reference is silent on continuing a
+    /// convergent post-storm pair; v1 uses the first snapshot in each latest
+    /// wave as that route's root, retains the displaced final session as its
+    /// own wave, and returns no partial batch if any branch fails.
     pub fn extend_sibling_terminal_pair_wave(
         &self,
         previous: &SiblingRebindResolution,
@@ -852,7 +852,19 @@ impl PackageResolver {
         let routes = previous
             .routes
             .iter()
-            .map(|route| self.extend_nested_terminal_pair(route, replacements.clone()))
+            .map(|route| {
+                let latest_wave = route
+                    .retained_wave_lengths
+                    .len()
+                    .checked_sub(1)
+                    .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+                self.extend_nested_terminal_pair_from_wave(
+                    route,
+                    latest_wave,
+                    0,
+                    replacements.clone(),
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(SiblingRebindResolution { routes })
     }
