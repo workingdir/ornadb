@@ -1572,6 +1572,11 @@ fn unknown_row_byte_caps_report_scoped_handoff_routes_by_nested_depth() {
             ],
             "input_scope": "root/storm1/branch1/limit1",
             "output_scope": "root/storm1/branch1/limit1/rebind1/cascade1",
+            "paired_scope_label": "root/storm1/branch1/limit1=>root/storm1/branch1/limit1/rebind1/cascade1",
+            "scope_labels": {
+                "input": "root/storm1/branch1/limit1",
+                "output": "root/storm1/branch1/limit1/rebind1/cascade1"
+            },
             "input_bytes": 2048,
             "output_bytes": 512,
         })
