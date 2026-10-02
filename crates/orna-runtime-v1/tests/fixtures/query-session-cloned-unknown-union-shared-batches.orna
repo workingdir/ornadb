@@ -1,0 +1,14 @@
+if true {
+    let unknown_operand = sys.MaintenanceJob
+        | filter(job => job.id >= 8);
+
+    sys.Storage
+        | filter(storage => storage.id >= 7)
+        | filter(storage => storage.id == 99)
+        | union(unknown_operand)
+        | union(unknown_operand)
+        | filter(job => job.id >= 10)
+        | filter(job => job.id == 99)
+        | exists(job => true)
+        |? (failure => failure.code)
+} else { 0 }
