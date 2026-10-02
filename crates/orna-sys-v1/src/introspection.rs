@@ -734,6 +734,8 @@ pub enum PlanByteCapScopeSegment {
     Rebind { position: usize },
     /// A one-based cascade position within a rebind.
     Cascade { index: usize },
+    /// The bounded output of a one-based cascade at a rebind position.
+    RebindCascadeOutput { position: usize, index: usize },
     /// A one-based nested storm position within a branch.
     NestedStorm { index: usize },
     /// The bounded output of a one-based nested storm within a branch.
@@ -3066,6 +3068,14 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
                     branch_cardinality = rebound;
                     branch_byte_scope = handoff_scope;
                     branch_byte_scope_path = handoff_scope_path;
+                    // Keep produced outputs distinct from cascade targets so later handoffs
+                    // retain provenance even when their estimates are unknown.
+                    branch_byte_scope_path.push(
+                        PlanByteCapScopeSegment::RebindCascadeOutput {
+                            position: rebind_index + 1,
+                            index: cascade_index + 1,
+                        },
+                    );
                 }
             }
         }
@@ -3632,6 +3642,11 @@ fn hash_byte_cap_scope_path(hash: &mut Sha256, path: &[PlanByteCapScopeSegment])
             }
             PlanByteCapScopeSegment::Cascade { index } => {
                 hash.update([4]);
+                hash.update((*index as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::RebindCascadeOutput { position, index } => {
+                hash.update([8]);
+                hash.update((*position as u64).to_be_bytes());
                 hash.update((*index as u64).to_be_bytes());
             }
             PlanByteCapScopeSegment::NestedStorm { index } => {
