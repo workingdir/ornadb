@@ -1551,6 +1551,7 @@ dependencies = [
  "orna-core",
  "orna-semantic-v1",
  "orna-syntax",
+ "orna-syntax-v1",
 ]
 
 [[package]]

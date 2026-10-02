@@ -1,0 +1,8 @@
+pub fn decode_canonical_text(input: Str): Int =
+    std.encoding.orna.decode(input, as: Int);
+
+pub fn decode_ovb_value(input: Blob): Int =
+    std.encoding.ovb.decode(input, as: Int);
+
+pub fn decode_json_value(input: Str): Int =
+    std.encoding.json.decode(input, as: Int);
