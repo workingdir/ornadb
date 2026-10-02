@@ -1,0 +1,83 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn cascade_at(root_pin: sys.SnapshotRef) = (
+    chained_factory(root_pin),
+    (bridge_pin: sys.SnapshotRef) => (
+        chained_factory(bridge_pin)().read,
+        (leaf_pin: sys.SnapshotRef) => (
+            chained_factory(leaf_pin)().read,
+            chained_factory(leaf_pin)().read(),
+        ),
+    ),
+);
+
+pub fn structure_at(
+    primary_pin: sys.SnapshotRef,
+    secondary_pin: sys.SnapshotRef,
+    tertiary_pin: sys.SnapshotRef,
+) = (
+    cascade_at(primary_pin),
+    (cascade_at(secondary_pin), cascade_at(tertiary_pin)),
+);
+
+pub fn tuple_chain_stages_remain_distinct_after_round_trip() {
+    let rolling = structure_at(
+        sys.snapshot("HEAD~80"),
+        sys.snapshot("HEAD~60"),
+        sys.snapshot("HEAD~40"),
+    );
+    let first = rolling;
+    rolling = structure_at(
+        sys.snapshot("HEAD~79"),
+        sys.snapshot("HEAD~59"),
+        sys.snapshot("HEAD~39"),
+    );
+    rolling = structure_at(
+        sys.snapshot("HEAD~78"),
+        sys.snapshot("HEAD~58"),
+        sys.snapshot("HEAD~38"),
+    );
+    rolling = structure_at(
+        sys.snapshot("HEAD~77"),
+        sys.snapshot("HEAD~57"),
+        sys.snapshot("HEAD~37"),
+    );
+    let intermediate = rolling;
+    rolling = structure_at(
+        sys.snapshot("HEAD~76"),
+        sys.snapshot("HEAD~56"),
+        sys.snapshot("HEAD~36"),
+    );
+    rolling = structure_at(
+        sys.snapshot("HEAD~75"),
+        sys.snapshot("HEAD~55"),
+        sys.snapshot("HEAD~35"),
+    );
+    rolling = structure_at(
+        sys.snapshot("HEAD~74"),
+        sys.snapshot("HEAD~54"),
+        sys.snapshot("HEAD~34"),
+    );
+    rolling = structure_at(
+        sys.snapshot("HEAD~73"),
+        sys.snapshot("HEAD~53"),
+        sys.snapshot("HEAD~33"),
+    );
+    rolling = first;
+    let returned = rolling;
+
+    let (_, (_, stage_3_tertiary)) = intermediate;
+    let (_, stage_3_chain) = stage_3_tertiary;
+    let (stage_3_bridge, _) = stage_3_chain(sys.snapshot("HEAD~27"));
+
+    let (_, (returned_secondary, _)) = returned;
+    let (_, returned_chain) = returned_secondary;
+    let (returned_bridge, _) = returned_chain(sys.snapshot("HEAD~50"));
+
+    [stage_3_bridge, returned_bridge]
+}
