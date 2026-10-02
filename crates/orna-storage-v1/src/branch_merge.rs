@@ -377,6 +377,17 @@ impl AppliedDepthFragmentRetryTransaction {
             appends: plan_signatures(appends),
         }
     }
+
+    fn touches_order(&self, order: u64) -> bool {
+        self.bindings
+            .iter()
+            .chain(&self.appends)
+            .any(|(transaction_order, _, _)| *transaction_order == order)
+            || self
+                .recoveries
+                .iter()
+                .any(|recovery| recovery.order == order)
+    }
 }
 
 /// Append-only tombstone history for committed paired merge plans.
@@ -857,6 +868,8 @@ impl BranchMergeTombstoneHistory {
     /// and the new fragment count replaces the old one. Its paired lineage
     /// position and depth-fragment submission mode remain reserved, while
     /// later buffered plans stay queued. No tombstone events are emitted.
+    /// Combined retry receipts that referenced this wave are invalidated, so
+    /// replay restores fragments cleared here.
     ///
     /// Returns [`BranchMergeTombstoneHistoryError::NoIncompleteDepthWave`] if
     /// this position has no incomplete buffered depth wave to recover.
@@ -883,10 +896,16 @@ impl BranchMergeTombstoneHistory {
             }) if fragments.len() < *previous_count => {
                 *previous_count = fragment_count;
                 fragments.clear();
-                Ok(())
             }
-            _ => Err(BranchMergeTombstoneHistoryError::NoIncompleteDepthWave { order }),
+            _ => return Err(BranchMergeTombstoneHistoryError::NoIncompleteDepthWave { order }),
         }
+        // Restart erased recovery fragments, so a prior combined-operation
+        // receipt touching this wave must not turn its replay into a no-op.
+        // Replaying the transaction rechecks its paired plans and restores the
+        // selected fragments while leaving unrelated cascade identities bound.
+        self.applied_fragment_retry_transactions
+            .retain(|transaction| !transaction.touches_order(order));
+        Ok(())
     }
 
     /// Atomically restarts several incomplete depth waves as one recovery
