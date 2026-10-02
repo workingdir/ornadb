@@ -143,7 +143,13 @@ fn int(value: i64) -> CanonicalValue {
 }
 
 fn capture_standard_gitlink(project_path: &Path, standard_snapshot: &str, message: &str) -> String {
-    git_output_at(project_path, &["add", "main.orna", ".gitmodules"]);
+    let mut staged_paths = vec!["main.orna", ".gitmodules"];
+    if project_path.join("snapshot_app.orna").is_file() {
+        staged_paths.push("snapshot_app.orna");
+    }
+    let mut add_arguments = vec!["add"];
+    add_arguments.extend(staged_paths);
+    git_output_at(project_path, &add_arguments);
     let gitlink = format!("160000,{standard_snapshot},stdlib/std");
     git_output_at(
         project_path,
@@ -800,8 +806,20 @@ fn project_module_executes_a_real_function_from_its_gitlink_pinned_std_snapshot(
 
     assert_eq!(project_v1.standard_profile().unwrap().snapshot(), snapshots[0]);
     assert_eq!(project_v6.standard_profile().unwrap().snapshot(), snapshots[5]);
-    assert_eq!(historical.submit("main.run()"), Ok(Some(int(8))));
-    assert_eq!(current.submit("main.run()"), Ok(Some(int(100_007))));
+    assert_eq!(historical.submit("use snapshot_app;"), Ok(None));
+    assert_eq!(current.submit("use snapshot_app;"), Ok(None));
+    assert_eq!(
+        historical
+            .submit("snapshot_app.value()")
+            .unwrap_or_else(|error| panic!("historical snapshot_app.value failed: {}", error.code())),
+        Some(int(8))
+    );
+    assert_eq!(
+        current
+            .submit("snapshot_app.value()")
+            .unwrap_or_else(|error| panic!("current snapshot_app.value failed: {}", error.code())),
+        Some(int(100_007))
+    );
 }
 
 #[test]
