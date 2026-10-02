@@ -5,6 +5,7 @@ use crate::{
     REFERENCE_STANDARD_BITS_PATH_V1, REFERENCE_STANDARD_QUERY_PATH_V1,
     REFERENCE_STANDARD_TEXT_PATH_V1, REFERENCE_STANDARD_STATS_PATH_V1,
     REFERENCE_STANDARD_TIME_PATH_V1,
+    REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1,
     REFERENCE_STANDARD_TIME_COMPACT_PATH_V1, REFERENCE_STANDARD_TIME_CLOCK_PATH_V1,
     REFERENCE_STANDARD_TIME_WORDS_PATH_V1, REFERENCE_STANDARD_TIME_ISO_PATH_V1,
     REFERENCE_STANDARD_OPTION_PATH_V1, REFERENCE_STANDARD_RESULT_PATH_V1,
@@ -59,6 +60,15 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert_eq!(sources[index].0, path);
         assert!(sources[index].1.contains(&format!("std.time.duration.{operation}.format")));
+    }
+    assert_eq!(sources[20].0, REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1);
+    for declaration in [
+        "pub fn is_leap_year(year: Int): Bool",
+        "pub fn days_in_month(year: Int, month: Int): Int?",
+        "pub fn is_valid_date(year: Int, month: Int, day: Int): Bool",
+        "pub fn day_of_year(year: Int, month: Int, day: Int): Int?",
+    ] {
+        assert!(sources[20].1.contains(declaration), "missing `{declaration}`");
     }
     assert_eq!(sources[11].0, REFERENCE_STANDARD_OPTION_PATH_V1);
     assert!(sources[11].1.contains("pub fn and_then<T, U>"));
@@ -166,6 +176,11 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     assert!(profile
         .verify_source(REFERENCE_STANDARD_ERROR_PATH_V1, &changed_error_source)
         .is_err());
+    let mut changed_calendar_source = sources[20].1.clone();
+    changed_calendar_source.push_str("\n// changed after the captured snapshot\n");
+    assert!(profile
+        .verify_source(REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1, &changed_calendar_source)
+        .is_err());
 
     let catalogue = reference_standard_catalogue_v1().expect("the standard module checks");
     for (path, source) in &sources[13..] {
@@ -188,6 +203,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     let collections_consumer = include_str!("fixtures/v1_collections_consumer.orna");
     let concurrent_consumer = include_str!("fixtures/v1_concurrent_consumer.orna");
     let error_result_consumer = include_str!("fixtures/v1_error_result_consumer.orna");
+    let time_calendar_consumer = include_str!("fixtures/v1_time_calendar_consumer.orna");
     for (path, source) in [
         ("list_consumer.orna", include_str!("fixtures/v1_list_consumer.orna")),
         ("map_consumer.orna", include_str!("fixtures/v1_map_consumer.orna")),
@@ -215,6 +231,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
             ModuleInput::new("collections_consumer.orna", collections_consumer),
             ModuleInput::new("concurrent_consumer.orna", concurrent_consumer),
             ModuleInput::new("error_result_consumer.orna", error_result_consumer),
+            ModuleInput::new("time_calendar_consumer.orna", time_calendar_consumer),
         ],
         &catalogue,
     );
