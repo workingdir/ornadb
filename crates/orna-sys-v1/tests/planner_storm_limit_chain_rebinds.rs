@@ -1,7 +1,8 @@
 use orna_sys_v1::{
     DisjunctStormBranchDescription, DisjunctStormCascadeDescription,
-    DisjunctStormLimitRebindDescription, ExplainError, ExpressionRef, ObjectRef, PlanDetail,
-    PlanNodeKind, QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
+    DisjunctStormLimitRebindDescription, ExplainError, ExpressionRef, ObjectRef,
+    PlanByteCapHandoffRoute, PlanDetail, PlanNodeKind, QueryPlanDescription,
+    QuerySourceStatistics, SnapshotRef,
     explain_query_with_disjunct_storm_branch_limit_chains,
 };
 
@@ -1408,6 +1409,56 @@ fn unknown_row_byte_caps_report_scoped_handoff_routes_by_nested_depth() {
                 "1:root/branch1/limit1=>root/branch1/limit1/rebind1/cascade1=1040>260;2:root/branch1/limit1/rebind1/cascade1/branch1/limit1=>root/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=1040>520".to_owned()
             )),
         ]
+    );
+    let first_routes = match filters[0]
+        .details()
+        .get("limit_chain_rebind_byte_cap_handoff_route_records")
+    {
+        Some(PlanDetail::ByteCapHandoffRoutes(routes)) => routes,
+        other => panic!("expected typed byte-cap handoff routes, got {other:?}"),
+    };
+    assert_eq!(first_routes.len(), 6);
+    assert_eq!(
+        first_routes[0],
+        PlanByteCapHandoffRoute {
+            depth: 1,
+            input_scope: "root/branch1/limit1".to_owned(),
+            output_scope: "root/branch1/limit1/rebind1/cascade1".to_owned(),
+            input_bytes: Some(2_048),
+            output_bytes: Some(512),
+        }
+    );
+    assert_eq!(
+        first_routes[2],
+        PlanByteCapHandoffRoute {
+            depth: 1,
+            input_scope: "root/branch1/limit1/rebind1/cascade2/limit2".to_owned(),
+            output_scope: "root/branch1/limit2/rebind2/cascade1".to_owned(),
+            input_bytes: Some(128),
+            output_bytes: Some(32),
+        }
+    );
+    assert_eq!(first_routes[3].depth, 2);
+    assert!(first_routes[3]
+        .input_scope
+        .contains("/cascade1/branch1/limit1"));
+
+    let serialized = serde_json::to_value(&explained).expect("explained plans serialize");
+    let serialized_stage = serialized["nodes"]
+        .as_array()
+        .expect("plan nodes serialize as an array")
+        .iter()
+        .find(|node| node["details"]["disjunct_storm"] == 1)
+        .expect("first storm node is serialized");
+    assert_eq!(
+        serialized_stage["details"]["limit_chain_rebind_byte_cap_handoff_route_records"][0],
+        serde_json::json!({
+            "depth": 1,
+            "input_scope": "root/branch1/limit1",
+            "output_scope": "root/branch1/limit1/rebind1/cascade1",
+            "input_bytes": 2048,
+            "output_bytes": 512,
+        })
     );
 }
 
