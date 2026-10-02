@@ -124,6 +124,8 @@ pub const REFERENCE_STANDARD_IO_PATH_V1: &str = "std/io/main.orna";
 pub const REFERENCE_STANDARD_FS_PATH_V1: &str = "std/io/fs.orna";
 pub const REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1: &str = "std/io/path.orna";
 pub const REFERENCE_STANDARD_IO_METADATA_PATH_V1: &str = "std/io/metadata.orna";
+pub const REFERENCE_STANDARD_IO_PROCESS_PATH_V1: &str = "std/io/process.orna";
+pub const REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1: &str = "std/io/environment.orna";
 pub const REFERENCE_STANDARD_CONCURRENT_PATH_V1: &str = "std/concurrent/main.orna";
 pub const REFERENCE_STANDARD_TEST_PATH_V1: &str = "std/test.orna";
 pub const REFERENCE_STANDARD_GENERICS_PATH_V1: &str = "std/generics.orna";
@@ -184,6 +186,10 @@ const REFERENCE_STANDARD_IO_PATH_MODULE_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/io/path.orna");
 const REFERENCE_STANDARD_IO_METADATA_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/io/metadata.orna");
+const REFERENCE_STANDARD_IO_PROCESS_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/io/process.orna");
+const REFERENCE_STANDARD_IO_ENVIRONMENT_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/io/environment.orna");
 const REFERENCE_STANDARD_CONCURRENT_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/concurrent/main.orna");
 const REFERENCE_STANDARD_TEST_SOURCE_V1: &str = include_str!("../../../stdlib/std/test.orna");
@@ -207,7 +213,7 @@ const REFERENCE_STANDARD_REFLECTION_SOURCE_V1: &str =
 /// This is the current source-backed standard boundary. The retained `orna.std/1`–
 /// `orna.std/11` APIs below model older, explicitly versioned snapshots.
 #[must_use]
-pub fn reference_standard_sources_v1() -> [(String, String); 44] {
+pub fn reference_standard_sources_v1() -> [(String, String); 46] {
     [
         (
             REFERENCE_STANDARD_MATH_PATH_V1.into(),
@@ -384,6 +390,14 @@ pub fn reference_standard_sources_v1() -> [(String, String); 44] {
         (
             REFERENCE_STANDARD_IO_METADATA_PATH_V1.into(),
             REFERENCE_STANDARD_IO_METADATA_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_IO_PROCESS_PATH_V1.into(),
+            REFERENCE_STANDARD_IO_PROCESS_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1.into(),
+            REFERENCE_STANDARD_IO_ENVIRONMENT_SOURCE_V1.into(),
         ),
     ]
 }

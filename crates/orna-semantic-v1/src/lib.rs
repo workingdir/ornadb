@@ -14244,6 +14244,24 @@ fn contains_type_error(ty: &Type) -> bool {
     }
 }
 
+/// `Bottom` is compatible during ordinary contextual checking, but a tuple
+/// containing a non-returning component is never produced as an argument.
+/// Reject that whole identity-binding wave while walking only value
+/// aggregates; a callback's Bottom result or an empty collection's element
+/// type does not make the callback/collection value itself incomplete.
+fn contains_nonreturning_aggregate_component(ty: &Type) -> bool {
+    match ty {
+        Type::Bottom => true,
+        Type::Record(fields) => fields
+            .values()
+            .any(contains_nonreturning_aggregate_component),
+        Type::Tuple(elements) => elements
+            .iter()
+            .any(contains_nonreturning_aggregate_component),
+        _ => false,
+    }
+}
+
 fn table_row_types_match(expected: &Type, actual: &Type, scope: &Scope) -> bool {
     let (Type::Named(expected), Type::Named(actual)) = (expected, actual) else {
         return false;
@@ -16471,6 +16489,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
         if matches!(formal, Type::Tuple(_))
             && (contains_type_error(formal)
                 || contains_type_error(actual)
+                || contains_nonreturning_aggregate_component(actual)
                 || !types_match(formal, actual))
         {
             continue;

@@ -48,7 +48,7 @@ pub use repl::{ReplSession, parse_admitted_repl};
 /// crate verifies its pinned profile before either boundary admits an import.
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
-pub fn reference_standard_sources() -> [(String, String); 44] {
+pub fn reference_standard_sources() -> [(String, String); 46] {
     orna_standard::reference_standard_sources_v1()
 }
 
@@ -9574,6 +9574,46 @@ mod tests {
         assert!(Arc::ptr_eq(left_shared_suffix, middle_shared_suffix));
         assert!(Arc::ptr_eq(left_shared_suffix, right_shared_batch));
         assert_eq!(middle_leaf.stages[0], RelationStage::Map(right_map));
+    }
+
+    #[test]
+    fn relation_plan_reuses_unknown_operand_batch_when_outer_union_composes() {
+        let unknown_first = Value::Bool(true);
+        let unknown_second = Value::Bool(false);
+        let outer_first = Value::Int(8.into());
+        let outer_second = Value::Int(9.into());
+        let unknown_batch = RelationPlan::union(
+            RelationPlan::new("UnknownLeft".into()),
+            RelationPlan::new("UnknownRight".into()),
+        )
+        .with_stage(RelationStage::Filter(vec![unknown_first.clone()]))
+        .with_stage(RelationStage::Filter(vec![unknown_second.clone()]));
+        let plan = RelationPlan::union(unknown_batch, RelationPlan::new("UnknownTail".into()))
+            .with_stage(RelationStage::Filter(vec![outer_first.clone()]))
+            .with_stage(RelationStage::Filter(vec![outer_second.clone()]))
+            .flush_filter_cascade();
+
+        let (unknown_union, unknown_tail) = plan.source_union.as_ref().expect("outer union");
+        let (left, right) = unknown_union
+            .source_union
+            .as_ref()
+            .expect("unknown operand union");
+        let batch_for = |leaf: &RelationPlan| match leaf.stages.as_slice() {
+            [RelationStage::SharedFilter(batch)] => Arc::clone(batch),
+            stages => panic!("expected one shared batch, got {stages:?}"),
+        };
+        let left_batch = batch_for(left);
+        let right_batch = batch_for(right);
+        assert!(Arc::ptr_eq(&left_batch, &right_batch));
+        assert_eq!(
+            left_batch.values().cloned().collect::<Vec<_>>(),
+            vec![unknown_first, unknown_second, outer_first.clone(), outer_second.clone()]
+        );
+        let tail_batch = batch_for(unknown_tail);
+        assert_eq!(
+            tail_batch.values().cloned().collect::<Vec<_>>(),
+            vec![outer_first, outer_second]
+        );
     }
 
     #[test]

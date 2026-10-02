@@ -1,7 +1,10 @@
+use std::collections::BTreeMap;
+
 use orna_sys_v1::{
     DisjunctStormBranchDescription, DisjunctStormCascadeDescription,
     DisjunctStormLimitRebindDescription, ExpressionRef, ObjectRef, PlanByteCapScopeSegment,
-    PlanDetail, PlanNodeKind, QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
+    PlanByteCapHandoffRoute, PlanDetail, PlanNodeKind, QueryPlanDescription,
+    QuerySourceStatistics, SnapshotRef,
     explain_query_with_disjunct_storm_branch_limit_chains,
 };
 
@@ -114,6 +117,34 @@ fn routes_for_stage<'a>(
     }
 }
 
+fn typed_route_summary(
+    routes: &[PlanByteCapHandoffRoute],
+    include_input_scope: bool,
+) -> String {
+    let mut by_depth = BTreeMap::<usize, Vec<String>>::new();
+    for route in routes {
+        let input_bytes = route
+            .input_bytes
+            .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        let output_bytes = route
+            .output_bytes
+            .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        let scope = if include_input_scope {
+            format!("{}=>{}", route.input_scope, route.output_scope)
+        } else {
+            route.output_scope.clone()
+        };
+        by_depth.entry(route.depth).or_default().push(format!(
+            "{scope}={input_bytes}>{output_bytes}"
+        ));
+    }
+    by_depth
+        .iter()
+        .map(|(depth, routes)| format!("{depth}:{}", routes.join(",")))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
 #[test]
 fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
     let parsed = orna_syntax_v1::parse_module(FIXTURE);
@@ -140,8 +171,8 @@ fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
     let third_stage_routes = routes_for_stage(&explained, 3);
     for (stage, prefix) in [
         (1, "root/storm1/"),
-        (2, "root/storm1/output/storm2/"),
-        (3, "root/storm1/output/storm2/output/storm3/"),
+        (2, "root/storm1/storm_output1/storm2/"),
+        (3, "root/storm1/storm_output1/storm2/storm_output2/storm3/"),
     ] {
         let filter = explained
             .nodes()
@@ -158,6 +189,21 @@ fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
             Some(PlanDetail::Text(scopes)) => scopes,
             other => panic!("expected handoff scopes by depth, got {other:?}"),
         };
+        assert_eq!(
+            scope_summary,
+            &typed_route_summary(routes_for_stage(&explained, stage), false)
+        );
+        let route_summary = match filter
+            .details()
+            .get("limit_chain_rebind_byte_cap_handoff_routes_by_depth")
+        {
+            Some(PlanDetail::Text(routes)) => routes,
+            other => panic!("expected routes by depth, got {other:?}"),
+        };
+        assert_eq!(
+            route_summary,
+            &typed_route_summary(routes_for_stage(&explained, stage), true)
+        );
         for depth in scope_summary.split(';') {
             let (_, scopes) = depth.split_once(':').expect("depth scope entry");
             for handoff in scopes.split(',') {
@@ -243,16 +289,16 @@ fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
             &route.input_path[..post_storm_prefix.len()],
             post_storm_prefix
         );
-        assert!(route.input_scope.starts_with("root/storm1/output/storm2/"));
-        assert!(route.output_scope.starts_with("root/storm1/output/storm2/"));
+        assert!(route.input_scope.starts_with("root/storm1/storm_output1/storm2/"));
+        assert!(route.output_scope.starts_with("root/storm1/storm_output1/storm2/"));
     }
     assert_eq!(
         post_storm_routes[2].input_scope,
-        "root/storm1/output/storm2/branch1/limit1/rebind1/cascade1/rebind_output1_1/limit2/rebind2/cascade1/rebind_output2_1/branch_output1/nested1/branch1/limit1/limit2"
+        "root/storm1/storm_output1/storm2/branch1/limit1/rebind1/cascade1/rebind_output1_1/limit2/rebind2/cascade1/rebind_output2_1/branch_output1/nested1/branch1/limit1/limit2"
     );
     assert_eq!(
         post_storm_routes[3].input_scope,
-        "root/storm1/output/storm2/branch1/limit1/rebind1/cascade1/rebind_output1_1/limit2/rebind2/cascade1/rebind_output2_1/branch_output1/nested1/nested_output1/nested2/branch1/limit1/limit2"
+        "root/storm1/storm_output1/storm2/branch1/limit1/rebind1/cascade1/rebind_output1_1/limit2/rebind2/cascade1/rebind_output2_1/branch_output1/nested1/nested_output1/nested2/branch1/limit1/limit2"
     );
     let third_stage_prefix = [
         PlanByteCapScopeSegment::StormStage { index: 1 },
@@ -272,18 +318,18 @@ fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
         );
         assert!(route
             .input_scope
-            .starts_with("root/storm1/output/storm2/output/storm3/"));
+            .starts_with("root/storm1/storm_output1/storm2/storm_output2/storm3/"));
         assert!(route
             .output_scope
-            .starts_with("root/storm1/output/storm2/output/storm3/"));
+            .starts_with("root/storm1/storm_output1/storm2/storm_output2/storm3/"));
     }
     assert_eq!(
         third_stage_routes[2].input_scope,
-        "root/storm1/output/storm2/output/storm3/branch1/limit1/rebind1/cascade1/rebind_output1_1/limit2/rebind2/cascade1/rebind_output2_1/branch_output1/nested1/branch1/limit1/limit2"
+        "root/storm1/storm_output1/storm2/storm_output2/storm3/branch1/limit1/rebind1/cascade1/rebind_output1_1/limit2/rebind2/cascade1/rebind_output2_1/branch_output1/nested1/branch1/limit1/limit2"
     );
     assert_eq!(
         third_stage_routes[3].input_scope,
-        "root/storm1/output/storm2/output/storm3/branch1/limit1/rebind1/cascade1/rebind_output1_1/limit2/rebind2/cascade1/rebind_output2_1/branch_output1/nested1/nested_output1/nested2/branch1/limit1/limit2"
+        "root/storm1/storm_output1/storm2/storm_output2/storm3/branch1/limit1/rebind1/cascade1/rebind_output1_1/limit2/rebind2/cascade1/rebind_output2_1/branch_output1/nested1/nested_output1/nested2/branch1/limit1/limit2"
     );
     assert!(
         post_storm_routes[2]
