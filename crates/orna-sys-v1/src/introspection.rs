@@ -2080,6 +2080,10 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             .iter()
             .flat_map(|branch| disjunct_storm_predicates(&branch.nested_storms))
             .collect::<Vec<_>>();
+        let has_nested_cascades = storm
+            .branches
+            .iter()
+            .any(|branch| !branch.nested_storms.is_empty());
         let limit_chain_rebind_shapes = storm
             .branches
             .iter()
@@ -2275,6 +2279,15 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
                 PlanDetail::Integer(storm_index),
             ),
         ]);
+        if has_nested_cascades {
+            details.insert(
+                "nested_storm_input_scope".to_owned(),
+                PlanDetail::Text(
+                    "bounded_branch_output_after_limits_rebinds_and_conjuncts_then_prior_nested_storm_outputs"
+                        .to_owned(),
+                ),
+            );
+        }
         if overflowed {
             record_work_overflow(&mut details);
         }
