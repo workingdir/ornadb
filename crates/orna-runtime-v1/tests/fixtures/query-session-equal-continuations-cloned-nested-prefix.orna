@@ -1,10 +1,11 @@
 if true {
     let unknown_base = sys.MaintenanceJob
-        | union(sys.MaintenanceJob)
         | filter(job => job.id >= 8);
-    let unknown_left = unknown_base
+    let nested_prefix = unknown_base
+        | union(unknown_base);
+    let unknown_left = nested_prefix
         | filter(job => job.id >= 10);
-    let unknown_right = unknown_base
+    let unknown_right = nested_prefix
         | filter(job => job.id >= 10);
     let nested_unknown = unknown_left
         | union(unknown_right);
