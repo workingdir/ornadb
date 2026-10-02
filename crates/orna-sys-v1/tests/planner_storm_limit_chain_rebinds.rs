@@ -1470,6 +1470,7 @@ fn unknown_row_byte_caps_report_scoped_handoff_routes_by_nested_depth() {
             PlanByteCapScopeSegment::Limit { position: 1 },
             PlanByteCapScopeSegment::Rebind { position: 1 },
             PlanByteCapScopeSegment::Cascade { index: 1 },
+            PlanByteCapScopeSegment::RebindCascadeOutput { position: 1, index: 1 },
             PlanByteCapScopeSegment::Rebind { position: 1 },
             PlanByteCapScopeSegment::Cascade { index: 2 },
         ]
@@ -1484,8 +1485,10 @@ fn unknown_row_byte_caps_report_scoped_handoff_routes_by_nested_depth() {
                 PlanByteCapScopeSegment::Limit { position: 1 },
                 PlanByteCapScopeSegment::Rebind { position: 1 },
                 PlanByteCapScopeSegment::Cascade { index: 1 },
+                PlanByteCapScopeSegment::RebindCascadeOutput { position: 1, index: 1 },
                 PlanByteCapScopeSegment::Rebind { position: 1 },
                 PlanByteCapScopeSegment::Cascade { index: 2 },
+                PlanByteCapScopeSegment::RebindCascadeOutput { position: 1, index: 2 },
                 PlanByteCapScopeSegment::Limit { position: 2 },
             ],
             output_path: vec![
@@ -1494,8 +1497,10 @@ fn unknown_row_byte_caps_report_scoped_handoff_routes_by_nested_depth() {
                 PlanByteCapScopeSegment::Limit { position: 1 },
                 PlanByteCapScopeSegment::Rebind { position: 1 },
                 PlanByteCapScopeSegment::Cascade { index: 1 },
+                PlanByteCapScopeSegment::RebindCascadeOutput { position: 1, index: 1 },
                 PlanByteCapScopeSegment::Rebind { position: 1 },
                 PlanByteCapScopeSegment::Cascade { index: 2 },
+                PlanByteCapScopeSegment::RebindCascadeOutput { position: 1, index: 2 },
                 PlanByteCapScopeSegment::Limit { position: 2 },
                 PlanByteCapScopeSegment::Rebind { position: 2 },
                 PlanByteCapScopeSegment::Cascade { index: 1 },
@@ -1810,6 +1815,7 @@ fn typed_handoff_routes_preserve_nested_storm_outputs_across_rebinds() {
             PlanByteCapScopeSegment::Limit { position: 1 },
             PlanByteCapScopeSegment::Rebind { position: 1 },
             PlanByteCapScopeSegment::Cascade { index: 1 },
+            PlanByteCapScopeSegment::RebindCascadeOutput { position: 1, index: 1 },
         ];
         for prior_nested in 1..=nested_index {
             expected_input_path.push(PlanByteCapScopeSegment::NestedStorm {
@@ -1853,7 +1859,7 @@ fn typed_handoff_routes_preserve_nested_storm_outputs_across_rebinds() {
             .iter()
             .find(|node| node["details"]["disjunct_storm"] == 1)
             .unwrap()["details"]["limit_chain_rebind_byte_cap_handoff_route_records"][3]
-            ["input_path"][8],
+            ["input_path"][9],
         serde_json::json!({ "kind": "nested_storm_output", "index": 2 })
     );
 }
@@ -2001,7 +2007,10 @@ fn typed_handoff_routes_preserve_nested_outputs_with_unknown_rows() {
         ]
     );
     let mut second_limit_path = routes[0].output_path.clone();
-    second_limit_path.push(PlanByteCapScopeSegment::Limit { position: 2 });
+    second_limit_path.extend([
+        PlanByteCapScopeSegment::RebindCascadeOutput { position: 1, index: 1 },
+        PlanByteCapScopeSegment::Limit { position: 2 },
+    ]);
     assert_eq!(routes[1].input_path, second_limit_path);
     second_limit_path.extend([
         PlanByteCapScopeSegment::Rebind { position: 2 },
@@ -2011,6 +2020,10 @@ fn typed_handoff_routes_preserve_nested_outputs_with_unknown_rows() {
 
     let mut first_nested_input = routes[1].output_path.clone();
     first_nested_input.extend([
+        PlanByteCapScopeSegment::RebindCascadeOutput {
+            position: 2,
+            index: 1,
+        },
         PlanByteCapScopeSegment::NestedStorm { index: 1 },
         PlanByteCapScopeSegment::Branch { index: 1 },
         PlanByteCapScopeSegment::Limit { position: 1 },
@@ -2024,6 +2037,10 @@ fn typed_handoff_routes_preserve_nested_outputs_with_unknown_rows() {
 
     let mut second_nested_input = routes[1].output_path.clone();
     second_nested_input.extend([
+        PlanByteCapScopeSegment::RebindCascadeOutput {
+            position: 2,
+            index: 1,
+        },
         PlanByteCapScopeSegment::NestedStorm { index: 1 },
         PlanByteCapScopeSegment::NestedStormOutput { index: 1 },
         PlanByteCapScopeSegment::NestedStorm { index: 2 },
@@ -2139,7 +2156,10 @@ fn typed_handoff_routes_preserve_nested_outputs_after_unknown_rebinds() {
         ]
     );
     let mut second_limit_input = routes[0].output_path.clone();
-    second_limit_input.push(PlanByteCapScopeSegment::Limit { position: 2 });
+    second_limit_input.extend([
+        PlanByteCapScopeSegment::RebindCascadeOutput { position: 1, index: 1 },
+        PlanByteCapScopeSegment::Limit { position: 2 },
+    ]);
     assert_eq!(routes[1].input_path, second_limit_input);
     second_limit_input.extend([
         PlanByteCapScopeSegment::Rebind { position: 2 },
@@ -2149,6 +2169,10 @@ fn typed_handoff_routes_preserve_nested_outputs_after_unknown_rebinds() {
 
     let mut first_nested_input = routes[1].output_path.clone();
     first_nested_input.extend([
+        PlanByteCapScopeSegment::RebindCascadeOutput {
+            position: 2,
+            index: 1,
+        },
         PlanByteCapScopeSegment::NestedStorm { index: 1 },
         PlanByteCapScopeSegment::Branch { index: 1 },
         PlanByteCapScopeSegment::Limit { position: 1 },
@@ -2157,6 +2181,10 @@ fn typed_handoff_routes_preserve_nested_outputs_after_unknown_rebinds() {
 
     let mut second_nested_input = routes[1].output_path.clone();
     second_nested_input.extend([
+        PlanByteCapScopeSegment::RebindCascadeOutput {
+            position: 2,
+            index: 1,
+        },
         PlanByteCapScopeSegment::NestedStorm { index: 1 },
         PlanByteCapScopeSegment::NestedStormOutput { index: 1 },
         PlanByteCapScopeSegment::NestedStorm { index: 2 },
@@ -2167,6 +2195,10 @@ fn typed_handoff_routes_preserve_nested_outputs_after_unknown_rebinds() {
 
     let mut third_nested_input = routes[1].output_path.clone();
     third_nested_input.extend([
+        PlanByteCapScopeSegment::RebindCascadeOutput {
+            position: 2,
+            index: 1,
+        },
         PlanByteCapScopeSegment::NestedStorm { index: 1 },
         PlanByteCapScopeSegment::NestedStormOutput { index: 1 },
         PlanByteCapScopeSegment::NestedStorm { index: 2 },
@@ -2295,7 +2327,10 @@ fn typed_handoff_routes_preserve_ancestry_through_unknown_nested_limit_chains() 
         ]
     );
     let mut outer_second_limit_input = routes[0].output_path.clone();
-    outer_second_limit_input.push(PlanByteCapScopeSegment::Limit { position: 2 });
+    outer_second_limit_input.extend([
+        PlanByteCapScopeSegment::RebindCascadeOutput { position: 1, index: 1 },
+        PlanByteCapScopeSegment::Limit { position: 2 },
+    ]);
     assert_eq!(routes[1].input_path, outer_second_limit_input);
     outer_second_limit_input.extend([
         PlanByteCapScopeSegment::Rebind { position: 2 },
@@ -2305,17 +2340,22 @@ fn typed_handoff_routes_preserve_ancestry_through_unknown_nested_limit_chains() 
 
     let mut first_nested_limit_input = routes[1].output_path.clone();
     first_nested_limit_input.extend([
+        PlanByteCapScopeSegment::RebindCascadeOutput { position: 2, index: 1 },
         PlanByteCapScopeSegment::NestedStorm { index: 1 },
         PlanByteCapScopeSegment::Branch { index: 1 },
         PlanByteCapScopeSegment::Limit { position: 1 },
     ]);
     assert_eq!(routes[2].input_path, first_nested_limit_input);
     let mut first_nested_second_limit_input = routes[2].output_path.clone();
-    first_nested_second_limit_input.push(PlanByteCapScopeSegment::Limit { position: 2 });
+    first_nested_second_limit_input.extend([
+        PlanByteCapScopeSegment::RebindCascadeOutput { position: 1, index: 1 },
+        PlanByteCapScopeSegment::Limit { position: 2 },
+    ]);
     assert_eq!(routes[3].input_path, first_nested_second_limit_input);
 
     let mut second_nested_limit_input = routes[1].output_path.clone();
     second_nested_limit_input.extend([
+        PlanByteCapScopeSegment::RebindCascadeOutput { position: 2, index: 1 },
         PlanByteCapScopeSegment::NestedStorm { index: 1 },
         PlanByteCapScopeSegment::NestedStormOutput { index: 1 },
         PlanByteCapScopeSegment::NestedStorm { index: 2 },
@@ -2326,6 +2366,7 @@ fn typed_handoff_routes_preserve_ancestry_through_unknown_nested_limit_chains() 
 
     let mut third_nested_limit_input = routes[1].output_path.clone();
     third_nested_limit_input.extend([
+        PlanByteCapScopeSegment::RebindCascadeOutput { position: 2, index: 1 },
         PlanByteCapScopeSegment::NestedStorm { index: 1 },
         PlanByteCapScopeSegment::NestedStormOutput { index: 1 },
         PlanByteCapScopeSegment::NestedStorm { index: 2 },
@@ -2336,7 +2377,10 @@ fn typed_handoff_routes_preserve_ancestry_through_unknown_nested_limit_chains() 
     ]);
     assert_eq!(routes[6].input_path, third_nested_limit_input);
     let mut third_nested_second_limit_input = routes[6].output_path.clone();
-    third_nested_second_limit_input.push(PlanByteCapScopeSegment::Limit { position: 2 });
+    third_nested_second_limit_input.extend([
+        PlanByteCapScopeSegment::RebindCascadeOutput { position: 1, index: 1 },
+        PlanByteCapScopeSegment::Limit { position: 2 },
+    ]);
     assert_eq!(routes[7].input_path, third_nested_second_limit_input);
 
     let serialized = serde_json::to_value(&explained).expect("explained plans serialize");
