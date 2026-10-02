@@ -269,6 +269,8 @@ pub struct BranchMergeTombstoneEvent {
 pub enum BranchMergeTombstoneHistoryError {
     /// The supplied step is not the next lineage position.
     OutOfOrder { expected: u64, actual: u64 },
+    /// This position is already buffered or has already been released.
+    DuplicateOrStale { order: u64 },
     /// The history already consumed the final representable lineage position.
     OrderExhausted,
 }
@@ -280,17 +282,24 @@ pub enum BranchMergeTombstoneHistoryError {
 /// appends its table/key-ordered exact deletions without deduplicating prior
 /// events, and advances the position even when a restore wave has no new
 /// tombstones. A later deletion of a restored key is therefore a new event at
-/// its own commit position. A paired step is checked and appended atomically.
+/// its own commit position. Concurrent completions may be submitted out of
+/// order; future deltas wait until every earlier paired position is present.
+/// A paired step is checked and appended atomically.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeTombstoneHistory {
     next_order: Option<u64>,
     events: Vec<BranchMergeTombstoneEvent>,
+    pending_deltas: BTreeMap<u64, Vec<(ObjectId, CanonicalValue)>>,
 }
 
 impl BranchMergeTombstoneHistory {
     /// Starts history after the caller's already-committed prefix.
     pub fn new(first_order: u64) -> Self {
-        Self { next_order: Some(first_order), events: Vec::new() }
+        Self {
+            next_order: Some(first_order),
+            events: Vec::new(),
+            pending_deltas: BTreeMap::new(),
+        }
     }
 
     /// Appends one plan emitted by [`BranchMergePlanSequencer`] at its next
@@ -309,11 +318,39 @@ impl BranchMergeTombstoneHistory {
             });
         }
 
-        self.events.extend(step.ordered_row_tombstones.iter().map(|(table, key)| {
-            BranchMergeTombstoneEvent { order: step.order, table: *table, key: key.clone() }
-        }));
-        self.next_order = expected.checked_add(1);
-        Ok(())
+        self.submit(step).map(|_| ())
+    }
+
+    /// Submits a completed paired plan, buffering future lineage positions
+    /// until the missing prefix arrives. Returns only the new contiguous
+    /// tombstone events released by this submission. Repeated or stale
+    /// positions are rejected without changing buffered or committed history.
+    pub fn submit(
+        &mut self,
+        step: &SequencedBranchMergePlan,
+    ) -> Result<Vec<BranchMergeTombstoneEvent>, BranchMergeTombstoneHistoryError> {
+        let Some(expected) = self.next_order else {
+            return Err(BranchMergeTombstoneHistoryError::OrderExhausted);
+        };
+        if step.order < expected || self.pending_deltas.contains_key(&step.order) {
+            return Err(BranchMergeTombstoneHistoryError::DuplicateOrStale {
+                order: step.order,
+            });
+        }
+
+        self.pending_deltas.insert(step.order, step.ordered_row_tombstones.clone());
+        let first_new_event = self.events.len();
+        while let Some(order) = self.next_order {
+            let Some(delta) = self.pending_deltas.remove(&order) else {
+                break;
+            };
+            self.events.extend(delta.into_iter().map(|(table, key)| {
+                BranchMergeTombstoneEvent { order, table, key }
+            }));
+            self.next_order = order.checked_add(1);
+        }
+
+        Ok(self.events[first_new_event..].to_vec())
     }
 
     /// Returns the next lineage position required by this history.
