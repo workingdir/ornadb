@@ -5986,8 +5986,36 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
             && *fingerprint == target_fingerprint
             && result == &expected_result
     ));
-    let mut snapshots = vec![(pinned_request, pinned_snapshot)];
-    let mut sequence = 4;
+    // The reference does not specify cache lifetime for completed status queries.
+    // Treat each query request ID as its own pinned snapshot identity, even when
+    // the paired queries target the same completed request and fingerprint.
+    let paired_request = status_request([250; 16]);
+    let paired_snapshot = block_on(host.dispatch_frame(
+        [5; 16],
+        4,
+        Frame::Binary(paired_request.clone()),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the second query in the completed snapshot pair is pinned independently");
+    assert!(matches!(
+        &paired_snapshot.message,
+        Message::RequestStatusResult {
+            target,
+            state: orna_protocol_v1::RequestState::Terminal,
+            fingerprint: Some(fingerprint),
+            result: Some(result),
+        } if *target == [81; 16]
+            && *fingerprint == target_fingerprint
+            && result == &expected_result
+    ));
+    assert_ne!(pinned_snapshot.request, paired_snapshot.request);
+    let mut snapshots = vec![
+        (pinned_request, pinned_snapshot),
+        (paired_request, paired_snapshot),
+    ];
+    let mut sequence = 5;
     let mut current_owner = owner;
     drop(host);
 
@@ -6046,29 +6074,41 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
                 &mut application,
             );
 
-            let fresh_request = status_request([83 + handoff * 3 + reconnect; 16]);
-            let fresh = block_on(host.dispatch_frame(
+            let first_pair_request = 83 + handoff * 6 + reconnect * 2;
+            let mut fresh_pair = Vec::with_capacity(2);
+            for request_id in [first_pair_request, first_pair_request + 1] {
+                let fresh_request = status_request([request_id; 16]);
+                let fresh = block_on(host.dispatch_frame(
+                    current_attachment,
+                    sequence,
+                    Frame::Binary(fresh_request.clone()),
+                    &mut application,
+                ))
+                .unwrap()
+                .response
+                .expect("each fresh query in the reconnect pair observes the terminal result");
+                assert!(matches!(
+                    &fresh.message,
+                    Message::RequestStatusResult {
+                        target,
+                        state: orna_protocol_v1::RequestState::Terminal,
+                        fingerprint: Some(fingerprint),
+                        result: Some(result),
+                    } if *target == [81; 16]
+                        && *fingerprint == target_fingerprint
+                        && result == &expected_result
+                ));
+                snapshots.push((fresh_request, fresh.clone()));
+                fresh_pair.push((snapshots.last().unwrap().0.clone(), fresh));
+                sequence += 1;
+            }
+            replay_durable_status_snapshots_reverse(
+                &mut host,
                 current_attachment,
-                sequence,
-                Frame::Binary(fresh_request.clone()),
+                &fresh_pair,
+                &mut sequence,
                 &mut application,
-            ))
-            .unwrap()
-            .response
-            .expect("a fresh query still observes the terminal result");
-            assert!(matches!(
-                &fresh.message,
-                Message::RequestStatusResult {
-                    target,
-                    state: orna_protocol_v1::RequestState::Terminal,
-                    fingerprint: Some(fingerprint),
-                    result: Some(result),
-                } if *target == [81; 16]
-                    && *fingerprint == target_fingerprint
-                    && result == &expected_result
-            ));
-            snapshots.push((fresh_request, fresh));
-            sequence += 1;
+            );
         }
 
         current_owner = replacement;
