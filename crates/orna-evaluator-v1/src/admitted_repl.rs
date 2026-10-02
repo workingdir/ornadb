@@ -4,8 +4,8 @@
 //! immutable project and optional verified standard sources, then receives an
 //! isolated session which parses source once, stages semantic state, rejects
 //! effects before evaluation, and publishes semantic/runtime successors
-//! together. It intentionally does not provide tables, activation writes,
-//! clocks, external effects, or presentation execution.
+//! together. Ordinary pure submission has no external effects; the explicit
+//! host-binding path admits only capabilities installed by the caller.
 
 use orna_foundation_v1::{
     CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, SafeText,
@@ -314,6 +314,43 @@ impl AdmittedReplSession {
         }
         let mut runtime = self.runtime.clone();
         let value = match runtime.submit_admitted(&input).map_err(ReplError::runtime) {
+            Ok(value) => value,
+            Err(error) => return Err(self.publish_failure(error)),
+        };
+        let mut semantic = self.semantic.clone();
+        if semantic.commit(admission).is_err() {
+            return Err(self.publish_failure(ReplError::fixed("ORNA-REPL-COMMIT")));
+        }
+        runtime.set_last_status(
+            CanonicalValue::new(orna_foundation_v1::OvbRaw::Null).expect("null is canonical"),
+        );
+        self.runtime = runtime;
+        self.semantic = semantic;
+        Ok(value)
+    }
+
+    /// Executes a checked input with explicitly installed native sys providers.
+    /// Environment names, process executables and roots, and clock waits remain
+    /// bounded by the capabilities supplied in `bindings`. Missing providers
+    /// fail closed; this path does not grant database effects.
+    pub fn submit_with_sys_host_bindings(
+        &mut self,
+        source: &str,
+        bindings: &mut crate::SysHostBindingRegistry,
+    ) -> Result<Option<CanonicalValue>, ReplError> {
+        let input = match self.parse(source) {
+            Ok(input) => input,
+            Err(error) => return Err(self.publish_failure(error)),
+        };
+        let admission = match self.semantic.stage(&input).map_err(semantic_error) {
+            Ok(admission) => admission,
+            Err(error) => return Err(self.publish_failure(error)),
+        };
+        let mut runtime = self.runtime.clone();
+        let value = match runtime
+            .submit_admitted_with_effects(&input, bindings)
+            .map_err(ReplError::runtime)
+        {
             Ok(value) => value,
             Err(error) => return Err(self.publish_failure(error)),
         };

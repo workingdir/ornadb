@@ -18,8 +18,9 @@ use orna_live_v1::{
 };
 use orna_protocol_v1::{Envelope, Message, PresentNode, ResultStatus};
 use orna_runtime_v1::{
-    NoFault, RuntimeActivationContext, RuntimeError, RuntimePublicationMetadataRows,
-    RuntimeTableActivationSnapshot, RuntimeTableRows, StagedTableActivation, TableMutation,
+    NoFault, RequestIdentity, RuntimeActivationContext, RuntimeError,
+    RuntimePublicationMetadataRows, RuntimeTableActivationSnapshot, RuntimeTableRows,
+    StagedTableActivation, TableMutation,
 };
 use orna_semantic_v1::{
     Catalogue, ModuleInput, Namespace, SymbolKind, TableSchema, analyze_with_catalogue,
@@ -426,6 +427,75 @@ impl ApplicationAuthority {
         StagedTableActivation::from_source(context, mutations, digest, Arc::new(NoFault))
             .map_err(|error: RuntimeError| ApplicationError::Runtime(error.to_string()))
     }
+
+    fn stage_source_mutations(
+        &self,
+        context: RuntimeActivationContext,
+        mutations: Vec<TableMutation>,
+        request: Option<RequestIdentity>,
+    ) -> Result<StagedTableActivation, ApplicationError> {
+        let activation_digest = Self::canonical_digest(&context, &mutations)?;
+        let mutations = mutations
+            .iter()
+            .enumerate()
+            .map(|(ordinal, mutation)| {
+                let mut digest = Sha256::new();
+                digest.update(b"ORNA-SOURCE-ACTIVATION-MUTATION\0");
+                digest.update(activation_digest);
+                if let Some(request) = request {
+                    digest.update(b"ORNA-SOURCE-REQUEST\0");
+                    digest.update(request.session_id);
+                    digest.update(request.request_id);
+                }
+                digest.update((ordinal as u64).to_be_bytes());
+                digest.update(mutation.id());
+                let id: [u8; 16] = digest.finalize()[..16]
+                    .try_into()
+                    .map_err(|_| ApplicationError::DigestEncoding)?;
+                match (mutation.rekey_to(), mutation.is_insert()) {
+                    (Some(new_key), _) => mutation
+                        .value()
+                        .ok_or_else(|| {
+                            ApplicationError::Runtime("re-key had no replacement row".into())
+                        })
+                        .and_then(|value| {
+                            TableMutation::rekey(
+                                id,
+                                mutation.table(),
+                                mutation.key().to_vec(),
+                                new_key.to_vec(),
+                                value.to_vec(),
+                            )
+                            .map_err(|error| ApplicationError::Runtime(error.to_string()))
+                        }),
+                    (None, true) => mutation
+                        .value()
+                        .ok_or_else(|| {
+                            ApplicationError::Runtime("insert had no replacement row".into())
+                        })
+                        .and_then(|value| {
+                            TableMutation::insert(
+                                id,
+                                mutation.table(),
+                                mutation.key().to_vec(),
+                                value.to_vec(),
+                            )
+                            .map_err(|error| ApplicationError::Runtime(error.to_string()))
+                        }),
+                    (None, false) => TableMutation::new(
+                        id,
+                        mutation.table(),
+                        mutation.key().to_vec(),
+                        mutation.value().map(<[u8]>::to_vec),
+                    )
+                    .map_err(|error: RuntimeError| {
+                        ApplicationError::Runtime(error.to_string())
+                    }),
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.stage_mutations(context, mutations)
+    }
 }
 
 /// The evaluated result of one admitted source activation together with the
@@ -552,6 +622,28 @@ impl StagedActivation {
         authority: &ApplicationAuthority,
         context: &RuntimeActivationContext,
     ) -> Result<StagedTableActivation, ApplicationError> {
+        self.stage_with_request(authority, context, None)
+    }
+
+    /// Stages source mutations for one durable request. The request identity
+    /// keeps independently admitted requests from sharing mutation IDs even
+    /// when they reuse the same captured activation context; retrying the same
+    /// staged request with that context remains deterministic.
+    pub fn stage_for_request(
+        &self,
+        authority: &ApplicationAuthority,
+        context: &RuntimeActivationContext,
+        request: RequestIdentity,
+    ) -> Result<StagedTableActivation, ApplicationError> {
+        self.stage_with_request(authority, context, Some(request))
+    }
+
+    fn stage_with_request(
+        &self,
+        authority: &ApplicationAuthority,
+        context: &RuntimeActivationContext,
+        request: Option<RequestIdentity>,
+    ) -> Result<StagedTableActivation, ApplicationError> {
         if self.snapshot_generation.is_some_and(|generation| {
             generation != context.capture().generation_digest()
         }) {
@@ -559,69 +651,10 @@ impl StagedActivation {
                 "table rows and commit context refer to different CWD generations".into(),
             ));
         }
-        // Mutation IDs are unique in the runtime's durable ledger. The source
-        // handler's IDs identify an ordered write within a source batch, so
-        // bind them to this captured activation before crossing that boundary.
-        // Replaying the same staged activation against the same context keeps
-        // the IDs stable, while a later activation can repeat the same write.
-        let activation_digest = ApplicationAuthority::canonical_digest(context, &self.mutations)?;
-        let mutations = self
-            .mutations
-            .iter()
-            .enumerate()
-            .map(|(ordinal, mutation)| {
-                let mut digest = Sha256::new();
-                digest.update(b"ORNA-SOURCE-ACTIVATION-MUTATION\0");
-                digest.update(activation_digest);
-                digest.update((ordinal as u64).to_be_bytes());
-                digest.update(mutation.id());
-                let id: [u8; 16] = digest.finalize()[..16]
-                    .try_into()
-                    .map_err(|_| ApplicationError::DigestEncoding)?;
-                let staged = match (mutation.rekey_to(), mutation.is_insert()) {
-                    (Some(new_key), _) => mutation
-                        .value()
-                        .ok_or_else(|| {
-                            ApplicationError::Runtime("re-key had no replacement row".into())
-                        })
-                        .and_then(|value| {
-                            TableMutation::rekey(
-                                id,
-                                mutation.table(),
-                                mutation.key().to_vec(),
-                                new_key.to_vec(),
-                                value.to_vec(),
-                            )
-                            .map_err(|error| ApplicationError::Runtime(error.to_string()))
-                        }),
-                    (None, true) => mutation
-                        .value()
-                        .ok_or_else(|| {
-                            ApplicationError::Runtime("insert had no replacement row".into())
-                        })
-                        .and_then(|value| {
-                            TableMutation::insert(
-                                id,
-                                mutation.table(),
-                                mutation.key().to_vec(),
-                                value.to_vec(),
-                            )
-                            .map_err(|error| ApplicationError::Runtime(error.to_string()))
-                        }),
-                    (None, false) => TableMutation::new(
-                        id,
-                        mutation.table(),
-                        mutation.key().to_vec(),
-                        mutation.value().map(<[u8]>::to_vec),
-                    )
-                    .map_err(|error: RuntimeError| {
-                        ApplicationError::Runtime(error.to_string())
-                    }),
-                };
-                staged
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        authority.stage_mutations(context.clone(), mutations)
+        // Request identity supplements the activation pin so identical source
+        // writes from distinct request entries cannot alias durable mutation
+        // IDs even when a caller reuses one captured context.
+        authority.stage_source_mutations(context.clone(), self.mutations.clone(), request)
     }
 }
 
@@ -1866,7 +1899,14 @@ impl LiveApplication for ApplicationLiveAdapter {
                 let Some(context) = context else {
                     return Err(LiveError::ApplicationRejected);
                 };
-                let activation = self.authority.stage_mutations(context.clone(), mutations)?;
+                let activation = self.authority.stage_source_mutations(
+                    context.clone(),
+                    mutations,
+                    Some(RequestIdentity {
+                        session_id: session,
+                        request_id: request,
+                    }),
+                )?;
                 let sessions = Arc::clone(&self.sessions);
                 let transaction = LiveEvalTransaction::new(
                     activation.mutations().to_vec(),
@@ -1895,7 +1935,14 @@ impl LiveApplication for ApplicationLiveAdapter {
             let Some(context) = context else {
                 return Err(LiveError::ApplicationRejected);
             };
-            let activation = staged.stage(&self.authority, context)?;
+            let activation = staged.stage_for_request(
+                &self.authority,
+                context,
+                RequestIdentity {
+                    session_id: session,
+                    request_id: request,
+                },
+            )?;
             let transaction = LiveEvalTransaction::new(
                 activation.mutations().to_vec(),
                 activation.next_digest(),
@@ -1962,7 +2009,14 @@ impl LiveApplication for ApplicationLiveAdapter {
             let response = if staged.mutations().is_empty() {
                 LiveEvalResponse::pure(envelope)
             } else {
-                let activation = staged.stage(&self.authority, context)?;
+                let activation = staged.stage_for_request(
+                    &self.authority,
+                    context,
+                    RequestIdentity {
+                        session_id: session,
+                        request_id: request,
+                    },
+                )?;
                 let transaction = LiveEvalTransaction::new(
                     activation.mutations().to_vec(),
                     activation.next_digest(),
@@ -9350,7 +9404,7 @@ mod tests {
     fn checked_in_source_effect_stages_and_commits_with_activation_scoped_id() {
         use futures::executor::block_on;
         use orna_repository_v1::Repository;
-        use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
+        use orna_runtime_v1::{RequestIdentity, RuntimeIdentity, RuntimeState};
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -9385,7 +9439,7 @@ mod tests {
         let application = authority
             .admit_module(
                 "admin-pause.orna",
-                include_str!("../tests/fixtures/admin-pause-stream.orna"),
+                include_str!("../tests/fixtures/activation-scoped-table-write.orna"),
                 "main",
             )
             .expect("checked-in source fixture is admitted");
@@ -9400,19 +9454,38 @@ mod tests {
             &context,
             &dispatcher,
         ))
-        .expect("source table write and terminal runtime effect evaluate");
+        .expect("checked-in source table write evaluates for the activation");
         assert_eq!(staged.value().raw(), &OvbRaw::Bool(true));
         assert_eq!(staged.mutations().len(), 1);
 
         let source_id = staged.mutations()[0].id();
+        let request = RequestIdentity {
+            session_id: [41; 16],
+            request_id: [45; 16],
+        };
         let activation = staged
-            .stage(&authority, &context)
+            .stage_for_request(&authority, &context, request)
             .expect("source mutations cross the captured transaction bridge");
         assert_ne!(activation.mutations()[0].id(), source_id);
         let retry = staged
-            .stage(&authority, &context)
+            .stage_for_request(&authority, &context, request)
             .expect("same captured source activation can be staged again");
         assert_eq!(activation.mutations()[0].id(), retry.mutations()[0].id());
+        let sibling_request = staged
+            .stage_for_request(
+                &authority,
+                &context,
+                RequestIdentity {
+                    request_id: [46; 16],
+                    ..request
+                },
+            )
+            .expect("another request can stage the same source activation");
+        assert_ne!(
+            activation.mutations()[0].id(),
+            sibling_request.mutations()[0].id(),
+            "source writes from different requests cannot reuse mutation identity"
+        );
         let key = activation.mutations()[0].key().to_vec();
 
         block_on(state.commit_table_activation(
@@ -9426,7 +9499,7 @@ mod tests {
         let fresh_context = block_on(state.begin_activation())
             .expect("later activation captures the committed generation");
         let later_activation = staged
-            .stage(&authority, &fresh_context)
+            .stage_for_request(&authority, &fresh_context, request)
             .expect("same source write stages in a later activation");
         assert_ne!(
             later_activation.mutations()[0].id(),

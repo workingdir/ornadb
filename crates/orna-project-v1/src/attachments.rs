@@ -706,6 +706,36 @@ impl PackageResolver {
         self.extend_nested_rebind_path_from_wave(previous, wave, snapshot, &replacements)
     }
 
+    /// Applies an ordered chain of terminal-depth pairs to one nested route.
+    /// Each pair starts from the last snapshot in the latest retained wave,
+    /// carrying the preceding rebind forward by one closure depth. The
+    /// reference is silent on this continuation rule; v1 keeps the exact
+    /// retained-wave tail and returns no partial chain if a pair fails.
+    pub fn extend_nested_terminal_pair_chain(
+        &self,
+        previous: &ReboundPathResolution,
+        replacement_waves: &[[PinnedDatabase; 2]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let mut route = previous.clone();
+        for replacements in replacement_waves {
+            let latest_wave = route
+                .retained_wave_lengths
+                .len()
+                .checked_sub(1)
+                .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+            let latest_snapshot = route.retained_wave_lengths[latest_wave]
+                .checked_sub(1)
+                .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+            route = self.extend_nested_terminal_pair_from_wave(
+                &route,
+                latest_wave,
+                latest_snapshot,
+                replacements.clone(),
+            )?;
+        }
+        Ok(route)
+    }
+
     /// Resolves independently rebound paths for sibling parent snapshots.
     /// Each input plan is `(parent, replacements)`; results keep input order
     /// and each route retains its own pre-rebind sessions. No partial batch is
@@ -834,7 +864,56 @@ impl PackageResolver {
                     *snapshot,
                     replacements.clone(),
                 )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Applies one identical terminal-depth pair to the latest retained-wave
+    /// root of every sibling route. The reference is silent on continuing a
+    /// convergent post-storm pair; v1 uses the first snapshot in each latest
+    /// wave as that route's root, retains the displaced final session as its
+    /// own wave, and returns no partial batch if any branch fails.
+    pub fn extend_sibling_terminal_pair_wave(
+        &self,
+        previous: &SiblingRebindResolution,
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = previous
+            .routes
+            .iter()
+            .map(|route| {
+                let latest_wave = route
+                    .retained_wave_lengths
+                    .len()
+                    .checked_sub(1)
+                    .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+                self.extend_nested_terminal_pair_from_wave(
+                    route,
+                    latest_wave,
+                    0,
+                    replacements.clone(),
+                )
             })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Applies an ordered chain of shared terminal-depth pairs across sibling
+    /// routes. Each pair continues from the last snapshot in the latest wave,
+    /// allowing the next pair to follow the newly rebound closure one depth
+    /// farther. The reference does not define chained post-storm selection;
+    /// v1 uses this retained-wave tail and returns no partial chain if any
+    /// sibling or pair fails.
+    pub fn extend_sibling_terminal_pair_chain(
+        &self,
+        previous: &SiblingRebindResolution,
+        replacement_waves: &[[PinnedDatabase; 2]],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = previous
+            .routes
+            .iter()
+            .map(|route| self.extend_nested_terminal_pair_chain(route, replacement_waves))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(SiblingRebindResolution { routes })
     }

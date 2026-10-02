@@ -30,6 +30,7 @@ mod cancellation;
 mod relation;
 mod timezone;
 mod repl;
+mod sys_bindings;
 
 pub use admitted_repl::{AdmittedReplSession, ReplError};
 pub use cancellation::CancellationToken;
@@ -42,6 +43,7 @@ pub use timezone::{
     TIMEZONE_DATASET_VERSION, ZonedLocalDateTime, resolve_time_zone,
 };
 pub use repl::{ReplSession, parse_admitted_repl};
+pub use sys_bindings::SysHostBindingRegistry;
 
 /// The verified standard-source bundle used by the bounded local and remote
 /// REPL boundaries. `orna-standard` owns the canonical module source; this
@@ -580,6 +582,32 @@ pub trait EffectHandler {
         _budget: &mut StepBudget,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         self.handle(callee, arguments)
+    }
+
+    /// Handle a call resolved to its canonical admitted function name. The
+    /// default preserves existing handlers; registry-backed bindings can use
+    /// the resolved name so source aliases do not bypass native dispatch.
+    fn handle_registered_with_budget(
+        &mut self,
+        _operation: &str,
+        callee: &Expr,
+        arguments: &[CanonicalValue],
+        budget: &mut StepBudget,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        self.handle_with_budget(callee, arguments, budget)
+    }
+
+    /// Handle a registered effect while retaining the evaluator's live
+    /// cancellation request for host operations that can stop promptly.
+    fn handle_registered_with_cancellation_and_budget(
+        &mut self,
+        operation: &str,
+        callee: &Expr,
+        arguments: &[CanonicalValue],
+        budget: &mut StepBudget,
+        _cancellation: Option<&CancellationToken>,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        self.handle_registered_with_budget(operation, callee, arguments, budget)
     }
 
     /// Resolve a stored row reference at the reference's snapshot pin.
@@ -1209,6 +1237,7 @@ enum Value {
     },
     Float(u64),
     String(String),
+    Blob(Vec<u8>),
     Date(String),
     Uuid([u8; 16]),
     /// OVB's complete stored identity is retained, including its snapshot pin.
@@ -1499,6 +1528,7 @@ impl Value {
             ),
             Self::Float(bits) => Raw::Float(bits),
             Self::String(value) => Raw::Text(value),
+            Self::Blob(value) => Raw::Bytes(value),
             Self::Date(value) => Raw::Tag(60001, Box::new(Raw::Text(value))),
             Self::Uuid(value) => object_id_raw(value),
             Self::Reference(value) => value.raw().clone(),
@@ -1622,6 +1652,7 @@ impl Value {
             Raw::Int(value) => context.integer(value.clone()).map(Self::Int),
             Raw::Float(bits) => Ok(Self::Float(*bits)),
             Raw::Text(value) => context.string(value.clone()).map(Self::String),
+            Raw::Bytes(value) => Ok(Self::Blob(value.clone())),
             Raw::Tag(60001, boxed) => {
                 let Raw::Text(value) = boxed.as_ref() else {
                     return Err(error("ORNA-EVAL-VALUE"));
@@ -4766,98 +4797,94 @@ impl Context<'_, '_> {
         let root_collection =
             root_collection_name(callee).filter(|name| !scope.0.contains_key(*name));
         let resolved_function = self.resolve_function_name(callee, scope);
-        let native_math = native_standard_module_operation(
-            callee,
-            resolved_function.as_deref(),
-            scope,
-            !self.restrict_function_names,
-            function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
-            "math",
-            &[],
-        );
-        let native_text = native_standard_module_operation(
-            callee,
-            resolved_function.as_deref(),
-            scope,
-            !self.restrict_function_names,
-            function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
-            "text",
-            &[
-                "__trim",
-                "__split",
-                "__join",
-                "__starts_with",
-                "__ends_with",
-                "__contains",
-                "__replace",
-                "__normalise",
-                "__lower",
-                "__upper",
-            ],
-        );
-        let native_bits = native_standard_module_operation(
-            callee,
-            resolved_function.as_deref(),
-            scope,
-            !self.restrict_function_names,
-            function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
-            "bits",
-            &[
-                "bit_or",
-                "bit_and",
-                "bit_xor",
-                "bit_not",
-                "shift_left",
-                "shift_right",
-            ],
-        );
-        let native_stats = native_standard_module_operation(
-            callee,
-            resolved_function.as_deref(),
-            scope,
-            !self.restrict_function_names,
-            function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
-            "stats",
-            &[
-                "__mean",
-                "__median",
-                "__percentile",
-                "__sum",
-                "__min",
-                "__max",
-                "__range",
-                "__mode",
-                "__variance",
-                "__standard_deviation",
-                "__histogram",
-                "__rate",
-                "__derivative",
-                "__integrate",
-            ],
-        );
-        // The zone rules shipped by this evaluator are valid only for the
-        // edition declared by the imported, captured std.time source. A
-        // different historical source keeps its ordinary fail-closed body.
-        let native_time = captured_timezone_snapshot_matches(self.functions)
-            .then(|| {
-                native_standard_module_operation(
+        if let Some(operation_name) = resolved_function.as_deref()
+            && let Some(operation) =
+                orna_sys_v1::system_host_operation_registry().operation(operation_name)
+            && self.effects.is_some()
+        {
+            if input.is_some()
+                || arguments.len() != operation.parameters.len()
+            {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            }
+            let positional = arguments.iter().all(|argument| argument.name.is_none());
+            let ordered_arguments = if positional {
+                arguments.iter().collect::<Vec<_>>()
+            } else {
+                let mut ordered = Vec::with_capacity(arguments.len());
+                for parameter in &operation.parameters {
+                    let mut matches = arguments
+                        .iter()
+                        .filter(|argument| {
+                            argument.name.as_deref() == Some(parameter.as_str())
+                        });
+                    let Some(argument) = matches.next() else {
+                        return Err(error("ORNA-EVAL-ARGUMENT"));
+                    };
+                    if matches.next().is_some() {
+                        return Err(error("ORNA-EVAL-ARGUMENT"));
+                    }
+                    ordered.push(argument);
+                }
+                if ordered.len() != arguments.len() {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                }
+                ordered
+            };
+            let values = ordered_arguments
+                .iter()
+                .map(|argument| {
+                    self.evaluate(&argument.value, scope, depth + 1)?
+                        .canonical()
+                })
+                .collect::<Result<Vec<_>, EvaluationError>>()?;
+            let remaining = self.limits.max_steps.saturating_sub(self.steps);
+            let mut budget = StepBudget::new(remaining);
+            let result = self
+                .effects
+                .as_deref_mut()
+                .expect("checked host effect handler")
+                .handle_registered_with_cancellation_and_budget(
+                    operation_name,
                     callee,
-                    resolved_function.as_deref(),
-                    scope,
-                    false,
-                    function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
-                    "time",
-                    &[
-                        "offset_at",
-                        "resolve_local",
-                        "duration.compact.format",
-                        "duration.clock.format",
-                        "duration.words.format",
-                        "duration.iso.format",
-                    ],
-                )
-            })
-            .flatten();
+                    &values,
+                    &mut budget,
+                    self.cancellation,
+                );
+            let debited = remaining - budget.remaining();
+            self.steps = self
+                .steps
+                .checked_add(debited)
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            if let Some(value) = result? {
+                return self.effect_value(&value);
+            }
+        }
+        let source_export_available = function_name(callee)
+            .is_some_and(|name| self.functions.contains_key(&name));
+        let native_binding = registered_standard_binding(
+            callee,
+            resolved_function.as_deref(),
+            scope,
+            !self.restrict_function_names,
+            source_export_available,
+            captured_timezone_snapshot_matches(self.functions),
+        );
+        let native_math = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::Math)
+            .map(|binding| binding.operation);
+        let native_text = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::Text)
+            .map(|binding| binding.operation);
+        let native_bits = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::Bits)
+            .map(|binding| binding.operation);
+        let native_stats = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::Stats)
+            .map(|binding| binding.operation);
+        let native_time = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::Time)
+            .map(|binding| binding.operation);
         let qualified_math = (!scope.0.contains_key("std"))
             .then(|| math_name(callee))
             .flatten();
@@ -4883,15 +4910,9 @@ impl Context<'_, '_> {
         {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
-        let native_collection = is_native_collection_binding(
-            callee,
-            resolved_function.as_deref(),
-            scope,
-            !self.restrict_function_names,
-            function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
-        ) && resolved_function.as_deref().is_none_or(|name| {
-            standard_collection_function_operation(name)
-                .is_some_and(|operation| operation.starts_with("__"))
+        let native_collection = native_binding.is_some_and(|binding| {
+            binding.kind == StandardBindingKind::Collection
+                && binding.operation.starts_with("__")
         });
         let native_asof_join = portable_collection_name(callee) == Some("asof_join")
             && !self.restrict_function_names
@@ -5185,6 +5206,19 @@ impl Context<'_, '_> {
         {
             return Some(alias.clone());
         }
+        if self.functions.contains_key(&name)
+            && orna_sys_v1::system_host_operation_registry()
+                .operation(&name)
+                .is_some()
+        {
+            return Some(name);
+        }
+        // Captured std modules are admitted source. Resolve their exact
+        // qualified identities in the bounded REPL so public Orna wrappers
+        // execute before private bounded primitives are dispatched.
+        if name.starts_with("std.") && self.functions.contains_key(&name) {
+            return Some(name);
+        }
         if !self.restrict_function_names && self.functions.contains_key(&name) {
             return Some(name);
         }
@@ -5262,6 +5296,7 @@ impl Context<'_, '_> {
         }
     }
     fn bits(&self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
+        let name = name.strip_prefix("__").unwrap_or(name);
         match (name, values.as_slice()) {
             ("bit_or", [Value::Int(left), Value::Int(right)]) => {
                 Ok(Value::Int(self.integer(left | right)?))
@@ -7757,6 +7792,129 @@ fn standard_collection_function_operation(name: &str) -> Option<&str> {
         .or_else(|| name.strip_prefix("std.query."))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StandardBindingKind {
+    Collection,
+    Math,
+    Text,
+    Bits,
+    Stats,
+    Time,
+}
+
+#[derive(Clone, Copy)]
+struct StandardBindingModule {
+    prefix: &'static str,
+    kind: StandardBindingKind,
+    operations: &'static [&'static str],
+}
+
+#[derive(Clone, Copy)]
+struct RegisteredStandardBinding {
+    kind: StandardBindingKind,
+    operation: &'static str,
+}
+
+// The registry connects pinned source identities to bounded evaluator
+// intrinsics. System host effects use their separate generated registry.
+const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
+    StandardBindingModule {
+        prefix: "std.collection.",
+        kind: StandardBindingKind::Collection,
+        operations: &[
+            "chunk", "flatten", "filter", "map", "flat_map", "sort_by", "rank", "take",
+            "drop", "distinct", "unique", "union", "count", "first", "one", "sum", "min",
+            "max", "every", "exists", "partition", "zip", "zip_exact", "group_by", "pairs",
+            "window", "split_when", "bucket_by", "asof_join", "__list_length",
+            "__list_concat", "__numeric_sum", "__stable_sort", "__minimum", "__maximum",
+            "__group_by", "__rank", "__asof_join", "__bucket_by",
+        ],
+    },
+    StandardBindingModule {
+        prefix: "std.query.",
+        kind: StandardBindingKind::Collection,
+        operations: &[
+            "chunk", "flatten", "filter", "map", "flat_map", "sort_by", "rank", "take",
+            "drop", "distinct", "unique", "union", "count", "first", "one", "sum", "min",
+            "max", "every", "exists", "partition", "zip", "zip_exact", "group_by", "pairs",
+            "window", "split_when", "bucket_by", "asof_join", "__list_length",
+            "__list_concat", "__numeric_sum", "__stable_sort", "__minimum", "__maximum",
+            "__group_by", "__rank", "__asof_join", "__bucket_by",
+        ],
+    },
+    StandardBindingModule {
+        prefix: "std.math.",
+        kind: StandardBindingKind::Math,
+        operations: &[],
+    },
+    StandardBindingModule {
+        prefix: "std.text.",
+        kind: StandardBindingKind::Text,
+        operations: &[
+            "__trim", "__split", "__join", "__starts_with", "__ends_with", "__contains",
+            "__replace", "__normalise", "__lower", "__upper",
+        ],
+    },
+    StandardBindingModule {
+        prefix: "std.bits.",
+        kind: StandardBindingKind::Bits,
+        operations: &[
+            "__bit_or", "__bit_and", "__bit_xor", "__bit_not", "__shift_left", "__shift_right",
+        ],
+    },
+    StandardBindingModule {
+        prefix: "std.stats.",
+        kind: StandardBindingKind::Stats,
+        operations: &[
+            "__mean", "__median", "__percentile", "__sum", "__min", "__max", "__range",
+            "__mode", "__variance", "__standard_deviation", "__histogram", "__rate",
+            "__derivative", "__integrate",
+        ],
+    },
+    StandardBindingModule {
+        prefix: "std.time.",
+        kind: StandardBindingKind::Time,
+        operations: &[
+            "offset_at", "resolve_local", "duration.compact.format", "duration.clock.format",
+            "duration.words.format", "duration.iso.format",
+        ],
+    },
+];
+
+fn registered_standard_binding(
+    callee: &Expr,
+    resolved_function: Option<&str>,
+    scope: &Scope,
+    allow_unresolved_qualified: bool,
+    source_export_available: bool,
+    captured_timezone_matches: bool,
+) -> Option<RegisteredStandardBinding> {
+    let spelling = function_name(callee);
+    let name = resolved_function.or(spelling.as_deref())?;
+    let (module, operation) = STANDARD_BINDING_MODULES.iter().find_map(|module| {
+        let operation = name.strip_prefix(module.prefix)?;
+        module
+            .operations
+            .iter()
+            .copied()
+            .find(|registered| *registered == operation)
+            .map(|operation| (*module, operation))
+    })?;
+    if module.kind == StandardBindingKind::Time && !captured_timezone_matches {
+        return None;
+    }
+    if resolved_function.is_none()
+        && (scope.0.contains_key("std")
+            || (!allow_unresolved_qualified && !source_export_available))
+    {
+        return None;
+    }
+    Some(RegisteredStandardBinding {
+        kind: module.kind,
+        operation,
+    })
+}
+
 fn is_native_collection_binding(
     callee: &Expr,
     resolved_function: Option<&str>,
@@ -7764,97 +7922,15 @@ fn is_native_collection_binding(
     allow_unresolved_qualified: bool,
     source_export_available: bool,
 ) -> bool {
-    // A source export in the loaded pinned module is the admission record for
-    // the intrinsic; an unresolved explicit path is accepted only by the
-    // unrestricted standalone evaluator. Lexical `std` values still win.
-    if scope.0.contains_key("std") && resolved_function.is_none() {
-        return false;
-    }
-    let resolved_operation = resolved_function.and_then(standard_collection_function_operation);
-    let Some(operation) = resolved_operation.or_else(|| portable_collection_name(callee)) else {
-        return false;
-    };
-    if !matches!(
-        operation,
-        "__list_length"
-            | "__list_concat"
-            | "__numeric_sum"
-            | "__stable_sort"
-            | "__minimum"
-            | "__maximum"
-            | "__group_by"
-            | "__rank"
-            | "__asof_join"
-            | "__bucket_by"
-            | "chunk"
-            | "flatten"
-            | "filter"
-            | "map"
-            | "flat_map"
-            | "sort_by"
-            | "rank"
-            | "take"
-            | "drop"
-            | "distinct"
-            | "unique"
-            | "union"
-            | "count"
-            | "first"
-            | "one"
-            | "sum"
-            | "min"
-            | "max"
-            | "every"
-            | "exists"
-            | "partition"
-            | "zip"
-            | "zip_exact"
-            | "group_by"
-            | "pairs"
-            | "window"
-            | "split_when"
-            | "bucket_by"
-            | "asof_join"
-    ) {
-        return false;
-    }
-    match resolved_function {
-        Some(_) => resolved_operation.is_some(),
-        None => allow_unresolved_qualified || source_export_available,
-    }
-}
-
-fn native_standard_module_operation<'a>(
-    callee: &'a Expr,
-    resolved_function: Option<&'a str>,
-    scope: &Scope,
-    allow_unresolved_qualified: bool,
-    source_export_available: bool,
-    module: &str,
-    operations: &[&str],
-) -> Option<&'a str> {
-    let prefix = match module {
-        "math" => "std.math.",
-        "text" => "std.text.",
-        "bits" => "std.bits.",
-        "stats" => "std.stats.",
-        "time" => "std.time.",
-        _ => return None,
-    };
-    if let Some(operation) = resolved_function.and_then(|name| name.strip_prefix(prefix)) {
-        return operations.contains(&operation).then_some(operation);
-    }
-    // A qualified fallback is admitted only when the pinned export was
-    // loaded (or by the intentionally unrestricted standalone evaluator).
-    // This keeps absent optional modules from receiving an implicit host
-    // implementation, while preserving lexical shadowing of the std root.
-    if scope.0.contains_key("std") {
-        return None;
-    }
-    let operation = standard_name(callee, module)?;
-    (operations.contains(&operation)
-        && (allow_unresolved_qualified || source_export_available))
-    .then_some(operation)
+    registered_standard_binding(
+        callee,
+        resolved_function,
+        scope,
+        allow_unresolved_qualified,
+        source_export_available,
+        true,
+    )
+    .is_some_and(|binding| binding.kind == StandardBindingKind::Collection)
 }
 
 fn captured_timezone_snapshot_matches(functions: &Functions) -> bool {
@@ -8769,6 +8845,54 @@ fn unescape_string_body(body: &str) -> Result<String, EvaluationError> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn registry_covers_pinned_intrinsic_and_sys_host_stubs() {
+        let scope = Scope(
+            BTreeMap::new(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            NominalDefinitions::new(),
+            BTreeSet::new(),
+        );
+        let mut registered = 0;
+        for (path, source) in orna_standard::reference_standard_sources_v1() {
+            let parsed = orna_syntax_v1::parse_module(&source);
+            assert!(parsed.is_ok(), "{path}: {:?}", parsed.diagnostics);
+            let namespace = path
+                .strip_prefix("std/")
+                .and_then(|path| path.strip_suffix(".orna"))
+                .expect("standard module path")
+                .replace('/', ".");
+            for item in parsed.value.items {
+                let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration
+                else {
+                    continue;
+                };
+                if !format!("{body:?}").contains("requires its") {
+                    continue;
+                }
+                let qualified = format!("std.{namespace}.{}", signature.name);
+                let call = orna_syntax_v1::parse_expression(&format!("{qualified}()"));
+                assert!(call.is_ok(), "{qualified}: {:?}", call.diagnostics);
+                let intrinsic = registered_standard_binding(
+                    &call.value,
+                    Some(&qualified),
+                    &scope,
+                    false,
+                    true,
+                    true,
+                );
+                let system_host = orna_sys_v1::system_host_operation_registry()
+                    .operation(&qualified)
+                    .is_some();
+                if intrinsic.is_some() || system_host {
+                    registered += 1;
+                }
+            }
+        }
+        assert!(registered >= 80, "expected the registered pinned host surface, got {registered}");
+    }
 
     fn evaluate_recovery(source: &str) -> CanonicalValue {
         evaluate_expression(source, &Environment::new(), Limits::default())
@@ -10133,6 +10257,74 @@ mod tests {
             &batch_for(composed_left),
             &batch_for(repeated_left)
         ));
+    }
+
+    #[test]
+    fn relation_plan_reuses_equal_cloned_prefixes_on_shared_union_batch() {
+        let local_filter = Value::Bool(true);
+        let outer_filter = Value::Bool(false);
+        let operand = RelationPlan::new("UnknownOperand".into())
+            .with_stage(RelationStage::Filter(vec![local_filter.clone()]));
+        let cascade = RelationPlan::union(
+            RelationPlan::new("CascadeLeft".into()),
+            RelationPlan::new("CascadeRight".into()),
+        )
+        .with_stage(RelationStage::Filter(vec![outer_filter.clone()]))
+        .flush_filter_cascade();
+        let batch_for = |leaf: &RelationPlan| match leaf.stages.as_slice() {
+            [RelationStage::SharedFilter(batch)] => Arc::clone(batch),
+            stages => panic!("expected one shared batch, got {stages:?}"),
+        };
+        let shared_outer = batch_for(cascade.source_union.as_ref().unwrap().0.as_ref());
+        let composed = RelationPlan::union(operand.clone(), operand)
+            .with_stage(RelationStage::SharedFilter(shared_outer))
+            .flush_filter_cascade();
+        let (left, right) = composed.source_union.as_ref().expect("unknown union remains");
+        let left_batch = batch_for(left);
+        let right_batch = batch_for(right);
+
+        assert!(Arc::ptr_eq(&left_batch, &right_batch));
+        assert_eq!(
+            left_batch.values().cloned().collect::<Vec<_>>(),
+            vec![local_filter, outer_filter]
+        );
+    }
+
+    #[test]
+    fn relation_plan_shares_cloned_prefixes_across_nested_unknown_union_leaves() {
+        let local_filter = Value::Bool(true);
+        let outer_filter = Value::Bool(false);
+        let operand = RelationPlan::new("UnknownOperand".into())
+            .with_stage(RelationStage::Filter(vec![local_filter.clone()]));
+        let cascade = RelationPlan::union(
+            RelationPlan::new("CascadeLeft".into()),
+            RelationPlan::new("CascadeRight".into()),
+        )
+        .with_stage(RelationStage::Filter(vec![outer_filter.clone()]))
+        .flush_filter_cascade();
+        let batch_for = |leaf: &RelationPlan| match leaf.stages.as_slice() {
+            [RelationStage::SharedFilter(batch)] => Arc::clone(batch),
+            stages => panic!("expected one shared batch, got {stages:?}"),
+        };
+        let shared_outer = batch_for(cascade.source_union.as_ref().unwrap().0.as_ref());
+        let composed = RelationPlan::union(
+            RelationPlan::union(operand.clone(), operand.clone()),
+            operand,
+        )
+        .with_stage(RelationStage::SharedFilter(shared_outer))
+        .flush_filter_cascade();
+        let (nested, right) = composed.source_union.as_ref().expect("outer union remains");
+        let (left, middle) = nested.source_union.as_ref().expect("nested union remains");
+        let left_batch = batch_for(left);
+        let middle_batch = batch_for(middle);
+        let right_batch = batch_for(right);
+
+        assert!(Arc::ptr_eq(&left_batch, &middle_batch));
+        assert!(Arc::ptr_eq(&left_batch, &right_batch));
+        assert_eq!(
+            left_batch.values().cloned().collect::<Vec<_>>(),
+            vec![local_filter, outer_filter]
+        );
     }
 
     #[test]

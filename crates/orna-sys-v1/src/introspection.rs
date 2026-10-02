@@ -9,7 +9,7 @@ use std::{
     fmt,
 };
 
-use serde::Serialize;
+use serde::{Serialize, ser::SerializeStruct};
 use sha2::{Digest, Sha256};
 
 use super::{Diagnostic, ObjectRef, PlanRef};
@@ -700,7 +700,7 @@ pub enum PlanDetail {
 
 /// One typed source-to-destination byte-cap handoff reported by a planner
 /// storm rebind. Unknown byte estimates remain `None`.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlanByteCapHandoffRoute {
     /// One-based nesting depth of the storm scope containing the rebind.
     pub depth: usize,
@@ -716,6 +716,82 @@ pub struct PlanByteCapHandoffRoute {
     pub input_bytes: Option<u64>,
     /// Known capped output byte estimate; `None` means the estimate is unknown.
     pub output_bytes: Option<u64>,
+}
+
+impl PlanByteCapHandoffRoute {
+    /// Creates a handoff route whose display labels derive from its typed paths.
+    pub fn from_typed_paths(
+        depth: usize,
+        input_path: Vec<PlanByteCapScopeSegment>,
+        output_path: Vec<PlanByteCapScopeSegment>,
+        input_bytes: Option<u64>,
+        output_bytes: Option<u64>,
+    ) -> Self {
+        Self {
+            depth,
+            input_scope: byte_cap_scope_path_label(&input_path),
+            output_scope: byte_cap_scope_path_label(&output_path),
+            input_path,
+            output_path,
+            input_bytes,
+            output_bytes,
+        }
+    }
+
+    /// Returns the canonical input label derived from `input_path`.
+    ///
+    /// The typed path is authoritative even if the public `input_scope` field
+    /// was changed after this route was constructed.
+    pub fn input_scope_label(&self) -> String {
+        byte_cap_scope_path_label(&self.input_path)
+    }
+
+    /// Returns the canonical output label derived from `output_path`.
+    ///
+    /// The typed path is authoritative even if the public `output_scope`
+    /// field was changed after this route was constructed.
+    pub fn output_scope_label(&self) -> String {
+        byte_cap_scope_path_label(&self.output_path)
+    }
+
+    /// Returns both canonical labels from this route's typed paths.
+    ///
+    /// Keeping the input and output labels together is useful when presenting
+    /// a route across post-storm ancestry, where the source path may include
+    /// outputs from preceding stages.
+    pub fn scope_labels(&self) -> (String, String) {
+        (
+            byte_cap_scope_path_label(&self.input_path),
+            byte_cap_scope_path_label(&self.output_path),
+        )
+    }
+
+    /// Returns the canonical input-to-output scope label for this route.
+    pub fn paired_scope_label(&self) -> String {
+        let (input_scope, output_scope) = self.scope_labels();
+        format!("{input_scope}=>{output_scope}")
+    }
+}
+
+impl Serialize for PlanByteCapHandoffRoute {
+    // The typed paths are authoritative; derive serialized labels instead of
+    // trusting duplicated strings that may be stale on a manually built route.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut route = serializer.serialize_struct("PlanByteCapHandoffRoute", 8)?;
+        route.serialize_field("depth", &self.depth)?;
+        route.serialize_field("input_path", &self.input_path)?;
+        route.serialize_field("output_path", &self.output_path)?;
+        let (input_scope, output_scope) = self.scope_labels();
+        route.serialize_field("input_scope", &input_scope)?;
+        route.serialize_field("output_scope", &output_scope)?;
+        route.serialize_field("paired_scope_label", &self.paired_scope_label())?;
+        route.serialize_field("input_bytes", &self.input_bytes)?;
+        route.serialize_field("output_bytes", &self.output_bytes)?;
+        route.end()
+    }
 }
 
 /// One typed step in a nested storm byte-cap handoff route. A route path
@@ -2900,9 +2976,10 @@ fn rebind_byte_cap_handoff_scopes_by_depth_text(
         let output_bytes = route
             .output_bytes
             .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        let (_, output_scope) = route.scope_labels();
         by_depth.entry(route.depth).or_default().push(format!(
             "{}={input_bytes}>{output_bytes}",
-            route.output_scope
+            output_scope
         ));
     }
     by_depth
@@ -2924,8 +3001,8 @@ fn rebind_byte_cap_handoff_routes_by_depth_text(
             .output_bytes
             .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
         by_depth.entry(route.depth).or_default().push(format!(
-            "{}=>{}={input_bytes}>{output_bytes}",
-            route.input_scope, route.output_scope
+            "{}={input_bytes}>{output_bytes}",
+            route.paired_scope_label()
         ));
     }
     by_depth
@@ -2941,14 +3018,14 @@ fn rebind_byte_cap_handoff_route_records(
     estimates
         .iter()
         .flat_map(|(depth, handoffs)| {
-            handoffs.iter().map(|handoff| PlanByteCapHandoffRoute {
-                depth: *depth,
-                input_path: handoff.input_path.clone(),
-                output_path: handoff.output_path.clone(),
-                input_scope: byte_cap_scope_path_label(&handoff.input_path),
-                output_scope: byte_cap_scope_path_label(&handoff.output_path),
-                input_bytes: handoff.input_bytes,
-                output_bytes: handoff.output_bytes,
+            handoffs.iter().map(|handoff| {
+                PlanByteCapHandoffRoute::from_typed_paths(
+                    *depth,
+                    handoff.input_path.clone(),
+                    handoff.output_path.clone(),
+                    handoff.input_bytes,
+                    handoff.output_bytes,
+                )
             })
         })
         .collect()
@@ -3654,8 +3731,9 @@ fn hash_plan_detail(hash: &mut Sha256, detail: &PlanDetail) {
                 hash.update((route.depth as u64).to_be_bytes());
                 hash_byte_cap_scope_path(hash, &route.input_path);
                 hash_byte_cap_scope_path(hash, &route.output_path);
-                hash_part(hash, route.input_scope.as_bytes());
-                hash_part(hash, route.output_scope.as_bytes());
+                let (input_scope, output_scope) = route.scope_labels();
+                hash_part(hash, input_scope.as_bytes());
+                hash_part(hash, output_scope.as_bytes());
                 hash_optional_u64(hash, route.input_bytes);
                 hash_optional_u64(hash, route.output_bytes);
             }
@@ -3729,5 +3807,60 @@ impl PlanNodeKind {
             Self::CheckpointUpdate => "checkpoint_update",
             Self::External => "external",
         }
+    }
+}
+
+#[cfg(test)]
+mod byte_cap_handoff_route_scope_tests {
+    use super::*;
+
+    #[test]
+    fn typed_paths_drive_scope_summaries_and_route_fingerprint() {
+        let input_path = vec![
+            PlanByteCapScopeSegment::StormStage { index: 1 },
+            PlanByteCapScopeSegment::StormStageOutput { index: 1 },
+            PlanByteCapScopeSegment::StormStage { index: 2 },
+            PlanByteCapScopeSegment::Branch { index: 1 },
+            PlanByteCapScopeSegment::Limit { position: 1 },
+        ];
+        let mut output_path = input_path.clone();
+        output_path.extend([
+            PlanByteCapScopeSegment::Rebind { position: 1 },
+            PlanByteCapScopeSegment::Cascade { index: 1 },
+        ]);
+        let mut stale_route = PlanByteCapHandoffRoute::from_typed_paths(
+            2,
+            input_path,
+            output_path,
+            None,
+            None,
+        );
+        stale_route.input_scope = "stale input scope".to_owned();
+        stale_route.output_scope = "stale output scope".to_owned();
+
+        let input_scope = "root/storm1/storm_stage_output1/storm2/branch1/limit1";
+        let output_scope = format!("{input_scope}/rebind1/cascade1");
+        assert_eq!(
+            stale_route.paired_scope_label(),
+            format!("{input_scope}=>{output_scope}")
+        );
+        assert_eq!(
+            rebind_byte_cap_handoff_scopes_by_depth_text(&[stale_route.clone()]),
+            format!("2:{output_scope}=?>?")
+        );
+        assert_eq!(
+            rebind_byte_cap_handoff_routes_by_depth_text(&[stale_route.clone()]),
+            format!("2:{input_scope}=>{output_scope}=?>?")
+        );
+
+        let mut canonical_route = stale_route.clone();
+        canonical_route.input_scope = input_scope.to_owned();
+        canonical_route.output_scope = output_scope;
+        let fingerprint = |route| {
+            let mut hash = Sha256::new();
+            hash_plan_detail(&mut hash, &PlanDetail::ByteCapHandoffRoutes(vec![route]));
+            hash.finalize()
+        };
+        assert_eq!(fingerprint(stale_route), fingerprint(canonical_route));
     }
 }

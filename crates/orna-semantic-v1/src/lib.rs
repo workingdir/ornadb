@@ -7630,6 +7630,7 @@ fn infer(
                         specialize_dynamic_parameter_snapshot_contexts(
                             &result,
                             &parameters,
+                            &default_parameters,
                             parameter_names.as_deref(),
                             arguments,
                             &values,
@@ -9378,6 +9379,9 @@ fn infer_case_arm_body(
 }
 
 fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
+    if !checkpoint_snapshot_maps_are_valid(left) || !checkpoint_snapshot_maps_are_valid(right) {
+        return None;
+    }
     if left == right {
         return Some(left.clone());
     }
@@ -14242,8 +14246,13 @@ fn require_same(expected: &Type, actual: &Type, diagnostics: &mut Vec<Diagnostic
 }
 
 fn types_match(expected: &Type, actual: &Type) -> bool {
+    if !checkpoint_snapshot_maps_are_valid(expected)
+        || !checkpoint_snapshot_maps_are_valid(actual)
+    {
+        return false;
+    }
     if expected == actual {
-        return true;
+        return checkpoint_snapshot_maps_are_valid(expected);
     }
     if matches!(actual, Type::Bottom) {
         return true;
@@ -14379,11 +14388,10 @@ fn contains_type_error(ty: &Type) -> bool {
     }
 }
 
-/// `Bottom` is compatible during ordinary contextual checking, but a tuple
-/// containing a non-returning component is never produced as an argument.
-/// Reject that whole identity-binding wave while walking only value
-/// aggregates; a callback's Bottom result or an empty collection's element
-/// type does not make the callback/collection value itself incomplete.
+/// `Bottom` is compatible during ordinary contextual checking, but a value
+/// containing a non-returning tuple or record component is never produced as
+/// an argument. Walk only value aggregates: a callback's Bottom result or an
+/// empty collection's element type does not make that value incomplete.
 fn contains_nonreturning_aggregate_component(ty: &Type) -> bool {
     match ty {
         Type::Bottom => true,
@@ -16600,6 +16608,7 @@ fn snapshot_selector_context(
 fn specialize_dynamic_parameter_snapshot_contexts(
     ty: &Type,
     formal_parameters: &[Type],
+    default_parameters: &BTreeSet<usize>,
     parameter_names: Option<&[String]>,
     arguments: &[orna_syntax_v1::Argument],
     argument_types: &[Type],
@@ -16608,29 +16617,68 @@ fn specialize_dynamic_parameter_snapshot_contexts(
     historical_context: Option<&Type>,
 ) -> Type {
     let mut binder_contexts = BTreeMap::new();
-    for (parameter_index, formal) in formal_parameters.iter().enumerate() {
-        let Some(argument_index) = call_argument_index_for_position(
-            parameter_names,
-            parameter_index,
-            arguments,
-        ) else {
-            continue;
-        };
-        let Some(actual) = argument_types.get(argument_index) else {
-            continue;
-        };
-        // A destructured parameter is one callback argument. Do not partially
-        // bind earlier tuple pins if a later nested component is incompatible.
-        if matches!(formal, Type::Tuple(_))
-            && (contains_type_error(formal)
-                || contains_type_error(actual)
-                || contains_nonreturning_aggregate_component(actual)
-                || !types_match(formal, actual))
-        {
-            continue;
+    let nonreturning_argument = argument_types
+        .iter()
+        .any(contains_nonreturning_aggregate_component);
+    let incomplete_argument = formal_parameters
+        .iter()
+        .enumerate()
+        .any(|(parameter_index, formal)| {
+            let Some(argument_index) = call_argument_index_for_position(
+                parameter_names,
+                parameter_index,
+                arguments,
+            ) else {
+                return !default_parameters.contains(&parameter_index);
+            };
+            let Some(actual) = argument_types.get(argument_index) else {
+                return true;
+            };
+            matches!(formal, Type::Tuple(_))
+                && (contains_type_error(formal)
+                    || contains_type_error(actual)
+                    || !types_match(formal, actual))
+        });
+    // The reference specifies pin identity but leaves recovery after a call
+    // that cannot reach the callee unspecified. Treat its binding wave
+    // transactionally:
+    // a malformed tuple or any missing required argument must not rebind
+    // otherwise valid siblings captured by the returned callable. Omitted
+    // defaults are valid.
+    let suppress_rebinding = nonreturning_argument || incomplete_argument;
+    if !suppress_rebinding {
+        for (parameter_index, formal) in formal_parameters.iter().enumerate() {
+            let Some(argument_index) = call_argument_index_for_position(
+                parameter_names,
+                parameter_index,
+                arguments,
+            ) else {
+                continue;
+            };
+            let Some(actual) = argument_types.get(argument_index) else {
+                continue;
+            };
+            // A destructured parameter is one callback argument. Do not partially
+            // bind its pins if recovery or shape checking found an invalid leaf.
+            if matches!(formal, Type::Tuple(_))
+                && (contains_type_error(formal)
+                    || contains_type_error(actual)
+                    || !types_match(formal, actual))
+            {
+                continue;
+            }
+            collect_snapshot_binder_contexts(formal, actual, &mut binder_contexts);
         }
-        collect_snapshot_binder_contexts(formal, actual, &mut binder_contexts);
     }
+
+    // A call with a non-returning argument, malformed tuple, or missing required
+    // argument never reaches the callee. Keep its result symbolic instead of
+    // leaking sibling pins.
+    let (parameter_names, arguments, argument_types) = if suppress_rebinding {
+        (None, &[][..], &[][..])
+    } else {
+        (parameter_names, arguments, argument_types)
+    };
     specialize_dynamic_parameter_snapshot_contexts_scoped(
         ty,
         parameter_names,
@@ -17270,11 +17318,17 @@ fn type_contains_valid_pinned_snapshot_identity(ty: &Type) -> bool {
 /// local rebinding; permit it when the only differences are selector contexts
 /// on pinned snapshot values. Saved aliases retain their original identities.
 fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
+    if !checkpoint_snapshot_maps_are_valid(expected)
+        || !checkpoint_snapshot_maps_are_valid(actual)
+    {
+        return false;
+    }
     if expected == actual {
         return true;
     }
     if is_snapshot_context_map_shape(expected) && is_snapshot_context_map_shape(actual) {
-        return true;
+        return snapshot_context_map_cardinality(expected)
+            == snapshot_context_map_cardinality(actual);
     }
     match (expected, actual) {
         (
@@ -17395,6 +17449,21 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
                 && pinned_snapshot_shape_matches(expected_unit, actual_unit)
         }
         _ => false,
+    }
+}
+
+/// Selector identities may change during a local rebind, but the number of
+/// captured selector slots is part of the pinned shape. The reference is
+/// silent about local map rebinds; preserving cardinality avoids silently
+/// adding or dropping captured pins.
+fn snapshot_context_map_cardinality(ty: &Type) -> Option<usize> {
+    match ty {
+        Type::Applied { base, arguments }
+            if base == "sys.SnapshotRefContext" || base == "semantic.SnapshotContextMap" =>
+        {
+            Some(arguments.len())
+        }
+        _ => None,
     }
 }
 
@@ -19241,6 +19310,14 @@ mod tests {
                 Type::Named("selector:binder:second".into()),
             ],
         };
+        let wider = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:HEAD~6".into()),
+                Type::Named("selector:HEAD~5".into()),
+                Type::Named("selector:HEAD~4".into()),
+            ],
+        };
         let malformed = Type::Applied {
             base: "semantic.SnapshotContextMap".into(),
             arguments: vec![Type::Named("domain.Factory".into())],
@@ -19272,18 +19349,40 @@ mod tests {
         ]));
 
         assert!(is_snapshot_context_map_shape(&first));
+        assert!(types_match(&first, &first));
+        assert!(types_match(&first, &Type::Bottom));
+        assert!(pinned_snapshot_shape_matches(&first, &first));
+        assert!(pinned_snapshot_shape_matches(&first, &second));
+        assert!(!pinned_snapshot_shape_matches(&first, &wider));
+        assert!(!pinned_snapshot_shape_matches(
+            &contextual_snapshot_ref("selector:HEAD~3"),
+            &first
+        ));
         assert!(type_contains_pinned_snapshot_identity(&first));
         assert!(pinned_snapshot_rebind_compatible(&first, &second));
+        assert!(!pinned_snapshot_rebind_compatible(&first, &wider));
         assert!(!is_snapshot_context_map_shape(&malformed));
+        assert!(!types_match(&malformed, &malformed));
+        assert!(!types_match(&malformed, &Type::Bottom));
+        assert!(!pinned_snapshot_shape_matches(&malformed, &malformed));
         assert!(!type_contains_pinned_snapshot_identity(&malformed));
         assert!(!pinned_snapshot_rebind_compatible(&malformed, &second));
         assert!(!is_snapshot_context_map_shape(&singleton));
         assert!(!is_snapshot_context_map_shape(&unsorted));
         assert!(!is_snapshot_context_map_shape(&duplicate));
+        assert_eq!(merge_list_element_types(&first, &first), Some(first.clone()));
+        assert!(merge_list_element_types(&malformed, &malformed).is_none());
         assert!(merge_checkpoint_field_map(&malformed, &malformed).is_none());
         assert!(merge_checkpoint_field_map(&malformed, &first).is_none());
         assert!(!checkpoint_snapshot_maps_are_valid(&nested_malformed));
+        assert!(!types_match(&nested_malformed, &nested_malformed));
+        assert!(!types_match(&nested_malformed, &Type::Bottom));
+        assert!(!pinned_snapshot_shape_matches(
+            &nested_malformed,
+            &nested_malformed
+        ));
         assert!(!type_contains_pinned_snapshot_identity(&nested_malformed));
+        assert!(merge_list_element_types(&nested_malformed, &nested_malformed).is_none());
         assert!(merge_checkpoint_field_map(&nested_malformed, &nested_malformed).is_none());
         assert!(!pinned_snapshot_rebind_compatible(
             &nested_malformed,
