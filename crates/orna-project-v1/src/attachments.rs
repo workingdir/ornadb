@@ -846,27 +846,67 @@ impl PackageResolver {
         checkpoint: &ReboundPathCheckpoint,
         replacement_waves: &[[PinnedDatabase; 2]],
     ) -> Result<ReboundPathResolution, AttachmentError> {
+        self.extend_nested_terminal_pair_chain_from_checkpoint_with_labels(
+            previous,
+            checkpoint,
+            replacement_waves,
+            &[],
+        )
+        .map(|(route, _)| route)
+    }
+
+    /// Applies ordered checkpoint-rooted pair chains as one atomic cascade.
+    /// Every checkpoint route is appended to retained history, then its exact
+    /// depth label is checked after each later pair fold, including folds from
+    /// subsequent checkpoints. The reference does not define this composition;
+    /// v1 keeps each selected checkpoint independent and preserves all earlier
+    /// checkpoint labels. Failure returns no partial cascade.
+    pub fn extend_nested_terminal_pair_checkpoint_cascades(
+        &self,
+        previous: &ReboundPathResolution,
+        cascades: &[(&ReboundPathCheckpoint, &[[PinnedDatabase; 2]])],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let mut route = previous.clone();
+        let mut retained_checkpoint_labels = Vec::new();
+        for (checkpoint, replacement_waves) in cascades {
+            let (folded, checkpoint_label) = self
+                .extend_nested_terminal_pair_chain_from_checkpoint_with_labels(
+                    &route,
+                    checkpoint,
+                    replacement_waves,
+                    &retained_checkpoint_labels,
+                )?;
+            if let Some(label) = checkpoint_label {
+                retained_checkpoint_labels.push(label);
+            }
+            route = folded;
+        }
+        Ok(route)
+    }
+
+    fn extend_nested_terminal_pair_chain_from_checkpoint_with_labels(
+        &self,
+        previous: &ReboundPathResolution,
+        checkpoint: &ReboundPathCheckpoint,
+        replacement_waves: &[[PinnedDatabase; 2]],
+        retained_checkpoint_labels: &[NestedPairDepthLabel],
+    ) -> Result<(ReboundPathResolution, Option<NestedPairDepthLabel>), AttachmentError> {
         checkpoint.validate_depth_identity()?;
         let Some((first, remaining)) = replacement_waves.split_first() else {
-            return Ok(previous.clone());
+            for label in retained_checkpoint_labels {
+                previous.validate_depth_label(label)?;
+            }
+            return Ok((previous.clone(), None));
         };
         let checkpoint_wave = previous
             .retained_wave_lengths
             .len()
             .checked_add(1)
             .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
-        let checkpoint_index = previous
-            .retained_sessions
-            .len()
-            .checked_add(1)
-            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
         let extension =
             self.resolve_nested_rebind_path(&checkpoint.handoff, first.as_slice())?;
         let mut route = Self::append_retained_rebound_extension(previous, extension);
-        let retained_checkpoint = route
-            .retained_sessions
-            .get(checkpoint_index)
-            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+        let retained_checkpoint = route.retained_snapshot_at_depth(checkpoint_wave, 0)?;
         if !checkpoint.depth_label.matches_session(retained_checkpoint) {
             return Err(AttachmentError::RetainedSnapshotUnavailable);
         }
@@ -876,6 +916,9 @@ impl PackageResolver {
             retained_checkpoint,
         );
         route.validate_depth_label(&folded_label)?;
+        for label in retained_checkpoint_labels {
+            route.validate_depth_label(label)?;
+        }
 
         for replacements in remaining {
             let latest_wave = route
@@ -893,8 +936,11 @@ impl PackageResolver {
                 replacements.clone(),
             )?;
             route.validate_depth_label(&folded_label)?;
+            for label in retained_checkpoint_labels {
+                route.validate_depth_label(label)?;
+            }
         }
-        Ok(route)
+        Ok((route, Some(folded_label)))
     }
 
     /// Rebinds each terminal pair in a storm from one saved checkpoint.
