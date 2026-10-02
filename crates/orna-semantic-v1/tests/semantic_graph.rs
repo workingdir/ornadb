@@ -6571,6 +6571,55 @@ fn collect_snapshot_contexts(ty: &Type, contexts: &mut BTreeSet<String>) {
     }
 }
 
+fn assert_canonical_snapshot_context_maps(ty: &Type) {
+    match ty {
+        Type::Applied { base, arguments } => {
+            if base == "semantic.SnapshotContextMap" {
+                assert!(arguments.len() > 1, "singleton maps must use SnapshotRefContext");
+                assert!(arguments.iter().all(|argument| matches!(
+                    argument,
+                    Type::Named(selector) if selector.starts_with("selector:")
+                )), "maps contain only canonical snapshot selectors");
+                assert!(arguments.windows(2).all(|pair| matches!(
+                    pair,
+                    [Type::Named(left), Type::Named(right)] if left < right
+                )), "map selectors are sorted and unique");
+            }
+            for argument in arguments {
+                assert_canonical_snapshot_context_maps(argument);
+            }
+        }
+        Type::List(inner)
+        | Type::Range(inner)
+        | Type::Relation(inner)
+        | Type::Stream(inner)
+        | Type::Optional(inner) => assert_canonical_snapshot_context_maps(inner),
+        Type::Record(fields) => {
+            for field in fields.values() {
+                assert_canonical_snapshot_context_maps(field);
+            }
+        }
+        Type::Tuple(items) => {
+            for item in items {
+                assert_canonical_snapshot_context_maps(item);
+            }
+        }
+        Type::Function {
+            parameters, result, ..
+        } => {
+            for parameter in parameters {
+                assert_canonical_snapshot_context_maps(parameter);
+            }
+            assert_canonical_snapshot_context_maps(result);
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            assert_canonical_snapshot_context_maps(currency);
+            assert_canonical_snapshot_context_maps(unit);
+        }
+        _ => {}
+    }
+}
+
 fn checkpoint_output_fields(ty: &Type) -> &BTreeMap<String, Type> {
     match ty {
         Type::List(inner) => checkpoint_output_fields(inner),
@@ -7185,6 +7234,7 @@ fn paired_depth_storms_retain_field_maps_at_each_rebound_depth() {
     let Type::Record(lanes) = result.as_ref() else {
         panic!("paired depth-storm checkpoint must expose both lanes");
     };
+    assert_canonical_snapshot_context_maps(result.as_ref());
 
     let cases: [
         (
