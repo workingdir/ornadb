@@ -48,7 +48,7 @@ pub use repl::{ReplSession, parse_admitted_repl};
 /// crate verifies its pinned profile before either boundary admits an import.
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
-pub fn reference_standard_sources() -> [(String, String); 37] {
+pub fn reference_standard_sources() -> [(String, String); 39] {
     orna_standard::reference_standard_sources_v1()
 }
 
@@ -3565,7 +3565,7 @@ impl Context<'_, '_> {
 
             match name {
                 "filter" => {
-                    plan = plan.with_stage(RelationStage::Filter(ordered[1].clone()));
+                    plan = plan.with_stage(RelationStage::Filter(vec![ordered[1].clone()]));
                     Ok(Value::Relation(plan))
                 }
                 // The reference specifies relation composition and order but
@@ -4149,25 +4149,27 @@ impl Context<'_, '_> {
         for (local_index, stage) in stages.iter().enumerate() {
             let index = stage_offset + local_index;
             match stage {
-                RelationStage::Filter(predicate) => {
-                    self.step()?;
-                    let result = self.invoke_predicate(predicate, value.clone(), depth + 1)?;
-                    let Value::Bool(result) = result else {
-                        return Err(error("ORNA-EVAL-TYPE"));
-                    };
-                    if !result {
-                        let mut rows = vec![RelationRow::Skip];
-                        // Once a preceding take has consumed its bound, a
-                        // downstream filter rejection still exhausts that
-                        // bounded relation. Propagate the stop now so the
-                        // source is not evaluated once more just to discover
-                        // the already-reached bound.
-                        if stages.iter().enumerate().any(|(offset, stage)| {
-                            matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
-                        }) {
-                            rows.push(RelationRow::End);
+                RelationStage::Filter(predicates) => {
+                    for predicate in predicates {
+                        self.step()?;
+                        let result = self.invoke_predicate(predicate, value.clone(), depth + 1)?;
+                        let Value::Bool(result) = result else {
+                            return Err(error("ORNA-EVAL-TYPE"));
+                        };
+                        if !result {
+                            let mut rows = vec![RelationRow::Skip];
+                            // Once a preceding take has consumed its bound, a
+                            // downstream filter rejection still exhausts that
+                            // bounded relation. Propagate the stop now so the
+                            // source is not evaluated once more just to discover
+                            // the already-reached bound.
+                            if stages.iter().enumerate().any(|(offset, stage)| {
+                                matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
+                            }) {
+                                rows.push(RelationRow::End);
+                            }
+                            return Ok(rows);
                         }
-                        return Ok(rows);
                     }
                 }
                 RelationStage::Map(transform) => {
@@ -9261,6 +9263,30 @@ mod tests {
 
         assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-VALUE");
         assert_eq!(callbacks, 1);
+    }
+
+    #[test]
+    fn relation_plan_fuses_adjacent_filters_in_order_without_crossing_map() {
+        let first = Value::Bool(true);
+        let second = Value::Bool(false);
+        let transform = Value::Int(7.into());
+        let third = Value::Bool(true);
+        let plan = RelationPlan::new("Note".into())
+            .with_stage(RelationStage::Filter(vec![first.clone()]))
+            .with_stage(RelationStage::Filter(vec![second.clone()]))
+            .with_stage(RelationStage::Map(transform.clone()))
+            .with_stage(RelationStage::Filter(vec![third.clone()]))
+            .with_stage(RelationStage::Take(2));
+
+        assert_eq!(
+            plan.stages,
+            vec![
+                RelationStage::Filter(vec![first, second]),
+                RelationStage::Map(transform),
+                RelationStage::Filter(vec![third]),
+                RelationStage::Take(2),
+            ]
+        );
     }
 
     #[test]

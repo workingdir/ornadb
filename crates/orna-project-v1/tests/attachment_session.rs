@@ -10754,6 +10754,28 @@ fn paired_depth_storm_rebinds_keep_sibling_terminal_routes_consistent() {
             sibling,
             middle_variant,
         );
+        let reopened_manifest_terminal = resolver
+            .resolve_for_parent(manifest_middle.database(aliases[2]).unwrap().clone())
+            .unwrap();
+        assert_pin(
+            &reopened_manifest_terminal,
+            aliases[3],
+            &terminal_commits[middle_variant],
+        );
+        assert_route(
+            &reopened_manifest_terminal,
+            &format!("{}.orna", aliases[3]),
+            3,
+            0,
+            middle_variant,
+        );
+        assert_route(
+            &reopened_manifest_terminal,
+            "main.orna",
+            2,
+            sibling,
+            middle_variant,
+        );
         assert_pin(
             &rebound_middle,
             aliases[2],
@@ -10794,18 +10816,40 @@ fn paired_depth_storm_rebinds_keep_sibling_terminal_routes_consistent() {
             0,
             selected_post_storm_deep[sibling],
         );
-        assert_pin(
-            &retained_post_storm_terminals[sibling],
-            aliases[3],
-            &terminal_commits[if sibling == 0 { 0 } else { 1 }],
-        );
-        assert_route(
-            &retained_post_storm_terminals[sibling],
-            &format!("{}.orna", aliases[3]),
-            3,
-            0,
-            if sibling == 0 { 0 } else { 1 },
-        );
+        for (retained, terminal_variant) in [
+            (
+                &reopened_manifest_snapshots[sibling],
+                later_deep_variants[sibling],
+            ),
+            (
+                &reopened_terminals[sibling],
+                selected_reopened_variants[sibling],
+            ),
+            (
+                &retained_post_storm_terminals[sibling],
+                stable_post_storm_variants[sibling],
+            ),
+        ] {
+            assert_pin(
+                retained,
+                aliases[3],
+                &terminal_commits[terminal_variant],
+            );
+            assert_route(
+                retained,
+                &format!("{}.orna", aliases[3]),
+                3,
+                0,
+                terminal_variant,
+            );
+            assert_route(
+                retained,
+                "main.orna",
+                2,
+                sibling,
+                later_deep_variants[sibling],
+            );
+        }
     }
 
     assert_pin(&parent, aliases[1], &middle_commits[0][0]);
