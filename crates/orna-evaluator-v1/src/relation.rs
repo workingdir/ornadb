@@ -326,25 +326,30 @@ impl FilterBatch {
         batch
     }
 
-    fn prefixed_by(values: Vec<Value>, next: &Arc<Self>) -> Arc<Self> {
+    fn followed_by_shared_prefix(prefix: &Arc<Self>, next: &Arc<Self>) -> Arc<Self> {
         let mut prefixed_batches = next
             .prefixed_batches
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // Union leaves are visited in order, so a cloned prefix often repeats
-        // the most recent join. Check hot entries before pruning stale ones.
+        // Nested union leaves can carry separately compiled but equivalent
+        // prefixes. Reuse their join when appending the same suffix so the
+        // shared batch identity survives those compilation boundaries.
         for batch in prefixed_batches.iter().rev().filter_map(Weak::upgrade) {
-            let FilterBatchNode::Then(previous, suffix) = &batch.node else {
+            let FilterBatchNode::Then(existing_prefix, suffix) = &batch.node else {
                 continue;
             };
-            if Arc::ptr_eq(suffix, next) && previous.values().eq(values.iter()) {
+            if Arc::ptr_eq(suffix, next) && existing_prefix.values().eq(prefix.values()) {
                 return batch;
             }
         }
         prefixed_batches.retain(|batch| batch.strong_count() > 0);
-        let batch = Self::followed_by(&Self::from_values(values), next);
+        let batch = Self::followed_by(prefix, next);
         prefixed_batches.push(Arc::downgrade(&batch));
         batch
+    }
+
+    fn prefixed_by(values: Vec<Value>, next: &Arc<Self>) -> Arc<Self> {
+        Self::followed_by_shared_prefix(&Self::from_values(values), next)
     }
 
     pub(super) fn chunks(&self) -> &[Arc<Vec<Value>>] {
@@ -558,7 +563,7 @@ impl RelationPlan {
                     Some(RelationStage::SharedFilter(previous)) => {
                         let next = FilterBatch::from_values(predicates);
                         self.stages.push(RelationStage::SharedFilter(
-                            FilterBatch::followed_by(&previous, &next),
+                            FilterBatch::followed_by_shared_prefix(&previous, &next),
                         ));
                     }
                     Some(previous) => {
@@ -620,7 +625,7 @@ impl RelationPlan {
                         FilterBatch::prefixed_by(previous, &predicates)
                     }
                     RelationStage::SharedFilter(previous) => {
-                        FilterBatch::followed_by(&previous, &predicates)
+                        FilterBatch::followed_by_shared_prefix(&previous, &predicates)
                     }
                     _ => unreachable!("checked filter stage"),
                 };
@@ -640,7 +645,7 @@ impl RelationPlan {
             }
             Some(RelationStage::SharedFilter(previous)) => {
                 self.stages.push(RelationStage::SharedFilter(
-                    FilterBatch::followed_by(&previous, &predicates),
+                    FilterBatch::followed_by_shared_prefix(&previous, &predicates),
                 ));
             }
             Some(previous) => {
