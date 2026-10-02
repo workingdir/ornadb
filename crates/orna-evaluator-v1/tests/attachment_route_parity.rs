@@ -850,7 +850,7 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         .unwrap(),
         PinnedDatabase::resolve(
             aliases[3],
-            package_repository,
+            package_repository.clone(),
             &route_three_final,
             loader,
         )
@@ -860,6 +860,17 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         .extend_nested_terminal_pair_chain(&fresh_route, &[first_pair.clone()])
         .unwrap_or_else(|error| panic!("first nested pair failed: {error:?}"));
     assert_eq!(first_stage.retained_wave(0).unwrap().len(), 2);
+    let saved_handoff = first_stage.handoff_checkpoint(0, 0).unwrap();
+    assert_eq!(
+        saved_handoff
+            .handoff()
+            .database(aliases[2])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        terminal_initial
+    );
     let mut first_evaluator = AdmittedReplSession::from_attached_database_session(
         &first_stage.retained_wave(0).unwrap()[1],
         Limits::default(),
@@ -897,7 +908,7 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
             &first_stage,
             0,
             0,
-            &[first_pair.clone(), second_pair],
+            &[first_pair.clone(), second_pair.clone()],
         )
         .unwrap_or_else(|error| panic!("historical handoff chain failed: {error:?}"));
     let mut selected_root = AdmittedReplSession::from_attached_database_session(
@@ -941,7 +952,7 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
             &first_stage,
             0,
             0,
-            &[first_pair, same_depth_second_pair],
+            &[first_pair.clone(), same_depth_second_pair],
         )
         .unwrap_or_else(|error| panic!("fixed-depth pair storm failed: {error:?}"));
     assert_eq!(
@@ -970,6 +981,59 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
     );
     assert_eq!(
         fixed_depth_evaluator.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(96.into())))
+    );
+
+    let later_cascade = resolver
+        .extend_nested_terminal_pair_chain(&first_stage, &[second_pair.clone()])
+        .unwrap_or_else(|error| panic!("later nested pair cascade failed: {error:?}"));
+    let checkpoint_replay = resolver
+        .extend_nested_terminal_pair_chain_from_checkpoint(
+            &later_cascade,
+            &saved_handoff,
+            &[first_pair, second_pair],
+        )
+        .unwrap_or_else(|error| panic!("checkpoint pair cascade failed: {error:?}"));
+
+    let replay_handoff = checkpoint_replay.retained_wave(4).unwrap()[0].clone();
+    assert_eq!(
+        replay_handoff.primary().pin().name(),
+        saved_handoff.handoff().primary().pin().name()
+    );
+    assert_eq!(
+        replay_handoff
+            .database(aliases[2])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        terminal_initial
+    );
+    let mut replay_handoff_eval = AdmittedReplSession::from_attached_database_session(
+        &replay_handoff,
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        replay_handoff_eval.submit(&format!("use {};", aliases[2])),
+        Ok(None)
+    );
+    assert_eq!(
+        replay_handoff_eval.submit(&format!("{}.package_value()", aliases[2])),
+        Ok(Some(Value::int(80.into())))
+    );
+
+    let mut replay_terminal_eval = AdmittedReplSession::from_attached_database_session(
+        &checkpoint_replay.retained_wave(6).unwrap()[1],
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        replay_terminal_eval.submit(&format!("use {};", aliases[4])),
+        Ok(None)
+    );
+    assert_eq!(
+        replay_terminal_eval.submit(&format!("{}.package_value()", aliases[4])),
         Ok(Some(Value::int(96.into())))
     );
 }
