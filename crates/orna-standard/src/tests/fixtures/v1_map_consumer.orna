@@ -1,0 +1,3 @@
+use std.map as map;
+
+pub fn map_operations(value: [(Str, Int)]): Int = map.size(value);
