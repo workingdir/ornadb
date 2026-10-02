@@ -29,8 +29,8 @@ const REBIND_CAP_DEPTH_GAPS_FIXTURE: &str =
     include_str!("fixtures/planner_storm_rebind_cap_depth_gaps.orna");
 const REBIND_CAP_HANDOFFS_FIXTURE: &str =
     include_str!("fixtures/planner_storm_rebind_cap_handoffs.orna");
-const REBIND_CAP_HANDOFF_ESTIMATES_FIXTURE: &str =
-    include_str!("fixtures/planner_storm_rebind_cap_handoff_estimates.orna");
+const REBIND_CAP_HANDOFF_SCOPES_FIXTURE: &str =
+    include_str!("fixtures/planner_storm_rebind_cap_handoff_scopes.orna");
 
 fn branch(
     limits: &[u64],
@@ -1306,7 +1306,7 @@ fn unknown_row_byte_caps_report_rebind_handoffs_by_nested_depth() {
 
 #[test]
 fn unknown_row_byte_caps_report_handoff_estimates_by_nested_depth() {
-    let parsed = orna_syntax_v1::parse_module(REBIND_CAP_HANDOFF_ESTIMATES_FIXTURE);
+    let parsed = orna_syntax_v1::parse_module(REBIND_CAP_HANDOFF_SCOPES_FIXTURE);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
     assert_eq!(parsed.value.items.len(), 2);
 
@@ -1375,6 +1375,22 @@ fn unknown_row_byte_caps_report_handoff_estimates_by_nested_depth() {
                 "1:2048>512,512>128,128>32;2:2048>1024,512>256,128>64".to_owned()
             )),
             Some(&PlanDetail::Text("1:1040>260;2:1040>520".to_owned())),
+        ]
+    );
+    assert_eq!(
+        filters
+            .iter()
+            .map(|filter| filter
+                .details()
+                .get("limit_chain_rebind_byte_cap_handoff_scopes_by_depth"))
+            .collect::<Vec<_>>(),
+        vec![
+            Some(&PlanDetail::Text(
+                "1:root/branch1/limit1/rebind1/cascade1=2048>512,root/branch1/limit1/rebind1/cascade2=512>128,root/branch1/limit2/rebind2/cascade1=128>32;2:root/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=2048>1024,root/branch1/limit1/rebind1/cascade2/branch1/limit1/rebind1/cascade1=512>256,root/branch1/limit2/rebind2/cascade1/branch1/limit1/rebind1/cascade1=128>64".to_owned()
+            )),
+            Some(&PlanDetail::Text(
+                "1:root/branch1/limit1/rebind1/cascade1=1040>260;2:root/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=1040>520".to_owned()
+            )),
         ]
     );
 }
