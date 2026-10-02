@@ -1,0 +1,24 @@
+pub table PlannerUnknownRebindAncestryConsolidation(id: Int) {
+    first: Bool,
+    second: Bool,
+    leaf: Bool,
+}
+
+pub fn unknown_rebind_ancestry_consolidation() = PlannerUnknownRebindAncestryConsolidation
+    | take(96)
+    | union(
+        PlannerUnknownRebindAncestryConsolidation
+            | take(64)
+            | filter(row => row.first),
+        PlannerUnknownRebindAncestryConsolidation
+            | take(48)
+            | filter(row => row.second)
+    )
+    | union(
+        PlannerUnknownRebindAncestryConsolidation
+            | take(24)
+            | filter(row => row.leaf),
+        PlannerUnknownRebindAncestryConsolidation
+            | take(12)
+            | filter(row => row.first)
+    );

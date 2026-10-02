@@ -1,0 +1,229 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn final_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+            };
+
+pub fn followup_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+                continuation: final_at(terminal_pin),
+            };
+
+pub fn cascade_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+                followup: followup_at(terminal_pin),
+            };
+
+// Repeat storm/reproduction cycles at both captured continuation depths.
+pub fn paired_continuation_reproductions_remain_stable_across_storm_cycles() {
+    let left_origin = cascade_at(sys.snapshot("HEAD~1160"))(sys.snapshot("HEAD~1120"))(sys.snapshot("HEAD~1080"))(sys.snapshot("HEAD~1040"));
+    let right_origin = cascade_at(sys.snapshot("HEAD~1150"))(sys.snapshot("HEAD~1110"))(sys.snapshot("HEAD~1070"))(sys.snapshot("HEAD~1030"));
+    let left_reproduced_one = cascade_at(sys.snapshot("HEAD~1160"))(sys.snapshot("HEAD~1120"))(sys.snapshot("HEAD~1080"))(sys.snapshot("HEAD~1040"));
+    let right_reproduced_one = cascade_at(sys.snapshot("HEAD~1150"))(sys.snapshot("HEAD~1110"))(sys.snapshot("HEAD~1070"))(sys.snapshot("HEAD~1030"));
+    let left_reproduced_two = cascade_at(sys.snapshot("HEAD~1160"))(sys.snapshot("HEAD~1120"))(sys.snapshot("HEAD~1080"))(sys.snapshot("HEAD~1040"));
+    let right_reproduced_two = cascade_at(sys.snapshot("HEAD~1150"))(sys.snapshot("HEAD~1110"))(sys.snapshot("HEAD~1070"))(sys.snapshot("HEAD~1030"));
+
+    let followup_origin = (left_origin.followup, right_origin.followup);
+    let followup_reproduced_one = (left_reproduced_one.followup, right_reproduced_one.followup);
+    let followup_reproduced_two = (left_reproduced_two.followup, right_reproduced_two.followup);
+    let (left_followup_origin, right_followup_origin) = followup_origin;
+    let followup_roots_round_one_rolling = followup_origin;
+    followup_roots_round_one_rolling = (followup_at(sys.snapshot("HEAD~1039")), followup_at(sys.snapshot("HEAD~1029")));
+    followup_roots_round_one_rolling = (followup_at(sys.snapshot("HEAD~1038")), followup_at(sys.snapshot("HEAD~1028")));
+    let followup_roots_round_one = followup_reproduced_one;
+    let (left_followup_root_one, right_followup_root_one) = followup_roots_round_one;
+
+    let followup_bridges_round_one_rolling = (
+        left_followup_root_one(sys.snapshot("HEAD~1000")),
+        right_followup_root_one(sys.snapshot("HEAD~990")),
+    );
+    followup_bridges_round_one_rolling = (
+        left_followup_root_one(sys.snapshot("HEAD~998")),
+        right_followup_root_one(sys.snapshot("HEAD~988")),
+    );
+    followup_bridges_round_one_rolling = (
+        left_followup_root_one(sys.snapshot("HEAD~999")),
+        right_followup_root_one(sys.snapshot("HEAD~989")),
+    );
+    let followup_bridges_round_one = (
+        left_followup_root_one(sys.snapshot("HEAD~1000")),
+        right_followup_root_one(sys.snapshot("HEAD~990")),
+    );
+    let (left_followup_bridge_one, right_followup_bridge_one) = followup_bridges_round_one;
+    let followup_leaves_round_one_rolling = (
+        left_followup_bridge_one(sys.snapshot("HEAD~980")),
+        right_followup_bridge_one(sys.snapshot("HEAD~970")),
+    );
+    followup_leaves_round_one_rolling = (
+        left_followup_bridge_one(sys.snapshot("HEAD~978")),
+        right_followup_bridge_one(sys.snapshot("HEAD~968")),
+    );
+    followup_leaves_round_one_rolling = (
+        left_followup_bridge_one(sys.snapshot("HEAD~979")),
+        right_followup_bridge_one(sys.snapshot("HEAD~969")),
+    );
+    let followup_leaves_round_one = (
+        left_followup_bridge_one(sys.snapshot("HEAD~980")),
+        right_followup_bridge_one(sys.snapshot("HEAD~970")),
+    );
+    let (left_followup_leaf_one, right_followup_leaf_one) = followup_leaves_round_one;
+    let left_followup_after_round_one = left_followup_leaf_one(sys.snapshot("HEAD~960"));
+    let right_followup_after_round_one = right_followup_leaf_one(sys.snapshot("HEAD~950"));
+    let left_followup_origin_output = left_followup_origin(sys.snapshot("HEAD~1000"))(sys.snapshot("HEAD~980"))(sys.snapshot("HEAD~960"));
+    let right_followup_origin_output = right_followup_origin(sys.snapshot("HEAD~990"))(sys.snapshot("HEAD~970"))(sys.snapshot("HEAD~950"));
+    let left_followup_reproduction_one = left_followup_root_one(sys.snapshot("HEAD~1000"))(sys.snapshot("HEAD~980"))(sys.snapshot("HEAD~960"));
+    let right_followup_reproduction_one = right_followup_root_one(sys.snapshot("HEAD~990"))(sys.snapshot("HEAD~970"))(sys.snapshot("HEAD~950"));
+
+    let followup_roots_round_two_rolling = followup_roots_round_one;
+    followup_roots_round_two_rolling = (followup_at(sys.snapshot("HEAD~1037")), followup_at(sys.snapshot("HEAD~1027")));
+    followup_roots_round_two_rolling = (followup_at(sys.snapshot("HEAD~1036")), followup_at(sys.snapshot("HEAD~1026")));
+    let followup_roots_round_two = followup_reproduced_two;
+    let (left_followup_root_two, right_followup_root_two) = followup_roots_round_two;
+    let followup_bridges_round_two_rolling = (
+        left_followup_root_two(sys.snapshot("HEAD~1000")),
+        right_followup_root_two(sys.snapshot("HEAD~990")),
+    );
+    followup_bridges_round_two_rolling = (
+        left_followup_root_two(sys.snapshot("HEAD~997")),
+        right_followup_root_two(sys.snapshot("HEAD~987")),
+    );
+    followup_bridges_round_two_rolling = (
+        left_followup_root_two(sys.snapshot("HEAD~996")),
+        right_followup_root_two(sys.snapshot("HEAD~986")),
+    );
+    let followup_bridges_round_two = (
+        left_followup_root_two(sys.snapshot("HEAD~1000")),
+        right_followup_root_two(sys.snapshot("HEAD~990")),
+    );
+    let (left_followup_bridge_two, right_followup_bridge_two) = followup_bridges_round_two;
+    let followup_leaves_round_two_rolling = (
+        left_followup_bridge_two(sys.snapshot("HEAD~980")),
+        right_followup_bridge_two(sys.snapshot("HEAD~970")),
+    );
+    followup_leaves_round_two_rolling = (
+        left_followup_bridge_two(sys.snapshot("HEAD~977")),
+        right_followup_bridge_two(sys.snapshot("HEAD~967")),
+    );
+    followup_leaves_round_two_rolling = (
+        left_followup_bridge_two(sys.snapshot("HEAD~976")),
+        right_followup_bridge_two(sys.snapshot("HEAD~966")),
+    );
+    let followup_leaves_round_two = (
+        left_followup_bridge_two(sys.snapshot("HEAD~980")),
+        right_followup_bridge_two(sys.snapshot("HEAD~970")),
+    );
+    let (left_followup_leaf_two, right_followup_leaf_two) = followup_leaves_round_two;
+    let left_followup_after_round_two = left_followup_leaf_two(sys.snapshot("HEAD~960"));
+    let right_followup_after_round_two = right_followup_leaf_two(sys.snapshot("HEAD~950"));
+    let left_followup_reproduction_two = left_followup_root_two(sys.snapshot("HEAD~1000"))(sys.snapshot("HEAD~980"))(sys.snapshot("HEAD~960"));
+    let right_followup_reproduction_two = right_followup_root_two(sys.snapshot("HEAD~990"))(sys.snapshot("HEAD~970"))(sys.snapshot("HEAD~950"));
+
+    let terminal_origin = (left_followup_origin_output.continuation, right_followup_origin_output.continuation);
+    let terminal_reproduced = (left_followup_reproduction_two.continuation, right_followup_reproduction_two.continuation);
+    let (left_terminal_origin_root, right_terminal_origin_root) = terminal_origin;
+    let (left_terminal_reproduced_root, right_terminal_reproduced_root) = terminal_reproduced;
+    let terminal_roots_round_one_rolling = terminal_origin;
+    terminal_roots_round_one_rolling = (final_at(sys.snapshot("HEAD~959")), final_at(sys.snapshot("HEAD~949")));
+    terminal_roots_round_one_rolling = (final_at(sys.snapshot("HEAD~958")), final_at(sys.snapshot("HEAD~948")));
+    let terminal_roots_round_one = terminal_reproduced;
+    let (left_terminal_root_one, right_terminal_root_one) = terminal_roots_round_one;
+    let terminal_bridges_round_one_rolling = (
+        left_terminal_root_one(sys.snapshot("HEAD~920")),
+        right_terminal_root_one(sys.snapshot("HEAD~910")),
+    );
+    terminal_bridges_round_one_rolling = (
+        left_terminal_root_one(sys.snapshot("HEAD~918")),
+        right_terminal_root_one(sys.snapshot("HEAD~908")),
+    );
+    let terminal_bridges_round_one = (
+        left_terminal_root_one(sys.snapshot("HEAD~920")),
+        right_terminal_root_one(sys.snapshot("HEAD~910")),
+    );
+    let (left_terminal_bridge_one, right_terminal_bridge_one) = terminal_bridges_round_one;
+    let terminal_leaves_round_one_rolling = (
+        left_terminal_bridge_one(sys.snapshot("HEAD~900")),
+        right_terminal_bridge_one(sys.snapshot("HEAD~890")),
+    );
+    terminal_leaves_round_one_rolling = (
+        left_terminal_bridge_one(sys.snapshot("HEAD~898")),
+        right_terminal_bridge_one(sys.snapshot("HEAD~888")),
+    );
+    let terminal_leaves_round_one = (
+        left_terminal_bridge_one(sys.snapshot("HEAD~900")),
+        right_terminal_bridge_one(sys.snapshot("HEAD~890")),
+    );
+    let (left_terminal_leaf_one, right_terminal_leaf_one) = terminal_leaves_round_one;
+    let left_terminal_after_round_one = left_terminal_leaf_one(sys.snapshot("HEAD~880"));
+    let right_terminal_after_round_one = right_terminal_leaf_one(sys.snapshot("HEAD~870"));
+
+    let terminal_roots_round_two_rolling = terminal_roots_round_one;
+    terminal_roots_round_two_rolling = (final_at(sys.snapshot("HEAD~957")), final_at(sys.snapshot("HEAD~947")));
+    terminal_roots_round_two_rolling = (final_at(sys.snapshot("HEAD~956")), final_at(sys.snapshot("HEAD~946")));
+    let terminal_roots_round_two = terminal_reproduced;
+    let (left_terminal_root_two, right_terminal_root_two) = terminal_roots_round_two;
+    let terminal_bridges_round_two_rolling = (
+        left_terminal_root_two(sys.snapshot("HEAD~920")),
+        right_terminal_root_two(sys.snapshot("HEAD~910")),
+    );
+    terminal_bridges_round_two_rolling = (
+        left_terminal_root_two(sys.snapshot("HEAD~917")),
+        right_terminal_root_two(sys.snapshot("HEAD~907")),
+    );
+    let terminal_bridges_round_two = (
+        left_terminal_root_two(sys.snapshot("HEAD~920")),
+        right_terminal_root_two(sys.snapshot("HEAD~910")),
+    );
+    let (left_terminal_bridge_two, right_terminal_bridge_two) = terminal_bridges_round_two;
+    let terminal_leaves_round_two_rolling = (
+        left_terminal_bridge_two(sys.snapshot("HEAD~900")),
+        right_terminal_bridge_two(sys.snapshot("HEAD~890")),
+    );
+    terminal_leaves_round_two_rolling = (
+        left_terminal_bridge_two(sys.snapshot("HEAD~897")),
+        right_terminal_bridge_two(sys.snapshot("HEAD~887")),
+    );
+    let terminal_leaves_round_two = (
+        left_terminal_bridge_two(sys.snapshot("HEAD~900")),
+        right_terminal_bridge_two(sys.snapshot("HEAD~890")),
+    );
+    let (left_terminal_leaf_two, right_terminal_leaf_two) = terminal_leaves_round_two;
+    let left_terminal_after_round_two = left_terminal_leaf_two(sys.snapshot("HEAD~880"));
+    let right_terminal_after_round_two = right_terminal_leaf_two(sys.snapshot("HEAD~870"));
+    let left_terminal_origin_output = left_terminal_origin_root(sys.snapshot("HEAD~920"))(sys.snapshot("HEAD~900"))(sys.snapshot("HEAD~880"));
+    let right_terminal_origin_output = right_terminal_origin_root(sys.snapshot("HEAD~910"))(sys.snapshot("HEAD~890"))(sys.snapshot("HEAD~870"));
+    let left_terminal_reproduced_output = left_terminal_reproduced_root(sys.snapshot("HEAD~920"))(sys.snapshot("HEAD~900"))(sys.snapshot("HEAD~880"));
+    let right_terminal_reproduced_output = right_terminal_reproduced_root(sys.snapshot("HEAD~910"))(sys.snapshot("HEAD~890"))(sys.snapshot("HEAD~870"));
+
+    {
+        followup_stability: {
+            left: [left_followup_origin_output, left_followup_after_round_one, left_followup_after_round_two, left_followup_reproduction_two],
+            right: [right_followup_origin_output, right_followup_after_round_one, right_followup_after_round_two, right_followup_reproduction_two],
+        },
+        terminal_stability: {
+            left: [left_terminal_origin_output, left_terminal_after_round_one, left_terminal_after_round_two, left_terminal_reproduced_output],
+            right: [right_terminal_origin_output, right_terminal_after_round_one, right_terminal_after_round_two, right_terminal_reproduced_output],
+        },
+    }
+}

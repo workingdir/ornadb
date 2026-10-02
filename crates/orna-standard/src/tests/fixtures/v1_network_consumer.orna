@@ -1,0 +1,4 @@
+use std.net;
+use std.url;
+
+pub fn core_name_remains_ordinary(value: Int): Int = value;

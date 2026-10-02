@@ -1,0 +1,92 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn nested_bundle_at(pin: sys.SnapshotRef) = {
+    direct: chained_factory(pin),
+    reader: chained_factory(pin)().read,
+    continuation: chained_factory(pin)().read(),
+};
+
+pub fn nested_rebind_chain_storm(
+    pin_0: sys.SnapshotRef,
+    pin_1: sys.SnapshotRef,
+    pin_2: sys.SnapshotRef,
+    pin_3: sys.SnapshotRef,
+    pin_4: sys.SnapshotRef,
+    pin_5: sys.SnapshotRef,
+    pin_6: sys.SnapshotRef,
+    pin_7: sys.SnapshotRef,
+) {
+    let rolling = nested_bundle_at(pin_0);
+    let stage_0 = rolling;
+    rolling = nested_bundle_at(pin_1);
+    let stage_1 = rolling;
+    rolling = nested_bundle_at(pin_2);
+    let stage_2 = rolling;
+    rolling = nested_bundle_at(pin_3);
+    let stage_3 = rolling;
+    rolling = nested_bundle_at(pin_4);
+    let stage_4 = rolling;
+    rolling = nested_bundle_at(pin_5);
+    let stage_5 = rolling;
+    rolling = nested_bundle_at(pin_6);
+    let stage_6 = rolling;
+    rolling = nested_bundle_at(pin_7);
+    let stage_7 = rolling;
+    rolling = stage_0;
+    let returned_to_first = rolling;
+    {
+        stage_0: {
+            direct: [stage_0.direct, chained_factory(pin_0)],
+            reader: [stage_0.reader, chained_factory(pin_0)().read],
+            continuation: [stage_0.continuation, chained_factory(pin_0)().read()],
+        },
+        stage_1: {
+            direct: [stage_1.direct, chained_factory(pin_1)],
+            reader: [stage_1.reader, chained_factory(pin_1)().read],
+            continuation: [stage_1.continuation, chained_factory(pin_1)().read()],
+        },
+        stage_2: {
+            direct: [stage_2.direct, chained_factory(pin_2)],
+            reader: [stage_2.reader, chained_factory(pin_2)().read],
+            continuation: [stage_2.continuation, chained_factory(pin_2)().read()],
+        },
+        stage_3: {
+            direct: [stage_3.direct, chained_factory(pin_3)],
+            reader: [stage_3.reader, chained_factory(pin_3)().read],
+            continuation: [stage_3.continuation, chained_factory(pin_3)().read()],
+        },
+        stage_4: {
+            direct: [stage_4.direct, chained_factory(pin_4)],
+            reader: [stage_4.reader, chained_factory(pin_4)().read],
+            continuation: [stage_4.continuation, chained_factory(pin_4)().read()],
+        },
+        stage_5: {
+            direct: [stage_5.direct, chained_factory(pin_5)],
+            reader: [stage_5.reader, chained_factory(pin_5)().read],
+            continuation: [stage_5.continuation, chained_factory(pin_5)().read()],
+        },
+        stage_6: {
+            direct: [stage_6.direct, chained_factory(pin_6)],
+            reader: [stage_6.reader, chained_factory(pin_6)().read],
+            continuation: [stage_6.continuation, chained_factory(pin_6)().read()],
+        },
+        stage_7: {
+            direct: [stage_7.direct, chained_factory(pin_7)],
+            reader: [stage_7.reader, chained_factory(pin_7)().read],
+            continuation: [stage_7.continuation, chained_factory(pin_7)().read()],
+        },
+        returned_to_first: {
+            direct: [returned_to_first.direct, chained_factory(pin_0)],
+            reader: [returned_to_first.reader, chained_factory(pin_0)().read],
+            continuation: [
+                returned_to_first.continuation,
+                chained_factory(pin_0)().read(),
+            ],
+        },
+    }
+}

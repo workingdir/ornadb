@@ -1,0 +1,43 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+// Store the callbacks themselves in paired tuple depths, then rebind the
+// tuple before using the saved and rebound callbacks concurrently.
+pub fn paired_callback_pins_survive_tuple_rebind() {
+    let rolling = (
+        (
+            () => factory_at(sys.snapshot("HEAD~80")),
+            () => factory_at(sys.snapshot("HEAD~60")),
+        ),
+        (
+            () => factory_at(sys.snapshot("HEAD~40")),
+            () => factory_at(sys.snapshot("HEAD~20")),
+        ),
+    );
+    let saved = rolling;
+    rolling = (
+        (
+            () => factory_at(sys.snapshot("HEAD~79")),
+            () => factory_at(sys.snapshot("HEAD~59")),
+        ),
+        (
+            () => factory_at(sys.snapshot("HEAD~39")),
+            () => factory_at(sys.snapshot("HEAD~19")),
+        ),
+    );
+    let rebound = rolling;
+    rolling = saved;
+
+    let ((saved_left_root, saved_left_leaf), (saved_right_root, saved_right_leaf)) = rolling;
+    let ((new_left_root, new_left_leaf), (new_right_root, new_right_leaf)) = rebound;
+    {
+        saved_left_root: std.concurrent.parallel([saved_left_root, saved_left_root]),
+        saved_left_leaf: std.concurrent.parallel([saved_left_leaf, saved_left_leaf]),
+        saved_right_root: std.concurrent.parallel([saved_right_root, saved_right_root]),
+        saved_right_leaf: std.concurrent.parallel([saved_right_leaf, saved_right_leaf]),
+        rebound_left_root: std.concurrent.parallel([new_left_root, new_left_root]),
+        rebound_left_leaf: std.concurrent.parallel([new_left_leaf, new_left_leaf]),
+        rebound_right_root: std.concurrent.parallel([new_right_root, new_right_root]),
+        rebound_right_leaf: std.concurrent.parallel([new_right_leaf, new_right_leaf]),
+    }
+}

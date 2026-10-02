@@ -1,0 +1,9 @@
+use std.list as list;
+use std.map as map;
+use std.set as set;
+
+pub fn list_operations(values: [Int]): [Int] = list.reverse(list.append(values, 5));
+pub fn map_operations(values: [(Str, Int)]): [(Str, Int)] =
+    map.insert(values, "answer", 42);
+pub fn set_operations(values: [Int]): [Int] =
+    set.union(values, set.from_list([1, 2]));

@@ -1,0 +1,33 @@
+pub table PlannerStormRebindStageCaps(id: Int) {
+    outer: Bool,
+    middle: Bool,
+    deep: Bool,
+    sibling: Bool,
+}
+pub fn rebind_stage_caps() = PlannerStormRebindStageCaps
+    | union(
+        PlannerStormRebindStageCaps
+            | take(10)
+            | union(
+                PlannerStormRebindStageCaps | take(100) | filter(row => row.deep),
+                PlannerStormRebindStageCaps | take(100) | filter(row => row.deep),
+                PlannerStormRebindStageCaps | take(100) | filter(row => row.deep)
+            )
+            | union(
+                PlannerStormRebindStageCaps
+                    | take(8)
+                    | union(
+                        PlannerStormRebindStageCaps | take(100) | filter(row => row.deep),
+                        PlannerStormRebindStageCaps | take(100) | filter(row => row.deep),
+                        PlannerStormRebindStageCaps | take(100) | filter(row => row.deep)
+                    )
+                    | take(40)
+                    | filter(row => row.middle),
+                PlannerStormRebindStageCaps | take(8) | filter(row => row.middle)
+            )
+            | take(100)
+            | filter(row => row.outer),
+        PlannerStormRebindStageCaps
+            | take(20)
+            | filter(row => row.sibling)
+    );
