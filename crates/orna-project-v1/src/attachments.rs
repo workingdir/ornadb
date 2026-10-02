@@ -243,6 +243,9 @@ impl PackageResolver {
     /// If an alias is rebound through several candidates before nested
     /// expansion, only the currently attached pin supplies that next manifest;
     /// the earlier candidates' manifests are not accumulated. The
+    /// Rebinding several prefix-related aliases in one session keeps them as
+    /// independent exact-key entries; expanding one replacement uses only its
+    /// own manifest and never combines it with another rebound alias's pins.
     /// selected session keeps every unmodified exact key pinned, including a
     /// longer prefix-related sibling. Expanding the rebound database gives
     /// its own manifest a fresh next-depth session, even when one of its keys
