@@ -2967,21 +2967,9 @@ fn rebind_byte_cap_handoff_route_records(
 }
 
 fn byte_cap_scope_path_label(path: &[PlanByteCapScopeSegment]) -> String {
-    let root_stage_has_output = matches!(
-        (path.first(), path.get(1)),
-        (
-            Some(PlanByteCapScopeSegment::StormStage { index: 1 }),
-            Some(PlanByteCapScopeSegment::StormStageOutput { index: 1 })
-        )
-    );
     let mut scope = "root".to_owned();
-    for (position, segment) in path.iter().enumerate() {
+    for segment in path {
         let label = match segment {
-            PlanByteCapScopeSegment::StormStage { index }
-                if position == 0 && *index == 1 && !root_stage_has_output =>
-            {
-                continue;
-            }
             PlanByteCapScopeSegment::StormStage { index } => format!("storm{index}"),
             PlanByteCapScopeSegment::StormStageOutput { .. } => "output".to_owned(),
             PlanByteCapScopeSegment::Branch { index } => format!("branch{index}"),
