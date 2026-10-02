@@ -816,6 +816,29 @@ impl PackageResolver {
         Ok(SiblingRebindResolution { routes })
     }
 
+    /// Applies one identical terminal-depth pair to sibling routes selected
+    /// from retained waves. Each route resolves from its own exact snapshot,
+    /// keeps its displaced final endpoint and earlier waves, and preserves
+    /// input order. No partial sibling batch is returned on failure.
+    pub fn extend_sibling_terminal_pair_wave_from_waves(
+        &self,
+        paths: &[(&ReboundPathResolution, usize, usize)],
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, wave, snapshot)| {
+                self.extend_nested_terminal_pair_from_wave(
+                    previous,
+                    *wave,
+                    *snapshot,
+                    replacements.clone(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
     /// Repeats one identical rebind path across a completed sibling batch.
     /// Each branch extends from its own terminal session and keeps its earlier
     /// route snapshots; the returned batch preserves sibling order.
