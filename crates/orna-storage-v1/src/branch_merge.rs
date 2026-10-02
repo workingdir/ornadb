@@ -279,6 +279,8 @@ pub enum BranchMergeTombstoneHistoryError {
     FragmentCountMismatch { order: u64, expected: usize, actual: usize },
     /// Overlapping fragments attempted to record one table/key twice in a wave.
     DuplicateTombstone { order: u64 },
+    /// Two concurrently buffered lineage positions record one table/key.
+    ConcurrentDuplicateTombstone { first_order: u64, second_order: u64 },
     /// A whole paired plan and split depth fragments were both submitted for one position.
     ConflictingSubmission { order: u64 },
     /// The history already consumed the final representable lineage position.
@@ -298,12 +300,16 @@ enum BufferedBranchMergeTombstoneDelta {
 ///
 /// MERGE-1 is silent on tombstone accumulation across committed waves and on
 /// overlapping depth fragments. This v1 policy accepts paired plans at their
-/// exact lineage positions, appends table/key-ordered deletions without
-/// deduplicating across waves, and advances through restore-only empty deltas.
+/// exact lineage positions, appends table/key-ordered deletion events in
+/// lineage order, and advances through restore-only empty deltas.
 /// Duplicate table/key events within one lineage position are rejected as
-/// soon as the overlapping fragment arrives. Duplicate checks are scoped to
-/// that position even while several restore waves are buffered concurrently:
-/// the same key at a later position remains a new event.
+/// soon as the overlapping fragment arrives. Two concurrently buffered
+/// positions cannot record the same logical key when every intervening
+/// position is buffered and also records that key. A duplicate reports both
+/// positions and leaves the attempted submission unchanged. A missing
+/// position delays that decision; an intervening position that omits the key
+/// separates a later re-delete. Once an earlier position has been released,
+/// a later position may record the key again as a separate event.
 /// Concurrent completions may arrive out of order; future deltas wait until
 /// every earlier paired position is present. Split waves wait until every
 /// fragment arrives, then flatten in canonical table/key order atomically.
@@ -363,6 +369,11 @@ impl BranchMergeTombstoneHistory {
             return Err(BranchMergeTombstoneHistoryError::DuplicateTombstone {
                 order: step.order,
             });
+        }
+        if let Some(other_order) =
+            self.pending_duplicate_order(step.order, &step.ordered_row_tombstones)
+        {
+            return Err(concurrent_duplicate_error(step.order, other_order));
         }
 
         self.pending_deltas.insert(
@@ -431,6 +442,9 @@ impl BranchMergeTombstoneHistory {
         if has_duplicate_tombstones_in_wave(&combined) {
             return Err(BranchMergeTombstoneHistoryError::DuplicateTombstone { order });
         }
+        if let Some(other_order) = self.pending_duplicate_order(order, tombstones) {
+            return Err(concurrent_duplicate_error(order, other_order));
+        }
 
         let buffered = self.pending_deltas.entry(order).or_insert_with(|| {
             BufferedBranchMergeTombstoneDelta::DepthFragments {
@@ -480,6 +494,37 @@ impl BranchMergeTombstoneHistory {
         self.events[first_new_event..].to_vec()
     }
 
+    fn pending_duplicate_order(
+        &self,
+        order: u64,
+        tombstones: &[(ObjectId, CanonicalValue)],
+    ) -> Option<u64> {
+        self.pending_deltas.iter().find_map(|(pending_order, delta)| {
+            if *pending_order == order {
+                return None;
+            }
+            let first_order = order.min(*pending_order);
+            let last_order = order.max(*pending_order);
+            tombstones
+                .iter()
+                .any(|(table, key)| {
+                    delta.contains_tombstone(*table, key)
+                        && {
+                            let between = self
+                                .pending_deltas
+                                .range((first_order + 1)..last_order)
+                                .collect::<Vec<_>>();
+                            let expected_between = last_order - first_order - 1;
+                            u64::try_from(between.len()).ok() == Some(expected_between)
+                                && between.iter().all(|(_, middle_delta)| {
+                                    middle_delta.contains_tombstone(*table, key)
+                                })
+                        }
+                })
+                .then_some(*pending_order)
+        })
+    }
+
     /// Returns the next lineage position required by this history.
     pub fn next_order(&self) -> Option<u64> {
         self.next_order
@@ -491,6 +536,39 @@ impl BranchMergeTombstoneHistory {
     }
 }
 
+impl BufferedBranchMergeTombstoneDelta {
+    fn contains_tombstone(&self, table: ObjectId, key: &CanonicalValue) -> bool {
+        let contains = |candidate_table: &ObjectId, candidate_key: &CanonicalValue| {
+            *candidate_table == table && same_primary_key(candidate_key, key)
+        };
+        match self {
+            Self::WholePlan(tombstones) => {
+                tombstones.iter().any(|(candidate_table, candidate_key)| {
+                    contains(candidate_table, candidate_key)
+                })
+            }
+            Self::DepthFragments { fragments, .. } => fragments
+                .values()
+                .flatten()
+                .any(|(candidate_table, candidate_key)| contains(candidate_table, candidate_key)),
+        }
+    }
+}
+
+fn concurrent_duplicate_error(
+    order: u64,
+    other_order: u64,
+) -> BranchMergeTombstoneHistoryError {
+    BranchMergeTombstoneHistoryError::ConcurrentDuplicateTombstone {
+        first_order: order.min(other_order),
+        second_order: order.max(other_order),
+    }
+}
+
+fn same_primary_key(left: &CanonicalValue, right: &CanonicalValue) -> bool {
+    left == right || matches!(compare_primary_keys(left, right), Ok(Ordering::Equal))
+}
+
 fn has_duplicate_tombstones_in_wave(tombstones: &[(ObjectId, CanonicalValue)]) -> bool {
     let mut ordered = tombstones.to_vec();
     ordered.sort_by(|(left_table, left_key), (right_table, right_key)| {
@@ -498,7 +576,9 @@ fn has_duplicate_tombstones_in_wave(tombstones: &[(ObjectId, CanonicalValue)]) -
             compare_primary_keys(left_key, right_key).unwrap_or(Ordering::Equal)
         })
     });
-    ordered.windows(2).any(|pair| pair[0].0 == pair[1].0 && pair[0].1 == pair[1].1)
+    ordered
+        .windows(2)
+        .any(|pair| pair[0].0 == pair[1].0 && same_primary_key(&pair[0].1, &pair[1].1))
 }
 
 /// Buffers selected successful plans and releases them in paired lineage order,
