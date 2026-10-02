@@ -20509,6 +20509,76 @@ fn paired_append_preserves_mixed_mode_priority_through_pending_wave_release() {
 }
 
 #[test]
+fn paired_append_duplicate_failure_is_atomic_during_depth_wave_interleaving() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let duplicate_key = fixture_rows
+        .iter()
+        .find(|row| row.key == string("a/child/deep"))
+        .expect("the in-crate depth fixture supplies the pending storm tombstone")
+        .key
+        .clone();
+    let corrected_key = fixture_rows
+        .iter()
+        .find(|row| row.key == string("root/child/deep"))
+        .expect("the in-crate depth fixture supplies a distinct retry tombstone")
+        .key
+        .clone();
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history.append(&whole_plan(0, Vec::new())).unwrap();
+    history
+        .submit_depth_merge_fragment(2, 0, 2, &[(id(1), duplicate_key.clone())])
+        .unwrap();
+    let before_rejected_append = history.clone();
+    assert_eq!(
+        history.append(&whole_plan(1, vec![duplicate_key.clone()])),
+        Err(BranchMergeTombstoneHistoryError::ConcurrentDuplicateTombstone {
+            first_order: 1,
+            second_order: 2,
+        }),
+        "a transaction append detects a duplicate with the pending post-storm depth wave",
+    );
+    assert_eq!(
+        history, before_rejected_append,
+        "a rejected append cannot partially reserve mode or change paired history",
+    );
+
+    let released = history
+        .submit_depth_merge_fragment(1, 0, 1, &[(id(1), corrected_key.clone())])
+        .unwrap();
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0].order, 1);
+    let released = history
+        .submit_depth_merge_fragment(2, 1, 2, &[])
+        .unwrap();
+    assert_eq!(
+        released,
+        vec![BranchMergeTombstoneEvent {
+            order: 2,
+            table: id(1),
+            key: duplicate_key,
+        }],
+        "the original storm wave remains intact after the failed transaction append",
+    );
+    assert_eq!(history.events()[0].order, 1);
+    assert_eq!(history.events()[0].key, corrected_key);
+    assert_eq!(history.next_order(), Some(3));
+}
+
+#[test]
 fn paired_mixed_mode_priority_survives_interleaved_depth_wave_release() {
     let fixture_keys = TOMBSTONE_DEPTH_COMMIT_ORDER
         .split("\n\n")
