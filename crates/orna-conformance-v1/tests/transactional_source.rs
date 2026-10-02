@@ -749,6 +749,76 @@ fn all_unique_factory_rejects_a_second_null_key_and_rolls_back_both_rows() {
 }
 
 #[test]
+fn all_unique_factory_compares_complete_nested_record_keys() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-all-unique-nested-record-keys.orna"
+    )));
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+    for id in [1, 2, 3] {
+        assert!(
+            runtime
+                .committed_row("Account", &Value::int(id.into()))
+                .is_some(),
+            "unique nested record key row {id} was not committed"
+        );
+    }
+}
+
+#[test]
+fn all_unique_factory_rejects_equal_nested_record_keys_and_rolls_back_rows() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-all-unique-duplicate-nested-record-keys.orna"
+    )));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+        ),
+        "duplicate nested projection did not reject candidate rows: {outcome:?}"
+    );
+    for id in [1, 2] {
+        assert_eq!(
+            runtime.committed_row("Account", &Value::int(id.into())),
+            None,
+            "failed nested-key assertion published row {id}"
+        );
+    }
+}
+
+#[test]
+fn every_factory_short_circuits_on_first_false_canonical_row() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-every-short-circuits-canonical-order.orna"
+    )));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+        ),
+        "later-row divide-by-zero should not run after the first false row: {outcome:?}"
+    );
+    for id in ["a", "b"] {
+        assert_eq!(
+            runtime.committed_row(
+                "Entry",
+                &Value::new(orna_foundation_v1::OvbRaw::Text(id.into()))
+                    .expect("canonical string key"),
+            ),
+            None,
+            "failed every predicate published row {id}"
+        );
+    }
+}
+
+#[test]
 fn table_all_unique_decimal_body_rejects_scale_alias_and_rolls_back_candidates() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     let outcome = runtime.execute_source(&fixture_source(include_str!(
