@@ -2952,6 +2952,27 @@ fn pinned_closure_identities_survive_parameter_rebinding_chains() {
 }
 
 #[test]
+fn each_call_specializes_all_stages_of_a_pinned_rebinding_chain() {
+    let source = include_str!("fixtures/historical-pinned-closure-chain-parameter-rebinding.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-parameter-rebinding.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn closure_contexts_from_parameter_rebinding_stages_stay_distinct() {
     let source = include_str!(
         "fixtures/historical-pinned-closure-chain-parameter-rebinding-mixed.orna"
@@ -2969,6 +2990,32 @@ fn closure_contexts_from_parameter_rebinding_stages_stay_distinct() {
             .iter()
             .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
         "closures from separate parameter rebinding stages should not compose: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn closure_contexts_from_distinct_rebinding_chain_calls_do_not_merge() {
+    let source = include_str!(
+        "fixtures/historical-pinned-closure-chain-parameter-rebinding-mixed.orna"
+    );
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-chain-parameter-rebinding-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "closures from distinct rebinding-chain calls should not compose: {:?}",
         result
             .diagnostics
             .iter()

@@ -36,3 +36,54 @@ pub fn each_rebound_chain_keeps_its_pinned_identity() {
         current: [chain.current, chained_factory(sys.snapshot("HEAD"))],
     }
 }
+
+pub fn rebind_through_pinned_parameters(
+    pin: sys.SnapshotRef,
+    middle_pin: sys.SnapshotRef,
+    final_pin: sys.SnapshotRef,
+) {
+    let original = chained_factory(pin);
+    let original_alias = pin;
+    pin = middle_pin;
+    let middle = chained_factory(pin);
+    let middle_alias = pin;
+    let final_source = final_pin;
+    pin = final_source;
+    let final = chained_factory(pin);
+    {
+        original: original,
+        original_alias: chained_factory(original_alias),
+        middle: middle,
+        middle_alias: forwarded_factory(middle_alias),
+        final: final,
+    }
+}
+
+pub fn each_call_specializes_its_three_stage_rebinding_chain() {
+    let first = rebind_through_pinned_parameters(
+        sys.snapshot("HEAD~20"),
+        sys.snapshot("HEAD~10"),
+        sys.snapshot("HEAD~5"),
+    );
+    let second = rebind_through_pinned_parameters(
+        sys.snapshot("HEAD~30"),
+        sys.snapshot("HEAD~15"),
+        sys.snapshot("HEAD~3"),
+    );
+    {
+        first_original: [first.original, chained_factory(sys.snapshot("HEAD~20"))],
+        first_original_alias: [
+            first.original_alias,
+            forwarded_factory(sys.snapshot("HEAD~20")),
+        ],
+        first_middle: [first.middle, chained_factory(sys.snapshot("HEAD~10"))],
+        first_middle_alias: [
+            first.middle_alias,
+            forwarded_factory(sys.snapshot("HEAD~10")),
+        ],
+        first_final: [first.final, chained_factory(sys.snapshot("HEAD~5"))],
+        second_original: [second.original, chained_factory(sys.snapshot("HEAD~30"))],
+        second_middle: [second.middle, chained_factory(sys.snapshot("HEAD~15"))],
+        second_final: [second.final, chained_factory(sys.snapshot("HEAD~3"))],
+    }
+}
