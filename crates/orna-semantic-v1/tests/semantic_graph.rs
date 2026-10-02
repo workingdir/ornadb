@@ -4860,6 +4860,29 @@ fn paired_continuation_chain_consistency_rebind_orders_reject_cross_pairing() {
 }
 
 #[test]
+fn paired_continuation_rebind_cascades_remain_consistent() {
+    let source = include_str!("fixtures/historical-paired-continuation-rebind-cascade-stability.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-continuation-rebind-cascade-stability.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "captured follow-up and terminal continuations must keep consistent identities through successive paired rebind cascades: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
