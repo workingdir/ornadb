@@ -1,0 +1,10 @@
+use std.views as views;
+
+pub fn selected(values: [Int], start: Int, end: Int): [Int] =
+    views.to_list(views.slice(views.from_list(values), start, end));
+
+pub fn prefix(values: [Int], count: Int): [Int] =
+    views.to_list(views.take(views.from_list(values), count));
+
+pub fn window_count(values: [Int], width: Int, step: Int): Int =
+    std.collection.count(views.windows(views.from_list(values), width, step));
