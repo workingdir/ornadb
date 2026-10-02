@@ -428,14 +428,14 @@ impl BranchRowSource for PartialRecoveringFixtureRows {
     }
 }
 
-struct FailAfterPairedPrefixFixtureRows {
+struct FailAfterRowsFixtureRows {
     source: FixtureRows,
     fail_after_rows: usize,
     rows_delivered: usize,
     failed_at: Option<(ObjectId, MergeSide, Vec<u8>)>,
 }
 
-impl BranchRowSource for FailAfterPairedPrefixFixtureRows {
+impl BranchRowSource for FailAfterRowsFixtureRows {
     fn visit_rows(
         &mut self,
         side: MergeSide,
@@ -459,7 +459,7 @@ impl BranchRowSource for FailAfterPairedPrefixFixtureRows {
         self.rows_delivered = delivered;
         if stopped_at_failure {
             self.failed_at = Some((table, side, locator));
-            return Err("fixture row source failed between paired depth ranges".into());
+            return Err("fixture row source failed after a partial row prefix".into());
         }
         Ok(())
     }
@@ -16394,7 +16394,7 @@ fn paired_depth_recovery_retries_keep_table_and_tombstone_order() {
     // when a later pair range fails, then retries the ordered walk from its
     // first table after recovery.
     let (base, left, right, source) = paired_depth_recovery_inputs(false);
-    let mut interrupted = FailAfterPairedPrefixFixtureRows {
+    let mut interrupted = FailAfterRowsFixtureRows {
         source,
         fail_after_rows: 6,
         rows_delivered: 0,
@@ -16409,7 +16409,7 @@ fn paired_depth_recovery_retries_keep_table_and_tombstone_order() {
             BranchMergeBudget { max_rows_examined: 11, max_conflicts: 0 },
         ),
         Err(BranchMergeError::RowRead {
-            message: "fixture row source failed between paired depth ranges".into(),
+            message: "fixture row source failed after a partial row prefix".into(),
         }),
     );
     assert_eq!(interrupted.rows_delivered, 6);
@@ -16880,6 +16880,89 @@ fn sustained_concurrent_tombstone_chains_keep_logical_boundary_order() {
     }
 
     assert_eq!(completed, LOADS_PER_WAVE * WAVES);
+}
+
+#[test]
+fn recovered_tombstone_chain_merges_keep_order_across_depth_layouts() {
+    // The reference requires a complete isolated result but leaves chain
+    // ordering after partial recovery open. Pin the local policy across a
+    // split retry and a whole-table retry of the same nested chain.
+    let (base, left, right, source) = tombstone_chain_load_inputs(true, true, false);
+    let mut interrupted = FailAfterRowsFixtureRows {
+        source,
+        fail_after_rows: 9,
+        rows_delivered: 0,
+        failed_at: None,
+    };
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: 15, max_conflicts: 0 },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed after a partial row prefix".into(),
+        }),
+    );
+    assert_eq!(interrupted.rows_delivered, 9);
+    assert_eq!(
+        interrupted.failed_at,
+        Some((id(1), MergeSide::Left, b"chain-left-4".to_vec())),
+        "recovery stops after four complete ranges and part of the next chain range",
+    );
+
+    let (split_base, split_left, split_right, split_source) =
+        tombstone_chain_load_inputs(true, true, false);
+    let (whole_base, whole_left, whole_right, whole_source) =
+        tombstone_chain_load_inputs(false, false, true);
+    let start = Arc::new(Barrier::new(2));
+    let split_start = Arc::clone(&start);
+    let split_retry = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows { source: split_source, first_load: Some(split_start) };
+        merge_three_way_snapshots(
+            &split_base,
+            &split_left,
+            &split_right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 15, max_conflicts: 0 },
+        )
+        .expect("recovered split chain retry completes")
+    });
+    let whole_retry = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows { source: whole_source, first_load: Some(start) };
+        merge_three_way_snapshots(
+            &whole_base,
+            &whole_left,
+            &whole_right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 15, max_conflicts: 0 },
+        )
+        .expect("recovered whole-table chain retry completes")
+    });
+
+    let split_plan = split_retry.join().expect("split chain worker completes");
+    let whole_plan = whole_retry.join().expect("whole-table chain worker completes");
+    let expected_tombstones = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .into_iter()
+    .map(string)
+    .collect::<Vec<_>>();
+    let expected_live_rows = vec![string("z")];
+    for (plan, expected_segments) in [(&split_plan, 7), (&whole_plan, 1)] {
+        assert_eq!(plan.report.rows_examined, 15);
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        assert_eq!(flattened_row_tombstones(plan), expected_tombstones);
+        assert_eq!(flattened_live_row_keys(plan), expected_live_rows);
+        assert_eq!(plan.tables[&id(1)].segments.len(), expected_segments);
+    }
 }
 
 #[test]
