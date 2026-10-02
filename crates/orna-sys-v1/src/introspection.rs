@@ -1079,6 +1079,57 @@ pub fn explain_query_with_input_disjunct_limit_conjunct_chain(
     )
 }
 
+/// Explains nested input limits, expanded disjuncts whose arms each contain a
+/// conjunct chain, a nested disjunct limit cascade, and then a separate
+/// conjunct chain followed by the query's outer limit and any additional
+/// limits.
+///
+/// Input limits run after source and join work and before disjunct expansion.
+/// Each disjunct arm evaluates its conjuncts left-to-right against the capped
+/// input. The nested disjunct limits then charge their immediate input before
+/// the separate final conjunct chain runs. ORNA-PLAN leaves selectivity and
+/// estimate aggregation unspecified, so this adapter uses independent 50%
+/// selectivity per arm and per conjunct, rounds branch row estimates upward,
+/// and keeps prior work charged after later caps. At least one input limit,
+/// one disjunct, one per-arm conjunct, one post-disjunct limit, and one final
+/// conjunct are required. `query.predicate` describes the disjunction with
+/// its per-arm conjuncts; `conjunct_predicate` describes the later AND chain.
+pub fn explain_query_with_input_limit_conjunct_disjunct_limit_conjunct_chain(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    conjunct_count_per_disjunct: u64,
+    nested_input_limits: &[u64],
+    nested_disjunct_limits: &[u64],
+    conjunct_predicate: ExpressionRef,
+    conjunct_count: u64,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0
+        || conjunct_count_per_disjunct == 0
+        || nested_input_limits.is_empty()
+        || nested_disjunct_limits.is_empty()
+        || conjunct_count == 0
+        || query.predicate.is_none()
+    {
+        return Err(ExplainError::InvalidExpression);
+    }
+    if disjunct_count.saturating_mul(conjunct_count_per_disjunct)
+        > MAX_PLAN_EXPRESSIONS as u64
+    {
+        return Err(ExplainError::TooManyExpressions);
+    }
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        Some(conjunct_count),
+        Some(conjunct_count_per_disjunct),
+        nested_input_limits,
+        nested_disjunct_limits,
+        Some(&conjunct_predicate),
+        additional_limits,
+    )
+}
+
 /// Explains an expanded disjunction, a nested limit chain, and then a
 /// left-to-right conjunct chain followed by the query's outer limit and any
 /// additional limits.
@@ -1137,8 +1188,10 @@ fn explain_query_with_predicate_pressure(
             && query.predicate.is_none())
         || (!limits_between_disjunct_and_conjunct.is_empty()
             && post_expansion_conjunct.is_none())
-        || (post_expansion_conjunct.is_some()
-            && (conjunct_count.is_none() || conjunct_count_per_disjunct.is_some()))
+        || (post_expansion_conjunct.is_some() && conjunct_count.is_none())
+        || (post_expansion_conjunct.is_none()
+            && conjunct_count.is_some()
+            && conjunct_count_per_disjunct.is_some())
     {
         return Err(ExplainError::InvalidExpression);
     }
@@ -1283,7 +1336,9 @@ fn explain_query_with_predicate_pressure(
         // Expression references are opaque to this planner. The selected API
         // shape supplies any branch/conjunct counts; the default count of one
         // preserves the historical single-filter fallback.
-        let (cardinality, work, mut details) = if post_expansion_conjunct.is_some() {
+        let (cardinality, work, mut details) = if post_expansion_conjunct.is_some()
+            && conjunct_count_per_disjunct.is_none()
+        {
             (
                 disjunction_cardinality(current_cardinality, disjunct_count),
                 current_cardinality
