@@ -17148,6 +17148,10 @@ fn pinned_snapshot_rebind_compatible(expected: &Type, actual: &Type) -> bool {
 }
 
 fn type_contains_pinned_snapshot_identity(ty: &Type) -> bool {
+    checkpoint_snapshot_maps_are_valid(ty) && type_contains_valid_pinned_snapshot_identity(ty)
+}
+
+fn type_contains_valid_pinned_snapshot_identity(ty: &Type) -> bool {
     match ty {
         Type::Applied { base, .. } if base == "sys.SnapshotRefContext" => {
             is_contextual_snapshot_ref(ty)
@@ -17162,21 +17166,27 @@ fn type_contains_pinned_snapshot_identity(ty: &Type) -> bool {
         | Type::Range(element)
         | Type::Relation(element)
         | Type::Stream(element)
-        | Type::Optional(element) => type_contains_pinned_snapshot_identity(element),
-        Type::Record(fields) => fields.values().any(type_contains_pinned_snapshot_identity),
-        Type::Tuple(elements) => elements.iter().any(type_contains_pinned_snapshot_identity),
+        | Type::Optional(element) => type_contains_valid_pinned_snapshot_identity(element),
+        Type::Record(fields) => fields.values().any(type_contains_valid_pinned_snapshot_identity),
+        Type::Tuple(elements) => elements
+            .iter()
+            .any(type_contains_valid_pinned_snapshot_identity),
         Type::Applied { arguments, .. } => {
-            arguments.iter().any(type_contains_pinned_snapshot_identity)
+            arguments
+                .iter()
+                .any(type_contains_valid_pinned_snapshot_identity)
         }
         Type::MoneyPerUnit { currency, unit } => {
-            type_contains_pinned_snapshot_identity(currency)
-                || type_contains_pinned_snapshot_identity(unit)
+            type_contains_valid_pinned_snapshot_identity(currency)
+                || type_contains_valid_pinned_snapshot_identity(unit)
         }
         Type::Function {
             parameters, result, ..
         } => {
-            parameters.iter().any(type_contains_pinned_snapshot_identity)
-                || type_contains_pinned_snapshot_identity(result)
+            parameters
+                .iter()
+                .any(type_contains_valid_pinned_snapshot_identity)
+                || type_contains_valid_pinned_snapshot_identity(result)
         }
         _ => false,
     }
@@ -19201,6 +19211,7 @@ mod tests {
         assert!(merge_checkpoint_field_map(&malformed, &malformed).is_none());
         assert!(merge_checkpoint_field_map(&malformed, &first).is_none());
         assert!(!checkpoint_snapshot_maps_are_valid(&nested_malformed));
+        assert!(!type_contains_pinned_snapshot_identity(&nested_malformed));
         assert!(merge_checkpoint_field_map(&nested_malformed, &nested_malformed).is_none());
         assert!(!pinned_snapshot_rebind_compatible(
             &nested_malformed,
