@@ -4849,6 +4849,51 @@ fn nested_tuple_error_wave_keeps_paired_capture_pins_atomic() {
 }
 
 #[test]
+fn nested_tuple_bottom_wave_keeps_paired_capture_pins_atomic() {
+    let source = include_str!("fixtures/historical-paired-nested-tuple-bottom-wave.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-tuple-bottom-wave.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "the non-returning tuple leaf is statically compatible: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_nested_tuple_bottom_wave_atomicity")
+        })
+        .expect("paired tuple bottom-wave fixture module");
+    let ty = &module.symbols["paired_nested_tuple_bottom_wave_atomicity"].ty;
+    let summary = format!("{ty:?}");
+    assert!(
+        !summary.contains("HEAD~380") && !summary.contains("HEAD~370"),
+        "a non-returning nested tuple argument must not specialize sibling pins: {summary}"
+    );
+    assert!(
+        summary.contains("HEAD~450")
+            && summary.contains("HEAD~320")
+            && summary.contains("HEAD~350")
+            && summary.contains("HEAD~290"),
+        "skipping the incomplete wave must preserve prior, later, and opposite-lane pins: {summary}"
+    );
+}
+
+#[test]
 fn concurrent_callback_tuples_reject_cross_lane_identity_mix_after_rebind() {
     let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
