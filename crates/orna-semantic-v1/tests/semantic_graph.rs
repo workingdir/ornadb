@@ -5211,6 +5211,98 @@ fn paired_reproductions_remain_stable_across_alternating_storm_orders() {
 }
 
 #[test]
+fn paired_checkpoint_roots_retain_their_selected_lane_contexts() {
+    fn collect_snapshot_contexts(ty: &Type, contexts: &mut BTreeSet<String>) {
+        match ty {
+            Type::Named(name) if name.starts_with("selector:") => {
+                contexts.insert(name.clone());
+            }
+            Type::List(inner)
+            | Type::Range(inner)
+            | Type::Relation(inner)
+            | Type::Stream(inner)
+            | Type::Optional(inner) => collect_snapshot_contexts(inner, contexts),
+            Type::Applied { arguments, .. } => {
+                for argument in arguments {
+                    collect_snapshot_contexts(argument, contexts);
+                }
+            }
+            Type::Function {
+                parameters, result, ..
+            } => {
+                for parameter in parameters {
+                    collect_snapshot_contexts(parameter, contexts);
+                }
+                collect_snapshot_contexts(result, contexts);
+            }
+            Type::Record(fields) => {
+                for field in fields.values() {
+                    collect_snapshot_contexts(field, contexts);
+                }
+            }
+            Type::Tuple(items) => {
+                for item in items {
+                    collect_snapshot_contexts(item, contexts);
+                }
+            }
+            Type::MoneyPerUnit { currency, unit } => {
+                collect_snapshot_contexts(currency, contexts);
+                collect_snapshot_contexts(unit, contexts);
+            }
+            _ => {}
+        }
+    }
+
+    let source = include_str!("fixtures/historical-paired-reproduction-stability-roundtrip.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-reproduction-stability-roundtrip.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_reproductions_remain_stable_across_chained_storm_orders")
+        })
+        .expect("paired reproduction checkpoint module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_reproductions_remain_stable_across_chained_storm_orders"]
+        .ty
+    else {
+        panic!("paired reproduction proof must export a function");
+    };
+    let Type::Record(checkpoints) = result.as_ref() else {
+        panic!("paired reproduction proof must expose checkpoint records");
+    };
+
+    for (lane, expected) in [
+        (
+            "left_checkpoints",
+            ["selector:HEAD~840", "selector:HEAD~880", "selector:HEAD~920"],
+        ),
+        (
+            "right_checkpoints",
+            ["selector:HEAD~830", "selector:HEAD~870", "selector:HEAD~910"],
+        ),
+    ] {
+        let ty = checkpoints.get(lane).expect("paired lane checkpoint record");
+        let mut actual = BTreeSet::new();
+        collect_snapshot_contexts(ty, &mut actual);
+        assert_eq!(
+            actual,
+            expected.map(str::to_owned).into_iter().collect(),
+            "{lane} root checkpoint must retain its original root, bridge, and leaf selectors"
+        );
+    }
+}
+
+#[test]
 fn paired_reproduction_checkpoint_types_stay_stable_across_interleaved_analyses() {
     const FUNCTION: &str =
         "paired_reproductions_remain_stable_across_chained_storm_orders";
