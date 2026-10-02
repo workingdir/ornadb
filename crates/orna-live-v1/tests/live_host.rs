@@ -5902,7 +5902,7 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
     eval_outcome: UnitEvalOutcome,
 ) {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
-    const HANDOFF_PAIRS: u8 = 4;
+    const HANDOFF_PAIRS: u8 = 6;
     const BRIDGE_RECONNECT_STORM: u8 = 4;
     const RECOVERED_RECONNECT_STORM: u8 = 5;
     const QUERY_IDS_PER_HANDOFF_PAIR: u8 = 24;
@@ -6256,7 +6256,7 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
         drop(host);
     }
 
-    assert_eq!(current_owner.owner_id, [83; 16]);
+    assert_eq!(current_owner.owner_id, [87; 16]);
     assert_eq!(application.calls, 1);
     remove_test_repository(&root);
 }
