@@ -5,13 +5,13 @@ use orna_evolution_v1::{
 use orna_foundation_v1::OvbRaw;
 use orna_storage_v1::{
     BranchMergeBudget, BranchMergeConflict, BranchMergeError, BranchMergePlan, BranchRowSource,
-    KeyRange, MergeSide, MergedSegment, RowSegmentManifest, TableManifest, ThreeWaySnapshot,
-    merge_three_way_snapshots,
+    BranchMergePlanSequenceError, BranchMergePlanSequencer, KeyRange, MergeSide, MergedSegment,
+    RowSegmentManifest, TableManifest, ThreeWaySnapshot, merge_three_way_snapshots,
 };
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Barrier},
+    sync::{Arc, Barrier, mpsc},
 };
 
 const BASE: &str = include_str!("fixtures/merge-contact-base.orna");
@@ -35,6 +35,7 @@ const TOMBSTONE_DELTA_CONFLICTING_RESTORES: &str =
     include_str!("fixtures/merge-tombstone-delta-conflicting-restores.orna");
 const TOMBSTONE_PAIRED_CHAIN: &str = include_str!("fixtures/merge-tombstone-paired-chain.orna");
 const TOMBSTONE_RECOVERY_STORM: &str = include_str!("fixtures/merge-tombstone-recovery-storm.orna");
+const TOMBSTONE_COMMIT_ORDER: &str = include_str!("fixtures/merge-tombstone-commit-order.orna");
 const TOMBSTONE_STORM_KEYS: &[&str] = &[
     "a",
     "root",
@@ -19898,6 +19899,156 @@ fn concurrent_uneven_depth_restore_retries_isolate_failed_attempts() {
     }
     assert_eq!(failed_attempts, 1);
     assert_eq!(completed_retries, RETRIES - 1);
+}
+
+#[test]
+fn paired_depth_storm_plans_release_in_commit_order_after_out_of_order_completion() {
+    let fixture_rows = TOMBSTONE_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_rows.len(), 8);
+
+    let wave_zero_deletes = ["a/child/deep", "root/child/deep/storm/a"];
+    let wave_one_deletes = ["a/child", "root/child/deep/storm/b"];
+    let wave_two_deletes = ["a", "root"];
+    let wave_zero_restores = fixture_rows
+        .iter()
+        .filter(|row| wave_zero_deletes.iter().any(|key| row.key == string(key)))
+        .cloned()
+        .collect::<Vec<_>>();
+    let wave_one_base = fixture_rows
+        .iter()
+        .filter(|row| !wave_zero_deletes.iter().any(|key| row.key == string(key)))
+        .cloned()
+        .collect::<Vec<_>>();
+    let wave_two_base = wave_one_base
+        .iter()
+        .filter(|row| !wave_one_deletes.iter().any(|key| row.key == string(key)))
+        .cloned()
+        .chain(wave_zero_restores.iter().cloned())
+        .collect::<Vec<_>>();
+
+    // Each worker plans against its own committed paired base. Wave one
+    // restores wave zero's deletes while recording new storm tombstones;
+    // wave two then appends shallow ancestors after those deep events.
+    let specs = vec![
+        (0_u64, fixture_rows.clone(), wave_zero_deletes.to_vec(), Vec::new()),
+        (1_u64, wave_one_base, wave_one_deletes.to_vec(), wave_zero_restores),
+        (2_u64, wave_two_base, wave_two_deletes.to_vec(), Vec::new()),
+    ];
+    let mut jobs = Vec::with_capacity(specs.len());
+    for (order, rows, deletes, restores) in specs {
+        let rows_by_table = [rows.as_slice(), rows.as_slice()];
+        let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+            &rows_by_table,
+            &deletes,
+            &deletes,
+            order as usize,
+            order % 2 == 1,
+            &format!("commit-order-wave-{order}"),
+        );
+        for table in [id(1), id(2)] {
+            for row in &restores {
+                add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, table, &[row.clone()]);
+                add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, table, &[row.clone()]);
+            }
+        }
+        jobs.push((order, base, left, right, source));
+    }
+
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (completed_tx, completed_rx) = mpsc::channel();
+    let mut releases = BTreeMap::new();
+    let mut workers = Vec::new();
+    for (order, base, left, right, mut source) in jobs {
+        let (release_tx, release_rx) = mpsc::channel();
+        releases.insert(order, release_tx);
+        let ready_tx = ready_tx.clone();
+        let completed_tx = completed_tx.clone();
+        workers.push(std::thread::spawn(move || {
+            let plan = merge_three_way_snapshots(
+                &base,
+                &left,
+                &right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 128, max_conflicts: 0 },
+            )
+            .expect("each independent paired restore wave produces a plan");
+            ready_tx.send(order).expect("the coordinator remains available");
+            release_rx.recv().expect("the coordinator releases this completed wave");
+            completed_tx.send((order, plan)).expect("the coordinator collects completed plans");
+        }));
+    }
+    drop(ready_tx);
+    drop(completed_tx);
+
+    let ready_orders = (0..3).map(|_| ready_rx.recv().unwrap()).collect::<Vec<_>>();
+    assert_eq!(ready_orders.iter().copied().collect::<std::collections::BTreeSet<_>>(), [0, 1, 2].into());
+
+    // All three merge computations have finished. Publish their results in a
+    // deliberately adversarial order to model concurrent completion delivery.
+    let mut sequencer = BranchMergePlanSequencer::new(0);
+    let mut released_plans = Vec::new();
+    let mut completion_order = Vec::new();
+    for expected_order in [2_u64, 1, 0] {
+        releases[&expected_order].send(()).unwrap();
+        let (order, plan) = completed_rx.recv().unwrap();
+        assert_eq!(order, expected_order);
+        completion_order.push(order);
+        let ready = sequencer.submit(order, &plan).unwrap();
+        if order == 0 {
+            released_plans = ready;
+        } else {
+            assert!(ready.is_empty(), "a later wave waits for every earlier commit position");
+        }
+    }
+    for worker in workers {
+        worker.join().expect("the paired merge worker completes");
+    }
+
+    assert_eq!(completion_order, [2, 1, 0]);
+    assert_eq!(sequencer.next_order(), Some(3));
+    assert_eq!(released_plans.len(), 3);
+    assert_eq!(
+        sequencer.submit(2, &released_plans[2]),
+        Err(BranchMergePlanSequenceError::DuplicateOrStale { order: 2 }),
+        "a competing result cannot append the already-selected wave twice",
+    );
+
+    let per_wave_deltas = released_plans
+        .iter()
+        .map(|plan| (table_row_tombstones(plan, id(1)), table_row_tombstones(plan, id(2))))
+        .collect::<Vec<_>>();
+    let expected_first = ["a/child/deep", "root/child/deep/storm/a"].map(string).to_vec();
+    let expected_second = ["a/child", "root/child/deep/storm/b"].map(string).to_vec();
+    let expected_third = ["a", "root"].map(string).to_vec();
+    assert_eq!(
+        per_wave_deltas,
+        [
+            (expected_first.clone(), expected_first),
+            (expected_second.clone(), expected_second),
+            (expected_third.clone(), expected_third),
+        ],
+        "each ordered commit preserves one atomic paired delta",
+    );
+    let storm_history = per_wave_deltas
+        .into_iter()
+        .flat_map(|(storm, _)| storm)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        storm_history,
+        [
+            "a/child/deep",
+            "root/child/deep/storm/a",
+            "a/child",
+            "root/child/deep/storm/b",
+            "a",
+            "root",
+        ]
+        .map(string),
+        "wave lineage order survives reverse completion, restoration, and shallower deletes",
+    );
 }
 
 #[test]

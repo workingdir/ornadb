@@ -1,0 +1,47 @@
+{
+  id: "a",
+  name: "Anchor",
+  city: "Oslo",
+}
+
+{
+  id: "a/child",
+  name: "Anchor child",
+  city: "Oslo",
+}
+
+{
+  id: "a/child/deep",
+  name: "Anchor deep",
+  city: "Oslo",
+}
+
+{
+  id: "root",
+  name: "Storm root",
+  city: "London",
+}
+
+{
+  id: "root/child",
+  name: "Storm child",
+  city: "London",
+}
+
+{
+  id: "root/child/deep/storm/a",
+  name: "Storm leaf A",
+  city: "London",
+}
+
+{
+  id: "root/child/deep/storm/b",
+  name: "Storm leaf B",
+  city: "London",
+}
+
+{
+  id: "z",
+  name: "Final sibling",
+  city: "Paris",
+}
