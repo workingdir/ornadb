@@ -7082,7 +7082,7 @@ fn reversed_sibling_storm_order_preserves_convergent_terminal_routes() {
 }
 
 #[test]
-fn post_storm_reopened_sibling_routes_remain_convergent() {
+fn post_storm_sibling_routes_survive_paired_depth_rebinds() {
     let package_source = include_str!("fixtures/attach-package.orna");
     let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
     let aliases = [
@@ -7346,6 +7346,128 @@ fn post_storm_reopened_sibling_routes_remain_convergent() {
             .pin()
             .commit(),
         reopened_terminal_routes[1]
+            .database(aliases[3])
+            .unwrap()
+            .pin()
+            .commit()
+    );
+
+    let previous_middle_routes = siblings.clone();
+    for (sibling, candidate) in [(0, 2), (1, 1), (1, 2), (0, 1), (1, 1), (0, 2)] {
+        siblings[sibling].detach_database(aliases[1]).unwrap();
+        siblings[sibling]
+            .attach_database(middle_pins[candidate].clone())
+            .unwrap();
+        assert_pin(
+            &siblings[sibling],
+            aliases[1],
+            &middle_commits[candidate],
+        );
+        assert_route(&siblings[sibling], aliases[1], 1, candidate);
+    }
+    assert_route(&previous_middle_routes[0], aliases[1], 1, 1);
+    assert_route(&previous_middle_routes[1], aliases[1], 1, 2);
+
+    let second_wave_middle_pins: Vec<PinnedDatabase> = siblings
+        .iter()
+        .map(|sibling| sibling.database(aliases[1]).unwrap().clone())
+        .collect();
+    let mut second_wave_deep_routes: Vec<AttachedDatabaseSession> = second_wave_middle_pins
+        .iter()
+        .map(|pin| resolver.resolve_for_parent(pin.clone()).unwrap())
+        .collect();
+    let first_wave_deep_routes = second_wave_deep_routes.clone();
+    for (sibling, candidate) in [(0, 2), (1, 1), (0, 1), (1, 2)] {
+        second_wave_deep_routes[sibling]
+            .detach_database(aliases[2])
+            .unwrap();
+        second_wave_deep_routes[sibling]
+            .attach_database(deep_pins[candidate].clone())
+            .unwrap();
+        assert_pin(
+            &second_wave_deep_routes[sibling],
+            aliases[2],
+            &deep_commits[candidate],
+        );
+        assert_route(&second_wave_deep_routes[sibling], aliases[2], 2, candidate);
+    }
+    assert_pin(
+        &second_wave_deep_routes[0],
+        aliases[2],
+        &deep_commits[1],
+    );
+    assert_pin(
+        &second_wave_deep_routes[1],
+        aliases[2],
+        &deep_commits[2],
+    );
+    for route in &first_wave_deep_routes {
+        assert_pin(route, aliases[2], &shared_deep_commit);
+        assert_route(route, aliases[2], 2, 0);
+    }
+
+    let second_wave_deep_pins: Vec<PinnedDatabase> = second_wave_deep_routes
+        .iter()
+        .map(|route| route.database(aliases[2]).unwrap().clone())
+        .collect();
+    let mut second_wave_terminal_routes: Vec<AttachedDatabaseSession> = second_wave_deep_pins
+        .iter()
+        .map(|pin| resolver.resolve_for_parent(pin.clone()).unwrap())
+        .collect();
+    let second_wave_manifest_routes = second_wave_terminal_routes.clone();
+    for sibling in 0..2 {
+        assert_pin(
+            &second_wave_terminal_routes[sibling],
+            aliases[3],
+            &terminal_commits[0],
+        );
+        assert_route(&second_wave_terminal_routes[sibling], aliases[3], 3, 0);
+    }
+
+    // Both new deep pins select the same terminal manifest, so the later
+    // terminal rebinds converge again without changing either earlier wave.
+    for (sibling, candidate) in [(0, 1), (1, 2), (1, 1), (0, 2), (1, 2)] {
+        second_wave_terminal_routes[sibling]
+            .detach_database(aliases[3])
+            .unwrap();
+        second_wave_terminal_routes[sibling]
+            .attach_database(terminal_pins[candidate].clone())
+            .unwrap();
+        assert_pin(
+            &second_wave_terminal_routes[sibling],
+            aliases[3],
+            &terminal_commits[candidate],
+        );
+        assert_route(&second_wave_terminal_routes[sibling], aliases[3], 3, candidate);
+    }
+    for sibling in 0..2 {
+        assert_pin(
+            &second_wave_terminal_routes[sibling],
+            aliases[3],
+            &terminal_commits[2],
+        );
+        assert_route(&second_wave_terminal_routes[sibling], aliases[3], 3, 2);
+        assert_route(&second_wave_manifest_routes[sibling], aliases[3], 3, 0);
+        assert_pin(
+            &terminal_branches[sibling],
+            aliases[3],
+            &terminal_commits[2],
+        );
+        assert_route(&terminal_branches[sibling], aliases[3], 3, 2);
+        assert_pin(
+            &reopened_terminal_routes[sibling],
+            aliases[3],
+            &terminal_commits[1],
+        );
+        assert_route(&reopened_terminal_routes[sibling], aliases[3], 3, 1);
+    }
+    assert_eq!(
+        second_wave_terminal_routes[0]
+            .database(aliases[3])
+            .unwrap()
+            .pin()
+            .commit(),
+        second_wave_terminal_routes[1]
             .database(aliases[3])
             .unwrap()
             .pin()
