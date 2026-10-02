@@ -17017,6 +17017,9 @@ fn type_contains_pinned_snapshot_identity(ty: &Type) -> bool {
         Type::Applied { base, .. } if base == "sys.HistoricalCallable" => {
             historical_callable_context(ty).is_some()
         }
+        Type::Applied { base, .. } if base == "semantic.SnapshotContextMap" => {
+            is_snapshot_context_map_shape(ty)
+        }
         Type::List(element)
         | Type::Range(element)
         | Type::Relation(element)
