@@ -485,6 +485,22 @@ impl PackageResolver {
         }
         Ok(session)
     }
+
+    /// Resolves the next closure from an exact alias selected in `parent`.
+    /// This uses that session's current pin, so a retained sibling session
+    /// continues from its own route after another session is rebound.
+    pub fn resolve_nested_for_alias(
+        &self,
+        parent: &AttachedDatabaseSession,
+        alias: &str,
+    ) -> Result<AttachedDatabaseSession, AttachmentError> {
+        let alias = checked_name(alias.to_owned())?;
+        let selected = parent
+            .database(&alias)
+            .cloned()
+            .ok_or(AttachmentError::DatabaseUnavailable)?;
+        self.resolve_for_parent(selected)
+    }
 }
 
 /// A primary database and zero or more read-only, commit-pinned attachments.
