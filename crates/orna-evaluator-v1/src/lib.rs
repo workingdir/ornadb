@@ -597,6 +597,19 @@ pub trait EffectHandler {
         self.handle_with_budget(callee, arguments, budget)
     }
 
+    /// Handle a registered effect while retaining the evaluator's live
+    /// cancellation request for host operations that can stop promptly.
+    fn handle_registered_with_cancellation_and_budget(
+        &mut self,
+        operation: &str,
+        callee: &Expr,
+        arguments: &[CanonicalValue],
+        budget: &mut StepBudget,
+        _cancellation: Option<&CancellationToken>,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        self.handle_registered_with_budget(operation, callee, arguments, budget)
+    }
+
     /// Resolve a stored row reference at the reference's snapshot pin.
     ///
     /// An activation adapter may apply its private write overlay at that pin,
@@ -1224,6 +1237,7 @@ enum Value {
     },
     Float(u64),
     String(String),
+    Blob(Vec<u8>),
     Date(String),
     Uuid([u8; 16]),
     /// OVB's complete stored identity is retained, including its snapshot pin.
@@ -1514,6 +1528,7 @@ impl Value {
             ),
             Self::Float(bits) => Raw::Float(bits),
             Self::String(value) => Raw::Text(value),
+            Self::Blob(value) => Raw::Bytes(value),
             Self::Date(value) => Raw::Tag(60001, Box::new(Raw::Text(value))),
             Self::Uuid(value) => object_id_raw(value),
             Self::Reference(value) => value.raw().clone(),
@@ -1637,6 +1652,7 @@ impl Value {
             Raw::Int(value) => context.integer(value.clone()).map(Self::Int),
             Raw::Float(bits) => Ok(Self::Float(*bits)),
             Raw::Text(value) => context.string(value.clone()).map(Self::String),
+            Raw::Bytes(value) => Ok(Self::Blob(value.clone())),
             Raw::Tag(60001, boxed) => {
                 let Raw::Text(value) = boxed.as_ref() else {
                     return Err(error("ORNA-EVAL-VALUE"));
@@ -4756,33 +4772,60 @@ impl Context<'_, '_> {
         let root_collection =
             root_collection_name(callee).filter(|name| !scope.0.contains_key(*name));
         let resolved_function = self.resolve_function_name(callee, scope);
-        if let Some(operation) = resolved_function
-            .as_deref()
-            .filter(|name| {
-                orna_sys_v1::system_host_operation_registry()
-                    .operation(name)
-                    .is_some()
-            })
+        if let Some(operation_name) = resolved_function.as_deref()
+            && let Some(operation) =
+                orna_sys_v1::system_host_operation_registry().operation(operation_name)
             && self.effects.is_some()
         {
             if input.is_some()
-                || arguments.len() != 1
-                || arguments[0]
-                    .name
-                    .as_deref()
-                    .is_some_and(|name| name != "name")
+                || arguments.len() != operation.parameters.len()
             {
                 return Err(error("ORNA-EVAL-ARGUMENT"));
             }
-            let value = self.evaluate(&arguments[0].value, scope, depth + 1)?;
-            let values = [value.canonical()?];
+            let positional = arguments.iter().all(|argument| argument.name.is_none());
+            let ordered_arguments = if positional {
+                arguments.iter().collect::<Vec<_>>()
+            } else {
+                let mut ordered = Vec::with_capacity(arguments.len());
+                for parameter in &operation.parameters {
+                    let mut matches = arguments
+                        .iter()
+                        .filter(|argument| {
+                            argument.name.as_deref() == Some(parameter.as_str())
+                        });
+                    let Some(argument) = matches.next() else {
+                        return Err(error("ORNA-EVAL-ARGUMENT"));
+                    };
+                    if matches.next().is_some() {
+                        return Err(error("ORNA-EVAL-ARGUMENT"));
+                    }
+                    ordered.push(argument);
+                }
+                if ordered.len() != arguments.len() {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                }
+                ordered
+            };
+            let values = ordered_arguments
+                .iter()
+                .map(|argument| {
+                    self.evaluate(&argument.value, scope, depth + 1)?
+                        .canonical()
+                })
+                .collect::<Result<Vec<_>, EvaluationError>>()?;
             let remaining = self.limits.max_steps.saturating_sub(self.steps);
             let mut budget = StepBudget::new(remaining);
             let result = self
                 .effects
                 .as_deref_mut()
                 .expect("checked host effect handler")
-                .handle_registered_with_budget(operation, callee, &values, &mut budget);
+                .handle_registered_with_cancellation_and_budget(
+                    operation_name,
+                    callee,
+                    &values,
+                    &mut budget,
+                    self.cancellation,
+                );
             let debited = remaining - budget.remaining();
             self.steps = self
                 .steps

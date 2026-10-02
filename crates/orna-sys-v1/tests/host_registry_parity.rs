@@ -15,16 +15,63 @@ fn embedded_host_registry_matches_deterministic_annotated_method_projection() {
 
     let registry = system_host_operation_registry();
     let operations = registry.operations().collect::<Vec<_>>();
-    assert_eq!(operations.len(), 2);
-    assert!(operations.iter().all(|operation| {
-        operation.role == "host.std.io.environment@1.0"
-            && operation.provider == "orna.sys.host.environment.v1"
-            && operation.effects.len() == 1
-            && operation.effects[0] == "read"
-    }));
-    let role = registry
-        .role("host.std.io.environment@1.0")
-        .expect("typed environment provider role");
-    assert!(role.required);
-    assert_eq!(role.operations.len(), operations.len());
+    assert_eq!(operations.len(), 4);
+    assert_eq!(
+        registry
+            .operation("std.io.environment.get")
+            .unwrap()
+            .parameters,
+        ["name"]
+    );
+    assert_eq!(
+        registry.operation("std.io.process.run").unwrap().parameters,
+        [
+            "executable",
+            "arguments",
+            "working_directory",
+            "environment",
+            "input",
+            "timeout",
+            "max_output_bytes"
+        ]
+    );
+    assert_eq!(
+        registry
+            .operation("std.concurrent.sleep")
+            .unwrap()
+            .parameters,
+        ["duration"]
+    );
+    for (role_name, provider_name, expected_effect) in [
+        (
+            "host.std.io.environment@1.0",
+            "orna.sys.host.environment.v1",
+            "read",
+        ),
+        (
+            "host.std.io.process@1.0",
+            "orna.sys.host.process.v1",
+            "invoke",
+        ),
+        (
+            "host.std.concurrent.clock@1.0",
+            "orna.sys.host.clock.v1",
+            "invoke",
+        ),
+    ] {
+        let role = registry.role(role_name).expect("typed provider role");
+        assert_eq!(role.provider, provider_name);
+        assert!(role.required);
+        assert_eq!(role.effects, [expected_effect]);
+        assert_eq!(
+            role.operations.len(),
+            operations.iter().filter(|op| op.role == role_name).count()
+        );
+        assert!(
+            operations
+                .iter()
+                .filter(|op| op.role == role_name)
+                .all(|op| { op.provider == provider_name && op.effects == [expected_effect] })
+        );
+    }
 }

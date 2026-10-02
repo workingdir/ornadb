@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, fs, path::Path};
 
+use quote::ToTokens;
 use serde_json::{Value, json};
 use syn::visit::Visit;
 
@@ -92,9 +93,25 @@ impl<'ast> Visit<'ast> for Collector {
             let result = parsed
                 .map_err(|error| error.to_string())
                 .and_then(|literal| {
-                    let metadata: Value = serde_json::from_str(&literal.value())
+                    let mut metadata: Value = serde_json::from_str(&literal.value())
                         .map_err(|error| format!("invalid host-operation JSON: {error}"))?;
                     validate_operation(&metadata, &method.sig)?;
+                    metadata["parameters"] = Value::Array(
+                        method
+                            .sig
+                            .inputs
+                            .iter()
+                            .filter_map(|input| match input {
+                                syn::FnArg::Typed(argument) => match argument.pat.as_ref() {
+                                    syn::Pat::Ident(name) => {
+                                        Some(Value::String(name.ident.to_string()))
+                                    }
+                                    _ => None,
+                                },
+                                syn::FnArg::Receiver(_) => None,
+                            })
+                            .collect(),
+                    );
                     let name = metadata["name"]
                         .as_str()
                         .ok_or_else(|| "host operation name must be a string".to_owned())?
@@ -147,15 +164,19 @@ fn validate_operation(metadata: &Value, method: &syn::Signature) -> Result<(), S
     if callable != name || name.rsplit('.').next() != Some(method.ident.to_string().as_str()) {
         return Err("host operation name, signature, and Rust method must agree".to_owned());
     }
-    let expected_signature = match method.ident.to_string().as_str() {
-        "get" => "fn std.io.environment.get(name: Str): Str?",
-        "require" => "fn std.io.environment.require(name: Str): Str",
-        _ => return Err("unsupported native environment operation method".to_owned()),
+    let expected_signature = match name {
+        "std.io.environment.get" => "fn std.io.environment.get(name: Str): Str?",
+        "std.io.environment.require" => "fn std.io.environment.require(name: Str): Str",
+        "std.io.process.run" => {
+            "fn std.io.process.run(executable: Str, arguments: [Str], working_directory: Str, environment: [(Str, Str)], input: Blob?, timeout: Duration?, max_output_bytes: Int): (Int?, Blob, Blob)"
+        }
+        "std.concurrent.sleep" => "fn std.concurrent.sleep(duration: Duration): Null",
+        _ => return Err("unsupported native host operation".to_owned()),
     };
     if signature != expected_signature {
         return Err("host operation signature must match its native method type".to_owned());
     }
-    validate_native_method_signature(method)?;
+    validate_native_method_signature(name, method)?;
     let role = object["role"]
         .as_str()
         .ok_or_else(|| "host operation role must be a string".to_owned())?;
@@ -227,24 +248,59 @@ fn validate_operation(metadata: &Value, method: &syn::Signature) -> Result<(), S
     Ok(())
 }
 
-fn validate_native_method_signature(method: &syn::Signature) -> Result<(), String> {
+fn validate_native_method_signature(
+    operation: &str,
+    method: &syn::Signature,
+) -> Result<(), String> {
     use syn::{FnArg, GenericArgument, Pat, PathArguments, ReturnType, Type, TypePath};
 
+    let (expected_arguments, expected_result, expected_error): (&[(&str, &str)], &str, &str) =
+        match operation {
+            "std.io.environment.get" => (
+                &[("name", "&str")],
+                "Option<&str>",
+                "EnvironmentProviderError",
+            ),
+            "std.io.environment.require" => {
+                (&[("name", "&str")], "&str", "EnvironmentProviderError")
+            }
+            "std.io.process.run" => (
+                &[
+                    ("executable", "&str"),
+                    ("arguments", "&[String]"),
+                    ("working_directory", "&str"),
+                    ("environment", "&[(String, String)]"),
+                    ("input", "Option<&[u8]>"),
+                    ("timeout", "Option<Duration>"),
+                    ("max_output_bytes", "usize"),
+                ],
+                "ProcessRunOutput",
+                "ProcessProviderError",
+            ),
+            "std.concurrent.sleep" => (&[("duration", "Duration")], "()", "ClockProviderError"),
+            _ => return Err("unsupported native host operation".to_owned()),
+        };
     let mut inputs = method.inputs.iter();
-    let (Some(FnArg::Receiver(receiver)), Some(FnArg::Typed(argument))) =
-        (inputs.next(), inputs.next())
-    else {
-        return Err("native host operation must take &self and one name argument".to_owned());
+    let Some(FnArg::Receiver(receiver)) = inputs.next() else {
+        return Err("native host operation must take &self".to_owned());
     };
-    if inputs.next().is_some()
-        || receiver.reference.is_none()
-        || receiver.mutability.is_some()
-        || !matches!(argument.pat.as_ref(), Pat::Ident(name) if name.ident == "name")
-        || !matches!(argument.ty.as_ref(), Type::Reference(reference) if matches!(reference.elem.as_ref(), Type::Path(path) if path.path.is_ident("str")))
-    {
-        return Err(
-            "native environment operation must have signature (&self, name: &str)".to_owned(),
-        );
+    if receiver.reference.is_none() || receiver.mutability.is_some() {
+        return Err("native host operation must take an immutable &self".to_owned());
+    }
+    for (expected_name, expected_type) in expected_arguments {
+        let Some(FnArg::Typed(argument)) = inputs.next() else {
+            return Err("native host operation has an unexpected receiver".to_owned());
+        };
+        if !matches!(argument.pat.as_ref(), Pat::Ident(name) if name.ident == *expected_name)
+            || compact_tokens(argument.ty.as_ref()) != expected_type.replace(' ', "")
+        {
+            return Err(format!(
+                "native `{operation}` argument `{expected_name}` has the wrong name or type"
+            ));
+        }
+    }
+    if inputs.next().is_some() || method.inputs.len() != expected_arguments.len() + 1 {
+        return Err(format!("native `{operation}` has the wrong argument count"));
     }
     let ReturnType::Type(_, output) = &method.output else {
         return Err("native host operation must return a typed Result".to_owned());
@@ -271,27 +327,14 @@ fn validate_native_method_signature(method: &syn::Signature) -> Result<(), Strin
     if types.next().is_some() {
         return Err("native host operation Result has extra generic types".to_owned());
     }
-    if !matches!(error, Type::Path(path) if path.path.is_ident("EnvironmentProviderError")) {
-        return Err("native host operation must use EnvironmentProviderError".to_owned());
-    }
-    let valid_value = match method.ident.to_string().as_str() {
-        "get" => {
-            matches!(value, Type::Path(path) if path.path.segments.last().is_some_and(|segment| {
-                segment.ident == "Option"
-                    && matches!(&segment.arguments, PathArguments::AngleBracketed(args)
-                        if matches!(args.args.first(), Some(GenericArgument::Type(Type::Reference(reference)))
-                            if matches!(reference.elem.as_ref(), Type::Path(path) if path.path.is_ident("str"))))
-            }))
-        }
-        "require" => {
-            matches!(value, Type::Reference(reference) if matches!(reference.elem.as_ref(), Type::Path(path) if path.path.is_ident("str")))
-        }
-        _ => false,
-    };
-    if !valid_value {
-        return Err(
-            "native environment result type must agree with its operation method".to_owned(),
-        );
+    if compact_tokens(value) != expected_result || compact_tokens(error) != expected_error {
+        return Err(format!(
+            "native `{operation}` result type does not match its descriptor"
+        ));
     }
     Ok(())
+}
+
+fn compact_tokens<T: ToTokens + ?Sized>(value: &T) -> String {
+    value.to_token_stream().to_string().replace(' ', "")
 }

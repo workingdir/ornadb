@@ -5528,6 +5528,114 @@ fn missing_tuple_wave_suppresses_sibling_rebinding_without_stub_results() {
 }
 
 #[test]
+fn missing_required_sibling_suppresses_tuple_pin_rebinding() {
+    let source =
+        include_str!("fixtures/historical-missing-sibling-scalar-preserves-tuple-pins.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-missing-sibling-scalar-preserves-tuple-pins.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "omitting the required label must remain a call error"
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("omitted_required_label_suppresses_tuple_capture_rebinding")
+        })
+        .expect("missing sibling argument fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["omitted_required_label_suppresses_tuple_capture_rebinding"].ty
+    else {
+        panic!("missing sibling argument proof must be a function");
+    };
+    let Type::Record(cases) = result.as_ref() else {
+        panic!("missing sibling argument proof must expose both calls");
+    };
+    let incomplete = cases.get("incomplete").expect("incomplete call");
+    let Type::Record(fields) = incomplete else {
+        panic!("incomplete call must retain computed capture values: {incomplete:?}");
+    };
+    fn assert_real_capture_values(fields: &BTreeMap<String, Type>) {
+        for name in [
+            "left_selected_capture",
+            "left_sibling_capture",
+            "terminal_capture",
+        ] {
+            let Type::Applied { base, arguments } = fields.get(name).expect("capture field") else {
+                panic!("{name} must remain a real historical callable: {fields:?}");
+            };
+            assert_eq!(base, "sys.HistoricalCallable", "{name}");
+            let [pin, Type::Function { result, .. }] = arguments.as_slice() else {
+                panic!("{name} must retain its snapshot and read result: {arguments:?}");
+            };
+            assert!(
+                matches!(pin, Type::Applied { base, .. } if base == "sys.SnapshotRefContext"),
+                "{name} must retain a computed snapshot context: {pin:?}"
+            );
+            let Type::Record(read_members) = result.as_ref() else {
+                panic!("{name} must expose a computed database read result: {result:?}");
+            };
+            assert!(
+                matches!(read_members.get("read"), Some(Type::Applied { base, .. }) if base == "sys.HistoricalCallable"),
+                "{name} must contain its real read callable: {read_members:?}"
+            );
+        }
+    }
+    assert_real_capture_values(fields);
+    let mut incomplete_contexts = BTreeSet::new();
+    collect_snapshot_contexts(incomplete, &mut incomplete_contexts);
+    for selector in ["HEAD~700", "HEAD~690"] {
+        assert!(
+            !incomplete_contexts
+                .iter()
+                .any(|context| context.contains(selector)),
+            "a supplied tuple pin leaked through the missing required sibling: {incomplete_contexts:?}"
+        );
+    }
+    let unresolved_tuple_pins = incomplete_contexts
+        .iter()
+        .filter(|context| context.starts_with("selector:dynamic-call:"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        unresolved_tuple_pins.len(),
+        2,
+        "the incomplete call must preserve distinct unresolved tuple identities: {incomplete_contexts:?}"
+    );
+    assert!(
+        incomplete_contexts.contains("selector:HEAD~680"),
+        "the later leaf pin still resolves at its own call: {incomplete_contexts:?}"
+    );
+
+    let complete = cases.get("complete").expect("complete call");
+    let Type::Record(complete_fields) = complete else {
+        panic!("complete call must return computed captures: {complete:?}");
+    };
+    assert_real_capture_values(complete_fields);
+    let mut complete_contexts = BTreeSet::new();
+    collect_snapshot_contexts(complete, &mut complete_contexts);
+    for selector in ["HEAD~670", "HEAD~660", "HEAD~650"] {
+        assert!(
+            complete_contexts.contains(&format!("selector:{selector}")),
+            "a complete call must preserve computed pin {selector}: {complete_contexts:?}"
+        );
+    }
+
+}
+
+#[test]
 fn concurrent_callback_tuples_reject_cross_lane_identity_mix_after_rebind() {
     let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
@@ -7545,6 +7653,70 @@ fn checkpoint_map_compatible_rebind_returns_each_real_snapshot_value() {
         let mut contexts = BTreeSet::new();
         collect_snapshot_contexts(value, &mut contexts);
         assert_eq!(contexts, BTreeSet::from([selector.to_owned()]), "{name}");
+    }
+}
+
+#[test]
+fn paired_checkpoint_map_shape_rebind_preserves_each_real_selector_set() {
+    let source = include_str!(
+        "fixtures/historical-paired-checkpoint-map-compatible-shape-rebind.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-checkpoint-map-compatible-shape-rebind.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_checkpoint_map_compatible_shape_rebind_returns_values")
+        })
+        .expect("paired checkpoint-map shape fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_checkpoint_map_compatible_shape_rebind_returns_values"]
+        .ty
+    else {
+        panic!("paired checkpoint-map rebind proof must export a function");
+    };
+    let Type::Record(values) = result.as_ref() else {
+        panic!("paired checkpoint-map rebind must return its computed fields");
+    };
+    for (name, expected) in [
+        (
+            "saved",
+            ["selector:HEAD~12", "selector:HEAD~11"],
+        ),
+        (
+            "rolling",
+            ["selector:HEAD~10", "selector:HEAD~9"],
+        ),
+    ] {
+        let Type::Record(fields) = values.get(name).expect("checkpoint record value") else {
+            panic!("{name} must remain a computed checkpoint record");
+        };
+        for (field, selector) in [("first", expected[0]), ("second", expected[1])] {
+            let value = fields.get(field).expect("computed checkpoint field");
+            assert_canonical_snapshot_context_maps(value);
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(value, &mut contexts);
+            assert_eq!(contexts, BTreeSet::from([selector.to_owned()]), "{name}.{field}");
+        }
     }
 }
 

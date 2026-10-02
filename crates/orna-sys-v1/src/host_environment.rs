@@ -16,6 +16,8 @@ pub struct HostOperationDescriptor {
     pub name: String,
     pub version: super::AbiVersion,
     pub signature: String,
+    #[serde(default)]
+    pub parameters: Vec<String>,
     pub effects: Vec<String>,
     pub preconditions: Vec<String>,
     pub failures: Vec<String>,

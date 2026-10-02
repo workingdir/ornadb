@@ -328,17 +328,31 @@ impl FilterBatch {
 
     fn followed_by_shared_prefix(prefix: &Arc<Self>, next: &Arc<Self>) -> Arc<Self> {
         let next_key = Arc::as_ptr(next) as usize;
-        let continuation = prefix
+        let mut continuations = prefix
             .continuations
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&next_key)
-            .and_then(Weak::upgrade);
-        if let Some(batch) = continuation {
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(batch) = continuations.get(&next_key).and_then(Weak::upgrade) {
             // Cloned leaves already have an identity-keyed join; avoid taking
             // the suffix's cross-prefix cache lock for this common path.
             return batch;
         }
+        let equivalent_continuation = continuations.values().filter_map(Weak::upgrade).find(
+            |batch| {
+                let FilterBatchNode::Then(previous, suffix) = &batch.node else {
+                    return false;
+                };
+                Arc::ptr_eq(previous, prefix)
+                    && (Arc::ptr_eq(suffix, next) || suffix.values().eq(next.values()))
+            },
+        );
+        if let Some(batch) = equivalent_continuation {
+            // Separately compiled suffixes with the same ordered filters are
+            // equivalent continuations; alias their identity-keyed entries.
+            continuations.insert(next_key, Arc::downgrade(&batch));
+            return batch;
+        }
+        drop(continuations);
 
         let mut prefixed_batches = next
             .prefixed_batches
@@ -831,5 +845,50 @@ mod tests {
             retained_prefix.flattened.get().is_none(),
             "identity-cached continuations should preserve the unflattened prefix"
         );
+    }
+
+    #[test]
+    fn equal_compiled_suffixes_share_cloned_nested_continuations() {
+        let prefix = FilterBatch::from_values(vec![Value::Bool(true)]);
+        let nested_prefix = RelationPlan::union(
+            RelationPlan::new("UnknownBaseLeft".into()),
+            RelationPlan::new("UnknownBaseRight".into()),
+        )
+        .with_stage(RelationStage::SharedFilter(Arc::clone(&prefix)))
+        .flush_filter_cascade();
+        let append_suffix = |plan: RelationPlan| {
+            plan.with_stage(RelationStage::Filter(vec![Value::String(
+                "same continuation".into(),
+            )]))
+        };
+        let plan = RelationPlan::union(
+            append_suffix(nested_prefix.clone()),
+            append_suffix(nested_prefix),
+        );
+
+        let batch_for = |leaf: &RelationPlan| match leaf.stages.as_slice() {
+            [RelationStage::SharedFilter(batch)] => Arc::clone(batch),
+            stages => panic!("expected one shared batch, got {stages:?}"),
+        };
+        let (left, right) = plan.source_union.as_ref().expect("outer union remains");
+        let (left_left, left_right) = left.source_union.as_ref().expect("left nested union");
+        let (right_left, right_right) = right.source_union.as_ref().expect("right nested union");
+        let batches = [
+            batch_for(left_left),
+            batch_for(left_right),
+            batch_for(right_left),
+            batch_for(right_right),
+        ];
+
+        assert!(batches[1..]
+            .iter()
+            .all(|batch| Arc::ptr_eq(&batches[0], batch)));
+        let continuations = prefix.continuations.lock().unwrap();
+        assert_eq!(continuations.len(), 2);
+        assert!(continuations.values().all(|continuation| {
+            continuation
+                .upgrade()
+                .is_some_and(|batch| Arc::ptr_eq(&batch, &batches[0]))
+        }));
     }
 }

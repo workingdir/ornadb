@@ -682,6 +682,29 @@ impl BranchMergeTombstoneHistory {
         Ok(())
     }
 
+    /// Atomically binds paired retry identities, applies fragment recoveries,
+    /// and validates same-position paired retry appends as one transaction.
+    /// Bindings run first so recovered appends are checked against full paired
+    /// identity rather than only their tombstone projection. If any binding,
+    /// recovery, or append conflicts, the original history is left unchanged,
+    /// including any fragment events that a partial recovery could release.
+    ///
+    /// MERGE-1 is silent on composing retry identity binding with fragment
+    /// recovery. This v1 policy makes the combined operation all-or-nothing;
+    /// callers that need separate transactions can use the constituent APIs.
+    pub fn bind_depth_fragment_retry_plans_with_recovery(
+        &mut self,
+        bindings: &[SequencedBranchMergePlan],
+        recoveries: &[BranchMergeDepthFragmentRecovery],
+        appends: &[SequencedBranchMergePlan],
+    ) -> Result<Vec<BranchMergeTombstoneEvent>, BranchMergeTombstoneHistoryError> {
+        let mut candidate = self.clone();
+        candidate.bind_depth_fragment_retry_plans(bindings)?;
+        let released = candidate.recover_depth_merge_fragments_with_appends(recoveries, appends)?;
+        *self = candidate;
+        Ok(released)
+    }
+
     /// Restarts an incomplete depth wave after its split plan has been
     /// recomputed. Previously buffered pieces for this position are discarded,
     /// and the new fragment count replaces the old one. Its paired lineage

@@ -780,13 +780,14 @@ impl Serialize for PlanByteCapHandoffRoute {
     where
         S: serde::Serializer,
     {
-        let mut route = serializer.serialize_struct("PlanByteCapHandoffRoute", 7)?;
+        let mut route = serializer.serialize_struct("PlanByteCapHandoffRoute", 8)?;
         route.serialize_field("depth", &self.depth)?;
         route.serialize_field("input_path", &self.input_path)?;
         route.serialize_field("output_path", &self.output_path)?;
         let (input_scope, output_scope) = self.scope_labels();
         route.serialize_field("input_scope", &input_scope)?;
         route.serialize_field("output_scope", &output_scope)?;
+        route.serialize_field("paired_scope_label", &self.paired_scope_label())?;
         route.serialize_field("input_bytes", &self.input_bytes)?;
         route.serialize_field("output_bytes", &self.output_bytes)?;
         route.end()

@@ -341,6 +341,11 @@ fn admitted_source_table_mutation_commits_rolls_back_and_replays_terminally() {
             &committed_context,
         )));
     let committed_mutation = committed_transaction.mutations[0].clone();
+    assert_ne!(
+        failed_mutation.id(),
+        committed_mutation.id(),
+        "the same source write in a separate request gets its own stage identity"
+    );
     let committed_staged = StagedTableActivation::from_source(
         committed_context,
         committed_transaction.mutations,
