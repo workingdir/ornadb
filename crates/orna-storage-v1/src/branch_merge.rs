@@ -793,7 +793,6 @@ impl BranchMergeTombstoneHistory {
                 order: step.order,
             });
         }
-
         self.classify_submission_mode_conflict(
             step.order,
             BranchMergeTombstoneSubmissionMode::WholePlan,
