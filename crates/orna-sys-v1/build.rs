@@ -71,6 +71,13 @@ fn main() {
         .expect("annotated native sys host operations form a valid registry");
     fs::write(out_dir.join("system_host_operations.json"), host_registry)
         .expect("write generated native sys host-operation registry");
+    let host_registry_schema = build_host::generate_host_registry_schema()
+        .expect("generate deterministic native sys host-operation schema");
+    fs::write(
+        out_dir.join("system_host_operations.schema.json"),
+        host_registry_schema,
+    )
+    .expect("write generated native sys host-operation schema");
     fs::write(
         out_dir.join("system_api_schema.json"),
         artifacts.schema_json,

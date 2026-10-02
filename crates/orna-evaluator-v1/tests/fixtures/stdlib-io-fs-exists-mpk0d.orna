@@ -1,0 +1,1 @@
+std.io.fs.exists("ROOT_PATH", "input.txt")
