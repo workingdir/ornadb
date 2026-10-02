@@ -19154,6 +19154,31 @@ mod tests {
             base: "semantic.SnapshotContextMap".into(),
             arguments: vec![Type::Named("domain.Factory".into())],
         };
+        let singleton = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![Type::Named("selector:HEAD~3".into())],
+        };
+        let unsorted = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:binder:z".into()),
+                Type::Named("selector:binder:a".into()),
+            ],
+        };
+        let duplicate = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:HEAD~3".into()),
+                Type::Named("selector:HEAD~3".into()),
+            ],
+        };
+        let nested_malformed = Type::Record(BTreeMap::from([
+            (
+                "pin".into(),
+                contextual_snapshot_ref("selector:HEAD~3"),
+            ),
+            ("map".into(), malformed.clone()),
+        ]));
 
         assert!(is_snapshot_context_map_shape(&first));
         assert!(type_contains_pinned_snapshot_identity(&first));
@@ -19161,6 +19186,17 @@ mod tests {
         assert!(!is_snapshot_context_map_shape(&malformed));
         assert!(!type_contains_pinned_snapshot_identity(&malformed));
         assert!(!pinned_snapshot_rebind_compatible(&malformed, &second));
+        assert!(!is_snapshot_context_map_shape(&singleton));
+        assert!(!is_snapshot_context_map_shape(&unsorted));
+        assert!(!is_snapshot_context_map_shape(&duplicate));
+        assert!(merge_checkpoint_field_map(&malformed, &malformed).is_none());
+        assert!(merge_checkpoint_field_map(&malformed, &first).is_none());
+        assert!(!checkpoint_snapshot_maps_are_valid(&nested_malformed));
+        assert!(merge_checkpoint_field_map(&nested_malformed, &nested_malformed).is_none());
+        assert!(!pinned_snapshot_rebind_compatible(
+            &nested_malformed,
+            &nested_malformed
+        ));
     }
 
     fn checked(inputs: &[ModuleInput]) -> Analysis {
