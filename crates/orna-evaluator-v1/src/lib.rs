@@ -5125,6 +5125,13 @@ impl Context<'_, '_> {
         {
             return Some(alias.clone());
         }
+        if self.functions.contains_key(&name)
+            && orna_sys_v1::system_host_operation_registry()
+                .operation(&name)
+                .is_some()
+        {
+            return Some(name);
+        }
         if !self.restrict_function_names && self.functions.contains_key(&name) {
             return Some(name);
         }

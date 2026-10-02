@@ -39,14 +39,15 @@ fn std_environment_get_reads_current_and_absent_process_values() {
         )),
         Ok(None)
     );
-    assert_eq!(
-        session.submit_with_sys_host_bindings(
+    let current = session
+        .submit_with_sys_host_bindings(
             include_str!("fixtures/repl-inline-std-io-environment-get-path-6tg7l.orna"),
             &mut bindings,
-        ),
-        Ok(Some(
-            Value::option(Some(Value::new(Raw::Text(expected)).unwrap())).unwrap()
-        ))
+        )
+        .unwrap_or_else(|error| panic!("environment get failed: {}", error.code()));
+    assert_eq!(
+        current,
+        Some(Value::option(Some(Value::new(Raw::Text(expected)).unwrap())).unwrap())
     );
     assert_eq!(
         session.submit_with_sys_host_bindings(
