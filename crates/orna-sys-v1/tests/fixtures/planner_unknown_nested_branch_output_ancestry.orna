@@ -1,0 +1,32 @@
+pub table PlannerUnknownNestedBranchOutputAncestry(id: Int) {
+    first: Bool,
+    second: Bool,
+    third: Bool,
+    fourth: Bool,
+    fifth: Bool,
+}
+pub fn nested_branch_output_ancestry() = PlannerUnknownNestedBranchOutputAncestry
+    | take(90)
+    | take(40)
+    | filter(row => row.first && row.second)
+    | union(
+        PlannerUnknownNestedBranchOutputAncestry
+            | take(14)
+            | take(7)
+            | filter(row => row.third)
+            | union(
+                PlannerUnknownNestedBranchOutputAncestry
+                    | take(3)
+                    | filter(row => row.fourth)
+            )
+    )
+    | union(
+        PlannerUnknownNestedBranchOutputAncestry
+            | take(12)
+            | filter(row => row.fifth)
+            | union(
+                PlannerUnknownNestedBranchOutputAncestry
+                    | take(5)
+                    | filter(row => row.first)
+            )
+    );
