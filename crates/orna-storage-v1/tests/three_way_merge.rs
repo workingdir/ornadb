@@ -7,7 +7,7 @@ use orna_storage_v1::{
     BranchMergeBudget, BranchMergeConflict, BranchMergeError, BranchMergePlan, BranchRowSource,
     BranchMergePlanSequenceError, BranchMergePlanSequencer, BranchMergeTombstoneHistory,
     BranchMergeTombstoneHistoryError, KeyRange, MergeSide, MergedSegment, RowSegmentManifest,
-    TableManifest, ThreeWaySnapshot, merge_three_way_snapshots,
+    SequencedBranchMergePlan, TableManifest, ThreeWaySnapshot, merge_three_way_snapshots,
 };
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 use std::{
@@ -20057,13 +20057,33 @@ fn paired_depth_storm_tombstone_history_stabilizes_across_restore_waves() {
         let mut replay_history = BranchMergeTombstoneHistory::new(0);
         let mut replayed_plans = Vec::new();
         for order in schedule {
-            for step in replay
-                .submit_with_tombstone_deltas(order, &plans_by_order[&order])
-                .unwrap()
-            {
-                replay_history.append(&step).unwrap();
-                replayed_plans.push(step);
+            let plan = &plans_by_order[&order];
+            let step = SequencedBranchMergePlan {
+                order,
+                plan: plan.clone(),
+                ordered_row_tombstones: plan.ordered_row_tombstones(),
+            };
+            let expected_order = replay_history.next_order().unwrap();
+            let released_events = replay_history.submit(&step).unwrap();
+            if order > expected_order {
+                assert!(
+                    released_events.is_empty(),
+                    "a future depth merge stays buffered until the missing restore wave arrives",
+                );
+                assert_eq!(replay_history.next_order(), Some(expected_order));
             }
+            let unchanged_history = replay_history.clone();
+            assert_eq!(
+                replay_history.submit(&step),
+                Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order }),
+                "repeated completion cannot duplicate buffered or committed events",
+            );
+            assert_eq!(replay_history, unchanged_history);
+            replayed_plans.extend(
+                replay
+                    .submit_with_tombstone_deltas(order, plan)
+                    .unwrap(),
+            );
         }
         assert_eq!(
             replayed_plans,
