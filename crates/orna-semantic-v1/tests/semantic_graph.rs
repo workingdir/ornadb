@@ -7657,6 +7657,70 @@ fn checkpoint_map_compatible_rebind_returns_each_real_snapshot_value() {
 }
 
 #[test]
+fn paired_checkpoint_map_shape_rebind_preserves_each_real_selector_set() {
+    let source = include_str!(
+        "fixtures/historical-paired-checkpoint-map-compatible-shape-rebind.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-checkpoint-map-compatible-shape-rebind.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_checkpoint_map_compatible_shape_rebind_returns_values")
+        })
+        .expect("paired checkpoint-map shape fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_checkpoint_map_compatible_shape_rebind_returns_values"]
+        .ty
+    else {
+        panic!("paired checkpoint-map rebind proof must export a function");
+    };
+    let Type::Record(values) = result.as_ref() else {
+        panic!("paired checkpoint-map rebind must return its computed fields");
+    };
+    for (name, expected) in [
+        (
+            "saved",
+            ["selector:HEAD~12", "selector:HEAD~11"],
+        ),
+        (
+            "rolling",
+            ["selector:HEAD~10", "selector:HEAD~9"],
+        ),
+    ] {
+        let Type::Record(fields) = values.get(name).expect("checkpoint record value") else {
+            panic!("{name} must remain a computed checkpoint record");
+        };
+        for (field, selector) in [("first", expected[0]), ("second", expected[1])] {
+            let value = fields.get(field).expect("computed checkpoint field");
+            assert_canonical_snapshot_context_maps(value);
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(value, &mut contexts);
+            assert_eq!(contexts, BTreeSet::from([selector.to_owned()]), "{name}.{field}");
+        }
+    }
+}
+
+#[test]
 fn paired_checkpoint_snapshot_maps_survive_chained_depth_storms() {
     let source = include_str!(
         "fixtures/historical-paired-checkpoint-snapshot-retention-depth-storm.orna"

@@ -17255,7 +17255,8 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
         return true;
     }
     if is_snapshot_context_map_shape(expected) && is_snapshot_context_map_shape(actual) {
-        return true;
+        return snapshot_context_map_cardinality(expected)
+            == snapshot_context_map_cardinality(actual);
     }
     match (expected, actual) {
         (
@@ -17376,6 +17377,21 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
                 && pinned_snapshot_shape_matches(expected_unit, actual_unit)
         }
         _ => false,
+    }
+}
+
+/// Selector identities may change during a local rebind, but the number of
+/// captured selector slots is part of the pinned shape. The reference is
+/// silent about local map rebinds; preserving cardinality avoids silently
+/// adding or dropping captured pins.
+fn snapshot_context_map_cardinality(ty: &Type) -> Option<usize> {
+    match ty {
+        Type::Applied { base, arguments }
+            if base == "sys.SnapshotRefContext" || base == "semantic.SnapshotContextMap" =>
+        {
+            Some(arguments.len())
+        }
+        _ => None,
     }
 }
 
@@ -19222,6 +19238,14 @@ mod tests {
                 Type::Named("selector:binder:second".into()),
             ],
         };
+        let wider = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:HEAD~6".into()),
+                Type::Named("selector:HEAD~5".into()),
+                Type::Named("selector:HEAD~4".into()),
+            ],
+        };
         let malformed = Type::Applied {
             base: "semantic.SnapshotContextMap".into(),
             arguments: vec![Type::Named("domain.Factory".into())],
@@ -19256,8 +19280,15 @@ mod tests {
         assert!(types_match(&first, &first));
         assert!(types_match(&first, &Type::Bottom));
         assert!(pinned_snapshot_shape_matches(&first, &first));
+        assert!(pinned_snapshot_shape_matches(&first, &second));
+        assert!(!pinned_snapshot_shape_matches(&first, &wider));
+        assert!(!pinned_snapshot_shape_matches(
+            &contextual_snapshot_ref("selector:HEAD~3"),
+            &first
+        ));
         assert!(type_contains_pinned_snapshot_identity(&first));
         assert!(pinned_snapshot_rebind_compatible(&first, &second));
+        assert!(!pinned_snapshot_rebind_compatible(&first, &wider));
         assert!(!is_snapshot_context_map_shape(&malformed));
         assert!(!types_match(&malformed, &malformed));
         assert!(!types_match(&malformed, &Type::Bottom));
