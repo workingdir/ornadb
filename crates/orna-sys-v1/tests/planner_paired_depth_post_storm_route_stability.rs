@@ -473,3 +473,62 @@ fn unknown_byte_handoffs_retain_prior_stage_output_paths() {
         );
     }
 }
+
+#[test]
+fn unknown_byte_route_serialization_derives_labels_from_typed_paths() {
+    let parsed = orna_syntax_v1::parse_module(UNKNOWN_STAGE_OUTPUT_HANDOFF_FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let input_path = vec![
+        PlanByteCapScopeSegment::StormStage { index: 1 },
+        PlanByteCapScopeSegment::StormStageOutput { index: 1 },
+        PlanByteCapScopeSegment::StormStage { index: 2 },
+        PlanByteCapScopeSegment::Branch { index: 1 },
+        PlanByteCapScopeSegment::Limit { position: 1 },
+    ];
+    let mut output_path = input_path.clone();
+    output_path.extend([
+        PlanByteCapScopeSegment::Rebind { position: 1 },
+        PlanByteCapScopeSegment::Cascade { index: 1 },
+    ]);
+    let canonical_route = PlanByteCapHandoffRoute::from_typed_paths(
+        2,
+        input_path.clone(),
+        output_path.clone(),
+        None,
+        None,
+    );
+    assert_eq!(
+        canonical_route.input_scope,
+        "root/storm1/storm_stage_output1/storm2/branch1/limit1"
+    );
+    assert_eq!(
+        canonical_route.output_scope,
+        "root/storm1/storm_stage_output1/storm2/branch1/limit1/rebind1/cascade1"
+    );
+    let route = PlanByteCapHandoffRoute {
+        depth: 1,
+        input_path,
+        output_path,
+        input_scope: "stale input label".to_owned(),
+        output_scope: "stale output label".to_owned(),
+        input_bytes: None,
+        output_bytes: None,
+    };
+
+    let serialized = serde_json::to_value(route).expect("unknown-byte route serializes");
+    assert_eq!(
+        serialized["input_scope"],
+        "root/storm1/storm_stage_output1/storm2/branch1/limit1"
+    );
+    assert_eq!(
+        serialized["output_scope"],
+        "root/storm1/storm_stage_output1/storm2/branch1/limit1/rebind1/cascade1"
+    );
+    assert_eq!(
+        serialized["input_path"][1],
+        serde_json::json!({ "kind": "storm_stage_output", "index": 1 })
+    );
+    assert_eq!(serialized["input_bytes"], serde_json::Value::Null);
+    assert_eq!(serialized["output_bytes"], serde_json::Value::Null);
+}

@@ -9736,6 +9736,43 @@ mod tests {
     }
 
     #[test]
+    fn relation_plan_shares_cloned_prefixes_across_nested_unknown_union_leaves() {
+        let local_filter = Value::Bool(true);
+        let outer_filter = Value::Bool(false);
+        let operand = RelationPlan::new("UnknownOperand".into())
+            .with_stage(RelationStage::Filter(vec![local_filter.clone()]));
+        let cascade = RelationPlan::union(
+            RelationPlan::new("CascadeLeft".into()),
+            RelationPlan::new("CascadeRight".into()),
+        )
+        .with_stage(RelationStage::Filter(vec![outer_filter.clone()]))
+        .flush_filter_cascade();
+        let batch_for = |leaf: &RelationPlan| match leaf.stages.as_slice() {
+            [RelationStage::SharedFilter(batch)] => Arc::clone(batch),
+            stages => panic!("expected one shared batch, got {stages:?}"),
+        };
+        let shared_outer = batch_for(cascade.source_union.as_ref().unwrap().0.as_ref());
+        let composed = RelationPlan::union(
+            RelationPlan::union(operand.clone(), operand.clone()),
+            operand,
+        )
+        .with_stage(RelationStage::SharedFilter(shared_outer))
+        .flush_filter_cascade();
+        let (nested, right) = composed.source_union.as_ref().expect("outer union remains");
+        let (left, middle) = nested.source_union.as_ref().expect("nested union remains");
+        let left_batch = batch_for(left);
+        let middle_batch = batch_for(middle);
+        let right_batch = batch_for(right);
+
+        assert!(Arc::ptr_eq(&left_batch, &middle_batch));
+        assert!(Arc::ptr_eq(&left_batch, &right_batch));
+        assert_eq!(
+            left_batch.values().cloned().collect::<Vec<_>>(),
+            vec![local_filter, outer_filter]
+        );
+    }
+
+    #[test]
     fn relation_scan_checks_cancellation_before_each_page() {
         let functions = Functions::new();
         let cancellation = CancellationToken::new();

@@ -24760,6 +24760,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_nested_cloned_unknown_operands_keep_shared_batches_ordered() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=40)
+            .map(|row_id| {
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, "current", row_id)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(181), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-nested-cloned-unknown-union-shared-batches.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (0, 34),
+            "the known branch exhausts before any nested cloned unknown operand is opened"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_equal_prefixes_keep_nested_unknown_union_batches_ordered() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=40)
+            .map(|row_id| {
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, "current", row_id)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(182), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-equivalent-prefixes-nested-unknown-union.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (0, 34),
+            "the known branch exhausts before separately compiled unknown prefixes are opened"
+        );
+    }
+
+    #[tokio::test]
     async fn query_take_two_preserves_results_across_conjunct_filter_splits() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
