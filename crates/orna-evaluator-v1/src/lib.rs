@@ -5360,6 +5360,9 @@ impl Context<'_, '_> {
             Some(StandardBindingKind::Base64) => {
                 format!("base64.{}", name.strip_prefix("__").unwrap_or(name))
             }
+            Some(StandardBindingKind::Money) => {
+                format!("money.{}", name.strip_prefix("__").unwrap_or(name))
+            }
             _ => name.to_owned(),
         };
         let values = named_arguments(
@@ -5879,6 +5882,7 @@ impl Context<'_, '_> {
         }
     }
     fn money(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
+        self.step()?;
         match (name, values.as_slice()) {
             ("__quantize", [amount, Value::Int(scale), Value::String(rounding)]) => {
                 let scale = scale
@@ -5928,7 +5932,30 @@ impl Context<'_, '_> {
                     .collect::<Result<Vec<_>, _>>()
                     .map(Value::List)
             }
-            ("__quantize" | "__allocate", _) => Err(error("ORNA-EVAL-TYPE")),
+            (
+                "__format",
+                [
+                    amount,
+                    Value::String(currency_code),
+                    Value::Int(minor_digits),
+                    Value::String(rounding),
+                    Value::String(locale),
+                ],
+            ) => {
+                let minor_digits = minor_digits
+                    .to_usize()
+                    .filter(|digits| *digits <= DEFAULT_INTEGER_DIGITS)
+                    .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+                let formatted = format_money_value(
+                    amount,
+                    currency_code,
+                    minor_digits,
+                    rounding,
+                    locale,
+                )?;
+                self.string(formatted).map(Value::String)
+            }
+            ("__quantize" | "__allocate" | "__format", _) => Err(error("ORNA-EVAL-TYPE")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
@@ -8309,6 +8336,84 @@ fn replace_money_amount(value: &Value, amount: DecimalValue) -> Result<Value, Ev
     }
 }
 
+fn format_money_value(
+    amount: &Value,
+    currency_code: &str,
+    minor_digits: usize,
+    rounding: &str,
+    locale: &str,
+) -> Result<String, EvaluationError> {
+    if currency_code.len() != 3
+        || !currency_code
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_uppercase())
+    {
+        return Err(error("ORNA-EVAL-VALUE"));
+    }
+    let (grouping, decimal_separator, suffix_symbol) = match locale {
+        "en" | "en-US" | "en-GB" | "ja-JP" => (",", ".", false),
+        "fr-FR" => ("\u{202f}", ",", true),
+        "de-DE" => (".", ",", true),
+        _ => return Err(error("ORNA-EVAL-VALUE")),
+    };
+    let symbol = match currency_code {
+        "GBP" => "£",
+        "USD" => "$",
+        "EUR" => "€",
+        "JPY" => "¥",
+        "CAD" => "CA$",
+        "AUD" => "A$",
+        "NZD" => "NZ$",
+        "CHF" => "CHF",
+        _ => currency_code,
+    };
+    let original = money_amount(amount)?;
+    let rounded = quantize_decimal(&original, minor_digits, rounding)?;
+    let units = decimal_scaled_integer(&rounded, minor_digits)?
+        .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+    let negative = units.sign() == Sign::Minus;
+    let digits = units.abs().to_str_radix(10);
+    let (whole, fraction) = if minor_digits == 0 {
+        (digits, String::new())
+    } else if digits.len() <= minor_digits {
+        (
+            "0".to_owned(),
+            format!("{}{}", "0".repeat(minor_digits - digits.len()), digits),
+        )
+    } else {
+        let split = digits.len() - minor_digits;
+        (digits[..split].to_owned(), digits[split..].to_owned())
+    };
+    let mut grouped = String::with_capacity(whole.len() + whole.len() / 3);
+    let mut first_group = whole.len() % 3;
+    if first_group == 0 {
+        first_group = 3;
+    }
+    grouped.push_str(&whole[..first_group]);
+    for start in (first_group..whole.len()).step_by(3) {
+        grouped.push_str(grouping);
+        grouped.push_str(&whole[start..start + 3]);
+    }
+    let mut number = grouped;
+    if minor_digits > 0 {
+        number.push_str(decimal_separator);
+        number.push_str(&fraction);
+    }
+    let sign = if negative { "-" } else { "" };
+    if symbol == currency_code {
+        if suffix_symbol {
+            Ok(format!("{sign}{number}\u{00a0}{currency_code}"))
+        } else {
+            Ok(format!("{sign}{currency_code}\u{00a0}{number}"))
+        }
+    } else if suffix_symbol {
+        Ok(format!("{sign}{number}\u{00a0}{symbol}"))
+    } else {
+        Ok(format!("{sign}{symbol}{number}"))
+    }
+}
+
 fn quantize_decimal(
     value: &DecimalValue,
     scale: usize,
@@ -8728,6 +8833,7 @@ fn named_arguments(
             | "hash.domain_sha256"
             | "base64.encode"
             | "base64.decode"
+            | "money.format"
     ) && arguments.iter().all(|argument| argument.name.is_none())
     {
         return Ok(values);
@@ -8788,6 +8894,7 @@ fn named_arguments(
         "hash.to_hex" => &["digest"],
         "hash.from_hex" => &["value"],
         "hash.domain_sha256" => &["domain", "payload"],
+        "money.format" => &["amount", "currency_code", "minor_digits", "rounding", "locale"],
         "first" => &["rows"],
         "one" => match values.len() {
             1 => &["rows"],
@@ -9121,7 +9228,7 @@ const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
     StandardBindingModule {
         prefix: "std.money.",
         kind: StandardBindingKind::Money,
-        operations: &["__quantize", "__allocate"],
+        operations: &["__quantize", "__allocate", "__format"],
     },
 ];
 

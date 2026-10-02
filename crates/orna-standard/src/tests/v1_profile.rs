@@ -1154,8 +1154,10 @@ fn pinned_money_operations_are_bound_to_the_captured_source_snapshot() {
     for declaration in [
         "pub fn quantize<T>(amount: T, minor_digits: Int, rounding: Str): T",
         "pub fn allocate<T>(",
+        "pub fn format<T>(",
         "fn __quantize<T>(",
         "fn __allocate<T>(",
+        "fn __format<T>(",
     ] {
         assert!(source.contains(declaration), "missing std.money declaration `{declaration}`");
     }

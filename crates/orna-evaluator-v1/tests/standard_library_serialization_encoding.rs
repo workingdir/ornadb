@@ -229,6 +229,16 @@ fn exact_money_allocation_distributes_remainders_stably_and_preserves_total() {
         ]))
         .unwrap())
     );
+    assert_eq!(
+        eval_pinned(include_str!("fixtures/stdlib-money-format-values-rl767.orna")),
+        Ok(bool_value(true))
+    );
+    assert_eq!(
+        eval_pinned(include_str!("fixtures/stdlib-money-format-unsupported-locale-rl767.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-VALUE"
+    );
 }
 
 #[test]
