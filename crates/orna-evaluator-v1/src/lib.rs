@@ -9617,6 +9617,43 @@ mod tests {
     }
 
     #[test]
+    fn relation_plan_reuses_shared_union_filter_join_across_batch_flushes() {
+        let local_filter = Value::Bool(true);
+        let outer_filter = Value::Bool(false);
+        let operand = RelationPlan::union(
+            RelationPlan::new("UnknownLeft".into()),
+            RelationPlan::new("UnknownRight".into()),
+        )
+        .with_stage(RelationStage::Filter(vec![local_filter]));
+        let operand = operand.flush_filter_cascade();
+        let cascade = RelationPlan::union(
+            RelationPlan::new("CascadeLeft".into()),
+            RelationPlan::new("CascadeRight".into()),
+        )
+        .with_stage(RelationStage::Filter(vec![outer_filter]));
+        let cascade = cascade.flush_filter_cascade();
+        let batch_for = |leaf: &RelationPlan| match leaf.stages.as_slice() {
+            [RelationStage::SharedFilter(batch)] => Arc::clone(batch),
+            stages => panic!("expected one shared batch, got {stages:?}"),
+        };
+        let shared_cascade = batch_for(cascade.source_union.as_ref().unwrap().0.as_ref());
+        let compose = || {
+            operand
+                .clone()
+                .with_stage(RelationStage::SharedFilter(Arc::clone(&shared_cascade)))
+                .flush_filter_cascade()
+        };
+        let first = compose();
+        let second = compose();
+        let composed_left = first.source_union.as_ref().unwrap().0.as_ref();
+        let repeated_left = second.source_union.as_ref().unwrap().0.as_ref();
+        assert!(Arc::ptr_eq(
+            &batch_for(composed_left),
+            &batch_for(repeated_left)
+        ));
+    }
+
+    #[test]
     fn relation_scan_checks_cancellation_before_each_page() {
         let functions = Functions::new();
         let cancellation = CancellationToken::new();
