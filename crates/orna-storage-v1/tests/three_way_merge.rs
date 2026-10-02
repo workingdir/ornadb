@@ -22519,6 +22519,35 @@ fn paired_restore_fold_keeps_uneven_fragment_retry_labels() {
         "the later wave retains its different label after both positions commit",
     );
     assert_eq!(history, committed);
+
+    assert_eq!(
+        history.submit_depth_merge_fragment(0, 1, 3, &[]),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 0,
+            expected: 2,
+            actual: 3,
+        }),
+        "direct submission validates the earlier folded wave's own label before stale order",
+    );
+    assert_eq!(history, committed);
+
+    assert_eq!(
+        history.submit_depth_merge_fragment(1, 0, 4, &[]),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 1,
+            expected: 3,
+            actual: 4,
+        }),
+        "direct submission validates the later folded wave's different label before stale order",
+    );
+    assert_eq!(history, committed);
+
+    assert_eq!(
+        history.submit_depth_merge_fragment(1, 0, 3, &[]),
+        Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 1 }),
+        "the original label still reaches the existing stale-position result",
+    );
+    assert_eq!(history, committed);
 }
 
 #[test]
