@@ -304,6 +304,9 @@ pub struct BranchMergePlan {
 /// Within one table's delta keys stay in canonical depth order, but separate
 /// commits append by lineage: a later shallow ancestor tombstone follows
 /// earlier descendant storm events instead of being sorted ahead of them.
+/// A conflicted candidate is not a paired commit step and has no appendable
+/// delta; concurrent retries from its base are alternatives, and at most one
+/// successful plan advances that paired lineage position.
 /// MERGE-1 is silent on isolation between concurrent retry invocations. This
 /// v1 policy keeps row buffers, budgets, and candidate plans invocation-local:
 /// a failure after one paired table has materialized aborts only that attempt,
