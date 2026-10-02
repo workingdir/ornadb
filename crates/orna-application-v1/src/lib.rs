@@ -9385,7 +9385,7 @@ mod tests {
         let application = authority
             .admit_module(
                 "admin-pause.orna",
-                include_str!("../tests/fixtures/admin-pause-stream.orna"),
+                include_str!("../tests/fixtures/activation-scoped-table-write.orna"),
                 "main",
             )
             .expect("checked-in source fixture is admitted");
@@ -9400,7 +9400,7 @@ mod tests {
             &context,
             &dispatcher,
         ))
-        .expect("source table write and terminal runtime effect evaluate");
+        .expect("checked-in source table write evaluates for the activation");
         assert_eq!(staged.value().raw(), &OvbRaw::Bool(true));
         assert_eq!(staged.mutations().len(), 1);
 
