@@ -228,6 +228,12 @@ pub struct BranchMergePlan {
 /// tombstone and conflict order regardless of adapter visitation order or
 /// concurrent scheduling.
 ///
+/// A path-shaped tombstone chain remains a sequence of exact-key decisions:
+/// chain depth extends the ordered walk but never gives a prefix deletion
+/// precedence over a descendant row. If a chain read fails partway through,
+/// the incomplete prefix is not observable; recovery retries produce the full
+/// canonical sequence from the first table and range.
+///
 /// A read failure at any table or range aborts the whole invocation. Facts
 /// gathered from earlier tables or depth ranges remain private; after source
 /// recovery, a fresh retry starts from the first table and range. Clean
