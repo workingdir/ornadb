@@ -419,6 +419,11 @@ impl PackageResolver {
     /// Reopening a retained pre-rebind middle snapshot after later paired
     /// depth waves still follows the deep and terminal pins in that snapshot's
     /// manifest, even if a sibling's newer rebound route now differs.
+    /// Terminal sessions retained before those waves keep both their
+    /// manifest-selected terminal pin and the ancestor module route captured
+    /// from the selected deep pin. Later sibling depth rebinds do not refresh
+    /// either part of that session snapshot. The reference is silent on
+    /// cross-wave refresh, so v1 keeps both routes bound to the captured pins.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
