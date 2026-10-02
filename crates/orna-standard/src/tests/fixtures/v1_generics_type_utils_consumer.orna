@@ -1,0 +1,14 @@
+use std.generics as generic;
+use std.type_utils as types;
+
+pub fn check_value_helpers(): Bool {
+    let pair = types.pair(4, "ok");
+
+    assert generic.identity(4) == 4;
+    assert generic.constant("kept", 9) == "kept";
+    assert types.first_of(pair) == 4;
+    assert types.second_of(pair) == "ok";
+    assert types.swap_pair(pair) == ("ok", 4);
+    assert types.some(4) == first([4]);
+    true
+}
