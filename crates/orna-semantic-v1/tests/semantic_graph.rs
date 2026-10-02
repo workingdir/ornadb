@@ -7352,6 +7352,54 @@ fn paired_checkpoint_maps_merge_distinct_lambda_binders_without_cross_field_loss
 }
 
 #[test]
+fn exact_checkpoint_map_equality_returns_boolean_and_real_checkpoint() {
+    let source = include_str!("fixtures/historical-checkpoint-map-exact-equality.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-checkpoint-map-exact-equality.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("exact_checkpoint_map_equality_returns_value")
+        })
+        .expect("exact-equality fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["exact_checkpoint_map_equality_returns_value"]
+        .ty
+    else {
+        panic!("exact map equality fixture must export a function");
+    };
+    let Type::Record(fields) = result.as_ref() else {
+        panic!("exact map equality function must return computed fields");
+    };
+    assert_eq!(
+        fields.get("same_checkpoint"),
+        Some(&Type::Bool),
+        "equality of a real checkpoint value with its exact type returns Bool"
+    );
+    let checkpoint = fields
+        .get("checkpoint")
+        .expect("the computed checkpoint value is returned");
+    assert_canonical_snapshot_context_maps(checkpoint);
+    let mut contexts = BTreeSet::new();
+    collect_snapshot_contexts(checkpoint, &mut contexts);
+    assert!(
+        !contexts.is_empty(),
+        "the returned checkpoint must retain its actual snapshot map"
+    );
+}
+
+#[test]
 fn paired_checkpoint_snapshot_maps_survive_chained_depth_storms() {
     let source = include_str!(
         "fixtures/historical-paired-checkpoint-snapshot-retention-depth-storm.orna"
