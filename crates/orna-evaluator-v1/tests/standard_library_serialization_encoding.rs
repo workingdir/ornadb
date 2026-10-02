@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use orna_evaluator_v1::{
     AdmittedReplSession, Environment, Functions, Limits, PureFunction,
-    evaluate_expression_with_functions,
+    evaluate_expression, evaluate_expression_with_functions,
 };
 use orna_foundation_v1::CanonicalValue;
 use orna_value_v1::Raw;
@@ -88,6 +88,10 @@ fn pinned_encoding_modules_compute_canonical_values_and_reject_noncanonical_inpu
         Ok(None)
     );
     assert_eq!(
+        with_std.submit(include_str!("fixtures/stdlib-call-encoding-base64-6u13r.orna")),
+        Ok(Some(CanonicalValue::new(Raw::Bytes(b"a".to_vec())).unwrap()))
+    );
+    assert_eq!(
         with_std.submit(include_str!("fixtures/stdlib-codec-json-exact-rl767.orna")),
         Ok(Some(int_value(9_007_199_254_740_993)))
     );
@@ -147,6 +151,18 @@ fn pinned_encoding_modules_compute_canonical_values_and_reject_noncanonical_inpu
         .unwrap_err()
         .code(),
         "ORNA-EVAL-VALUE"
+    );
+    let payload = Environment::from([(
+        "payload".into(),
+        CanonicalValue::new(Raw::Bytes(b"hello".to_vec())).unwrap(),
+    )]);
+    assert_eq!(
+        evaluate_expression(
+            include_str!("fixtures/stdlib-base64-encode-6u13r.orna"),
+            &payload,
+            Limits::default(),
+        ),
+        Ok(text_value("aGVsbG8="))
     );
 
     let mut without_std = AdmittedReplSession::new(Limits::default());

@@ -292,8 +292,13 @@ impl SysHostBindingRegistry {
         operation: &HostOperationDescriptor,
         arguments: &[CanonicalValue],
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        if operation.name != "std.net.http.send"
-            || operation.implementation != "send"
+        if !matches!(
+            operation.name.as_str(),
+            "std.net.http.send"
+                | "std.net.http.start"
+                | "std.net.http.wait"
+                | "std.net.http.cancel"
+        ) || operation.implementation != operation.name.rsplit('.').next().unwrap_or("")
             || operation.role != "host.std.net.http@1.0"
             || operation.provider != "orna.sys.host.http.v1"
             || operation.effects != ["invoke"]
@@ -304,44 +309,65 @@ impl SysHostBindingRegistry {
             .http
             .as_ref()
             .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
-        let [method, url, headers, body, timeout, max_headers, max_body] = arguments else {
-            return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
-        };
-        let method = raw_text(method.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-        let url = raw_text(url.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-        let headers =
-            raw_text_pairs(headers.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-        let body = match optional_raw(body.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))? {
-            None | Some(OvbRaw::Null) => None,
-            Some(OvbRaw::Bytes(bytes)) => Some(bytes.as_slice()),
-            Some(_) => return Err(redacted_error("ORNA-EVAL-TYPE")),
-        };
-        let timeout =
-            match optional_raw(timeout.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))? {
-                None | Some(OvbRaw::Null) => None,
-                Some(OvbRaw::Tag(60005, duration)) => {
-                    Some(raw_duration(duration).ok_or_else(|| redacted_error("ORNA-EVAL-VALUE"))?)
+        let raw = match operation.name.as_str() {
+            "std.net.http.send" | "std.net.http.start" => {
+                let (method, url, headers, body, timeout, max_headers, max_body) =
+                    parse_http_request_arguments(arguments)?;
+                if operation.name == "std.net.http.send" {
+                    let response = provider
+                        .send(
+                            &method,
+                            &url,
+                            &headers,
+                            body.as_deref(),
+                            timeout,
+                            max_headers,
+                            max_body,
+                        )
+                        .map_err(|failure| self.failure(operation, failure.code()))?;
+                    http_response_raw(response)
+                } else {
+                    let handle = provider
+                        .start(
+                            &method,
+                            &url,
+                            &headers,
+                            body.as_deref(),
+                            timeout,
+                            max_headers,
+                            max_body,
+                        )
+                        .map_err(|failure| self.failure(operation, failure.code()))?;
+                    Ok(OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(handle.to_vec()))))
                 }
-                Some(_) => return Err(redacted_error("ORNA-EVAL-TYPE")),
-            };
-        let OvbRaw::Int(max_headers) = max_headers.raw() else {
-            return Err(redacted_error("ORNA-EVAL-TYPE"));
+            }
+            "std.net.http.wait" => {
+                let [handle, timeout] = arguments else {
+                    return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
+                };
+                let handle =
+                    raw_uuid(handle.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+                let timeout = raw_optional_duration(timeout.raw())?;
+                let response = provider
+                    .wait(handle, timeout)
+                    .map_err(|failure| self.failure(operation, failure.code()))?;
+                http_response_raw(response)
+            }
+            "std.net.http.cancel" => {
+                let [handle] = arguments else {
+                    return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
+                };
+                let handle =
+                    raw_uuid(handle.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+                Ok(OvbRaw::Bool(provider.cancel(handle).map_err(
+                    |failure| self.failure(operation, failure.code()),
+                )?))
+            }
+            _ => return Err(redacted_error("ORNA-EVAL-UNSUPPORTED")),
         };
-        let OvbRaw::Int(max_body) = max_body.raw() else {
-            return Err(redacted_error("ORNA-EVAL-TYPE"));
-        };
-        let max_headers = max_headers
-            .to_usize()
-            .ok_or_else(|| redacted_error("ORNA-EVAL-VALUE"))?;
-        let max_body = max_body
-            .to_usize()
-            .ok_or_else(|| redacted_error("ORNA-EVAL-VALUE"))?;
-        let response = provider
-            .send(method, url, &headers, body, timeout, max_headers, max_body)
-            .map_err(|failure| self.failure(operation, failure.code()))?;
-        http_response_raw(response)
-            .and_then(|raw| CanonicalValue::new(raw).map_err(|_| redacted_error("ORNA-EVAL-VALUE")))
+        CanonicalValue::new(raw?)
             .map(Some)
+            .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))
     }
 
     fn dispatch_environment(
@@ -541,6 +567,71 @@ fn http_response_raw(response: HostHttpResponse) -> Result<OvbRaw, EvaluationErr
     ]))
 }
 
+fn parse_http_request_arguments(
+    arguments: &[CanonicalValue],
+) -> Result<
+    (
+        String,
+        String,
+        Vec<(String, String)>,
+        Option<Vec<u8>>,
+        Option<std::time::Duration>,
+        usize,
+        usize,
+    ),
+    EvaluationError,
+> {
+    let [method, url, headers, body, timeout, max_headers, max_body] = arguments else {
+        return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
+    };
+    let method = raw_text(method.raw())
+        .ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?
+        .to_owned();
+    let url = raw_text(url.raw())
+        .ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?
+        .to_owned();
+    let headers = raw_text_pairs(headers.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+    let body = match optional_raw(body.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))? {
+        None | Some(OvbRaw::Null) => None,
+        Some(OvbRaw::Bytes(bytes)) => Some(bytes.clone()),
+        Some(_) => return Err(redacted_error("ORNA-EVAL-TYPE")),
+    };
+    let timeout = raw_optional_duration(timeout.raw())?;
+    let OvbRaw::Int(max_headers) = max_headers.raw() else {
+        return Err(redacted_error("ORNA-EVAL-TYPE"));
+    };
+    let OvbRaw::Int(max_body) = max_body.raw() else {
+        return Err(redacted_error("ORNA-EVAL-TYPE"));
+    };
+    let max_headers = max_headers
+        .to_usize()
+        .ok_or_else(|| redacted_error("ORNA-EVAL-VALUE"))?;
+    let max_body = max_body
+        .to_usize()
+        .ok_or_else(|| redacted_error("ORNA-EVAL-VALUE"))?;
+    Ok((method, url, headers, body, timeout, max_headers, max_body))
+}
+
+fn raw_uuid(value: &OvbRaw) -> Option<[u8; 16]> {
+    let OvbRaw::Tag(37, value) = value else {
+        return None;
+    };
+    let OvbRaw::Bytes(bytes) = value.as_ref() else {
+        return None;
+    };
+    bytes.as_slice().try_into().ok()
+}
+
+fn raw_optional_duration(value: &OvbRaw) -> Result<Option<std::time::Duration>, EvaluationError> {
+    match optional_raw(value).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))? {
+        None | Some(OvbRaw::Null) => Ok(None),
+        Some(OvbRaw::Tag(60005, value)) => raw_duration(value)
+            .map(Some)
+            .ok_or_else(|| redacted_error("ORNA-EVAL-VALUE")),
+        Some(_) => Err(redacted_error("ORNA-EVAL-TYPE")),
+    }
+}
+
 fn optional_value(value: Option<OvbRaw>) -> OvbRaw {
     let mut fields = vec![OvbRaw::Int(if value.is_some() {
         1.into()
@@ -669,4 +760,75 @@ impl EffectHandler for SysHostBindingRegistry {
 
 fn redacted_error(code: &'static str) -> EvaluationError {
     EvaluationError::redacted(SafeText::new(code).expect("static evaluator error code is safe"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_generated_host_operation_reaches_its_native_dispatch_arm() {
+        let environment = EnvironmentProvider::from_snapshot([(
+            "HOME".to_owned(),
+            Some("fixture-home".to_owned()),
+        )])
+        .expect("valid host environment snapshot");
+        let process = ProcessProvider::new(std::time::Duration::from_secs(1), 1024)
+            .expect("valid process limits");
+        let clock = ClockProvider::new(std::time::Duration::from_secs(1));
+        let filesystem = FilesystemProvider::new();
+        let http = HttpProvider::new(std::time::Duration::from_secs(1), 1024, 1024)
+            .expect("valid HTTP limits");
+        let bindings = SysHostBindingRegistry::new(environment)
+            .with_process_provider(process)
+            .with_clock_provider(clock)
+            .with_filesystem_provider(filesystem)
+            .with_http_provider(http);
+        let environment_argument = CanonicalValue::new(OvbRaw::Text("HOME".to_owned()))
+            .expect("environment name is canonical");
+        let mut checked = 0;
+
+        for operation in system_host_operation_registry().operations() {
+            checked += 1;
+            if operation.provider == "orna.sys.host.environment.v1" {
+                let actual = bindings
+                    .dispatch(
+                        &operation.name,
+                        std::slice::from_ref(&environment_argument),
+                        None,
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!("{} dispatch failed: {}", operation.name, error.code())
+                    })
+                    .expect("environment operation returns a value");
+                let expected = match operation.name.as_str() {
+                    "std.io.environment.get" => OvbRaw::Tag(
+                        60013,
+                        Box::new(OvbRaw::Array(vec![
+                            OvbRaw::Int(1.into()),
+                            OvbRaw::Text("fixture-home".to_owned()),
+                        ])),
+                    ),
+                    "std.io.environment.require" => OvbRaw::Text("fixture-home".to_owned()),
+                    name => panic!("unmapped environment operation {name}"),
+                };
+                assert_eq!(actual.raw(), &expected, "{} result", operation.name);
+            } else {
+                let error = bindings
+                    .dispatch(&operation.name, &[], None)
+                    .expect_err("empty args must reach a registered handler and fail arity");
+                assert_eq!(
+                    error.code(),
+                    "ORNA-EVAL-ARGUMENT",
+                    "{} must resolve to its typed native dispatch arm",
+                    operation.name
+                );
+            }
+        }
+
+        assert_eq!(
+            checked, 20,
+            "the host dispatch audit covers the full registry"
+        );
+    }
 }

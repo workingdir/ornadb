@@ -736,6 +736,104 @@ impl PackageResolver {
         Ok(route)
     }
 
+    /// Continues a terminal-pair chain from an exact retained session. The
+    /// first pair uses that session as its handoff root; later pairs continue
+    /// from the preceding pair's newest handoff. The reference does not define
+    /// selecting an older handoff for a chained pair; v1 keeps that explicit
+    /// depth and preserves the displaced terminal route with the new history.
+    /// An empty chain leaves the previous route unchanged.
+    pub fn extend_nested_terminal_pair_chain_from_retained(
+        &self,
+        previous: &ReboundPathResolution,
+        retained_session: usize,
+        replacement_waves: &[[PinnedDatabase; 2]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let Some((first, remaining)) = replacement_waves.split_first() else {
+            return Ok(previous.clone());
+        };
+        let route = self.extend_nested_terminal_pair_from_retained(
+            previous,
+            retained_session,
+            first.clone(),
+        )?;
+        self.extend_nested_terminal_pair_chain(&route, remaining)
+    }
+
+    /// Continues a terminal-pair chain from an exact snapshot in a retained
+    /// wave. The selected route determines the first pair's closure depth;
+    /// subsequent pairs preserve the normal one-depth handoff between waves.
+    /// Invalid wave or snapshot positions return no new route. The reference
+    /// is silent on this selection rule; v1 resolves from the exact snapshot.
+    pub fn extend_nested_terminal_pair_chain_from_wave(
+        &self,
+        previous: &ReboundPathResolution,
+        wave: usize,
+        snapshot: usize,
+        replacement_waves: &[[PinnedDatabase; 2]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let selected_wave = previous
+            .retained_wave(wave)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+        if snapshot >= selected_wave.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+        let retained_session = previous.retained_wave_lengths[..wave]
+            .iter()
+            .sum::<usize>()
+            + snapshot;
+        self.extend_nested_terminal_pair_chain_from_retained(
+            previous,
+            retained_session,
+            replacement_waves,
+        )
+    }
+
+    /// Rebinds each terminal pair in a storm from the same retained route.
+    /// Unlike a pair chain, one pair's handoff is not used as the next pair's
+    /// root, so repeated rebinds do not widen the closure depth. The selected
+    /// wave and snapshot remain stable because extensions append history.
+    /// The reference is silent on storm root selection; v1 uses the exact
+    /// caller-selected snapshot and returns no partial extension on failure.
+    pub fn extend_nested_terminal_pair_storm_from_wave(
+        &self,
+        previous: &ReboundPathResolution,
+        wave: usize,
+        snapshot: usize,
+        replacement_waves: &[[PinnedDatabase; 2]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let mut route = previous.clone();
+        for replacements in replacement_waves {
+            route = self.extend_nested_terminal_pair_from_wave(
+                &route,
+                wave,
+                snapshot,
+                replacements.clone(),
+            )?;
+        }
+        Ok(route)
+    }
+
+    /// Continues a nested terminal-pair chain from a saved handoff checkpoint.
+    /// The first pair uses the checkpoint's exact attached pins even when
+    /// `previous` has since gone through another rebind cascade; later pairs
+    /// continue from their latest handoff. The reference is silent on replaying
+    /// retained routes across cascades, so v1 records the checkpoint route in
+    /// the new history and keeps the input route unchanged on failure.
+    pub fn extend_nested_terminal_pair_chain_from_checkpoint(
+        &self,
+        previous: &ReboundPathResolution,
+        checkpoint: &ReboundPathCheckpoint,
+        replacement_waves: &[[PinnedDatabase; 2]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let Some((first, remaining)) = replacement_waves.split_first() else {
+            return Ok(previous.clone());
+        };
+        let extension =
+            self.resolve_nested_rebind_path(&checkpoint.handoff, first.as_slice())?;
+        let route = Self::append_retained_rebound_extension(previous, extension);
+        self.extend_nested_terminal_pair_chain(&route, remaining)
+    }
+
     /// Resolves independently rebound paths for sibling parent snapshots.
     /// Each input plan is `(parent, replacements)`; results keep input order
     /// and each route retains its own pre-rebind sessions. No partial batch is
@@ -983,9 +1081,39 @@ impl ReboundPathResolution {
         self.retained_sessions.get(start..start + length)
     }
 
+    /// Saves one exact handoff route for replay after later rebinding
+    /// cascades. The checkpoint owns the selected session, so extending or
+    /// restoring another route cannot change its primary or attached pins.
+    pub fn handoff_checkpoint(
+        &self,
+        wave: usize,
+        snapshot: usize,
+    ) -> Result<ReboundPathCheckpoint, AttachmentError> {
+        let handoff = self
+            .retained_wave(wave)
+            .and_then(|snapshots| snapshots.get(snapshot))
+            .cloned()
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+        Ok(ReboundPathCheckpoint { handoff })
+    }
+
     /// Takes ownership of the final closure and every retained route snapshot.
     pub fn into_parts(self) -> (AttachedDatabaseSession, Vec<AttachedDatabaseSession>) {
         (self.final_session, self.retained_sessions)
+    }
+}
+
+/// An immutable copy of a retained nested route, suitable for replay after a
+/// later route has been extended or rebound.
+#[derive(Clone, Debug)]
+pub struct ReboundPathCheckpoint {
+    handoff: AttachedDatabaseSession,
+}
+
+impl ReboundPathCheckpoint {
+    /// The exact primary and attached pins saved at this handoff.
+    pub fn handoff(&self) -> &AttachedDatabaseSession {
+        &self.handoff
     }
 }
 

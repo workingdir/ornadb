@@ -1,0 +1,9 @@
+pub table Account(id: Int) {
+    key: Int?,
+    assert all_unique(account => account.key);
+}
+
+fn parent() {
+    Account.insert({ id: 1, key: null });
+    Account.insert({ id: 2, key: 9 });
+}

@@ -24,6 +24,7 @@ use orna_value_v1::{
     CANONICAL_NAN_BITS, ErrorValue as CanonicalErrorValue, Raw, float_max, float_min,
     float_ordinary_eq, float_total_cmp,
 };
+use sha2::{Digest as _, Sha256};
 use serde::{
     Deserialize,
     de::{self, MapAccess, SeqAccess, Visitor},
@@ -4980,6 +4981,9 @@ impl Context<'_, '_> {
         let native_time = native_binding
             .filter(|binding| binding.kind == StandardBindingKind::Time)
             .map(|binding| binding.operation);
+        let native_hash = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::Hash)
+            .map(|binding| binding.operation);
         let native_base64 = native_binding
             .filter(|binding| binding.kind == StandardBindingKind::Base64)
             .map(|binding| binding.operation);
@@ -5046,6 +5050,7 @@ impl Context<'_, '_> {
             && native_bits.is_none()
             && native_stats.is_none()
             && native_time.is_none()
+            && native_hash.is_none()
             && native_base64.is_none()
             && native_json.is_none()
             && native_orna_codec.is_none()
@@ -5237,6 +5242,7 @@ impl Context<'_, '_> {
             .or(text)
             .or(stats)
             .or(time)
+            .or(native_hash)
             .or(base64)
             .or(json)
             .or(orna_codec)
@@ -5271,7 +5277,20 @@ impl Context<'_, '_> {
             }
         }
         values.extend(explicit);
-        let values = named_arguments(name, arguments, values, implicit, collection.is_some())?;
+        let binding_name = match native_binding.map(|binding| binding.kind) {
+            Some(StandardBindingKind::Hash) => format!("hash.{name}"),
+            Some(StandardBindingKind::Base64) => {
+                format!("base64.{}", name.strip_prefix("__").unwrap_or(name))
+            }
+            _ => name.to_owned(),
+        };
+        let values = named_arguments(
+            &binding_name,
+            arguments,
+            values,
+            implicit,
+            collection.is_some(),
+        )?;
         if math.is_some() {
             self.math(name, values)
         } else if bits.is_some() {
@@ -5303,6 +5322,8 @@ impl Context<'_, '_> {
             }
         } else if time.is_some() {
             self.time(name, values)
+        } else if native_hash.is_some() {
+            self.hash(name, values)
         } else if base64.is_some() {
             self.base64(name, values)
         } else if json.is_some() {
@@ -5640,17 +5661,79 @@ impl Context<'_, '_> {
     }
     fn base64(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
         match (name, values.as_slice()) {
-            ("__encode", [Value::Blob(bytes)]) => {
+            ("__encode" | "encode", [Value::Blob(bytes)]) => {
                 self.items(bytes.len())?;
                 self.string(encode_base64(bytes)).map(Value::String)
             }
-            ("__decode", [Value::String(text)]) => {
+            ("__decode" | "decode", [Value::String(text)]) => {
                 self.string(text.clone())?;
                 let bytes = decode_base64(text)?;
                 self.items(bytes.len())?;
                 Ok(Value::Blob(bytes))
             }
-            ("__encode" | "__decode", _) => Err(error("ORNA-EVAL-TYPE")),
+            ("__encode" | "encode" | "__decode" | "decode", _) => {
+                Err(error("ORNA-EVAL-TYPE"))
+            }
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+    fn hash(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
+        self.step()?;
+        match (name, values.as_slice()) {
+            ("sha256", [Value::Blob(input)]) => {
+                if input.len() > self.limits.max_string_bytes {
+                    return Err(error("ORNA-EVAL-LIMIT"));
+                }
+                Ok(Value::Blob(Sha256::digest(input).to_vec()))
+            }
+            ("sha256_text", [Value::String(input)]) => {
+                Ok(Value::Blob(Sha256::digest(input.as_bytes()).to_vec()))
+            }
+            ("domain_sha256", [Value::String(domain), Value::Blob(payload)]) => {
+                if domain.is_empty()
+                    || !domain.is_ascii()
+                    || domain.as_bytes().contains(&0)
+                    || payload.len() > self.limits.max_string_bytes
+                {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                let mut digest = Sha256::new();
+                digest.update(domain.as_bytes());
+                digest.update([0]);
+                digest.update(payload);
+                Ok(Value::Blob(digest.finalize().to_vec()))
+            }
+            ("to_hex", [Value::Blob(digest)]) if digest.len() == 32 => {
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                let mut output = String::with_capacity(64);
+                for byte in digest {
+                    output.push(char::from(HEX[usize::from(byte >> 4)]));
+                    output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+                }
+                self.string(output).map(Value::String)
+            }
+            ("from_hex", [Value::String(encoded)]) => {
+                let decoded = if encoded.len() == 64
+                    && encoded
+                        .as_bytes()
+                        .iter()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+                {
+                    let mut bytes = Vec::with_capacity(32);
+                    for pair in encoded.as_bytes().chunks_exact(2) {
+                        let high = (pair[0] as char).to_digit(16).expect("validated hex digit");
+                        let low = (pair[1] as char).to_digit(16).expect("validated hex digit");
+                        bytes.push(((high << 4) | low) as u8);
+                    }
+                    Some(Box::new(Value::Blob(bytes)))
+                } else {
+                    None
+                };
+                Ok(Value::Option(decoded))
+            }
+            ("sha256" | "sha256_text" | "domain_sha256" | "to_hex" | "from_hex", _) => {
+                Err(error("ORNA-EVAL-TYPE"))
+            }
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
@@ -8556,6 +8639,13 @@ fn named_arguments(
             | "__percentile"
             | "__variance"
             | "__standard_deviation"
+            | "hash.sha256"
+            | "hash.sha256_text"
+            | "hash.to_hex"
+            | "hash.from_hex"
+            | "hash.domain_sha256"
+            | "base64.encode"
+            | "base64.decode"
     ) && arguments.iter().all(|argument| argument.name.is_none())
     {
         return Ok(values);
@@ -8610,6 +8700,12 @@ fn named_arguments(
         },
         "__histogram" => &["rows", "bins", "include_final_upper"],
         "__rate" | "__derivative" | "__integrate" => &["points"],
+        "hash.sha256" | "hash.sha256_text" | "base64.encode" | "base64.decode" => {
+            &["input"]
+        }
+        "hash.to_hex" => &["digest"],
+        "hash.from_hex" => &["value"],
+        "hash.domain_sha256" => &["domain", "payload"],
         "first" => &["rows"],
         "one" => match values.len() {
             1 => &["rows"],
@@ -8730,6 +8826,7 @@ enum StandardBindingKind {
     Bits,
     Stats,
     Time,
+    Hash,
     Base64,
     Json,
     OrnaCodec,
@@ -8909,9 +9006,20 @@ const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
         ],
     },
     StandardBindingModule {
+        prefix: "std.hash.",
+        kind: StandardBindingKind::Hash,
+        operations: &[
+            "sha256",
+            "sha256_text",
+            "domain_sha256",
+            "to_hex",
+            "from_hex",
+        ],
+    },
+    StandardBindingModule {
         prefix: "std.encoding.base64.",
         kind: StandardBindingKind::Base64,
-        operations: &["__encode", "__decode"],
+        operations: &["encode", "decode", "__encode", "__decode"],
     },
     StandardBindingModule {
         prefix: "std.encoding.json.",

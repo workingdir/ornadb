@@ -1359,6 +1359,7 @@ dependencies = [
 name = "orna-evaluator-v1"
 version = "1.0.0"
 dependencies = [
+ "base64",
  "num-bigint 0.4.8",
  "num-integer",
  "num-traits",
@@ -1372,6 +1373,7 @@ dependencies = [
  "orna-value-v1",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "unicode-normalization",
 ]
@@ -1618,6 +1620,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "syn 2.0.119",
+ "uuid",
 ]
 
 [[package]]
