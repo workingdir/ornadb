@@ -6077,13 +6077,25 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
                 current_attachment = next_attachment;
             }
 
-            replay_durable_status_snapshots(
-                &mut host,
-                current_attachment,
-                &snapshots,
-                &mut sequence,
-                &mut application,
-            );
+            // Alternate replay direction within each reconnect pair so both
+            // identities remain stable regardless of their relative age.
+            if reconnect % 2 == 0 {
+                replay_durable_status_snapshots(
+                    &mut host,
+                    current_attachment,
+                    &snapshots,
+                    &mut sequence,
+                    &mut application,
+                );
+            } else {
+                replay_durable_status_snapshots_reverse(
+                    &mut host,
+                    current_attachment,
+                    &snapshots,
+                    &mut sequence,
+                    &mut application,
+                );
+            }
 
             let first_pair_request = 83 + handoff_pair * 12 + reconnect * 2;
             let mut fresh_pair = Vec::with_capacity(2);
