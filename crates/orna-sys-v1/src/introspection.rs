@@ -589,7 +589,9 @@ pub struct DisjunctStormBranchDescription {
     /// Nested cascades rebound after one-based positions in `nested_limits`.
     /// List entries must be ordered by position; entries at one position run
     /// in declaration order. Each cascade consumes current branch rows, and
-    /// its output feeds the next limit in the chain.
+    /// its output feeds the next limit in the chain. A rebind at a later
+    /// position starts from the branch output after all earlier limits and
+    /// rebinds; it never restarts from the enclosing storm input.
     pub limit_rebinds: Vec<DisjunctStormLimitRebindDescription>,
     /// Nested disjunct storms evaluated against this branch's filtered output.
     pub nested_storms: Vec<DisjunctStormCascadeDescription>,
@@ -2074,6 +2076,13 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
                 "limit_chain_rebind_stage_input_scope".to_owned(),
                 PlanDetail::Text(
                     "post_limit_branch_input_then_previous_rebind_stage_bounded_rows_and_bytes"
+                        .to_owned(),
+                ),
+            ),
+            (
+                "limit_chain_rebind_position_input_scope".to_owned(),
+                PlanDetail::Text(
+                    "current_branch_rows_and_bytes_after_prior_limits_and_rebind_cascades"
                         .to_owned(),
                 ),
             ),
