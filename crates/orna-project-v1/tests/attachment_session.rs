@@ -9797,6 +9797,295 @@ fn short_alias_rebound_to_long_pin_keeps_longer_nested_routes() {
     assert_eq!(long_pin.pin().commit().as_str(), replacement_commit);
 }
 
+#[test]
+fn repeated_paired_depth_storms_keep_sibling_pin_routes_consistent() {
+    let package_source = include_str!("fixtures/attach-package.orna");
+    let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
+    let aliases = [
+        "archive",
+        "archive_copy",
+        "archive_copy_archive",
+        "archive_copy_archive_archive",
+    ];
+    let sibling_count = 2;
+    let variant_count = 2;
+    let marker = |depth: usize, sibling: usize, variant: usize| {
+        (depth + 1) * 100 + sibling * 10 + variant
+    };
+
+    let terminal_commits: Vec<String> = (0..variant_count)
+        .map(|variant| {
+            write_package_snapshot(
+                shared_dir.path(),
+                package_source,
+                &format!("{}", marker(3, 0, variant)),
+                None,
+                &format!("shared terminal route {variant}"),
+            )
+        })
+        .collect();
+    let deep_commits: Vec<Vec<String>> = (0..sibling_count)
+        .map(|sibling| {
+            (0..variant_count)
+                .map(|variant| {
+                    let manifest = format!("{} {}\n", aliases[3], terminal_commits[variant]);
+                    write_package_snapshot(
+                        shared_dir.path(),
+                        package_source,
+                        &format!("{}", marker(2, sibling, variant)),
+                        Some(&manifest),
+                        &format!("sibling {sibling} deep route {variant}"),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    let middle_commits: Vec<Vec<String>> = (0..sibling_count)
+        .map(|sibling| {
+            (0..variant_count)
+                .map(|variant| {
+                    let manifest = format!("{} {}\n", aliases[2], deep_commits[sibling][variant]);
+                    write_package_snapshot(
+                        shared_dir.path(),
+                        package_source,
+                        &format!("{}", marker(1, sibling, variant)),
+                        Some(&manifest),
+                        &format!("sibling {sibling} middle route {variant}"),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    let parent_manifest = format!("{} {}\n", aliases[1], middle_commits[0][0]);
+    let parent_commit = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "50",
+        Some(&parent_manifest),
+        "parent for paired depth sibling storms",
+    );
+
+    let loader = ProjectLoader::default();
+    let resolve_pin_grid = |alias: &str, commits: &[Vec<String>]| {
+        commits
+            .iter()
+            .map(|sibling| {
+                sibling
+                    .iter()
+                    .map(|commit| {
+                        PinnedDatabase::resolve(alias, shared_repository.clone(), commit, loader)
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let middle_pins = resolve_pin_grid(aliases[1], &middle_commits);
+    let deep_pins = resolve_pin_grid(aliases[2], &deep_commits);
+    let parent_pin = PinnedDatabase::resolve(
+        aliases[0],
+        shared_repository.clone(),
+        &parent_commit,
+        loader,
+    )
+    .unwrap();
+    let resolver = PackageResolver::new(
+        aliases
+            .iter()
+            .map(|alias| ((*alias).to_owned(), shared_repository.clone())),
+        loader,
+    )
+    .unwrap();
+    let rebind = |session: &mut AttachedDatabaseSession, alias: &str, pin: &PinnedDatabase| {
+        session.detach_database(alias).unwrap();
+        session.attach_database(pin.clone()).unwrap();
+    };
+    let assert_pin = |session: &AttachedDatabaseSession, alias: &str, commit: &str| {
+        assert_eq!(
+            session.database(alias).unwrap().pin().commit().as_str(),
+            commit
+        );
+    };
+    let assert_route = |session: &AttachedDatabaseSession,
+                        path: &str,
+                        depth: usize,
+                        sibling: usize,
+                        variant: usize| {
+        assert_module_route(
+            session,
+            path,
+            &format!("= {}", marker(depth, sibling, variant)),
+        );
+    };
+
+    struct RetainedWave {
+        sibling: usize,
+        middle_variant: usize,
+        deep_variant: usize,
+        root: AttachedDatabaseSession,
+        manifest_closure: AttachedDatabaseSession,
+        rebound_closure: AttachedDatabaseSession,
+        terminal_closure: AttachedDatabaseSession,
+    }
+
+    let parent = resolver.resolve_for_parent(parent_pin).unwrap();
+    let mut roots = vec![parent.clone(); sibling_count];
+    let mut waves = Vec::new();
+    let mut final_terminals: Vec<Option<AttachedDatabaseSession>> =
+        vec![None; sibling_count];
+    // Each sibling sees multiple paired depth waves in an interleaved order.
+    // The last wave leaves distinct middle/deep routes on a shared terminal.
+    for (sibling, middle_variant, deep_variant) in
+        [(0, 1, 0), (1, 0, 1), (0, 0, 1), (1, 1, 0), (1, 0, 0), (0, 1, 0)]
+    {
+        rebind(
+            &mut roots[sibling],
+            aliases[1],
+            &middle_pins[sibling][middle_variant],
+        );
+        assert_pin(
+            &roots[sibling],
+            aliases[1],
+            &middle_commits[sibling][middle_variant],
+        );
+        assert_route(
+            &roots[sibling],
+            &format!("{}.orna", aliases[1]),
+            1,
+            sibling,
+            middle_variant,
+        );
+
+        let mut middle = resolver
+            .resolve_for_parent(roots[sibling].database(aliases[1]).unwrap().clone())
+            .unwrap();
+        assert_pin(
+            &middle,
+            aliases[2],
+            &deep_commits[sibling][middle_variant],
+        );
+        assert_route(&middle, "main.orna", 1, sibling, middle_variant);
+        assert_route(
+            &middle,
+            &format!("{}.orna", aliases[2]),
+            2,
+            sibling,
+            middle_variant,
+        );
+        let manifest_closure = middle.clone();
+
+        rebind(
+            &mut middle,
+            aliases[2],
+            &deep_pins[sibling][deep_variant],
+        );
+        assert_pin(
+            &middle,
+            aliases[2],
+            &deep_commits[sibling][deep_variant],
+        );
+        assert_route(&middle, "main.orna", 1, sibling, middle_variant);
+        assert_route(
+            &middle,
+            &format!("{}.orna", aliases[2]),
+            2,
+            sibling,
+            deep_variant,
+        );
+        let rebound_closure = middle.clone();
+
+        let terminal = resolver
+            .resolve_for_parent(middle.database(aliases[2]).unwrap().clone())
+            .unwrap();
+        assert_pin(
+            &terminal,
+            aliases[3],
+            &terminal_commits[deep_variant],
+        );
+        assert_route(&terminal, "main.orna", 2, sibling, deep_variant);
+        assert_route(
+            &terminal,
+            &format!("{}.orna", aliases[3]),
+            3,
+            0,
+            deep_variant,
+        );
+        final_terminals[sibling] = Some(terminal.clone());
+        waves.push(RetainedWave {
+            sibling,
+            middle_variant,
+            deep_variant,
+            root: roots[sibling].clone(),
+            manifest_closure,
+            rebound_closure,
+            terminal_closure: terminal,
+        });
+    }
+
+    for wave in waves {
+        let sibling = wave.sibling;
+        assert_pin(
+            &wave.root,
+            aliases[1],
+            &middle_commits[sibling][wave.middle_variant],
+        );
+        assert_route(
+            &wave.root,
+            &format!("{}.orna", aliases[1]),
+            1,
+            sibling,
+            wave.middle_variant,
+        );
+        assert_pin(
+            &wave.manifest_closure,
+            aliases[2],
+            &deep_commits[sibling][wave.middle_variant],
+        );
+        assert_route(
+            &wave.manifest_closure,
+            &format!("{}.orna", aliases[2]),
+            2,
+            sibling,
+            wave.middle_variant,
+        );
+        assert_pin(
+            &wave.rebound_closure,
+            aliases[2],
+            &deep_commits[sibling][wave.deep_variant],
+        );
+        assert_route(
+            &wave.rebound_closure,
+            &format!("{}.orna", aliases[2]),
+            2,
+            sibling,
+            wave.deep_variant,
+        );
+        assert_pin(
+            &wave.terminal_closure,
+            aliases[3],
+            &terminal_commits[wave.deep_variant],
+        );
+        assert_route(
+            &wave.terminal_closure,
+            &format!("{}.orna", aliases[3]),
+            3,
+            0,
+            wave.deep_variant,
+        );
+    }
+
+    let left_terminal = final_terminals[0].as_ref().unwrap();
+    let right_terminal = final_terminals[1].as_ref().unwrap();
+    assert_pin(left_terminal, aliases[3], &terminal_commits[0]);
+    assert_pin(right_terminal, aliases[3], &terminal_commits[0]);
+    assert_route(left_terminal, &format!("{}.orna", aliases[3]), 3, 0, 0);
+    assert_route(right_terminal, &format!("{}.orna", aliases[3]), 3, 0, 0);
+    assert_route(left_terminal, "main.orna", 2, 0, 0);
+    assert_route(right_terminal, "main.orna", 2, 1, 0);
+    assert_pin(&parent, aliases[1], &middle_commits[0][0]);
+    assert_route(&parent, &format!("{}.orna", aliases[1]), 1, 0, 0);
+}
+
 fn assert_module_route(session: &AttachedDatabaseSession, path: &str, source_marker: &str) {
     assert!(
         session
