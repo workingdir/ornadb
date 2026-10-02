@@ -98,6 +98,7 @@ pub const REFERENCE_STANDARD_BITS_PATH_V1: &str = "std/bits.orna";
 pub const REFERENCE_STANDARD_STATS_PATH_V1: &str = "std/stats.orna";
 pub const REFERENCE_STANDARD_TIME_PATH_V1: &str = "std/time.orna";
 pub const REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1: &str = "std/time/calendar.orna";
+pub const REFERENCE_STANDARD_STREAM_PATH_V1: &str = "std/stream.orna";
 pub const REFERENCE_STANDARD_TIME_COMPACT_PATH_V1: &str = "std/time/duration/compact.orna";
 pub const REFERENCE_STANDARD_TIME_CLOCK_PATH_V1: &str = "std/time/duration/clock.orna";
 pub const REFERENCE_STANDARD_TIME_WORDS_PATH_V1: &str = "std/time/duration/words.orna";
@@ -122,6 +123,7 @@ const REFERENCE_STANDARD_STATS_SOURCE_V1: &str = include_str!("../../../stdlib/s
 const REFERENCE_STANDARD_TIME_SOURCE_V1: &str = include_str!("../../../stdlib/std/time.orna");
 const REFERENCE_STANDARD_TIME_CALENDAR_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/time/calendar.orna");
+const REFERENCE_STANDARD_STREAM_SOURCE_V1: &str = include_str!("../../../stdlib/std/stream.orna");
 const REFERENCE_STANDARD_TIME_COMPACT_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/time/duration/compact.orna");
 const REFERENCE_STANDARD_TIME_CLOCK_SOURCE_V1: &str =
@@ -146,7 +148,7 @@ const REFERENCE_STANDARD_CONCURRENT_SOURCE_V1: &str =
 /// This is the current source-backed standard boundary. The retained `orna.std/1`–
 /// `orna.std/11` APIs below model older, explicitly versioned snapshots.
 #[must_use]
-pub fn reference_standard_sources_v1() -> [(String, String); 21] {
+pub fn reference_standard_sources_v1() -> [(String, String); 22] {
     [
         (
             REFERENCE_STANDARD_MATH_PATH_V1.into(),
@@ -231,6 +233,10 @@ pub fn reference_standard_sources_v1() -> [(String, String); 21] {
         (
             REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1.into(),
             REFERENCE_STANDARD_TIME_CALENDAR_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_STREAM_PATH_V1.into(),
+            REFERENCE_STANDARD_STREAM_SOURCE_V1.into(),
         ),
     ]
 }
