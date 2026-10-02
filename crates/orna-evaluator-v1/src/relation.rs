@@ -6,10 +6,8 @@ use num_integer::Integer;
 use num_traits::ToPrimitive;
 
 use super::{
+    timezone::{resolve_time_zone, Instant, LocalDateTime, LocalTimeResolution, TimeZone, TimeZoneError},
     Value,
-    timezone::{
-        Instant, LocalDateTime, LocalTimeResolution, TimeZone, TimeZoneError, resolve_time_zone,
-    },
 };
 
 /// The two boundary models admitted by `bucket_by`.
@@ -27,6 +25,7 @@ pub(super) struct BucketBySpec {
     pub(super) period: BucketPeriod,
     pub(super) zone: Option<String>,
 }
+
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RelationBucketError {
@@ -77,7 +76,7 @@ impl RelationBucketState {
                 Some(resolve_time_zone(name).map_err(RelationBucketError::TimeZone)?)
             }
             (BucketPeriod::CalendarDays { .. }, None) => {
-                return Err(RelationBucketError::MissingZone);
+                return Err(RelationBucketError::MissingZone)
             }
             (BucketPeriod::Elapsed { .. }, _) => None,
         };
@@ -124,6 +123,7 @@ impl RelationBucketState {
         self.current.take()
     }
 
+
     fn boundaries(&self, instant: Instant) -> Result<(Instant, Instant), RelationBucketError> {
         match &self.spec.period {
             BucketPeriod::Elapsed {
@@ -131,7 +131,10 @@ impl RelationBucketState {
                 nanosecond,
             } => elapsed_boundaries(instant, seconds, *nanosecond),
             BucketPeriod::CalendarDays { days } => {
-                let zone = self.zone.as_ref().ok_or(RelationBucketError::MissingZone)?;
+                let zone = self
+                    .zone
+                    .as_ref()
+                    .ok_or(RelationBucketError::MissingZone)?;
                 calendar_boundaries(instant, zone, *days)
             }
         }
@@ -167,8 +170,9 @@ fn elapsed_boundaries(
     if width <= BigInt::from(0u8) {
         return Err(RelationBucketError::InvalidPeriod);
     }
-    let instant_nanos = BigInt::from(instant.unix_seconds) * BigInt::from(1_000_000_000u32)
-        + BigInt::from(instant.nanosecond);
+    let instant_nanos =
+        BigInt::from(instant.unix_seconds) * BigInt::from(1_000_000_000u32)
+            + BigInt::from(instant.nanosecond);
     let start_nanos = instant_nanos.div_floor(&width) * &width;
     let end_nanos = &start_nanos + width;
     Ok((
@@ -403,8 +407,12 @@ impl RelationStage {
     fn filter_values_equal(left: &Self, right: &Self) -> Option<bool> {
         match (left, right) {
             (Self::Filter(left), Self::Filter(right)) => Some(left == right),
-            (Self::Filter(left), Self::SharedFilter(right)) => Some(left.iter().eq(right.values())),
-            (Self::SharedFilter(left), Self::Filter(right)) => Some(left.values().eq(right.iter())),
+            (Self::Filter(left), Self::SharedFilter(right)) => {
+                Some(left.iter().eq(right.values()))
+            }
+            (Self::SharedFilter(left), Self::Filter(right)) => {
+                Some(left.values().eq(right.iter()))
+            }
             (Self::SharedFilter(left), Self::SharedFilter(right)) => {
                 Some(Arc::ptr_eq(left, right) || left.values().eq(right.values()))
             }
@@ -546,23 +554,25 @@ impl RelationPlan {
                 // changing stages such as Take remain pushdown barriers.
                 return self;
             }
-            RelationStage::Filter(mut predicates) => match self.stages.pop() {
-                Some(RelationStage::Filter(mut previous)) => {
-                    previous.append(&mut predicates);
-                    self.stages.push(RelationStage::Filter(previous));
+            RelationStage::Filter(mut predicates) => {
+                match self.stages.pop() {
+                    Some(RelationStage::Filter(mut previous)) => {
+                        previous.append(&mut predicates);
+                        self.stages.push(RelationStage::Filter(previous));
+                    }
+                    Some(RelationStage::SharedFilter(previous)) => {
+                        let next = FilterBatch::from_values(predicates);
+                        self.stages.push(RelationStage::SharedFilter(
+                            FilterBatch::followed_by_shared_prefix(&previous, &next),
+                        ));
+                    }
+                    Some(previous) => {
+                        self.stages.push(previous);
+                        self.stages.push(RelationStage::Filter(predicates));
+                    }
+                    None => self.stages.push(RelationStage::Filter(predicates)),
                 }
-                Some(RelationStage::SharedFilter(previous)) => {
-                    let next = FilterBatch::from_values(predicates);
-                    self.stages.push(RelationStage::SharedFilter(
-                        FilterBatch::followed_by_shared_prefix(&previous, &next),
-                    ));
-                }
-                Some(previous) => {
-                    self.stages.push(previous);
-                    self.stages.push(RelationStage::Filter(predicates));
-                }
-                None => self.stages.push(RelationStage::Filter(predicates)),
-            },
+            }
             stage => {
                 self = self.flush_filter_cascade();
                 self.stages.push(stage);
@@ -629,11 +639,9 @@ impl RelationPlan {
         }
         match self.stages.pop() {
             Some(RelationStage::Filter(previous)) => {
-                self.stages
-                    .push(RelationStage::SharedFilter(FilterBatch::prefixed_by(
-                        previous,
-                        &predicates,
-                    )));
+                self.stages.push(RelationStage::SharedFilter(
+                    FilterBatch::prefixed_by(previous, &predicates),
+                ));
             }
             Some(RelationStage::SharedFilter(previous)) => {
                 self.stages.push(RelationStage::SharedFilter(
@@ -642,9 +650,12 @@ impl RelationPlan {
             }
             Some(previous) => {
                 self.stages.push(previous);
-                self.stages.push(RelationStage::SharedFilter(predicates));
+                self.stages
+                    .push(RelationStage::SharedFilter(predicates));
             }
-            None => self.stages.push(RelationStage::SharedFilter(predicates)),
+            None => self
+                .stages
+                .push(RelationStage::SharedFilter(predicates)),
         }
         self
     }
