@@ -4,6 +4,7 @@ use std::{
 };
 
 mod build_support;
+mod build_host;
 
 use build_support::{
     collect_rust_sources, generate_sys_artifacts,
@@ -27,8 +28,10 @@ fn main() {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
     let source_root = manifest.join("src");
     let build_support_path = manifest.join("build_support.rs");
+    let build_host_path = manifest.join("build_host.rs");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", build_support_path.display());
+    println!("cargo:rerun-if-changed={}", build_host_path.display());
     // Watch the directory recursively so adding a new annotated module also
     // invalidates the collected schema, even before that file is known here.
     println!("cargo:rerun-if-changed={}", source_root.display());
@@ -64,6 +67,10 @@ fn main() {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("build output directory"));
     fs::write(out_dir.join("api_sys.json"), artifacts.api_json)
         .expect("write generated api/sys.json");
+    let host_registry = build_host::generate_host_registry(&source_root)
+        .expect("annotated native sys host operations form a valid registry");
+    fs::write(out_dir.join("system_host_operations.json"), host_registry)
+        .expect("write generated native sys host-operation registry");
     fs::write(
         out_dir.join("system_api_schema.json"),
         artifacts.schema_json,

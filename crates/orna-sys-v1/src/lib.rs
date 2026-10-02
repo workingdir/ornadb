@@ -56,6 +56,9 @@ pub use introspection::{
 mod provider;
 pub use provider::*;
 
+mod host_environment;
+pub use host_environment::*;
+
 pub const CANONICAL_VALUE_CODEC_V1: &str = "OVB-1";
 
 macro_rules! identity {
