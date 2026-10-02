@@ -460,6 +460,7 @@ pub struct BranchMergeTombstoneHistory {
     pending_deltas: BTreeMap<u64, BufferedBranchMergeTombstoneDelta>,
     pending_plan_identities: BTreeMap<u64, [u8; 32]>,
     committed_modes: BTreeMap<u64, BranchMergeTombstoneSubmissionMode>,
+    committed_fragment_counts: BTreeMap<u64, usize>,
     committed_plan_identities: BTreeMap<u64, [u8; 32]>,
     duplicate_retry_modes: BTreeMap<u64, BranchMergeTombstoneSubmissionMode>,
     applied_fragment_retry_transactions: Vec<AppliedDepthFragmentRetryTransaction>,
@@ -474,6 +475,7 @@ impl BranchMergeTombstoneHistory {
             pending_deltas: BTreeMap::new(),
             pending_plan_identities: BTreeMap::new(),
             committed_modes: BTreeMap::new(),
+            committed_fragment_counts: BTreeMap::new(),
             committed_plan_identities: BTreeMap::new(),
             duplicate_retry_modes: BTreeMap::new(),
             applied_fragment_retry_transactions: Vec::new(),
@@ -871,7 +873,7 @@ impl BranchMergeTombstoneHistory {
         {
             return Ok(Vec::new());
         }
-        self.validate_buffered_depth_fragment_labels(recoveries)?;
+        self.validate_depth_fragment_labels(recoveries)?;
 
         let mut candidate = self.clone();
         candidate.bind_depth_fragment_retry_plans(bindings)?;
@@ -1044,6 +1046,11 @@ impl BranchMergeTombstoneHistory {
     /// retry plan carries tombstones, its exact projection must match the
     /// separately supplied delta even for unbound fragment waves. Legacy
     /// projection-only plans with no embedded tombstones remain supported.
+    /// A committed depth wave keeps its fragment-count retry label, so a later
+    /// recovery with a changed count reports `FragmentCountMismatch` rather
+    /// than losing the label when an uneven cascade folds. MERGE-1 is silent
+    /// on retaining labels after folds; this v1 policy preserves each wave's
+    /// declared count for deterministic stale-retry diagnostics.
     pub fn recover_depth_merge_fragments_with_appends(
         &mut self,
         recoveries: &[BranchMergeDepthFragmentRecovery],
@@ -1063,7 +1070,7 @@ impl BranchMergeTombstoneHistory {
                 });
             }
         }
-        self.validate_buffered_depth_fragment_labels(&recoveries)?;
+        self.validate_depth_fragment_labels(&recoveries)?;
 
         let mut candidate = self.clone();
         let mut appends = appends.to_vec();
@@ -1283,7 +1290,7 @@ impl BranchMergeTombstoneHistory {
         Ok(self.release_contiguous())
     }
 
-    fn validate_buffered_depth_fragment_labels(
+    fn validate_depth_fragment_labels(
         &self,
         recoveries: &[BranchMergeDepthFragmentRecovery],
     ) -> Result<(), BranchMergeTombstoneHistoryError> {
@@ -1299,11 +1306,15 @@ impl BranchMergeTombstoneHistory {
         }
 
         for recovery in recoveries {
-            let Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
-                fragment_count: expected_count,
-                ..
-            }) = self.pending_deltas.get(&recovery.order)
-            else {
+            let expected_count = match self.pending_deltas.get(&recovery.order) {
+                Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
+                    fragment_count,
+                    ..
+                }) => Some(*fragment_count),
+                Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => None,
+                None => self.committed_fragment_counts.get(&recovery.order).copied(),
+            };
+            let Some(expected_count) = expected_count else {
                 continue;
             };
 
@@ -1313,10 +1324,10 @@ impl BranchMergeTombstoneHistory {
                     fragment_count: recovery.fragment_count,
                 });
             }
-            if *expected_count != recovery.fragment_count {
+            if expected_count != recovery.fragment_count {
                 return Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
                     order: recovery.order,
-                    expected: *expected_count,
+                    expected: expected_count,
                     actual: recovery.fragment_count,
                 });
             }
@@ -1346,6 +1357,15 @@ impl BranchMergeTombstoneHistory {
             }
             let delta = self.pending_deltas.remove(&order).expect("ready delta is buffered");
             let mode = delta.submission_mode();
+            if let BufferedBranchMergeTombstoneDelta::DepthFragments {
+                fragment_count, ..
+            } = &delta
+            {
+                // The fold drops buffered fragments, but retry diagnostics
+                // still need the wave's label after its events commit.
+                self.committed_fragment_counts
+                    .insert(order, *fragment_count);
+            }
             self.duplicate_retry_modes.remove(&order);
             if let Some(identity) = self.pending_plan_identities.remove(&order) {
                 self.committed_plan_identities.insert(order, identity);
