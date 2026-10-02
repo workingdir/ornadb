@@ -20245,6 +20245,136 @@ fn paired_depth_storm_tombstone_history_stabilizes_across_restore_waves() {
         "append-only tombstone history is stable across every completion schedule",
     );
 
+    let depth_fragments = released_plans
+        .iter()
+        .map(|step| {
+            step.plan
+                .tables
+                .iter()
+                .flat_map(|(table, merged)| {
+                    merged.segments.iter().map(|segment| match segment {
+                        MergedSegment::Rows { tombstones, .. } => tombstones
+                            .iter()
+                            .cloned()
+                            .map(|key| (*table, key))
+                            .collect::<Vec<_>>(),
+                        MergedSegment::Reuse { .. } => Vec::new(),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert!(depth_fragments.iter().all(|fragments| !fragments.is_empty()));
+
+    // Complete each restore wave from independently delivered depth pieces.
+    // Reversing and interleaving their arrival cannot change the history.
+    let mut reverse_fragment_history = BranchMergeTombstoneHistory::new(0);
+    for wave in (0..released_plans.len()).rev() {
+        let fragments = &depth_fragments[wave];
+        for fragment in (0..fragments.len()).rev() {
+            let emitted = reverse_fragment_history
+                .submit_depth_merge_fragment(
+                    released_plans[wave].order,
+                    fragment,
+                    fragments.len(),
+                    &fragments[fragment],
+                )
+                .unwrap();
+            if wave > 0 {
+                assert!(emitted.is_empty(), "future waves wait behind the missing prefix");
+                assert_eq!(reverse_fragment_history.next_order(), Some(0));
+            }
+        }
+    }
+    assert_eq!(reverse_fragment_history, history);
+
+    let mut interleaved_fragment_history = BranchMergeTombstoneHistory::new(0);
+    let max_fragments = depth_fragments.iter().map(Vec::len).max().unwrap_or_default();
+    for fragment in 0..max_fragments {
+        for (wave, fragments) in depth_fragments.iter().enumerate() {
+            if fragment < fragments.len() {
+                interleaved_fragment_history
+                    .submit_depth_merge_fragment(
+                        released_plans[wave].order,
+                        fragment,
+                        fragments.len(),
+                        &fragments[fragment],
+                    )
+                    .unwrap();
+            }
+        }
+    }
+    assert_eq!(interleaved_fragment_history, history);
+
+    let mut fragment_guards = BranchMergeTombstoneHistory::new(0);
+    let guarded_fragments = &depth_fragments[2];
+    assert!(fragment_guards
+        .submit_depth_merge_fragment(
+            released_plans[2].order,
+            0,
+            guarded_fragments.len(),
+            &guarded_fragments[0],
+        )
+        .unwrap()
+        .is_empty());
+    let unchanged_fragment_guards = fragment_guards.clone();
+    assert_eq!(
+        fragment_guards.submit_depth_merge_fragment(
+            released_plans[2].order,
+            0,
+            guarded_fragments.len(),
+            &guarded_fragments[0],
+        ),
+        Err(BranchMergeTombstoneHistoryError::DuplicateFragment {
+            order: released_plans[2].order,
+            fragment: 0,
+        }),
+    );
+    assert_eq!(fragment_guards, unchanged_fragment_guards);
+    assert_eq!(
+        fragment_guards.submit_depth_merge_fragment(
+            released_plans[2].order,
+            1,
+            guarded_fragments.len() + 1,
+            &[],
+        ),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: released_plans[2].order,
+            expected: guarded_fragments.len(),
+            actual: guarded_fragments.len() + 1,
+        }),
+    );
+    assert_eq!(fragment_guards, unchanged_fragment_guards);
+    assert_eq!(
+        fragment_guards.submit_depth_merge_fragment(
+            released_plans[2].order,
+            guarded_fragments.len(),
+            guarded_fragments.len(),
+            &[],
+        ),
+        Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+            fragment: guarded_fragments.len(),
+            fragment_count: guarded_fragments.len(),
+        }),
+    );
+    assert_eq!(fragment_guards, unchanged_fragment_guards);
+
+    let mut whole_plan_mode_guard = BranchMergeTombstoneHistory::new(0);
+    whole_plan_mode_guard.submit(&released_plans[2]).unwrap();
+    let unchanged_whole_plan_mode_guard = whole_plan_mode_guard.clone();
+    assert_eq!(
+        whole_plan_mode_guard.submit_depth_merge_fragment(
+            released_plans[2].order,
+            0,
+            guarded_fragments.len(),
+            &guarded_fragments[0],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission {
+            order: released_plans[2].order,
+        }),
+    );
+    assert_eq!(whole_plan_mode_guard, unchanged_whole_plan_mode_guard);
+
     let rows_by_table = [fixture_rows.as_slice(), fixture_rows.as_slice()];
     let mut split_layout_deltas = Vec::new();
     for layout in [0, 1] {
