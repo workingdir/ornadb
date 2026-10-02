@@ -234,6 +234,10 @@ pub struct BranchMergePlan {
 /// the incomplete prefix is not observable; recovery retries produce the full
 /// canonical sequence from the first table and range.
 ///
+/// Paired chain storms run with per-invocation budgets and result buffers.
+/// Concurrent retries therefore preserve each table's complete tombstone
+/// sequence without sharing partial work or budget state.
+///
 /// A read failure at any table or range aborts the whole invocation. Facts
 /// gathered from earlier tables or depth ranges remain private; after source
 /// recovery, a fresh retry starts from the first table and range. Clean
