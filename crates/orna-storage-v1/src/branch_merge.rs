@@ -277,6 +277,8 @@ pub enum BranchMergeTombstoneHistoryError {
     DuplicateFragment { order: u64, fragment: usize },
     /// Fragments for one position disagree about how many pieces it contains.
     FragmentCountMismatch { order: u64, expected: usize, actual: usize },
+    /// Overlapping fragments attempted to record one table/key twice in a wave.
+    DuplicateTombstone { order: u64 },
     /// A whole paired plan and split depth fragments were both submitted for one position.
     ConflictingSubmission { order: u64 },
     /// The history already consumed the final representable lineage position.
@@ -294,16 +296,15 @@ enum BufferedBranchMergeTombstoneDelta {
 
 /// Append-only tombstone history for committed paired merge plans.
 ///
-/// MERGE-1 is silent on how tombstones accumulate across committed waves. This
-/// v1 policy accepts each sequenced paired plan at exactly the next position,
-/// appends its table/key-ordered exact deletions without deduplicating prior
-/// events, and advances the position even when a restore wave has no new
-/// tombstones. A later deletion of a restored key is therefore a new event at
-/// its own commit position. Concurrent completions may be submitted out of
-/// order; future deltas wait until every earlier paired position is present.
-/// A paired step is checked and appended atomically. A wave split into depth
-/// fragments waits until every fragment arrives, then its events are flattened
-/// in canonical table/key order before advancing the lineage.
+/// MERGE-1 is silent on tombstone accumulation across committed waves and on
+/// overlapping depth fragments. This v1 policy accepts paired plans at their
+/// exact lineage positions, appends table/key-ordered deletions without
+/// deduplicating across waves, and advances through restore-only empty deltas.
+/// Duplicate table/key events within one wave are rejected as overlapping
+/// fragments, while the same key at a later position remains a new event.
+/// Concurrent completions may arrive out of order; future deltas wait until
+/// every earlier paired position is present. Split waves wait until every
+/// fragment arrives, then flatten in canonical table/key order atomically.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeTombstoneHistory {
     next_order: Option<u64>,
@@ -353,6 +354,11 @@ impl BranchMergeTombstoneHistory {
         };
         if step.order < expected || self.pending_deltas.contains_key(&step.order) {
             return Err(BranchMergeTombstoneHistoryError::DuplicateOrStale {
+                order: step.order,
+            });
+        }
+        if has_duplicate_tombstones(&step.ordered_row_tombstones) {
+            return Err(BranchMergeTombstoneHistoryError::DuplicateTombstone {
                 order: step.order,
             });
         }
@@ -413,6 +419,25 @@ impl BranchMergeTombstoneHistory {
             None => {}
         }
 
+        let completes_delta = match self.pending_deltas.get(&order) {
+            Some(BufferedBranchMergeTombstoneDelta::DepthFragments { fragments, .. }) => {
+                fragments.len() + 1 == fragment_count
+            }
+            _ => fragment_count == 1,
+        };
+        if completes_delta {
+            let mut combined = match self.pending_deltas.get(&order) {
+                Some(BufferedBranchMergeTombstoneDelta::DepthFragments { fragments, .. }) => {
+                    fragments.values().flatten().cloned().collect::<Vec<_>>()
+                }
+                _ => Vec::new(),
+            };
+            combined.extend_from_slice(tombstones);
+            if has_duplicate_tombstones(&combined) {
+                return Err(BranchMergeTombstoneHistoryError::DuplicateTombstone { order });
+            }
+        }
+
         let buffered = self.pending_deltas.entry(order).or_insert_with(|| {
             BufferedBranchMergeTombstoneDelta::DepthFragments {
                 fragment_count,
@@ -470,6 +495,16 @@ impl BranchMergeTombstoneHistory {
     pub fn events(&self) -> &[BranchMergeTombstoneEvent] {
         &self.events
     }
+}
+
+fn has_duplicate_tombstones(tombstones: &[(ObjectId, CanonicalValue)]) -> bool {
+    let mut ordered = tombstones.to_vec();
+    ordered.sort_by(|(left_table, left_key), (right_table, right_key)| {
+        left_table.cmp(right_table).then_with(|| {
+            compare_primary_keys(left_key, right_key).unwrap_or(Ordering::Equal)
+        })
+    });
+    ordered.windows(2).any(|pair| pair[0].0 == pair[1].0 && pair[0].1 == pair[1].1)
 }
 
 /// Buffers selected successful plans and releases them in paired lineage order,
