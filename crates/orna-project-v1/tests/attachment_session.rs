@@ -11791,7 +11791,18 @@ fn paired_terminal_depth_waves_retain_pre_and_between_routes() {
         assert_eq!(retained_pre_storm.len(), 2);
         assert_pin(&retained_pre_storm[1], aliases[0], middle);
 
-        let reopened_wave = route.retained_wave(1).unwrap();
+        let prior_final_wave = route.retained_wave(1).unwrap();
+        assert_eq!(prior_final_wave.len(), 1);
+        assert_pin(&prior_final_wave[0], aliases[1], deep);
+        assert_pin(&prior_final_wave[0], aliases[2], &terminal_base);
+        assert_module_route(
+            &prior_final_wave[0],
+            "main.orna",
+            &format!("= {deep_marker}"),
+        );
+        assert_module_route(&prior_final_wave[0], "archive_copy_archive.orna", "= 710");
+
+        let reopened_wave = route.retained_wave(2).unwrap();
         assert_eq!(reopened_wave.len(), 2);
         assert_pin(&reopened_wave[0], aliases[0], middle);
         assert_pin(&reopened_wave[0], aliases[1], &deep_base);
@@ -11840,18 +11851,22 @@ fn paired_terminal_depth_waves_retain_pre_and_between_routes() {
     ];
     let repeated = resolver
         .extend_sibling_terminal_pair_paths_from_waves(&[
-            (&reopened.routes()[0], 1, 1, &left_repeat_pair),
-            (&reopened.routes()[1], 1, 1, &right_repeat_pair),
+            (&reopened.routes()[0], 2, 1, &left_repeat_pair),
+            (&reopened.routes()[1], 2, 1, &right_repeat_pair),
         ])
         .unwrap();
     assert_eq!(repeated.routes().len(), 2);
     for (
         route,
         deep,
+        superseded_terminal,
+        superseded_leaf,
         terminal,
         prior_leaf,
         final_leaf,
         deep_marker,
+        superseded_terminal_marker,
+        superseded_leaf_marker,
         terminal_marker,
         prior_leaf_marker,
         final_marker,
@@ -11859,10 +11874,14 @@ fn paired_terminal_depth_waves_retain_pre_and_between_routes() {
         (
             &repeated.routes()[0],
             &deep_left,
+            &terminal_left,
+            &leaves[1],
             &terminal_right,
             &leaves[2],
             &leaves[3],
             "601",
+            "711",
+            "701",
             "712",
             "702",
             "703",
@@ -11870,18 +11889,46 @@ fn paired_terminal_depth_waves_retain_pre_and_between_routes() {
         (
             &repeated.routes()[1],
             &deep_right,
+            &terminal_right,
+            &leaves[2],
             &terminal_left,
             &leaves[1],
             &leaves[4],
             "602",
+            "712",
+            "702",
             "711",
             "701",
             "704",
         ),
     ] {
         assert_eq!(route.retained_wave(0).unwrap().len(), 2);
-        assert_eq!(route.retained_wave(1).unwrap().len(), 2);
-        let repeated_wave = route.retained_wave(2).unwrap();
+        let prior_deep_route = route.retained_wave(1).unwrap();
+        assert_eq!(prior_deep_route.len(), 1);
+        assert_pin(&prior_deep_route[0], aliases[1], deep);
+        assert_pin(&prior_deep_route[0], aliases[2], &terminal_base);
+        assert_module_route(
+            &prior_deep_route[0],
+            "main.orna",
+            &format!("= {deep_marker}"),
+        );
+        assert_eq!(route.retained_wave(2).unwrap().len(), 2);
+        let superseded_final = route.retained_wave(3).unwrap();
+        assert_eq!(superseded_final.len(), 1);
+        assert_pin(&superseded_final[0], aliases[2], superseded_terminal);
+        assert_pin(&superseded_final[0], aliases[3], superseded_leaf);
+        assert_module_route(
+            &superseded_final[0],
+            "main.orna",
+            &format!("= {superseded_terminal_marker}"),
+        );
+        assert_module_route(
+            &superseded_final[0],
+            "archive_copy_archive_archive.orna",
+            &format!("= {superseded_leaf_marker}"),
+        );
+
+        let repeated_wave = route.retained_wave(4).unwrap();
         assert_eq!(repeated_wave.len(), 2);
         assert_pin(&repeated_wave[0], aliases[1], deep);
         assert_pin(&repeated_wave[0], aliases[2], &terminal_base);
@@ -11911,7 +11958,7 @@ fn paired_terminal_depth_waves_retain_pre_and_between_routes() {
     }
     assert!(matches!(
         resolver.extend_sibling_terminal_pair_paths_from_waves(&[
-            (&reopened.routes()[0], 1, 1, &left_repeat_pair),
+            (&reopened.routes()[0], 2, 1, &left_repeat_pair),
             (&reopened.routes()[1], usize::MAX, 0, &right_repeat_pair),
         ]),
         Err(AttachmentError::RetainedSnapshotUnavailable)
