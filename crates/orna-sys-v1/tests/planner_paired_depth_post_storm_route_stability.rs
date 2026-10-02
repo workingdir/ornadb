@@ -437,5 +437,39 @@ fn unknown_byte_handoffs_retain_prior_stage_output_paths() {
             &routes[0].input_path[..expected_prior_outputs.len()],
             expected_prior_outputs
         );
+
+        let filter = explained
+            .nodes()
+            .iter()
+            .find(|node| {
+                node.kind() == PlanNodeKind::Filter
+                    && node.details().get("disjunct_storm") == Some(&PlanDetail::Integer(stage))
+            })
+            .expect("unknown-byte storm stage is visible");
+        let scope_summary = match filter
+            .details()
+            .get("limit_chain_rebind_byte_cap_handoff_scopes_by_depth")
+        {
+            Some(PlanDetail::Text(scopes)) => scopes,
+            other => panic!("expected typed handoff scopes, got {other:?}"),
+        };
+        assert_eq!(
+            scope_summary,
+            &format!("1:{}=?>?", routes[0].output_scope)
+        );
+        let route_summary = match filter
+            .details()
+            .get("limit_chain_rebind_byte_cap_handoff_routes_by_depth")
+        {
+            Some(PlanDetail::Text(routes)) => routes,
+            other => panic!("expected typed handoff routes, got {other:?}"),
+        };
+        assert_eq!(
+            route_summary,
+            &format!(
+                "1:{}=>{}=?>?",
+                routes[0].input_scope, routes[0].output_scope
+            )
+        );
     }
 }
