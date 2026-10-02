@@ -1088,6 +1088,7 @@ pub fn explain_query_with_disjunct_storm_chain(
 /// declaration order, each consuming the previous rebind's bounded result.
 /// Row and byte estimates are capped independently; an unknown dimension stays
 /// unknown while a known dimension continues to use its immediate input cap.
+/// Unknown row-based work does not erase a known byte estimate.
 /// Since
 /// `sys.PlanNodeKind` has no union node, each storm is one aggregate filter
 /// node whose details retain the exact branch chains and rebind points; this
@@ -2094,6 +2095,12 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
                 PlanDetail::Text(
                     "rows_and_bytes_capped_independently_unknown_dimensions_remain_unknown"
                         .to_owned(),
+                ),
+            ),
+            (
+                "limit_chain_rebind_work_scope".to_owned(),
+                PlanDetail::Text(
+                    "unknown_row_work_does_not_erase_known_byte_estimates".to_owned(),
                 ),
             ),
             (

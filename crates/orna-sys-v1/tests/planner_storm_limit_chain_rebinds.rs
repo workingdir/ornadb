@@ -19,6 +19,8 @@ const REBIND_CAP_STABILITY_FIXTURE: &str =
     include_str!("fixtures/planner_storm_rebind_cap_stability.orna");
 const PARTIAL_ESTIMATE_REBIND_STAGES_FIXTURE: &str =
     include_str!("fixtures/planner_storm_partial_estimate_rebind_stages.orna");
+const UNKNOWN_REBIND_NESTED_CAPS_FIXTURE: &str =
+    include_str!("fixtures/planner_storm_unknown_rebind_nested_caps.orna");
 
 fn branch(
     limits: &[u64],
@@ -803,6 +805,121 @@ fn known_byte_caps_stay_bounded_across_stages_when_row_estimates_are_unknown() {
                 .to_owned()
         ))
     );
+}
+
+#[test]
+fn known_byte_caps_survive_unknown_work_in_nested_rebind_storm_stages() {
+    let parsed = orna_syntax_v1::parse_module(UNKNOWN_REBIND_NESTED_CAPS_FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    let first_rebind = storm(
+        "expr:unknown-work-first-rebind",
+        (0..3).map(|_| branch(&[40], 2, vec![])).collect(),
+    );
+    let second_rebind = storm(
+        "expr:unknown-work-second-rebind",
+        (0..2).map(|_| branch(&[30], 3, vec![])).collect(),
+    );
+    let mut first_branch = branch(
+        &[20, 10],
+        1,
+        vec![
+            rebind(1, vec![first_rebind, second_rebind]),
+            rebind(
+                2,
+                vec![storm(
+                    "expr:unknown-work-after-limit-two",
+                    (0..2).map(|_| branch(&[20], 2, vec![])).collect(),
+                )],
+            ),
+        ],
+    );
+    first_branch.nested_storms = vec![
+        storm(
+            "expr:unknown-work-nested-after-rebind",
+            (0..2).map(|_| branch(&[18], 2, vec![])).collect(),
+        ),
+        storm(
+            "expr:unknown-work-second-nested-stage",
+            vec![branch(&[12], 3, vec![])],
+        ),
+    ];
+    let first_stage = storm(
+        "expr:unknown-work-first-stage",
+        vec![first_branch, branch(&[8], 2, vec![])],
+    );
+
+    let mut second_branch = branch(
+        &[6, 3],
+        1,
+        vec![rebind(
+            1,
+            vec![
+                storm(
+                    "expr:unknown-work-second-stage-rebind-one",
+                    (0..2).map(|_| branch(&[24], 2, vec![])).collect(),
+                ),
+                storm(
+                    "expr:unknown-work-second-stage-rebind-two",
+                    (0..3).map(|_| branch(&[16], 3, vec![])).collect(),
+                ),
+            ],
+        )],
+    );
+    second_branch.nested_storms.push(storm(
+        "expr:unknown-work-second-stage-nested",
+        (0..2).map(|_| branch(&[10], 2, vec![])).collect(),
+    ));
+    let second_stage = storm(
+        "expr:unknown-work-second-stage",
+        vec![second_branch, branch(&[4], 2, vec![])],
+    );
+    let third_stage = storm(
+        "expr:unknown-work-third-stage",
+        vec![branch(&[2], 1, vec![]), branch(&[1], 1, vec![])],
+    );
+
+    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+        &query(None, Some(1_000)),
+        &[first_stage, second_stage, third_stage],
+        &[],
+    )
+    .expect("unknown row work does not erase nested known byte caps");
+    let mut stages = explained
+        .nodes()
+        .iter()
+        .filter(|node| {
+            node.kind() == PlanNodeKind::Filter && node.details().contains_key("disjunct_storm")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(stages.len(), 3);
+    stages.sort_by_key(|stage| match stage.details().get("disjunct_storm") {
+        Some(PlanDetail::Integer(index)) => *index,
+        _ => unreachable!("top-level storm stages carry their one-based index"),
+    });
+
+    let cardinalities = stages
+        .iter()
+        .map(|stage| (stage.estimated_rows(), stage.estimated_bytes()))
+        .collect::<Vec<_>>();
+    assert!(cardinalities.iter().all(|(rows, bytes)| rows.is_none() && bytes.is_some()));
+    for pair in cardinalities.windows(2) {
+        assert_eq!(pair[1].0, None);
+        assert!(pair[1].1.unwrap() <= pair[0].1.unwrap());
+    }
+    assert!(cardinalities[0].1.unwrap() <= 1_000);
+    assert!(stages.iter().all(|stage| stage.estimated_work().is_none()));
+    assert_eq!(
+        stages[0].details().get("limit_chain_rebind_work_scope"),
+        Some(&PlanDetail::Text(
+            "unknown_row_work_does_not_erase_known_byte_estimates".to_owned()
+        ))
+    );
+    assert!(matches!(
+        stages[0].details().get("nested_cascade_shapes"),
+        Some(PlanDetail::Text(shapes)) if !shapes.is_empty()
+    ));
 }
 
 #[test]
