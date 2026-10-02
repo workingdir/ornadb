@@ -1615,4 +1615,33 @@ fn stepwise_transitive_replay_retains_prior_pins_after_each_upgrade() {
             Ok(Some(ints(&[expected_results[index]])))
         );
     }
+
+    for (index, path) in [
+        "std/chain/leaf.orna",
+        "std/math.orna",
+        "std/collection.orna",
+        "std/chain/bridge.orna",
+        "std/chain/entry.orna",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut mixed_sources = projects[index].standard_sources().to_vec();
+        let next_source = standard_source(&projects[index + 1], path).to_owned();
+        mixed_sources
+            .iter_mut()
+            .find(|(source_path, _)| source_path == path)
+            .unwrap()
+            .1 = next_source;
+        assert_eq!(
+            AdmittedReplSession::from_loaded_project(
+                &projects[index],
+                mixed_sources,
+                Limits::default(),
+            )
+            .unwrap_err()
+            .code(),
+            "ORNA-REPL-STANDARD"
+        );
+    }
 }
