@@ -16703,7 +16703,8 @@ fn call_argument_snapshot_context(
 /// A typed `SnapshotRef` parameter has no concrete identity while its body is
 /// summarized. Parameter references use a caller-specialized key; local aliases
 /// use capture keys so same-named nested parameters cannot retarget them, with
-/// a lexical binder identity for aliases of shadowing lambda parameters.
+/// a lexical binder identity for aliases of shadowing lambda parameters or
+/// local SnapshotRef bindings.
 /// Uncontextualized non-parameter references stay generic because this semantic
 /// pass cannot infer their runtime pin.
 fn specialize_snapshot_ref_parameter(

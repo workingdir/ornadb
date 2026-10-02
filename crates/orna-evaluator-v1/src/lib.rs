@@ -3560,15 +3560,27 @@ impl Context<'_, '_> {
                 };
                 return Ok(Value::Relation(RelationPlan::union(left, right)));
             }
+            if name == "filter" {
+                let mut filter_arguments = ordered.into_iter();
+                let Some(Value::Relation(plan)) = filter_arguments.next() else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                let Some(predicate) = filter_arguments.next() else {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                };
+                // Filter compilation extends the owned plan directly. A
+                // chain of filters over a nested union storm should copy the
+                // tree only when the cascade is split between union children,
+                // not once for every stage added to that tree.
+                return Ok(Value::Relation(
+                    plan.with_stage(RelationStage::Filter(vec![predicate])),
+                ));
+            }
             let Value::Relation(mut plan) = ordered[0].clone() else {
                 return Err(error("ORNA-EVAL-TYPE"));
             };
 
             match name {
-                "filter" => {
-                    plan = plan.with_stage(RelationStage::Filter(vec![ordered[1].clone()]));
-                    Ok(Value::Relation(plan))
-                }
                 // The reference specifies relation composition and order but
                 // no separate projection grammar. `project` is the named
                 // result-shaping spelling of the same lazy one-to-one map.

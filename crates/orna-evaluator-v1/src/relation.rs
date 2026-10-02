@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use num_bigint::BigInt;
 use num_integer::Integer;
@@ -442,18 +443,19 @@ impl RelationPlan {
             unreachable!("checked filter stage")
         };
         let (left, right) = self.source_union.take().expect("checked union source");
+        let predicates = Arc::new(predicates);
         self.source_union = Some((
-            Box::new(left.push_filter_cascade(predicates.clone())),
+            Box::new(left.push_filter_cascade(Arc::clone(&predicates))),
             Box::new(right.push_filter_cascade(predicates)),
         ));
         self
     }
 
-    fn push_filter_cascade(mut self, mut predicates: Vec<Value>) -> Self {
+    fn push_filter_cascade(mut self, predicates: Arc<Vec<Value>>) -> Self {
         if let Some((left, right)) = self.source_union.take() {
             if self.stages.is_empty() {
                 self.source_union = Some((
-                    Box::new(left.push_filter_cascade(predicates.clone())),
+                    Box::new(left.push_filter_cascade(Arc::clone(&predicates))),
                     Box::new(right.push_filter_cascade(predicates)),
                 ));
                 return self;
@@ -464,19 +466,21 @@ impl RelationPlan {
                 let Some(RelationStage::Filter(mut previous)) = self.stages.pop() else {
                     unreachable!("checked filter stage")
                 };
-                previous.append(&mut predicates);
+                previous.extend(predicates.iter().cloned());
+                let predicates = Arc::new(previous);
                 self.source_union = Some((
-                    Box::new(left.push_filter_cascade(previous.clone())),
-                    Box::new(right.push_filter_cascade(previous)),
+                    Box::new(left.push_filter_cascade(Arc::clone(&predicates))),
+                    Box::new(right.push_filter_cascade(predicates)),
                 ));
                 return self;
             }
             self.source_union = Some((left, right));
         }
         if let Some(RelationStage::Filter(previous)) = self.stages.last_mut() {
-            previous.append(&mut predicates);
+            previous.extend(predicates.iter().cloned());
         } else {
-            self.stages.push(RelationStage::Filter(predicates));
+            self.stages
+                .push(RelationStage::Filter(predicates.as_ref().clone()));
         }
         self
     }

@@ -14,7 +14,8 @@ mod scan_planner;
 mod publication_policy;
 
 pub use branch_merge::{
-    BranchMergeBudget, BranchMergeConflict, BranchMergeError, BranchMergePlan,
+    BranchMergeBudget, BranchMergeConflict, BranchMergeDepthWaveRecovery, BranchMergeError,
+    BranchMergePlan,
     BranchMergeTombstoneEvent, BranchMergeTombstoneHistory,
     BranchMergeTombstoneHistoryError,
     BranchMergePlanSequenceError, BranchMergePlanSequencer, BranchMergeReport,
