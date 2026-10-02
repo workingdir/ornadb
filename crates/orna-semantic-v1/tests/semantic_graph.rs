@@ -3286,6 +3286,60 @@ fn closure_bundle_round_trips_keep_intermediate_pins_distinct() {
 }
 
 #[test]
+fn structural_closure_rebind_storm_preserves_every_stage_pin() {
+    let source = include_str!("fixtures/historical-pinned-closure-bundle-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-bundle-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn structural_closure_rebind_storm_keeps_nonadjacent_pins_distinct() {
+    let source = include_str!(
+        "fixtures/historical-pinned-closure-bundle-storm-mixed.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-bundle-storm-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        1,
+        "eight rebind stages must remain distinct after returning to the first pin: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
