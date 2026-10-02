@@ -416,6 +416,9 @@ impl PackageResolver {
     /// earlier terminal sessions keep their captured routes. The reference
     /// does not define this post-storm sequence, so v1 resolves each edge from
     /// the pin selected in that wave.
+    /// Reopening a retained pre-rebind middle snapshot after later paired
+    /// depth waves still follows the deep and terminal pins in that snapshot's
+    /// manifest, even if a sibling's newer rebound route now differs.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
