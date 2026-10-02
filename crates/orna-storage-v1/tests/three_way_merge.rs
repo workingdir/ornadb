@@ -35,7 +35,8 @@ const TOMBSTONE_DELTA_CONFLICTING_RESTORES: &str =
     include_str!("fixtures/merge-tombstone-delta-conflicting-restores.orna");
 const TOMBSTONE_PAIRED_CHAIN: &str = include_str!("fixtures/merge-tombstone-paired-chain.orna");
 const TOMBSTONE_RECOVERY_STORM: &str = include_str!("fixtures/merge-tombstone-recovery-storm.orna");
-const TOMBSTONE_COMMIT_ORDER: &str = include_str!("fixtures/merge-tombstone-commit-order.orna");
+const TOMBSTONE_DEPTH_COMMIT_ORDER: &str =
+    include_str!("fixtures/merge-tombstone-depth-commit-order.orna");
 const TOMBSTONE_STORM_KEYS: &[&str] = &[
     "a",
     "root",
@@ -19903,15 +19904,15 @@ fn concurrent_uneven_depth_restore_retries_isolate_failed_attempts() {
 
 #[test]
 fn paired_depth_storm_plans_release_in_commit_order_after_out_of_order_completion() {
-    let fixture_rows = TOMBSTONE_COMMIT_ORDER
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
         .split("\n\n")
         .map(|record| parse_fixture(record, RowKeyKind::Explicit))
         .collect::<Vec<_>>();
-    assert_eq!(fixture_rows.len(), 8);
+    assert_eq!(fixture_rows.len(), 11);
 
-    let wave_zero_deletes = ["a/child/deep", "root/child/deep/storm/a"];
-    let wave_one_deletes = ["a/child", "root/child/deep/storm/b"];
-    let wave_two_deletes = ["a", "root"];
+    let wave_zero_deletes = ["a/child/deep/leaf", "root/child/deep/leaf/twig/bud/seed"];
+    let wave_one_deletes = ["a/child/deep", "root/child/deep/leaf/twig"];
+    let wave_two_deletes = ["a/child", "root/child"];
     let wave_zero_restores = fixture_rows
         .iter()
         .filter(|row| wave_zero_deletes.iter().any(|key| row.key == string(key)))
@@ -19938,6 +19939,7 @@ fn paired_depth_storm_plans_release_in_commit_order_after_out_of_order_completio
         (2_u64, wave_two_base, wave_two_deletes.to_vec(), Vec::new()),
     ];
     let mut jobs = Vec::with_capacity(specs.len());
+    let mut range_layouts = Vec::with_capacity(specs.len());
     for (order, rows, deletes, restores) in specs {
         let rows_by_table = [rows.as_slice(), rows.as_slice()];
         let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
@@ -19948,6 +19950,15 @@ fn paired_depth_storm_plans_release_in_commit_order_after_out_of_order_completio
             order % 2 == 1,
             &format!("commit-order-wave-{order}"),
         );
+        range_layouts.push(
+            [id(1), id(2)].map(|table| {
+                base.tables[&table]
+                    .segments
+                    .iter()
+                    .map(|segment| segment.range.clone())
+                    .collect::<Vec<_>>()
+            }),
+        );
         for table in [id(1), id(2)] {
             for row in &restores {
                 add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, table, &[row.clone()]);
@@ -19955,6 +19966,11 @@ fn paired_depth_storm_plans_release_in_commit_order_after_out_of_order_completio
             }
         }
         jobs.push((order, base, left, right, source));
+    }
+    assert_ne!(range_layouts[0], range_layouts[1], "successive waves use different depth cuts");
+    assert_ne!(range_layouts[1], range_layouts[2], "the final wave changes depth cuts again");
+    for layout in &range_layouts {
+        assert_ne!(layout[0], layout[1], "paired tables retain distinct split layouts");
     }
 
     let (ready_tx, ready_rx) = mpsc::channel();
@@ -20020,9 +20036,14 @@ fn paired_depth_storm_plans_release_in_commit_order_after_out_of_order_completio
         .iter()
         .map(|plan| (table_row_tombstones(plan, id(1)), table_row_tombstones(plan, id(2))))
         .collect::<Vec<_>>();
-    let expected_first = ["a/child/deep", "root/child/deep/storm/a"].map(string).to_vec();
-    let expected_second = ["a/child", "root/child/deep/storm/b"].map(string).to_vec();
-    let expected_third = ["a", "root"].map(string).to_vec();
+    let expected_first = [
+        "a/child/deep/leaf",
+        "root/child/deep/leaf/twig/bud/seed",
+    ]
+    .map(string)
+    .to_vec();
+    let expected_second = ["a/child/deep", "root/child/deep/leaf/twig"].map(string).to_vec();
+    let expected_third = ["a/child", "root/child"].map(string).to_vec();
     assert_eq!(
         per_wave_deltas,
         [
@@ -20039,15 +20060,40 @@ fn paired_depth_storm_plans_release_in_commit_order_after_out_of_order_completio
     assert_eq!(
         storm_history,
         [
+            "a/child/deep/leaf",
+            "root/child/deep/leaf/twig/bud/seed",
             "a/child/deep",
-            "root/child/deep/storm/a",
+            "root/child/deep/leaf/twig",
             "a/child",
-            "root/child/deep/storm/b",
-            "a",
-            "root",
+            "root/child",
         ]
         .map(string),
         "wave lineage order survives reverse completion, restoration, and shallower deletes",
+    );
+
+    let paired_tombstone_history = released_plans
+        .iter()
+        .flat_map(BranchMergePlan::ordered_row_tombstones)
+        .collect::<Vec<_>>();
+    let expected_paired_history = [
+        (id(1), "a/child/deep/leaf"),
+        (id(1), "root/child/deep/leaf/twig/bud/seed"),
+        (id(2), "a/child/deep/leaf"),
+        (id(2), "root/child/deep/leaf/twig/bud/seed"),
+        (id(1), "a/child/deep"),
+        (id(1), "root/child/deep/leaf/twig"),
+        (id(2), "a/child/deep"),
+        (id(2), "root/child/deep/leaf/twig"),
+        (id(1), "a/child"),
+        (id(1), "root/child"),
+        (id(2), "a/child"),
+        (id(2), "root/child"),
+    ]
+    .map(|(table, key)| (table, string(key)));
+    assert_eq!(
+        paired_tombstone_history,
+        expected_paired_history,
+        "split-depth changes preserve each paired delta and append waves in commit lineage order",
     );
 }
 

@@ -218,6 +218,24 @@ pub struct BranchMergePlan {
     pub report: BranchMergeReport,
 }
 
+impl BranchMergePlan {
+    /// Flattens this plan's row tombstones in table, split-range, then
+    /// canonical key order. Concatenate results from
+    /// [`BranchMergePlanSequencer`] in the released order to retain commit
+    /// lineage across plans whose depth splits differ.
+    pub fn ordered_row_tombstones(&self) -> Vec<(ObjectId, CanonicalValue)> {
+        let mut ordered = Vec::new();
+        for (table, merged) in &self.tables {
+            for segment in &merged.segments {
+                if let MergedSegment::Rows { tombstones, .. } = segment {
+                    ordered.extend(tombstones.iter().cloned().map(|key| (*table, key)));
+                }
+            }
+        }
+        ordered
+    }
+}
+
 /// Buffers selected successful plans and releases them in paired lineage order,
 /// independent of the order in which concurrent workers finish.
 ///
@@ -227,8 +245,11 @@ pub struct BranchMergePlan {
 /// position. A later plan may finish first, but it is held until every earlier
 /// position is submitted. Each returned plan remains one atomic paired step,
 /// so adapters can persist its tables together and append its table-local
-/// deltas without replaying or re-sorting earlier history. The sequencer does
-/// not perform durable commits; adapters must enact returned plans in order.
+/// deltas without replaying or re-sorting earlier history. Within a plan,
+/// `ordered_row_tombstones` retains table and split-range order; across plans,
+/// the sequencer's returned order takes precedence over key depth. The
+/// sequencer does not perform durable commits; adapters must enact returned
+/// plans in order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePlanSequencer {
     next_order: Option<u64>,
@@ -373,6 +394,9 @@ impl BranchMergePlanSequencer {
 /// Within one table's delta keys stay in canonical depth order, but separate
 /// commits append by lineage: a later shallow ancestor tombstone follows
 /// earlier descendant storm events instead of being sorted ahead of them.
+/// If successive plans use different split boundaries, each plan first
+/// flattens its keys in that plan's table and validated range order; depth
+/// changes never reorder or repartition the already-committed prefix.
 /// A conflicted candidate is not a paired commit step and has no appendable
 /// delta; concurrent retries from its base are alternatives, and at most one
 /// successful plan advances that paired lineage position.
