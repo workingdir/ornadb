@@ -19978,6 +19978,11 @@ fn concurrent_paired_storm_waves_preserve_depth_event_lineage() {
         "root/child/deep/storm/b",
         "root/child/deep/storm/f",
     ];
+    let wave_five_right_deletes = [
+        "a/child",
+        "root/child/deep",
+        "root/child/deep/storm/f",
+    ];
     let storm_restores = storm_rows
         .iter()
         .filter(|row| row.key != string("z"))
@@ -20022,14 +20027,36 @@ fn concurrent_paired_storm_waves_preserve_depth_event_lineage() {
                     Vec::new(),
                 )
             };
+            let conflict_retry = wave == 3 && retry == 1;
+            let right_deletes = if conflict_retry {
+                &wave_five_right_deletes[..]
+            } else {
+                deletes
+            };
             let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
                 &[storm_base, anchor_base],
                 deletes,
-                deletes,
+                right_deletes,
                 retry % 2,
                 false,
                 &format!("concurrent-paired-storm-wave-{wave}-retry-{retry}"),
             );
+            if conflict_retry {
+                let storm_key = string("root/child/deep/storm/b");
+                let mut changed = false;
+                for ((side, _), rows) in &mut source.rows {
+                    if *side == MergeSide::Right {
+                        if let Some(row) = rows
+                            .iter_mut()
+                            .find(|row| row.table == id(1) && row.key == storm_key)
+                        {
+                            *row = edit_name(row, "concurrent branch edit");
+                            changed = true;
+                        }
+                    }
+                }
+                assert!(changed, "the storm conflict fixture row is in a right branch range");
+            }
             for (table, row) in &restore_rows {
                 add_chained_storm_fixture_rows(
                     &left,
@@ -20102,7 +20129,7 @@ fn concurrent_paired_storm_waves_preserve_depth_event_lineage() {
                     &mut source,
                     BranchMergeBudget {
                         max_rows_examined: 80,
-                        max_conflicts: 0,
+                        max_conflicts: if conflict_retry { 1 } else { 0 },
                     },
                 );
                 (wave, retry, result, source.source, restore_rows)
@@ -20159,6 +20186,7 @@ fn concurrent_paired_storm_waves_preserve_depth_event_lineage() {
     .map(string);
     let anchor_wave_five_live = ["a", "a/child/deep", "d", "zz"].map(string);
     let mut failures_by_wave = [0; WAVES];
+    let mut conflicts_by_wave = [0; WAVES];
     let mut successes_by_wave = [0; WAVES];
     let mut selected_wave_plans: [Option<BranchMergePlan>; WAVES] =
         std::array::from_fn(|_| None);
@@ -20170,6 +20198,34 @@ fn concurrent_paired_storm_waves_preserve_depth_event_lineage() {
             worker.join().expect("cross-wave retry worker completes");
         if first_observed_wave.is_none() {
             first_observed_wave = Some(wave);
+        }
+        if wave == 3 && retry == 1 {
+            let Err(BranchMergeError::Conflicts { conflicts, report }) = result else {
+                panic!("a storm delete against a concurrent edit is not appendable")
+            };
+            assert_eq!(report.conflicts_lower_bound, 1);
+            assert!(report.affected_tables.contains(&id(1)));
+            assert!(source.failed_at.is_none());
+            let observed_conflicts = conflicts
+                .into_iter()
+                .map(|conflict| {
+                    let BranchMergeConflict::Row {
+                        conflict: RowMergeConflict::DeleteAndEdit { table, key },
+                        ..
+                    } = conflict
+                    else {
+                        panic!("the competing storm edit yields a delete/edit conflict")
+                    };
+                    (table, key)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                observed_conflicts,
+                vec![(id(1), string("root/child/deep/storm/b"))],
+            );
+            conflicts_by_wave[wave] += 1;
+            failures_by_wave[wave] += 1;
+            continue;
         }
         if retry == 0 {
             match result {
@@ -20248,8 +20304,9 @@ fn concurrent_paired_storm_waves_preserve_depth_event_lineage() {
             selected_wave_plans[wave] = Some(plan);
         }
     }
-    assert_eq!(failures_by_wave, [1; WAVES]);
-    assert_eq!(successes_by_wave, [RETRIES_PER_WAVE - 1; WAVES]);
+    assert_eq!(failures_by_wave, [1, 1, 1, 2]);
+    assert_eq!(conflicts_by_wave, [0, 0, 0, 1]);
+    assert_eq!(successes_by_wave, [3, 3, 3, 2]);
     assert_eq!(first_observed_wave, Some(WAVES - 1));
 
     let wave_two = selected_wave_plans[0]

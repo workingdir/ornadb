@@ -324,6 +324,11 @@ impl PackageResolver {
     /// closure still begins at the exact pin in its selected deep manifest;
     /// interleaving later terminal storms cannot change the other branch or a
     /// fresh expansion from either retained deep pin.
+    /// Sibling middle pins that converge on one exact deep pin can then take
+    /// independent deep-rebind storms whose candidates select the same
+    /// terminal pin. Terminal closures opened from those selected deep pins
+    /// still begin on that shared route; later terminal rebinds remain local
+    /// to each sibling closure.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
