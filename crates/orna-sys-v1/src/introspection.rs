@@ -1074,8 +1074,10 @@ pub fn explain_query_with_disjunct_storm_chain(
 /// This adapter applies each branch's limits and 50%-per-conjunct fallback
 /// independently, combines branch matches in declaration order without
 /// counting more rows or bytes than the stage input, and feeds that result to
-/// the next storm. An explicit rebind runs just after its one-based limit
-/// position and feeds its output to the following limit. Since
+/// the next storm. Every cascade result is capped to its immediate input; at
+/// a rebind that means the current branch's bounded rows and bytes. An explicit
+/// rebind runs just after its one-based limit position and feeds its capped
+/// output to the following limit. Since
 /// `sys.PlanNodeKind` has no union node, each storm is one aggregate filter
 /// node whose details retain the exact branch chains and rebind points; this
 /// avoids presenting sibling limits as a false serial pipeline. The
@@ -1947,7 +1949,7 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
         let branch_count =
             u64::try_from(storm.branches.len()).map_err(|_| ExplainError::TooManyNodes)?;
         let (cardinality, work, overflowed) =
-            disjunct_storm_branch_cascade_cardinality_and_work(current_cardinality, &storm.branches);
+            disjunct_storm_cascade_cardinality_and_work(current_cardinality, storm);
         let branch_limits = storm
             .branches
             .iter()
@@ -2056,6 +2058,16 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             (
                 "limit_chain_rebind_predicates".to_owned(),
                 PlanDetail::Expressions(limit_chain_rebind_predicates),
+            ),
+            (
+                "branch_local_storm_cap_scope".to_owned(),
+                PlanDetail::Text(
+                    "each_cascade_output_capped_to_immediate_input_rows_and_bytes".to_owned(),
+                ),
+            ),
+            (
+                "limit_chain_rebind_cap_scope".to_owned(),
+                PlanDetail::Text("post_limit_branch_rows_and_bytes".to_owned()),
             ),
             (
                 "expansion_work".to_owned(),
@@ -2585,6 +2597,27 @@ fn disjunct_storm_predicates(storms: &[DisjunctStormCascadeDescription]) -> Vec<
     predicates
 }
 
+fn disjunct_storm_cascade_cardinality_and_work(
+    input: Cardinality,
+    storm: &DisjunctStormCascadeDescription,
+) -> (Cardinality, Option<u64>, bool) {
+    let (estimated, work, overflowed) =
+        disjunct_storm_branch_cascade_cardinality_and_work(input, &storm.branches);
+    (cap_cardinality_to_input(estimated, input), work, overflowed)
+}
+
+fn cap_cardinality_to_input(estimated: Cardinality, input: Cardinality) -> Cardinality {
+    let rows = match (estimated.rows, input.rows) {
+        (Some(estimated), Some(cap)) => Some(estimated.min(cap)),
+        _ => None,
+    };
+    let bytes = match (estimated.bytes, input.bytes) {
+        (Some(estimated), Some(cap)) => Some(estimated.min(cap)),
+        _ => None,
+    };
+    Cardinality { rows, bytes }
+}
+
 fn disjunct_storm_branch_cascade_cardinality_and_work(
     input: Cardinality,
     branches: &[DisjunctStormBranchDescription],
@@ -2618,9 +2651,9 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
             {
                 for rebind_storm in &rebind.storms {
                     let (rebound, rebound_work, rebound_overflowed) =
-                        disjunct_storm_branch_cascade_cardinality_and_work(
+                        disjunct_storm_cascade_cardinality_and_work(
                             branch_cardinality,
-                            &rebind_storm.branches,
+                            rebind_storm,
                         );
                     overflowed |= rebound_overflowed;
                     match (work, rebound_work) {
@@ -2658,7 +2691,7 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
 
         for nested_storm in &branch.nested_storms {
             let (nested_output, nested_work, nested_overflowed) =
-                disjunct_storm_branch_cascade_cardinality_and_work(branch_output, &nested_storm.branches);
+                disjunct_storm_cascade_cardinality_and_work(branch_output, nested_storm);
             overflowed |= nested_overflowed;
             match (work, nested_work) {
                 (Some(total), Some(nested_work)) => match total.checked_add(nested_work) {
