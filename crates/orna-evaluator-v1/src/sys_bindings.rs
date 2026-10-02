@@ -62,9 +62,18 @@ impl SysHostBindingRegistry {
             .dispatch(operation, name)
             .map_err(|failure| self.failure(operation_name, failure))?;
         let raw = match value {
-            EnvironmentDispatchValue::Optional(Some(value))
-            | EnvironmentDispatchValue::Required(value) => OvbRaw::Text(value),
-            EnvironmentDispatchValue::Optional(None) => OvbRaw::Null,
+            EnvironmentDispatchValue::Optional(value) => {
+                let mut fields = vec![OvbRaw::Int(if value.is_some() {
+                    1.into()
+                } else {
+                    0.into()
+                })];
+                if let Some(value) = value {
+                    fields.push(OvbRaw::Text(value));
+                }
+                OvbRaw::Tag(60013, Box::new(OvbRaw::Array(fields)))
+            }
+            EnvironmentDispatchValue::Required(value) => OvbRaw::Text(value),
         };
         CanonicalValue::new(raw)
             .map(Some)
