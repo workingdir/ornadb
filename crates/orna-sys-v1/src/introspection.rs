@@ -563,6 +563,20 @@ pub struct QueryPlanDescription {
     pub materialize_into: Option<ObjectRef>,
 }
 
+/// One nested disjunct storm stage whose branches each have their own limit
+/// cascade and conjunct chain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisjunctStormDescription {
+    /// Resolved predicate reference for this expansion stage.
+    pub predicate: ExpressionRef,
+    /// Number of independent OR branches expanded at this stage.
+    pub disjunct_count: u64,
+    /// Ordered limits applied independently inside every branch.
+    pub nested_branch_limits: Vec<u64>,
+    /// Ordered AND terms evaluated inside each branch after its limits.
+    pub conjunct_count_per_disjunct: u64,
+}
+
 /// Statistics supplied by the snapshot/catalogue adapter, never measured by
 /// the explain path itself. Missing values remain missing in the plan.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -973,6 +987,48 @@ pub fn explain_query_with_disjunct_branch_limit_conjunct_cascade(
     )
 }
 
+/// Explains a sequence of nested disjunct storms. Every stage starts from the
+/// previous stage's estimated output, expands its own disjuncts, applies an
+/// ordered limit cascade to each branch, evaluates that branch's conjunct
+/// chain, and combines the surviving branch estimates before feeding the
+/// next storm. The query's outer limit and `additional_limits` run after all
+/// storms.
+///
+/// ORNA-PLAN leaves estimate aggregation unspecified for this composition.
+/// The adapter uses independent branches with 50% selectivity per conjunct,
+/// rounds branch matches upward, and charges every branch limit for each
+/// disjunct. It retains work and known overflow from earlier storms through
+/// later stages and zero limits. The query-level predicate must be absent;
+/// each `DisjunctStormDescription` supplies the predicate for its stage.
+pub fn explain_query_with_disjunct_storm_chain(
+    query: &QueryPlanDescription,
+    storms: &[DisjunctStormDescription],
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if storms.is_empty() || query.predicate.is_some() {
+        return Err(ExplainError::InvalidExpression);
+    }
+    if storms.iter().any(|storm| {
+        storm.disjunct_count == 0
+            || storm.nested_branch_limits.is_empty()
+            || storm.conjunct_count_per_disjunct == 0
+    }) {
+        return Err(ExplainError::InvalidExpression);
+    }
+    explain_query_with_predicate_pressure_and_branch_limits_and_storms(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        additional_limits,
+        storms,
+    )
+}
+
 /// Explains nested input limits, one expanded disjunctive filter, and then
 /// the query's outer limit followed by any additional limits.
 ///
@@ -1248,6 +1304,32 @@ fn explain_query_with_predicate_pressure_and_branch_limits(
     post_expansion_conjunct: Option<&ExpressionRef>,
     additional_limits: &[u64],
 ) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_with_predicate_pressure_and_branch_limits_and_storms(
+        query,
+        disjunct_count,
+        conjunct_count,
+        conjunct_count_per_disjunct,
+        nested_input_limits,
+        nested_branch_limits,
+        limits_between_disjunct_and_conjunct,
+        post_expansion_conjunct,
+        additional_limits,
+        &[],
+    )
+}
+
+fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    conjunct_count: Option<u64>,
+    conjunct_count_per_disjunct: Option<u64>,
+    nested_input_limits: &[u64],
+    nested_branch_limits: &[u64],
+    limits_between_disjunct_and_conjunct: &[u64],
+    post_expansion_conjunct: Option<&ExpressionRef>,
+    additional_limits: &[u64],
+    disjunct_storms: &[DisjunctStormDescription],
+) -> Result<ExplainedPlan, ExplainError> {
     if disjunct_count == 0
         || conjunct_count == Some(0)
         || conjunct_count_per_disjunct == Some(0)
@@ -1295,12 +1377,16 @@ fn explain_query_with_predicate_pressure_and_branch_limits(
     let operator_bound = 1usize
         .saturating_add(query.joins.len().saturating_mul(2))
         .saturating_add(usize::from(query.predicate.is_some()))
+        .saturating_add(disjunct_storms.len())
         .saturating_add(usize::from(!query.projections.is_empty()))
         .saturating_add(usize::from(query.distinct))
         .saturating_add(usize::from(!query.ordering.is_empty()))
         .saturating_add(usize::from(query.limit.is_some()))
         .saturating_add(nested_input_limits.len())
         .saturating_add(nested_branch_limits.len())
+        .saturating_add(disjunct_storms.iter().fold(0usize, |total, storm| {
+            total.saturating_add(storm.nested_branch_limits.len())
+        }))
         .saturating_add(limits_between_disjunct_and_conjunct.len())
         .saturating_add(usize::from(post_expansion_conjunct.is_some()))
         .saturating_add(additional_limits.len())
@@ -1316,6 +1402,7 @@ fn explain_query_with_predicate_pressure_and_branch_limits(
         .chain(query.ordering.iter().map(|ordering| &ordering.expression))
         .chain(query.joins.iter().filter_map(|join| join.predicate.as_ref()))
         .chain(post_expansion_conjunct.iter().copied())
+        .chain(disjunct_storms.iter().map(|storm| &storm.predicate))
         .any(|expression| invalid_reference(expression.as_str()))
     {
         return Err(ExplainError::InvalidExpression);
@@ -1327,6 +1414,15 @@ fn explain_query_with_predicate_pressure_and_branch_limits(
         .saturating_add(usize::from(query.predicate.is_some()))
         .saturating_add(usize::from(post_expansion_conjunct.is_some()))
         .saturating_add(query.joins.iter().filter(|join| join.predicate.is_some()).count())
+        .saturating_add(disjunct_storms.iter().fold(0usize, |total, storm| {
+            let stage = usize::try_from(
+                storm
+                    .disjunct_count
+                    .saturating_mul(storm.conjunct_count_per_disjunct),
+            )
+            .unwrap_or(usize::MAX);
+            total.saturating_add(stage)
+        }))
         > MAX_PLAN_EXPRESSIONS
     {
         return Err(ExplainError::TooManyExpressions);
@@ -1618,6 +1714,89 @@ fn explain_query_with_predicate_pressure_and_branch_limits(
             );
             current_cardinality = cardinality;
         }
+    }
+    for (storm_index, storm) in disjunct_storms.iter().enumerate() {
+        let storm_index = u64::try_from(storm_index + 1).map_err(|_| ExplainError::TooManyNodes)?;
+        for limit in &storm.nested_branch_limits {
+            let cardinality = limit_cardinality(current_cardinality, *limit);
+            let work = current_cardinality
+                .rows
+                .and_then(|rows| rows.checked_mul(storm.disjunct_count));
+            let mut details = BTreeMap::from([
+                ("limit".to_owned(), PlanDetail::Integer(*limit)),
+                (
+                    "limit_scope".to_owned(),
+                    PlanDetail::Text("per_disjunct_branch".to_owned()),
+                ),
+                (
+                    "disjunct_count".to_owned(),
+                    PlanDetail::Integer(storm.disjunct_count),
+                ),
+                (
+                    "disjunct_storm".to_owned(),
+                    PlanDetail::Integer(storm_index),
+                ),
+            ]);
+            if current_cardinality.rows.is_some() && work.is_none() {
+                record_work_overflow(&mut details);
+            }
+            current = push_unary(
+                &mut operators,
+                current,
+                PlanNodeKind::Limit,
+                None,
+                details,
+                cardinality,
+                work,
+            );
+            current_cardinality = cardinality;
+        }
+        let (cardinality, work) = conjunctive_disjunction_cardinality_and_work(
+            current_cardinality,
+            storm.disjunct_count,
+            storm.conjunct_count_per_disjunct,
+        );
+        let mut details = BTreeMap::from([
+            (
+                "selectivity_assumption".to_owned(),
+                PlanDetail::Text(
+                    "0.5_per_branch_conjunct_then_independent_disjuncts".to_owned(),
+                ),
+            ),
+            (
+                "disjunct_count".to_owned(),
+                PlanDetail::Integer(storm.disjunct_count),
+            ),
+            (
+                "conjunct_count_per_disjunct".to_owned(),
+                PlanDetail::Integer(storm.conjunct_count_per_disjunct),
+            ),
+            (
+                "conjunct_order".to_owned(),
+                PlanDetail::Text("left_to_right_short_circuit".to_owned()),
+            ),
+            (
+                "expansion_work".to_owned(),
+                PlanDetail::Text("full_input_per_disjunct_after_branch_limits".to_owned()),
+            ),
+            (
+                "disjunct_storm".to_owned(),
+                PlanDetail::Integer(storm_index),
+            ),
+        ]);
+        if current_cardinality.rows.is_some() && work.is_none() {
+            record_work_overflow(&mut details);
+        }
+        current = push_unary(
+            &mut operators,
+            current,
+            PlanNodeKind::Filter,
+            Some(storm.predicate.clone()),
+            details,
+            cardinality,
+            work,
+        );
+        current_cardinality = cardinality;
     }
     if !query.projections.is_empty() {
         let cardinality = current_cardinality;
