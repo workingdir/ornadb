@@ -7082,7 +7082,7 @@ fn reversed_sibling_storm_order_preserves_convergent_terminal_routes() {
 }
 
 #[test]
-fn convergent_sibling_terminal_storms_keep_paired_depth_routes_stable() {
+fn post_storm_reopened_sibling_routes_remain_convergent() {
     let package_source = include_str!("fixtures/attach-package.orna");
     let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
     let aliases = [
@@ -7286,6 +7286,71 @@ fn convergent_sibling_terminal_storms_keep_paired_depth_routes_stable() {
             .unwrap();
         assert_eq!(retained_terminal_route.attached().count(), 0);
     }
+
+    let mut reopened_terminal_routes: Vec<AttachedDatabaseSession> = selected_middle
+        .iter()
+        .map(|middle_pin| {
+            let reopened_deep = resolver.resolve_for_parent(middle_pin.clone()).unwrap();
+            assert_pin(&reopened_deep, aliases[2], &shared_deep_commit);
+            assert_route(&reopened_deep, aliases[2], 2, 0);
+            resolver
+                .resolve_for_parent(reopened_deep.database(aliases[2]).unwrap().clone())
+                .unwrap()
+        })
+        .collect();
+    let post_storm_manifest_routes = reopened_terminal_routes.clone();
+    for sibling in 0..2 {
+        assert_pin(
+            &reopened_terminal_routes[sibling],
+            aliases[3],
+            &terminal_commits[0],
+        );
+        assert_route(&reopened_terminal_routes[sibling], aliases[3], 3, 0);
+    }
+
+    // A second storm wave on the newly reopened siblings converges on one
+    // terminal pin without moving either manifest snapshot or the old wave.
+    for (sibling, candidate) in [(0, 2), (1, 1), (1, 2), (0, 1), (1, 1)] {
+        reopened_terminal_routes[sibling]
+            .detach_database(aliases[3])
+            .unwrap();
+        reopened_terminal_routes[sibling]
+            .attach_database(terminal_pins[candidate].clone())
+            .unwrap();
+        assert_pin(
+            &reopened_terminal_routes[sibling],
+            aliases[3],
+            &terminal_commits[candidate],
+        );
+        assert_route(&reopened_terminal_routes[sibling], aliases[3], 3, candidate);
+    }
+    for sibling in 0..2 {
+        assert_pin(
+            &reopened_terminal_routes[sibling],
+            aliases[3],
+            &terminal_commits[1],
+        );
+        assert_route(&reopened_terminal_routes[sibling], aliases[3], 3, 1);
+        assert_route(&post_storm_manifest_routes[sibling], aliases[3], 3, 0);
+        assert_pin(
+            &terminal_branches[sibling],
+            aliases[3],
+            &terminal_commits[2],
+        );
+        assert_route(&terminal_branches[sibling], aliases[3], 3, 2);
+    }
+    assert_eq!(
+        reopened_terminal_routes[0]
+            .database(aliases[3])
+            .unwrap()
+            .pin()
+            .commit(),
+        reopened_terminal_routes[1]
+            .database(aliases[3])
+            .unwrap()
+            .pin()
+            .commit()
+    );
 }
 
 #[test]
