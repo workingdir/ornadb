@@ -8,7 +8,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     fmt::Write as _,
-    rc::Rc,
+    sync::Arc,
 };
 
 use num_bigint::{BigInt, Sign};
@@ -457,6 +457,11 @@ fn validate_admitted_nominals(
                 validate_admitted_nominals(value, definitions, limits)?;
             }
         }
+        Value::Stream { values, .. } => {
+            for value in values {
+                validate_admitted_nominals(value, definitions, limits)?;
+            }
+        }
         Value::Record(fields) => {
             for value in fields.values() {
                 validate_admitted_nominals(value, definitions, limits)?;
@@ -632,6 +637,16 @@ pub trait EffectHandler {
         _cancellation: Option<&CancellationToken>,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         self.handle_registered_with_budget(operation, callee, arguments, budget)
+    }
+
+    /// Forks an activation-owned handler for one structured child task.
+    ///
+    /// Returning `None` leaves child host effects unavailable. Implementors
+    /// that return a handler must give the child an isolated ownership scope;
+    /// child adapters are moved to their worker and joined before the parent
+    /// activation returns.
+    fn fork_task_child(&mut self, _child_index: usize) -> Option<Box<dyn EffectHandler + Send>> {
+        None
     }
 
     /// Resolve a stored row reference at the reference's snapshot pin.
@@ -1109,6 +1124,34 @@ fn error(code: &'static str) -> EvaluationError {
     EvaluationError::redacted(SafeText::new(code).expect("static safe code"))
 }
 
+fn aggregate_task_failures(failures: &[EvaluationError]) -> EvaluationError {
+    let Some(primary) = failures.first() else {
+        return error("ORNA-EVAL-ERROR");
+    };
+    if failures.len() == 1 {
+        return primary.clone();
+    }
+    let primary_value = primary.canonical.clone().unwrap_or_else(|| {
+        CanonicalErrorValue::new(primary.code(), "<redacted>", [], BTreeMap::new())
+            .expect("redacted task error is canonical")
+    });
+    let mut causes = primary_value.causes();
+    for failure in failures.iter().skip(1) {
+        causes.push(failure.canonical.clone().unwrap_or_else(|| {
+            CanonicalErrorValue::new(failure.code(), "<redacted>", [], BTreeMap::new())
+                .expect("redacted task cause is canonical")
+        }));
+    }
+    let aggregate = CanonicalErrorValue::new(
+        primary_value.code(),
+        primary_value.message(),
+        causes,
+        primary_value.safe_details(),
+    )
+    .expect("ordered task error causes remain canonical");
+    EvaluationError::from_canonical(aggregate)
+}
+
 fn valid_date_literal(value: &str) -> bool {
     let bytes = value.as_bytes();
     if bytes.len() != 10
@@ -1311,7 +1354,7 @@ enum Value {
         name: String,
         nominal_definitions: NominalDefinitions,
     },
-    Closure(Rc<Closure>),
+    Closure(Arc<Closure>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1608,6 +1651,16 @@ impl Value {
             Self::List(values) | Self::Tuple(values) => Raw::Array(
                 values
                     .into_iter()
+                    .map(Value::raw)
+                    .collect::<Result<_, _>>()?,
+            ),
+            // The finite stream's source identity and digest remain in the
+            // live evaluator value; the canonical boundary exposes its real
+            // item sequence rather than substituting a placeholder result.
+            Self::Stream { values, position, .. } => Raw::Array(
+                values
+                    .into_iter()
+                    .skip(position)
                     .map(Value::raw)
                     .collect::<Result<_, _>>()?,
             ),
@@ -2000,6 +2053,136 @@ enum RelationRow {
     Yield(Value),
     End,
 }
+
+fn invoke_task_callback(
+    callback: Value,
+    functions: &Functions,
+    aliases: Option<&BTreeMap<String, String>>,
+    session_functions: Option<&BTreeSet<String>>,
+    limits: Limits,
+    cancellation: CancellationToken,
+    repl_bindings: bool,
+    restrict_function_names: bool,
+    reject_unhandled_field_calls: bool,
+    depth: usize,
+    mut effects: Option<Box<dyn EffectHandler + Send>>,
+) -> Result<Value, EvaluationError> {
+    let mut context = Context {
+        limits,
+        steps: 0,
+        functions,
+        aliases,
+        session_functions,
+        repl_bindings,
+        restrict_function_names,
+        reject_unhandled_field_calls,
+        effects: effects
+            .as_deref_mut()
+            .map(|handler| handler as &mut dyn EffectHandler),
+        namespace: None,
+        transfer: None,
+        cancellation: Some(&cancellation),
+    };
+    context.invoke_callable(&callback, Vec::new(), depth)
+}
+
+/// Run finite callback lists with a bounded number of owned worker threads.
+/// A first ordinary failure stops admission for `parallel`; a first success
+/// stops admission for `race`. In-flight children observe the shared token,
+/// and `thread::scope` joins every worker before the owner returns.
+fn run_task_callbacks(
+    callbacks: &[Value],
+    mut child_effects: Vec<Option<Box<dyn EffectHandler + Send>>>,
+    callback_depth: usize,
+    parent: Option<CancellationToken>,
+    functions: &Functions,
+    aliases: Option<&BTreeMap<String, String>>,
+    session_functions: Option<&BTreeSet<String>>,
+    limits: Limits,
+    repl_bindings: bool,
+    restrict_function_names: bool,
+    reject_unhandled_field_calls: bool,
+    cancel_after_failure: bool,
+    cancel_after_success: bool,
+) -> (Vec<Option<Result<Value, EvaluationError>>>, Option<Value>) {
+    const MAX_TASK_WORKERS: usize = 32;
+    let available = std::thread::available_parallelism().map_or(1, usize::from);
+    let worker_count = callbacks.len().min(available).min(MAX_TASK_WORKERS).max(1);
+    let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let shared_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let child_effects = Arc::new(std::sync::Mutex::new(std::mem::take(&mut child_effects)));
+
+    std::thread::scope(|scope| {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        for _ in 0..worker_count {
+            let sender = sender.clone();
+            let next = Arc::clone(&next);
+            let shared_cancel = Arc::clone(&shared_cancel);
+            let child_effects = Arc::clone(&child_effects);
+            let parent = parent.clone();
+            scope.spawn(move || {
+                loop {
+                    if shared_cancel.load(std::sync::atomic::Ordering::Acquire)
+                        || parent.as_ref().is_some_and(CancellationToken::is_requested)
+                    {
+                        break;
+                    }
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    let Some(callback) = callbacks.get(index).cloned() else {
+                        break;
+                    };
+                    let effects = child_effects
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get_mut(index)
+                        .and_then(Option::take);
+                    let cancellation =
+                        CancellationToken::child(Arc::clone(&shared_cancel), parent.clone());
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        invoke_task_callback(
+                            callback,
+                            functions,
+                            aliases,
+                            session_functions,
+                            limits,
+                            cancellation,
+                            repl_bindings,
+                            restrict_function_names,
+                            reject_unhandled_field_calls,
+                            callback_depth,
+                            effects,
+                        )
+                    }))
+                    .unwrap_or_else(|_| Err(error("ORNA-EVAL-ERROR")));
+                    if (cancel_after_failure
+                        && result
+                            .as_ref()
+                            .is_err_and(|failure| failure.code() != "ORNA-EVAL-CANCELLED"))
+                        || (cancel_after_success && result.is_ok())
+                    {
+                        shared_cancel.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    let _ = sender.send((index, result));
+                }
+            });
+        }
+        drop(sender);
+        let mut results = (0..callbacks.len()).map(|_| None).collect::<Vec<_>>();
+        let mut winner = None;
+        while let Ok((index, result)) = receiver.recv() {
+            if cancel_after_success
+                && winner.is_none()
+                && let Ok(value) = &result
+            {
+                winner = Some(value.clone());
+                shared_cancel.store(true, std::sync::atomic::Ordering::Release);
+            }
+            results[index] = Some(result);
+        }
+        (results, winner)
+    })
+}
+
 impl Context<'_, '_> {
     fn effect_value(&mut self, value: &CanonicalValue) -> Result<Value, EvaluationError> {
         // Effect results cross a canonical boundary. Apply the depth limit to
@@ -2286,7 +2469,7 @@ impl Context<'_, '_> {
                 self.items(scope.0.len())?;
                 let mut captured = scope.clone();
                 captured.1.extend(captured.0.keys().cloned());
-                Ok(Value::Closure(Rc::new(Closure {
+                Ok(Value::Closure(Arc::new(Closure {
                     parameters: parameters
                         .iter()
                         .map(|parameter| Parameter {
@@ -5181,6 +5364,12 @@ impl Context<'_, '_> {
         let native_bits = native_binding
             .filter(|binding| binding.kind == StandardBindingKind::Bits)
             .map(|binding| binding.operation);
+        let native_stream = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::Stream)
+            .map(|binding| binding.operation);
+        let native_concurrent = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::Concurrent)
+            .map(|binding| binding.operation);
         let native_stats = native_binding
             .filter(|binding| binding.kind == StandardBindingKind::Stats)
             .map(|binding| binding.operation);
@@ -5188,7 +5377,7 @@ impl Context<'_, '_> {
             .filter(|binding| binding.kind == StandardBindingKind::Time)
             .map(|binding| binding.operation);
         let root_stream = root_stream_name(callee);
-        let stream = match (root_stream, input.as_ref()) {
+        let root_stream_operation = match (root_stream, input.as_ref()) {
             (Some("from_list"), None) => Some("from_list"),
             (Some("for_each"), Some(Value::Stream { .. })) => Some("for_each"),
             _ => None,
@@ -5257,10 +5446,12 @@ impl Context<'_, '_> {
         // primitives for operations whose values are erased at runtime.
         if !native_asof_join
             && !native_collection
-            && stream.is_none()
+            && root_stream_operation.is_none()
             && native_math.is_none()
             && native_text.is_none()
             && native_bits.is_none()
+            && native_stream.is_none()
+            && native_concurrent.is_none()
             && native_stats.is_none()
             && native_time.is_none()
             && native_hash.is_none()
@@ -5274,6 +5465,8 @@ impl Context<'_, '_> {
                 && qualified_text.is_none()
                 && qualified_stats.is_none()
                 && qualified_time.is_none()
+                && native_stream.is_none()
+                && native_concurrent.is_none()
                 && portable_collection_operation(callee, resolved_function.as_deref()).is_none()
                 && root_collection.is_none()
                 || resolved_function.is_some())
@@ -5443,6 +5636,8 @@ impl Context<'_, '_> {
                 .flatten()
         });
         let time = native_time;
+        let stream = native_stream.or(root_stream_operation);
+        let concurrent = native_concurrent;
         let base64 = native_base64;
         let json = native_json;
         let orna_codec = native_orna_codec;
@@ -5456,6 +5651,7 @@ impl Context<'_, '_> {
             .or(stats)
             .or(time)
             .or(stream)
+            .or(concurrent)
             .or(native_hash)
             .or(base64)
             .or(json)
@@ -5541,6 +5737,8 @@ impl Context<'_, '_> {
             self.time(name, values)
         } else if stream.is_some() {
             self.stream(name, values, depth)
+        } else if concurrent.is_some() {
+            self.concurrent(name, values, depth)
         } else if native_hash.is_some() {
             self.hash(name, values)
         } else if base64.is_some() {
@@ -5781,6 +5979,431 @@ impl Context<'_, '_> {
             | ("join", [_, _])
             | ("replace", [_, _, _])
             | ("normalise", [_, _]) => Err(error("ORNA-EVAL-TYPE")),
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+    fn checked_stream_values(
+        &mut self,
+        stream: &Value,
+    ) -> Result<(Vec<Value>, String), EvaluationError> {
+        let Value::Stream {
+            values,
+            source_label,
+            source_digest,
+            position,
+        } = stream
+        else {
+            return Err(error("ORNA-EVAL-TYPE"));
+        };
+        if *position > values.len()
+            || self.list_stream_digest(source_label, values)? != *source_digest
+        {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        self.items(values.len().saturating_sub(*position))?;
+        Ok((values[*position..].to_vec(), source_label.clone()))
+    }
+
+    fn finite_stream(
+        &mut self,
+        source_label: String,
+        values: Vec<Value>,
+    ) -> Result<Value, EvaluationError> {
+        self.string(source_label.clone())?;
+        self.items(values.len())?;
+        let source_digest = self.list_stream_digest(&source_label, &values)?;
+        Ok(Value::Stream {
+            values,
+            source_label,
+            source_digest,
+            position: 0,
+        })
+    }
+    fn stream(
+        &mut self,
+        name: &str,
+        values: Vec<Value>,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        match (name, values.as_slice()) {
+            ("from_list", [Value::List(items), Value::String(source_label)]) => {
+                self.finite_stream(source_label.clone(), items.clone())
+            }
+            ("for_each", [Value::Stream { .. }, action]) => {
+                let (items, _) = self.checked_stream_values(&values[0])?;
+                self.items(items.len())?;
+                for value in items {
+                    self.step()?;
+                    let result = self.invoke_predicate(action, value, depth + 1)?;
+                    if !matches!(result, Value::Unit | Value::Null) {
+                        return Err(error("ORNA-EVAL-TYPE"));
+                    }
+                    self.step()?;
+                }
+                Ok(Value::Unit)
+            }
+            ("batch", [Value::Stream { .. }, Value::Int(size)]) => {
+                let (items, source_label) = self.checked_stream_values(&values[0])?;
+                let size = self.positive_collection_size(size)?;
+                let mut batches = Vec::new();
+                for batch in items.chunks(size) {
+                    self.step()?;
+                    batches.push(Value::List(batch.to_vec()));
+                    self.items(batches.len())?;
+                }
+                self.finite_stream(format!("{source_label}|batch:{size}"), batches)
+            }
+            ("buffer", [Value::Stream { .. }, Value::Int(capacity)]) => {
+                let (items, source_label) = self.checked_stream_values(&values[0])?;
+                self.positive_collection_size(capacity)?;
+                // The immutable finite source is consumed under backpressure;
+                // a bounded queue changes scheduling, never item order/content.
+                self.finite_stream(format!("{source_label}|buffer"), items)
+            }
+            ("merge", [Value::List(streams)]) => {
+                let mut sources = Vec::with_capacity(streams.len());
+                for stream in streams {
+                    let (items, source_label) = self.checked_stream_values(stream)?;
+                    sources.push((source_label, items));
+                }
+                let total = sources.iter().try_fold(0usize, |total, (_, items)| {
+                    total
+                        .checked_add(items.len())
+                        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))
+                })?;
+                self.items(total)?;
+                let mut merged = Vec::with_capacity(total);
+                // The reference leaves cross-source arrival to a live
+                // scheduler. These finite materialized sources have no event
+                // timestamps, so this evaluator uses a repeatable round-robin
+                // admission schedule while preserving every source's order.
+                for position in 0..sources
+                    .iter()
+                    .map(|(_, items)| items.len())
+                    .max()
+                    .unwrap_or(0)
+                {
+                    for (_, items) in &sources {
+                        if let Some(value) = items.get(position) {
+                            self.step()?;
+                            merged.push(value.clone());
+                        }
+                    }
+                }
+                let mut merge_identity = Sha256::new();
+                merge_identity.update(b"orna.merge.v1\0");
+                merge_identity.update((sources.len() as u64).to_be_bytes());
+                for (source_label, items) in &sources {
+                    merge_identity.update((source_label.len() as u64).to_be_bytes());
+                    merge_identity.update(source_label.as_bytes());
+                    merge_identity.update(self.list_stream_digest(source_label, items)?);
+                }
+                let source_identity = merge_identity
+                    .finalize()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                self.finite_stream(format!("merge:{source_identity}"), merged)
+            }
+            (
+                "throttle",
+                [
+                    Value::Stream { .. },
+                    Value::Duration {
+                        seconds,
+                        nanosecond,
+                    },
+                    Value::String(policy),
+                ],
+            ) => {
+                if elapsed_total_nanoseconds(seconds, *nanosecond) <= BigInt::from(0u8) {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                if policy != "drop" {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                // The reference requires elapsed intervals but gives this
+                // finite source no timestamp provider. Treat the materialized
+                // list as one observation instant; explicit `drop` keeps its
+                // first item and drops later same-instant values.
+                let (items, source_label) = self.checked_stream_values(&values[0])?;
+                let output = items.first().cloned().into_iter().collect();
+                self.finite_stream(format!("{source_label}|throttle:drop"), output)
+            }
+            (
+                "debounce",
+                [
+                    Value::Stream { .. },
+                    Value::Duration {
+                        seconds,
+                        nanosecond,
+                    },
+                    Value::String(policy),
+                ],
+            ) => {
+                if elapsed_total_nanoseconds(seconds, *nanosecond) <= BigInt::from(0u8) {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                if policy != "latest" {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                // The reference requires elapsed quiet intervals but gives
+                // this finite source no timestamp provider. Treat its items as
+                // one synchronous burst and apply explicit `latest` delivery.
+                let (items, source_label) = self.checked_stream_values(&values[0])?;
+                let output = items.last().cloned().into_iter().collect();
+                self.finite_stream(format!("{source_label}|debounce:latest"), output)
+            }
+            ("retry", [Value::Stream { .. }, Value::Record(policy)]) => {
+                let (items, source_label) = self.checked_stream_values(&values[0])?;
+                let Some(Value::Int(max_attempts)) = policy.get("max_attempts") else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                let Some(Value::Duration {
+                    seconds: initial_seconds,
+                    nanosecond: initial_nanos,
+                }) = policy.get("initial_delay")
+                else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                let Some(Value::Duration {
+                    seconds: maximum_seconds,
+                    nanosecond: maximum_nanos,
+                }) = policy.get("max_delay")
+                else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                if !max_attempts.is_positive()
+                    || elapsed_total_nanoseconds(initial_seconds, *initial_nanos)
+                        < BigInt::from(0u8)
+                    || elapsed_total_nanoseconds(maximum_seconds, *maximum_nanos)
+                        < elapsed_total_nanoseconds(initial_seconds, *initial_nanos)
+                {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                // ListStreamSource is replayable and cannot produce a blocked
+                // provider delivery. A valid retry policy preserves it exactly.
+                self.finite_stream(format!("{source_label}|retry"), items)
+            }
+            ("recover", [Value::Stream { .. }, handler]) => {
+                let (items, source_label) = self.checked_stream_values(&values[0])?;
+                if !matches!(handler, Value::Function { .. } | Value::Closure(_)) {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                }
+                // The finite list source cannot fail decoding or polling, so
+                // recovery has no failure to replace and retains every item.
+                self.finite_stream(format!("{source_label}|recover"), items)
+            }
+            ("from_list", [_, _])
+            | ("for_each", [_, _])
+            | ("batch", [_, _])
+            | ("buffer", [_, _])
+            | ("throttle", [_, _, _])
+            | ("debounce", [_, _, _])
+            | ("retry", [_, _])
+            | ("recover", [_, _])
+            | ("merge", [_]) => Err(error("ORNA-EVAL-TYPE")),
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+    fn concurrent(
+        &mut self,
+        name: &str,
+        values: Vec<Value>,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        match (name, values.as_slice()) {
+            ("parallel", [Value::List(callbacks)]) => {
+                self.items(callbacks.len())?;
+                if callbacks.is_empty() {
+                    return Ok(Value::List(Vec::new()));
+                }
+                self.depth(depth.saturating_add(1))?;
+                let parent = self.cancellation.cloned();
+                let mut child_effects = Vec::with_capacity(callbacks.len());
+                if let Some(effects) = self.effects.as_deref_mut() {
+                    for index in 0..callbacks.len() {
+                        child_effects.push(effects.fork_task_child(index));
+                    }
+                } else {
+                    child_effects.resize_with(callbacks.len(), || None);
+                }
+                let (results, _) = run_task_callbacks(
+                    callbacks,
+                    child_effects,
+                    depth.saturating_add(1),
+                    parent.clone(),
+                    self.functions,
+                    self.aliases,
+                    self.session_functions,
+                    self.limits,
+                    self.repl_bindings,
+                    self.restrict_function_names,
+                    self.reject_unhandled_field_calls,
+                    true,
+                    false,
+                );
+                if parent.as_ref().is_some_and(CancellationToken::is_requested) {
+                    return Err(error("ORNA-EVAL-CANCELLED"));
+                }
+                let failures = results
+                    .iter()
+                    .filter_map(|result| result.as_ref()?.as_ref().err())
+                    .filter(|failure| failure.code() != "ORNA-EVAL-CANCELLED")
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !failures.is_empty() {
+                    return Err(aggregate_task_failures(&failures));
+                }
+                let mut output = Vec::with_capacity(results.len());
+                for result in results {
+                    match result {
+                        Some(Ok(value)) => output.push(value),
+                        Some(Err(failure)) => return Err(failure),
+                        None => return Err(error("ORNA-EVAL-CANCELLED")),
+                    }
+                }
+                Ok(Value::List(output))
+            }
+            ("race", [Value::List(callbacks)]) => {
+                self.items(callbacks.len())?;
+                if callbacks.is_empty() {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                self.depth(depth.saturating_add(1))?;
+                let parent = self.cancellation.cloned();
+                let mut child_effects = Vec::with_capacity(callbacks.len());
+                if let Some(effects) = self.effects.as_deref_mut() {
+                    for index in 0..callbacks.len() {
+                        child_effects.push(effects.fork_task_child(index));
+                    }
+                } else {
+                    child_effects.resize_with(callbacks.len(), || None);
+                }
+                let (results, winner) = run_task_callbacks(
+                    callbacks,
+                    child_effects,
+                    depth.saturating_add(1),
+                    parent.clone(),
+                    self.functions,
+                    self.aliases,
+                    self.session_functions,
+                    self.limits,
+                    self.repl_bindings,
+                    self.restrict_function_names,
+                    self.reject_unhandled_field_calls,
+                    false,
+                    true,
+                );
+                if parent.as_ref().is_some_and(CancellationToken::is_requested) {
+                    return Err(error("ORNA-EVAL-CANCELLED"));
+                }
+                if let Some(winner) = winner {
+                    return Ok(winner);
+                }
+                results
+                    .into_iter()
+                    .enumerate()
+                    .find_map(|(_, result)| {
+                        result.and_then(|result| match result {
+                            Err(failure) if failure.code() != "ORNA-EVAL-CANCELLED" => {
+                                Some(Err(failure))
+                            }
+                            _ => None,
+                        })
+                    })
+                    .unwrap_or_else(|| Err(error("ORNA-EVAL-ERROR")))
+            }
+            (
+                "timeout",
+                [
+                    callback,
+                    Value::Duration {
+                        seconds,
+                        nanosecond,
+                    },
+                ],
+            ) => {
+                self.depth(depth.saturating_add(1))?;
+                if seconds.is_negative() {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                let seconds = seconds.to_u64().ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+                let timeout = std::time::Duration::new(seconds, *nanosecond);
+                let shared_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let parent = self.cancellation.cloned();
+                let functions = self.functions;
+                let aliases = self.aliases;
+                let session_functions = self.session_functions;
+                let limits = self.limits;
+                let repl_bindings = self.repl_bindings;
+                let restrict_function_names = self.restrict_function_names;
+                let reject_unhandled_field_calls = self.reject_unhandled_field_calls;
+                let child_effects = self
+                    .effects
+                    .as_deref_mut()
+                    .and_then(|effects| effects.fork_task_child(0));
+                let result = std::thread::scope(|scope| {
+                    let (sender, receiver) = std::sync::mpsc::channel();
+                    let shared_for_task = Arc::clone(&shared_cancel);
+                    let callback = callback.clone();
+                    let task_parent = parent.clone();
+                    scope.spawn(move || {
+                        let cancellation =
+                            CancellationToken::child(Arc::clone(&shared_for_task), task_parent);
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            invoke_task_callback(
+                                callback,
+                                functions,
+                                aliases,
+                                session_functions,
+                                limits,
+                                cancellation,
+                                repl_bindings,
+                                restrict_function_names,
+                                reject_unhandled_field_calls,
+                                depth.saturating_add(1),
+                                child_effects,
+                            )
+                        }))
+                        .unwrap_or_else(|_| Err(error("ORNA-EVAL-ERROR")));
+                        let _ = sender.send(result);
+                    });
+                    let started = std::time::Instant::now();
+                    loop {
+                        if parent.as_ref().is_some_and(CancellationToken::is_requested) {
+                            shared_cancel.store(true, std::sync::atomic::Ordering::Release);
+                            while receiver.recv().is_ok() {}
+                            return Err(error("ORNA-EVAL-CANCELLED"));
+                        }
+                        let remaining = timeout.saturating_sub(started.elapsed());
+                        if remaining.is_zero() {
+                            match receiver.try_recv() {
+                                Ok(result) => return result,
+                                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                    shared_cancel.store(true, std::sync::atomic::Ordering::Release);
+                                    let _ = receiver.recv();
+                                    return Err(error("ORNA-EVAL-TIMEOUT"));
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                    return Err(error("ORNA-EVAL-ERROR"));
+                                }
+                            }
+                        }
+                        match receiver
+                            .recv_timeout(remaining.min(std::time::Duration::from_millis(10)))
+                        {
+                            Ok(result) => return result,
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                return Err(error("ORNA-EVAL-ERROR"));
+                            }
+                        }
+                    }
+                })?;
+                Ok(result)
+            }
+            ("parallel" | "race", [_]) | ("timeout", [_, _]) => Err(error("ORNA-EVAL-TYPE")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
@@ -6167,66 +6790,6 @@ impl Context<'_, '_> {
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
-    fn stream(
-        &mut self,
-        name: &str,
-        values: Vec<Value>,
-        depth: usize,
-    ) -> Result<Value, EvaluationError> {
-        match (name, values.as_slice()) {
-            ("from_list", [Value::List(items), Value::String(source_label)]) => {
-                self.items(items.len())?;
-                let source_label = self.string(source_label.clone())?;
-                let source_digest = self.list_stream_digest(&source_label, items)?;
-                Ok(Value::Stream {
-                    values: items.clone(),
-                    source_label,
-                    source_digest,
-                    position: 0,
-                })
-            }
-            (
-                "for_each",
-                [
-                    Value::Stream {
-                        values,
-                        source_label,
-                        source_digest,
-                        position,
-                    },
-                    action,
-                ],
-            ) => {
-                self.items(values.len())?;
-                if *position > values.len()
-                    || self.list_stream_digest(source_label, values)? != *source_digest
-                {
-                    return Err(error("ORNA-EVAL-VALUE"));
-                }
-                let mut next_index = *position;
-                while next_index < values.len() {
-                    self.step()?;
-                    let result = self.invoke_predicate(
-                        action,
-                        values[next_index].clone(),
-                        depth + 1,
-                    )?;
-                    if !matches!(result, Value::Unit | Value::Null) {
-                        return Err(error("ORNA-EVAL-TYPE"));
-                    }
-                    // Callback completion and checkpoint movement consume
-                    // independent cancellable steps; failures leave the
-                    // next-item position unchanged.
-                    self.step()?;
-                    next_index += 1;
-                }
-                Ok(Value::Unit)
-            }
-            ("from_list", [_, _]) | ("for_each", [_, _]) => Err(error("ORNA-EVAL-TYPE")),
-            _ => Err(error("ORNA-EVAL-ARGUMENT")),
-        }
-    }
-
     fn list_stream_digest(
         &mut self,
         source_label: &str,
@@ -7973,6 +8536,67 @@ impl Context<'_, '_> {
         }
         Ok(Value::List(joined))
     }
+    fn invoke_callable(
+        &mut self,
+        callable: &Value,
+        arguments: Vec<Value>,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        let (parameters, body, mut captured, session_owned, namespace) = match callable {
+            Value::Function {
+                name,
+                nominal_definitions,
+            } => {
+                let function = self
+                    .functions
+                    .get(name)
+                    .ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+                (
+                    function.parameters.clone(),
+                    function.body.clone(),
+                    Scope::from_environment_with_nominals(
+                        &function.environment,
+                        nominal_definitions,
+                        self,
+                    )?,
+                    self.session_functions
+                        .is_some_and(|functions| functions.contains(name)),
+                    function_namespace(name),
+                )
+            }
+            Value::Closure(closure) => (
+                closure.parameters.clone(),
+                closure.body.clone(),
+                closure.captured.clone(),
+                self.repl_bindings,
+                closure.namespace.clone(),
+            ),
+            _ => return Err(error("ORNA-EVAL-TYPE")),
+        };
+        self.depth(depth + 1)?;
+        self.items(arguments.len())?;
+        if arguments.len() > parameters.len() {
+            return Err(error("ORNA-EVAL-ARGUMENT"));
+        }
+        captured.2.extend(
+            self.session_functions
+                .into_iter()
+                .flat_map(|functions| functions.iter().cloned())
+                .filter(|name| captured.0.contains_key(name)),
+        );
+        let mut supplied = BTreeMap::new();
+        for (index, value) in arguments.into_iter().enumerate() {
+            supplied.insert(parameter_key(&parameters[index], index), value);
+        }
+        let previous_repl_bindings = self.repl_bindings;
+        self.repl_bindings = session_owned;
+        let previous_namespace = self.namespace.clone();
+        self.namespace = namespace;
+        let result = invoke_pure(self, &parameters, &body, captured, supplied, depth + 1);
+        self.namespace = previous_namespace;
+        self.repl_bindings = previous_repl_bindings;
+        result
+    }
     fn invoke_predicate(
         &mut self,
         callable: &Value,
@@ -9158,9 +9782,18 @@ fn named_arguments(
         "bit_or" | "bit_and" | "bit_xor" => &["left", "right"],
         "bit_not" => &["value"],
         "shift_left" | "shift_right" => &["value", "count"],
-        "chunk" => &["values", "size"],
         "from_list" => &["values", "source_identity"],
         "for_each" => &["stream", "action"],
+        "batch" => &["stream", "size"],
+        "buffer" => &["stream", "capacity"],
+        "merge" => &["streams"],
+        "throttle" => &["stream", "duration", "drop_policy"],
+        "debounce" => &["stream", "duration", "delivery_policy"],
+        "retry" => &["stream", "policy"],
+        "recover" => &["stream", "handler"],
+        "parallel" | "race" => &["callbacks"],
+        "timeout" => &["callback", "duration"],
+        "chunk" => &["values", "size"],
         "flatten" | "unique" | "pairs" => &["values"],
         "distinct" | "count" => &["rows"],
         "last" => &["rows"],
@@ -9309,6 +9942,8 @@ enum StandardBindingKind {
     Math,
     Text,
     Bits,
+    Stream,
+    Concurrent,
     Stats,
     Time,
     Hash,
@@ -9457,6 +10092,26 @@ const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
             "__shift_left",
             "__shift_right",
         ],
+    },
+    StandardBindingModule {
+        prefix: "std.stream.",
+        kind: StandardBindingKind::Stream,
+        operations: &[
+            "from_list",
+            "for_each",
+            "batch",
+            "buffer",
+            "merge",
+            "throttle",
+            "debounce",
+            "retry",
+            "recover",
+        ],
+    },
+    StandardBindingModule {
+        prefix: "std.concurrent.",
+        kind: StandardBindingKind::Concurrent,
+        operations: &["parallel", "race", "timeout"],
     },
     StandardBindingModule {
         prefix: "std.stats.",
