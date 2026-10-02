@@ -8005,6 +8005,277 @@ fn post_storm_paired_closures_preserve_three_sibling_terminal_routes() {
 }
 
 #[test]
+fn post_storm_paired_depth_rebinds_follow_each_sibling_manifest() {
+    let package_source = include_str!("fixtures/attach-package.orna");
+    let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
+    let aliases = [
+        "archive",
+        "archive_copy",
+        "archive_copy_archive",
+        "archive_copy_archive_archive",
+    ];
+    let sibling_count = 2;
+    let marker =
+        |depth: usize, sibling: usize, variant: usize| (depth + 1) * 100 + sibling * 10 + variant;
+
+    let terminal_commits: Vec<String> = (0..sibling_count)
+        .map(|sibling| {
+            write_package_snapshot(
+                shared_dir.path(),
+                package_source,
+                &format!("{}", marker(3, sibling, sibling)),
+                None,
+                &format!("sibling-specific terminal {sibling}"),
+            )
+        })
+        .collect();
+    let deep_commits: Vec<Vec<String>> = (0..sibling_count)
+        .map(|sibling| {
+            (0..2)
+                .map(|variant| {
+                    let terminal = if variant == 0 { sibling } else { 1 - sibling };
+                    let manifest = format!("{} {}\n", aliases[3], terminal_commits[terminal]);
+                    write_package_snapshot(
+                        shared_dir.path(),
+                        package_source,
+                        &format!("{}", marker(2, sibling, variant)),
+                        Some(&manifest),
+                        &format!("sibling {sibling} deep route {variant}"),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    let middle_commits: Vec<Vec<String>> = (0..sibling_count)
+        .map(|sibling| {
+            (0..2)
+                .map(|variant| {
+                    let manifest = format!("{} {}\n", aliases[2], deep_commits[sibling][variant]);
+                    write_package_snapshot(
+                        shared_dir.path(),
+                        package_source,
+                        &format!("{}", marker(1, sibling, variant)),
+                        Some(&manifest),
+                        &format!("sibling {sibling} middle route {variant}"),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    let parent_manifest = format!("{} {}\n", aliases[1], middle_commits[0][0]);
+    let parent_commit = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "50",
+        Some(&parent_manifest),
+        "parent for diverging post-storm sibling routes",
+    );
+
+    let loader = ProjectLoader::default();
+    let resolve_pin_grid = |alias: &str, commits: &[Vec<String>]| {
+        commits
+            .iter()
+            .map(|sibling| {
+                sibling
+                    .iter()
+                    .map(|commit| {
+                        PinnedDatabase::resolve(alias, shared_repository.clone(), commit, loader)
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let middle_pins = resolve_pin_grid(aliases[1], &middle_commits);
+    let deep_pins = resolve_pin_grid(aliases[2], &deep_commits);
+    let terminal_pins: Vec<PinnedDatabase> = terminal_commits
+        .iter()
+        .map(|commit| {
+            PinnedDatabase::resolve(aliases[3], shared_repository.clone(), commit, loader).unwrap()
+        })
+        .collect();
+    let parent_pin = PinnedDatabase::resolve(
+        aliases[0],
+        shared_repository.clone(),
+        &parent_commit,
+        loader,
+    )
+    .unwrap();
+    let resolver = PackageResolver::new(
+        aliases
+            .iter()
+            .map(|alias| ((*alias).to_owned(), shared_repository.clone())),
+        loader,
+    )
+    .unwrap();
+    let rebind = |session: &mut AttachedDatabaseSession, alias: &str, pin: &PinnedDatabase| {
+        session.detach_database(alias).unwrap();
+        session.attach_database(pin.clone()).unwrap();
+    };
+    let assert_pin = |session: &AttachedDatabaseSession, alias: &str, commit: &str| {
+        assert_eq!(
+            session.database(alias).unwrap().pin().commit().as_str(),
+            commit
+        );
+    };
+    let assert_route =
+        |session: &AttachedDatabaseSession, depth: usize, sibling: usize, variant: usize| {
+            assert_module_route(
+                session,
+                &format!("{}.orna", aliases[depth]),
+                &format!("= {}", marker(depth, sibling, variant)),
+            );
+        };
+
+    let parent = resolver.resolve_for_parent(parent_pin).unwrap();
+    let mut sibling_roots = vec![parent.clone(); sibling_count];
+    rebind(&mut sibling_roots[1], aliases[1], &middle_pins[1][0]);
+    for sibling in 0..sibling_count {
+        assert_pin(
+            &sibling_roots[sibling],
+            aliases[1],
+            &middle_commits[sibling][0],
+        );
+        assert_route(&sibling_roots[sibling], 1, sibling, 0);
+    }
+    let pre_storm_roots = sibling_roots.clone();
+
+    let old_deep_closures: Vec<AttachedDatabaseSession> = sibling_roots
+        .iter()
+        .map(|root| {
+            resolver
+                .resolve_for_parent(root.database(aliases[1]).unwrap().clone())
+                .unwrap()
+        })
+        .collect();
+    let old_deep_snapshots = old_deep_closures.clone();
+    let mut old_terminal_routes: Vec<AttachedDatabaseSession> = old_deep_closures
+        .iter()
+        .map(|deep| {
+            resolver
+                .resolve_for_parent(deep.database(aliases[2]).unwrap().clone())
+                .unwrap()
+        })
+        .collect();
+    let pre_storm_terminal_snapshots = old_terminal_routes.clone();
+    for sibling in 0..sibling_count {
+        assert_pin(
+            &old_deep_closures[sibling],
+            aliases[2],
+            &deep_commits[sibling][0],
+        );
+        assert_route(&old_deep_closures[sibling], 2, sibling, 0);
+        assert_pin(
+            &old_terminal_routes[sibling],
+            aliases[3],
+            &terminal_commits[sibling],
+        );
+    }
+
+    // Earlier terminal storms choose routes opposite their sibling manifests.
+    rebind(&mut old_terminal_routes[0], aliases[3], &terminal_pins[1]);
+    rebind(&mut old_terminal_routes[1], aliases[3], &terminal_pins[0]);
+    assert_pin(&old_terminal_routes[0], aliases[3], &terminal_commits[1]);
+    assert_pin(&old_terminal_routes[1], aliases[3], &terminal_commits[0]);
+    assert_route(&old_terminal_routes[0], 3, 1, 1);
+    assert_route(&old_terminal_routes[1], 3, 0, 0);
+
+    // The later middle rebinds select different deep pins by manifest.
+    rebind(&mut sibling_roots[1], aliases[1], &middle_pins[1][1]);
+    rebind(&mut sibling_roots[0], aliases[1], &middle_pins[0][1]);
+    for sibling in 0..sibling_count {
+        assert_pin(
+            &sibling_roots[sibling],
+            aliases[1],
+            &middle_commits[sibling][1],
+        );
+        assert_route(&sibling_roots[sibling], 1, sibling, 1);
+    }
+    let mut reopened_deep_closures: Vec<AttachedDatabaseSession> = sibling_roots
+        .iter()
+        .map(|root| {
+            resolver
+                .resolve_for_parent(root.database(aliases[1]).unwrap().clone())
+                .unwrap()
+        })
+        .collect();
+    let selected_manifest_deep_snapshots = reopened_deep_closures.clone();
+    for sibling in 0..sibling_count {
+        assert_pin(
+            &reopened_deep_closures[sibling],
+            aliases[2],
+            &deep_commits[sibling][1],
+        );
+        assert_route(&reopened_deep_closures[sibling], 2, sibling, 1);
+    }
+
+    // Rebinding the selected deep edge changes only that reopened closure.
+    rebind(&mut reopened_deep_closures[0], aliases[2], &deep_pins[0][0]);
+    rebind(&mut reopened_deep_closures[1], aliases[2], &deep_pins[1][0]);
+    let final_terminal_routes: Vec<AttachedDatabaseSession> = reopened_deep_closures
+        .iter()
+        .map(|deep| {
+            resolver
+                .resolve_for_parent(deep.database(aliases[2]).unwrap().clone())
+                .unwrap()
+        })
+        .collect();
+
+    for sibling in 0..sibling_count {
+        assert_pin(
+            &reopened_deep_closures[sibling],
+            aliases[2],
+            &deep_commits[sibling][0],
+        );
+        assert_route(&reopened_deep_closures[sibling], 2, sibling, 0);
+        assert_pin(
+            &selected_manifest_deep_snapshots[sibling],
+            aliases[2],
+            &deep_commits[sibling][1],
+        );
+        assert_pin(
+            &final_terminal_routes[sibling],
+            aliases[3],
+            &terminal_commits[sibling],
+        );
+        assert_route(&final_terminal_routes[sibling], 3, sibling, sibling);
+        assert_pin(
+            &pre_storm_terminal_snapshots[sibling],
+            aliases[3],
+            &terminal_commits[sibling],
+        );
+        assert_pin(
+            &old_terminal_routes[sibling],
+            aliases[3],
+            &terminal_commits[1 - sibling],
+        );
+        assert_pin(
+            &old_deep_snapshots[sibling],
+            aliases[2],
+            &deep_commits[sibling][0],
+        );
+        assert_pin(
+            &pre_storm_roots[sibling],
+            aliases[1],
+            &middle_commits[sibling][0],
+        );
+    }
+    assert_ne!(
+        final_terminal_routes[0]
+            .database(aliases[3])
+            .unwrap()
+            .pin()
+            .commit(),
+        final_terminal_routes[1]
+            .database(aliases[3])
+            .unwrap()
+            .pin()
+            .commit()
+    );
+    assert_pin(&parent, aliases[1], &middle_commits[0][0]);
+}
+
+#[test]
 fn three_sibling_depth_storms_keep_convergent_routes_stable() {
     let package_source = include_str!("fixtures/attach-package.orna");
     let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
