@@ -5,6 +5,9 @@ pub table PlannerPairedDepthPostStormRouteStability(id: Int) {
     fourth: Bool,
     fifth: Bool,
     sixth: Bool,
+    seventh: Bool,
+    eighth: Bool,
+    ninth: Bool,
 }
 pub fn paired_depth_post_storm_routes() = PlannerPairedDepthPostStormRouteStability
     | union(
@@ -38,6 +41,23 @@ pub fn paired_depth_post_storm_routes() = PlannerPairedDepthPostStormRouteStabil
                         PlannerPairedDepthPostStormRouteStability
                             | take(3)
                             | filter(row => row.sixth)
+            )
+    )
+    )
+    | union(
+        PlannerPairedDepthPostStormRouteStability
+            | take(72)
+            | take(36)
+            | filter(row => row.seventh)
+            | union(
+                PlannerPairedDepthPostStormRouteStability
+                    | take(16)
+                    | take(8)
+                    | filter(row => row.eighth)
+                    | union(
+                        PlannerPairedDepthPostStormRouteStability
+                            | take(4)
+                            | filter(row => row.ninth)
                     )
             )
     );
