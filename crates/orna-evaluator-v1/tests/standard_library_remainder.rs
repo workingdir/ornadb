@@ -252,6 +252,14 @@ fn pinned_stats_aggregates_require_the_captured_std_module() {
         "an inexact exact-number mean needs an explicit scale and rounding mode"
     );
     assert_eq!(
+        session
+            .submit(include_str!("fixtures/stdlib-stats-unbound-operation-fdqo9.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-ERROR",
+        "new stats contracts fail closed until their evaluator binding exists"
+    );
+    assert_eq!(
         session.submit(include_str!("fixtures/stdlib-use-query-ymou.orna")),
         Ok(None)
     );
