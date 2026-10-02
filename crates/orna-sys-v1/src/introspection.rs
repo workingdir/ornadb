@@ -2037,7 +2037,12 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             })
             .collect::<Vec<_>>()
             .join(";");
-        let limit_chain_rebind_byte_cap_depths = disjunct_storm_rebind_depths(storm);
+        let limit_chain_rebind_byte_cap_handoffs_by_depth =
+            disjunct_storm_rebind_cascade_counts_by_depth(storm);
+        let limit_chain_rebind_byte_cap_depths = limit_chain_rebind_byte_cap_handoffs_by_depth
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
         let limit_chain_rebind_max_nested_depth = limit_chain_rebind_byte_cap_depths
             .last()
             .copied()
@@ -2047,6 +2052,12 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             .map(usize::to_string)
             .collect::<Vec<_>>()
             .join(",");
+        let limit_chain_rebind_byte_cap_handoffs_by_depth_text =
+            limit_chain_rebind_byte_cap_handoffs_by_depth
+                .iter()
+                .map(|(depth, count)| format!("{depth}:{count}"))
+                .collect::<Vec<_>>()
+                .join(",");
         let limit_chain_rebind_predicates = storm
             .branches
             .iter()
@@ -2092,6 +2103,10 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             (
                 "limit_chain_rebind_byte_cap_depths".to_owned(),
                 PlanDetail::Text(limit_chain_rebind_byte_cap_depths_text),
+            ),
+            (
+                "limit_chain_rebind_byte_cap_handoffs_by_depth".to_owned(),
+                PlanDetail::Text(limit_chain_rebind_byte_cap_handoffs_by_depth_text),
             ),
             (
                 "limit_chain_rebind_predicates".to_owned(),
@@ -2683,16 +2698,21 @@ fn disjunct_storm_predicates(storms: &[DisjunctStormCascadeDescription]) -> Vec<
     predicates
 }
 
-/// Returns one-based storm nesting levels with at least one branch-local
-/// limit rebind. Those are the levels where nested byte caps apply to the
-/// immediate post-limit branch estimate.
-fn disjunct_storm_rebind_depths(storm: &DisjunctStormCascadeDescription) -> Vec<usize> {
+/// Returns the number of rebound cascades at each one-based storm nesting
+/// level. Every counted cascade has a byte-cap handoff from its immediate
+/// post-limit branch estimate or the previous rebound output.
+fn disjunct_storm_rebind_cascade_counts_by_depth(
+    storm: &DisjunctStormCascadeDescription,
+) -> BTreeMap<usize, usize> {
     let mut pending = vec![(storm, 1usize)];
-    let mut rebind_depths = BTreeSet::new();
+    let mut rebind_counts = BTreeMap::new();
     while let Some((storm, depth)) = pending.pop() {
         for branch in &storm.branches {
-            if !branch.limit_rebinds.is_empty() {
-                rebind_depths.insert(depth);
+            for rebind in &branch.limit_rebinds {
+                if !rebind.storms.is_empty() {
+                    let count = rebind_counts.entry(depth).or_insert(0usize);
+                    *count = count.saturating_add(rebind.storms.len());
+                }
             }
             pending.extend(
                 branch
@@ -2704,7 +2724,7 @@ fn disjunct_storm_rebind_depths(storm: &DisjunctStormCascadeDescription) -> Vec<
             );
         }
     }
-    rebind_depths.into_iter().collect()
+    rebind_counts
 }
 
 fn disjunct_storm_cascade_cardinality_and_work(
