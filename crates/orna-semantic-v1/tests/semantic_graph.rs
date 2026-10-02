@@ -3831,6 +3831,29 @@ fn tuple_pin_cascade_stages_do_not_merge_after_round_trip() {
 }
 
 #[test]
+fn tuple_pin_cascade_depths_stay_isolated_through_chained_storm_rebinds() {
+    let source = include_str!("fixtures/historical-tuple-pin-cascade-depth-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-tuple-pin-cascade-depth-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "nested tuple pin cascades must preserve each depth and storm stage independently: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
