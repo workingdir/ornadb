@@ -45,6 +45,7 @@ pub use introspection::{
     explain_query_with_input_disjunct_limit_conjunct_chain,
     explain_query_with_input_limit_conjunct_disjunct_limit_conjunct_chain,
     explain_query_with_input_limit_disjunct_conjunct_chain, explain_query_with_limit_chain,
+    explain_query_with_disjunct_branch_limit_conjunct_cascade,
 };
 
 mod provider;

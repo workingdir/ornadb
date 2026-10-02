@@ -928,6 +928,51 @@ pub fn explain_query_with_conjunct_disjunct_limit_chain(
     )
 }
 
+/// Explains disjunct expansion whose individual branches each run a nested
+/// limit chain followed by a left-to-right conjunct chain, then applies the
+/// query's outer limit and any additional limit stages.
+///
+/// Each branch starts from the same source/join input. Its nested limits run
+/// in order before its conjuncts; limit work is charged once per disjunct.
+/// The disjunction then combines the branch estimates. ORNA-PLAN leaves this
+/// estimate composition unspecified, so the adapter uses the deterministic
+/// 50%-per-conjunct, independent-branch fallback and rounds each branch's
+/// surviving rows upward. The query's `limit` and `additional_limits` run
+/// after the disjunction and retain all branch work. `disjunct_count`,
+/// and `conjunct_count_per_disjunct` must be positive; `nested_branch_limits`
+/// must be nonempty and the query must have a predicate.
+pub fn explain_query_with_disjunct_branch_limit_conjunct_cascade(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    nested_branch_limits: &[u64],
+    conjunct_count_per_disjunct: u64,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0
+        || nested_branch_limits.is_empty()
+        || conjunct_count_per_disjunct == 0
+        || query.predicate.is_none()
+    {
+        return Err(ExplainError::InvalidExpression);
+    }
+    if disjunct_count.saturating_mul(conjunct_count_per_disjunct)
+        > MAX_PLAN_EXPRESSIONS as u64
+    {
+        return Err(ExplainError::TooManyExpressions);
+    }
+    explain_query_with_predicate_pressure_and_branch_limits(
+        query,
+        disjunct_count,
+        None,
+        Some(conjunct_count_per_disjunct),
+        &[],
+        nested_branch_limits,
+        &[],
+        None,
+        additional_limits,
+    )
+}
+
 /// Explains nested input limits, one expanded disjunctive filter, and then
 /// the query's outer limit followed by any additional limits.
 ///
@@ -1179,9 +1224,34 @@ fn explain_query_with_predicate_pressure(
     post_expansion_conjunct: Option<&ExpressionRef>,
     additional_limits: &[u64],
 ) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_with_predicate_pressure_and_branch_limits(
+        query,
+        disjunct_count,
+        conjunct_count,
+        conjunct_count_per_disjunct,
+        nested_input_limits,
+        &[],
+        limits_between_disjunct_and_conjunct,
+        post_expansion_conjunct,
+        additional_limits,
+    )
+}
+
+fn explain_query_with_predicate_pressure_and_branch_limits(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    conjunct_count: Option<u64>,
+    conjunct_count_per_disjunct: Option<u64>,
+    nested_input_limits: &[u64],
+    nested_branch_limits: &[u64],
+    limits_between_disjunct_and_conjunct: &[u64],
+    post_expansion_conjunct: Option<&ExpressionRef>,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
     if disjunct_count == 0
         || conjunct_count == Some(0)
         || conjunct_count_per_disjunct == Some(0)
+        || (!nested_branch_limits.is_empty() && conjunct_count_per_disjunct.is_none())
         || ((disjunct_count > 1
             || conjunct_count.is_some()
             || conjunct_count_per_disjunct.is_some())
@@ -1230,6 +1300,7 @@ fn explain_query_with_predicate_pressure(
         .saturating_add(usize::from(!query.ordering.is_empty()))
         .saturating_add(usize::from(query.limit.is_some()))
         .saturating_add(nested_input_limits.len())
+        .saturating_add(nested_branch_limits.len())
         .saturating_add(limits_between_disjunct_and_conjunct.len())
         .saturating_add(usize::from(post_expansion_conjunct.is_some()))
         .saturating_add(additional_limits.len())
@@ -1327,6 +1398,36 @@ fn explain_query_with_predicate_pressure(
             PlanNodeKind::Limit,
             None,
             BTreeMap::from([("limit".to_owned(), PlanDetail::Integer(*limit))]),
+            cardinality,
+            work,
+        );
+        current_cardinality = cardinality;
+    }
+    for limit in nested_branch_limits {
+        let cardinality = limit_cardinality(current_cardinality, *limit);
+        let work = current_cardinality
+            .rows
+            .and_then(|rows| rows.checked_mul(disjunct_count));
+        let mut details = BTreeMap::from([
+            ("limit".to_owned(), PlanDetail::Integer(*limit)),
+            (
+                "limit_scope".to_owned(),
+                PlanDetail::Text("per_disjunct_branch".to_owned()),
+            ),
+            (
+                "disjunct_count".to_owned(),
+                PlanDetail::Integer(disjunct_count),
+            ),
+        ]);
+        if current_cardinality.rows.is_some() && work.is_none() {
+            record_work_overflow(&mut details);
+        }
+        current = push_unary(
+            &mut operators,
+            current,
+            PlanNodeKind::Limit,
+            None,
+            details,
             cardinality,
             work,
         );
