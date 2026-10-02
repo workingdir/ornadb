@@ -5022,6 +5022,62 @@ fn bottom_terminal_tuple_wave_preserves_each_capture_depth_pin_identity() {
 }
 
 #[test]
+fn bottom_cascade_keeps_completed_capture_depth_identities() {
+    let source = include_str!("fixtures/historical-paired-nested-tuple-bottom-wave.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-tuple-bottom-wave.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_nested_tuple_bottom_cascade_identity")
+        })
+        .expect("bottom cascade fixture module");
+    let summary = format!("{:?}", module.symbols["paired_nested_tuple_bottom_cascade_identity"].ty);
+    for selector in [
+        "HEAD~450",
+        "HEAD~440",
+        "HEAD~430",
+        "HEAD~420",
+        "HEAD~410",
+        "HEAD~400",
+        "HEAD~350",
+        "HEAD~340",
+        "HEAD~330",
+    ] {
+        assert!(
+            summary.contains(&format!("selector:{selector}")),
+            "completed capture depth lost {selector}: {summary}"
+        );
+    }
+    for selector in [
+        "HEAD~380",
+        "HEAD~370",
+        "HEAD~360",
+        "HEAD~320",
+        "HEAD~310",
+        "HEAD~290",
+        "HEAD~280",
+        "HEAD~270",
+    ] {
+        assert!(
+            !summary.contains(selector),
+            "incomplete tuple wave leaked {selector}: {summary}"
+        );
+    }
+}
+
+#[test]
 fn concurrent_callback_tuples_reject_cross_lane_identity_mix_after_rebind() {
     let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
