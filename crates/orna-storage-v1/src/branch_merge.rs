@@ -7,9 +7,9 @@
 //! so callers cannot partially apply this operation to the CWD.
 
 use orna_evolution_v1::{
-    CanonicalValue, CheckpointGeneration, CheckpointMergeConflict, KeyedRow, ObjectId, RowMergeConflict,
-    RowMergeOperation, RowSnapshotMergeError, RowSnapshotState, Schema, SchemaMergeConflict,
-    merge_checkpoint_generation, merge_keyed_row_states, merge_schema_bounded,
+    CanonicalValue, CheckpointGeneration, CheckpointMergeConflict, KeyedRow, ObjectId,
+    RowMergeConflict, RowMergeOperation, RowSnapshotMergeError, RowSnapshotState, Schema,
+    SchemaMergeConflict, merge_checkpoint_generation, merge_keyed_row_states, merge_schema_bounded,
 };
 use orna_foundation_v1::compare_primary_keys;
 use std::{
@@ -37,7 +37,10 @@ pub struct KeyRange {
 
 impl KeyRange {
     pub fn all() -> Self {
-        Self { start: None, end: None }
+        Self {
+            start: None,
+            end: None,
+        }
     }
 
     pub fn new(start: Option<Vec<u8>>, end: Option<Vec<u8>>) -> Option<Self> {
@@ -60,16 +63,12 @@ impl KeyRange {
         if compare_primary_keys(&key_value, &key_value).is_err() {
             return false;
         }
-        self.start
-            .as_deref()
-            .is_none_or(|start| {
-                compare_key_to_encoded_primary_key(&key_value, start)
-                    .is_some_and(|order| order != Ordering::Less)
-            })
-            && self
-                .end
-                .as_deref()
-                .is_none_or(|end| compare_key_to_encoded_primary_key(&key_value, end) == Some(Ordering::Less))
+        self.start.as_deref().is_none_or(|start| {
+            compare_key_to_encoded_primary_key(&key_value, start)
+                .is_some_and(|order| order != Ordering::Less)
+        }) && self.end.as_deref().is_none_or(|end| {
+            compare_key_to_encoded_primary_key(&key_value, end) == Some(Ordering::Less)
+        })
     }
 }
 
@@ -140,17 +139,29 @@ pub struct BranchMergeBudget {
 
 impl Default for BranchMergeBudget {
     fn default() -> Self {
-        Self { max_rows_examined: 1_000_000, max_conflicts: 1_000 }
+        Self {
+            max_rows_examined: 1_000_000,
+            max_conflicts: 1_000,
+        }
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BranchMergeConflict {
     Schema(SchemaMergeConflict),
-    Table { table: ObjectId, reason: &'static str },
-    Row { range: KeyRange, conflict: RowMergeConflict },
+    Table {
+        table: ObjectId,
+        reason: &'static str,
+    },
+    Row {
+        range: KeyRange,
+        conflict: RowMergeConflict,
+    },
     /// Projects to the user-facing `sys.CheckpointConflict` diagnostic.
-    CheckpointConflict { id: CheckpointId, conflict: CheckpointMergeConflict },
+    CheckpointConflict {
+        id: CheckpointId,
+        conflict: CheckpointMergeConflict,
+    },
 }
 
 impl BranchMergeConflict {
@@ -175,17 +186,31 @@ pub struct BranchMergeReport {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BranchMergeError {
-    Conflicts { conflicts: Vec<BranchMergeConflict>, report: BranchMergeReport },
-    BudgetExceeded { report: BranchMergeReport },
-    InvalidManifest { table: ObjectId },
-    RowRead { message: String },
-    InvalidRow { table: ObjectId },
+    Conflicts {
+        conflicts: Vec<BranchMergeConflict>,
+        report: BranchMergeReport,
+    },
+    BudgetExceeded {
+        report: BranchMergeReport,
+    },
+    InvalidManifest {
+        table: ObjectId,
+    },
+    RowRead {
+        message: String,
+    },
+    InvalidRow {
+        table: ObjectId,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MergedSegment {
     /// Reuse an immutable segment without decompressing or comparing rows.
-    Reuse { from: MergeSide, manifest: RowSegmentManifest },
+    Reuse {
+        from: MergeSide,
+        manifest: RowSegmentManifest,
+    },
     /// Materialized logical rows for a range where all three sides changed.
     /// `tombstones` are canonical keys present in the common base but absent
     /// from the merged live rows. They are this plan's versioned deletion
@@ -233,9 +258,9 @@ impl BranchMergePlan {
             }
         }
         ordered.sort_by(|(left_table, left_key), (right_table, right_key)| {
-            left_table.cmp(right_table).then_with(|| {
-                compare_primary_keys(left_key, right_key).unwrap_or(Ordering::Equal)
-            })
+            left_table
+                .cmp(right_table)
+                .then_with(|| compare_primary_keys(left_key, right_key).unwrap_or(Ordering::Equal))
         });
         ordered
     }
@@ -292,11 +317,18 @@ pub enum BranchMergeTombstoneHistoryError {
     /// This position is already buffered or has already been released.
     DuplicateOrStale { order: u64 },
     /// A depth fragment index is outside its declared fragment count.
-    InvalidFragment { fragment: usize, fragment_count: usize },
+    InvalidFragment {
+        fragment: usize,
+        fragment_count: usize,
+    },
     /// A depth fragment repeats a fragment already buffered for this position.
     DuplicateFragment { order: u64, fragment: usize },
     /// Fragments for one position disagree about how many pieces it contains.
-    FragmentCountMismatch { order: u64, expected: usize, actual: usize },
+    FragmentCountMismatch {
+        order: u64,
+        expected: usize,
+        actual: usize,
+    },
     /// No incomplete buffered depth wave exists at this lineage position.
     NoIncompleteDepthWave { order: u64 },
     /// A batch wave-restart request must include at least one position.
@@ -313,6 +345,8 @@ pub enum BranchMergeTombstoneHistoryError {
     ConcurrentDuplicateTombstone { first_order: u64, second_order: u64 },
     /// A whole paired plan and split depth fragments were both submitted for one position.
     ConflictingSubmission { order: u64 },
+    /// A recovery append reused an accepted whole-plan position with different tombstones.
+    AppendRetryMismatch { order: u64 },
     /// The history already consumed the final representable lineage position.
     OrderExhausted,
 }
@@ -371,7 +405,14 @@ enum BranchMergeTombstoneSubmissionMode {
 /// after the restarts and participate in the same all-or-nothing transaction.
 /// Recovery can include replacement fragments as well; restarts, appends, and
 /// fragment submissions commit together, with released events returned only
-/// after the entire transaction succeeds.
+/// after the entire transaction succeeds. MERGE-1 does not specify retries for
+/// these tombstone appends. This v1 policy treats a repeated same-order
+/// whole-plan tombstone delta as an idempotent retry only when its table/key
+/// set matches the already queued or committed delta; table/key order within
+/// that delta does not matter. A changed delta at an accepted order returns
+/// `AppendRetryMismatch`, and mixed submission modes still return
+/// `ConflictingSubmission`. The history retains only tombstone deltas, so
+/// callers remain responsible for checking full paired-plan identity.
 /// Unrecorded stale order precedes
 /// buffered and retry-mode checks, and mixed-mode conflicts precede
 /// fragment-index or tombstone-content validation.
@@ -448,9 +489,7 @@ impl BranchMergeTombstoneHistory {
             BranchMergeTombstoneSubmissionMode::WholePlan,
         )?;
         if has_duplicate_tombstones_in_wave(&step.ordered_row_tombstones) {
-            return Err(BranchMergeTombstoneHistoryError::DuplicateTombstone {
-                order: step.order,
-            });
+            return Err(BranchMergeTombstoneHistoryError::DuplicateTombstone { order: step.order });
         }
         if let Some(other_order) =
             self.pending_duplicate_order(step.order, &step.ordered_row_tombstones)
@@ -493,9 +532,9 @@ impl BranchMergeTombstoneHistory {
         }
 
         match self.pending_deltas.get(&order) {
-            Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => unreachable!(
-                "whole-plan mode conflicts are classified before fragment validation"
-            ),
+            Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => {
+                unreachable!("whole-plan mode conflicts are classified before fragment validation")
+            }
             Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
                 fragment_count: expected_count,
                 fragments,
@@ -605,9 +644,11 @@ impl BranchMergeTombstoneHistory {
         restarts.sort_unstable_by_key(|(order, _)| *order);
         for pair in restarts.windows(2) {
             if pair[0].0 == pair[1].0 {
-                return Err(BranchMergeTombstoneHistoryError::DuplicateDepthWaveRestart {
-                    order: pair[0].0,
-                });
+                return Err(
+                    BranchMergeTombstoneHistoryError::DuplicateDepthWaveRestart {
+                        order: pair[0].0,
+                    },
+                );
             }
         }
 
@@ -690,7 +731,12 @@ impl BranchMergeTombstoneHistory {
     /// count must match each wave's current count; a fragment index replaces
     /// its buffered value or fills a missing slot. Appends are queued first,
     /// then fragment updates run in lineage and index order. Any failure leaves
-    /// the original wave contents, queue, and released events unchanged.
+    /// the original wave contents, queue, and released events unchanged. An
+    /// exact same-order retry of an already queued or committed tombstone delta
+    /// is skipped, so recovery replay cannot append its chain events twice.
+    /// A changed delta at that order fails with
+    /// [`BranchMergeTombstoneHistoryError::AppendRetryMismatch`]. Standalone
+    /// [`Self::append`] remains strict and rejects reused positions.
     pub fn recover_depth_merge_fragments_with_appends(
         &mut self,
         recoveries: &[BranchMergeDepthFragmentRecovery],
@@ -704,10 +750,12 @@ impl BranchMergeTombstoneHistory {
         recoveries.sort_unstable_by_key(|recovery| (recovery.order, recovery.fragment));
         for pair in recoveries.windows(2) {
             if pair[0].order == pair[1].order && pair[0].fragment == pair[1].fragment {
-                return Err(BranchMergeTombstoneHistoryError::DuplicateDepthFragmentRecovery {
-                    order: pair[0].order,
-                    fragment: pair[0].fragment,
-                });
+                return Err(
+                    BranchMergeTombstoneHistoryError::DuplicateDepthFragmentRecovery {
+                        order: pair[0].order,
+                        fragment: pair[0].fragment,
+                    },
+                );
             }
         }
 
@@ -715,7 +763,7 @@ impl BranchMergeTombstoneHistory {
         let mut appends = appends.to_vec();
         appends.sort_unstable_by_key(|step| step.order);
         for step in &appends {
-            candidate.append(step)?;
+            candidate.append_recovery_plan(step)?;
         }
 
         let mut released = Vec::new();
@@ -725,6 +773,50 @@ impl BranchMergeTombstoneHistory {
 
         *self = candidate;
         Ok(released)
+    }
+
+    fn append_recovery_plan(
+        &mut self,
+        step: &SequencedBranchMergePlan,
+    ) -> Result<(), BranchMergeTombstoneHistoryError> {
+        if self.next_order.is_none() {
+            return Err(BranchMergeTombstoneHistoryError::OrderExhausted);
+        }
+        self.classify_submission_mode_conflict(
+            step.order,
+            BranchMergeTombstoneSubmissionMode::WholePlan,
+        )?;
+        if has_duplicate_tombstones_in_wave(&step.ordered_row_tombstones) {
+            return Err(BranchMergeTombstoneHistoryError::DuplicateTombstone { order: step.order });
+        }
+
+        if let Some(BufferedBranchMergeTombstoneDelta::WholePlan(existing)) =
+            self.pending_deltas.get(&step.order)
+        {
+            return if same_tombstone_delta(existing, &step.ordered_row_tombstones) {
+                Ok(())
+            } else {
+                Err(BranchMergeTombstoneHistoryError::AppendRetryMismatch { order: step.order })
+            };
+        }
+
+        if self.committed_modes.get(&step.order)
+            == Some(&BranchMergeTombstoneSubmissionMode::WholePlan)
+        {
+            let committed = self
+                .events
+                .iter()
+                .filter(|event| event.order == step.order)
+                .map(|event| (event.table, event.key.clone()))
+                .collect::<Vec<_>>();
+            return if same_tombstone_delta(&committed, &step.ordered_row_tombstones) {
+                Ok(())
+            } else {
+                Err(BranchMergeTombstoneHistoryError::AppendRetryMismatch { order: step.order })
+            };
+        }
+
+        self.append(step)
     }
 
     fn recover_buffered_depth_fragment(
@@ -756,9 +848,9 @@ impl BranchMergeTombstoneHistory {
                 }
                 fragments
             }
-            Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => unreachable!(
-                "whole-plan mode conflicts are classified before fragment recovery"
-            ),
+            Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => {
+                unreachable!("whole-plan mode conflicts are classified before fragment recovery")
+            }
             None => {
                 return Err(BranchMergeTombstoneHistoryError::NoIncompleteDepthWave {
                     order: recovery.order,
@@ -805,7 +897,10 @@ impl BranchMergeTombstoneHistory {
             if !ready {
                 break;
             }
-            let delta = self.pending_deltas.remove(&order).expect("ready delta is buffered");
+            let delta = self
+                .pending_deltas
+                .remove(&order)
+                .expect("ready delta is buffered");
             let mode = delta.submission_mode();
             self.duplicate_retry_modes.remove(&order);
             let mut tombstones = match delta {
@@ -820,9 +915,11 @@ impl BranchMergeTombstoneHistory {
                     compare_primary_keys(left_key, right_key).unwrap_or(Ordering::Equal)
                 })
             });
-            self.events.extend(tombstones.into_iter().map(|(table, key)| {
-                BranchMergeTombstoneEvent { order, table, key }
-            }));
+            self.events.extend(
+                tombstones
+                    .into_iter()
+                    .map(|(table, key)| BranchMergeTombstoneEvent { order, table, key }),
+            );
             self.next_order = order.checked_add(1);
         }
 
@@ -899,17 +996,18 @@ impl BranchMergeTombstoneHistory {
         order: u64,
         tombstones: &[(ObjectId, CanonicalValue)],
     ) -> Option<u64> {
-        self.pending_deltas.iter().find_map(|(pending_order, delta)| {
-            if *pending_order == order {
-                return None;
-            }
-            let first_order = order.min(*pending_order);
-            let last_order = order.max(*pending_order);
-            tombstones
-                .iter()
-                .any(|(table, key)| {
-                    delta.contains_tombstone(*table, key)
-                        && {
+        self.pending_deltas
+            .iter()
+            .find_map(|(pending_order, delta)| {
+                if *pending_order == order {
+                    return None;
+                }
+                let first_order = order.min(*pending_order);
+                let last_order = order.max(*pending_order);
+                tombstones
+                    .iter()
+                    .any(|(table, key)| {
+                        delta.contains_tombstone(*table, key) && {
                             let between = self
                                 .pending_deltas
                                 .range((first_order + 1)..last_order)
@@ -920,9 +1018,9 @@ impl BranchMergeTombstoneHistory {
                                     middle_delta.contains_tombstone(*table, key)
                                 })
                         }
-                })
-                .then_some(*pending_order)
-        })
+                    })
+                    .then_some(*pending_order)
+            })
     }
 
     /// Returns the next lineage position required by this history.
@@ -949,11 +1047,9 @@ impl BufferedBranchMergeTombstoneDelta {
             *candidate_table == table && same_primary_key(candidate_key, key)
         };
         match self {
-            Self::WholePlan(tombstones) => {
-                tombstones.iter().any(|(candidate_table, candidate_key)| {
-                    contains(candidate_table, candidate_key)
-                })
-            }
+            Self::WholePlan(tombstones) => tombstones
+                .iter()
+                .any(|(candidate_table, candidate_key)| contains(candidate_table, candidate_key)),
             Self::DepthFragments { fragments, .. } => fragments
                 .values()
                 .flatten()
@@ -962,10 +1058,7 @@ impl BufferedBranchMergeTombstoneDelta {
     }
 }
 
-fn concurrent_duplicate_error(
-    order: u64,
-    other_order: u64,
-) -> BranchMergeTombstoneHistoryError {
+fn concurrent_duplicate_error(order: u64, other_order: u64) -> BranchMergeTombstoneHistoryError {
     BranchMergeTombstoneHistoryError::ConcurrentDuplicateTombstone {
         first_order: order.min(other_order),
         second_order: order.max(other_order),
@@ -979,13 +1072,25 @@ fn same_primary_key(left: &CanonicalValue, right: &CanonicalValue) -> bool {
 fn has_duplicate_tombstones_in_wave(tombstones: &[(ObjectId, CanonicalValue)]) -> bool {
     let mut ordered = tombstones.to_vec();
     ordered.sort_by(|(left_table, left_key), (right_table, right_key)| {
-        left_table.cmp(right_table).then_with(|| {
-            compare_primary_keys(left_key, right_key).unwrap_or(Ordering::Equal)
-        })
+        left_table
+            .cmp(right_table)
+            .then_with(|| compare_primary_keys(left_key, right_key).unwrap_or(Ordering::Equal))
     });
     ordered
         .windows(2)
         .any(|pair| pair[0].0 == pair[1].0 && same_primary_key(&pair[0].1, &pair[1].1))
+}
+
+fn same_tombstone_delta(
+    left: &[(ObjectId, CanonicalValue)],
+    right: &[(ObjectId, CanonicalValue)],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().all(|(table, key)| {
+            right.iter().any(|(other_table, other_key)| {
+                table == other_table && same_primary_key(key, other_key)
+            })
+        })
 }
 
 /// Buffers selected successful plans and releases them in paired lineage order,
@@ -1020,7 +1125,10 @@ impl BranchMergePlanSequencer {
     /// Starts a sequence at the next commit position following the caller's
     /// already-persisted prefix.
     pub fn new(first_order: u64) -> Self {
-        Self { next_order: Some(first_order), pending: BTreeMap::new() }
+        Self {
+            next_order: Some(first_order),
+            pending: BTreeMap::new(),
+        }
     }
 
     /// Submits one selected successful plan. Returns the newly contiguous
@@ -1216,15 +1324,26 @@ pub fn merge_three_way_snapshots<R: BranchRowSource>(
     // candidate schema. MERGE-1 requires an isolated complete result but
     // leaves diagnostic ordering open, so this order is the deterministic
     // policy used here.
-    let schema = match merge_schema_bounded(&base.schema, &left.schema, &right.schema, budget.max_conflicts) {
+    let schema = match merge_schema_bounded(
+        &base.schema,
+        &left.schema,
+        &right.schema,
+        budget.max_conflicts,
+    ) {
         Ok(schema) => schema,
         Err(schema_failure) => {
             for conflict in &schema_failure.conflicts {
                 let affected = conflict.affected_tables();
                 if affected.is_empty() {
-                    report.affected_tables.extend(base.schema.tables.iter().map(|table| table.id));
-                    report.affected_tables.extend(left.schema.tables.iter().map(|table| table.id));
-                    report.affected_tables.extend(right.schema.tables.iter().map(|table| table.id));
+                    report
+                        .affected_tables
+                        .extend(base.schema.tables.iter().map(|table| table.id));
+                    report
+                        .affected_tables
+                        .extend(left.schema.tables.iter().map(|table| table.id));
+                    report
+                        .affected_tables
+                        .extend(right.schema.tables.iter().map(|table| table.id));
                 } else {
                     report.affected_tables.extend(affected);
                 }
@@ -1235,51 +1354,69 @@ pub fn merge_three_way_snapshots<R: BranchRowSource>(
                 // that happens, report every candidate table conservatively;
                 // the reference requires affected-table evidence but does
                 // not define a summary shape for omitted schema details.
-                report.affected_tables.extend(base.schema.tables.iter().map(|table| table.id));
-                report.affected_tables.extend(left.schema.tables.iter().map(|table| table.id));
-                report.affected_tables.extend(right.schema.tables.iter().map(|table| table.id));
+                report
+                    .affected_tables
+                    .extend(base.schema.tables.iter().map(|table| table.id));
+                report
+                    .affected_tables
+                    .extend(left.schema.tables.iter().map(|table| table.id));
+                report
+                    .affected_tables
+                    .extend(right.schema.tables.iter().map(|table| table.id));
             }
             if schema_failure.conflicts_lower_bound > budget.max_conflicts {
                 report.conflicts_lower_bound = schema_failure.conflicts_lower_bound;
                 return Err(BranchMergeError::BudgetExceeded { report });
             }
             report.conflicts_lower_bound = schema_failure.conflicts_lower_bound;
-            conflicts.extend(schema_failure.conflicts.into_iter().map(BranchMergeConflict::Schema));
+            conflicts.extend(
+                schema_failure
+                    .conflicts
+                    .into_iter()
+                    .map(BranchMergeConflict::Schema),
+            );
             return Err(BranchMergeError::Conflicts { conflicts, report });
         }
     };
 
     // The ascending union is part of the recovery ordering policy: a paired
     // depth walk cannot reorder tombstones or conflicts by table visitation.
-    let table_ids: BTreeSet<_> = base.tables.keys().chain(left.tables.keys()).chain(right.tables.keys()).copied().collect();
+    let table_ids: BTreeSet<_> = base
+        .tables
+        .keys()
+        .chain(left.tables.keys())
+        .chain(right.tables.keys())
+        .copied()
+        .collect();
     let mut merged_tables = BTreeMap::new();
     for table in table_ids {
         let b = base.tables.get(&table);
         let l = left.tables.get(&table);
         let r = right.tables.get(&table);
         match merge_table(table, b, l, r, rows, budget, &mut conflicts, &mut report)? {
-            Some(table_plan) => { merged_tables.insert(table, table_plan); }
+            Some(table_plan) => {
+                merged_tables.insert(table, table_plan);
+            }
             None => {}
         }
     }
 
     // If the bounded row phase stops early, do not mix checkpoint impacts
     // into a report whose row materialization was cut short.
-    let checkpoints = merge_checkpoint_phase(
-        base,
-        left,
-        right,
-        budget,
-        &mut conflicts,
-        &mut report,
-    )?;
+    let checkpoints =
+        merge_checkpoint_phase(base, left, right, budget, &mut conflicts, &mut report)?;
 
     if !conflicts.is_empty() {
         // Intermediate table candidates are never observable when any later
         // row or checkpoint conflict remains unresolved.
         return Err(BranchMergeError::Conflicts { conflicts, report });
     }
-    Ok(BranchMergePlan { schema, tables: merged_tables, checkpoints, report })
+    Ok(BranchMergePlan {
+        schema,
+        tables: merged_tables,
+        checkpoints,
+        report,
+    })
 }
 
 /// Resolves storage checkpoint state after row ranges have been planned.
@@ -1296,7 +1433,13 @@ fn merge_checkpoint_phase(
     conflicts: &mut Vec<BranchMergeConflict>,
     report: &mut BranchMergeReport,
 ) -> Result<BTreeMap<CheckpointId, CheckpointGeneration>, BranchMergeError> {
-    let checkpoint_ids: BTreeSet<_> = base.checkpoints.keys().chain(left.checkpoints.keys()).chain(right.checkpoints.keys()).cloned().collect();
+    let checkpoint_ids: BTreeSet<_> = base
+        .checkpoints
+        .keys()
+        .chain(left.checkpoints.keys())
+        .chain(right.checkpoints.keys())
+        .cloned()
+        .collect();
     let mut checkpoints = BTreeMap::new();
     for id in checkpoint_ids {
         match merge_checkpoint_generation(
@@ -1304,7 +1447,9 @@ fn merge_checkpoint_phase(
             left.checkpoints.get(&id),
             right.checkpoints.get(&id),
         ) {
-            Ok(Some(checkpoint)) => { checkpoints.insert(id, checkpoint); }
+            Ok(Some(checkpoint)) => {
+                checkpoints.insert(id, checkpoint);
+            }
             Ok(None) => {}
             Err(conflict) => {
                 report.affected_checkpoints.insert(id.clone());
@@ -1316,7 +1461,9 @@ fn merge_checkpoint_phase(
                     report,
                     budget,
                 ) {
-                    return Err(BranchMergeError::BudgetExceeded { report: report.clone() });
+                    return Err(BranchMergeError::BudgetExceeded {
+                        report: report.clone(),
+                    });
                 }
             }
         }
@@ -1350,8 +1497,20 @@ fn merge_table<R: BranchRowSource>(
         (None, None, Some(r)) => Ok(Some(reuse(MergeSide::Right, r))),
         (None, Some(l), Some(r)) if l.digest == r.digest => Ok(Some(reuse(MergeSide::Left, l))),
         (None, Some(_), Some(_)) => {
-            if record_conflict(BranchMergeConflict::Table { table, reason: "same table identity added differently" }, Some(table), None, conflicts, report, budget) {
-                return Err(BranchMergeError::BudgetExceeded { report: report.clone() });
+            if record_conflict(
+                BranchMergeConflict::Table {
+                    table,
+                    reason: "same table identity added differently",
+                },
+                Some(table),
+                None,
+                conflicts,
+                report,
+                budget,
+            ) {
+                return Err(BranchMergeError::BudgetExceeded {
+                    report: report.clone(),
+                });
             }
             Ok(None)
         }
@@ -1359,8 +1518,20 @@ fn merge_table<R: BranchRowSource>(
         (Some(b), None, Some(r)) if b.digest == r.digest => Ok(None),
         (Some(b), Some(l), None) if b.digest == l.digest => Ok(None),
         (Some(_), None, Some(_)) | (Some(_), Some(_), None) => {
-            if record_conflict(BranchMergeConflict::Table { table, reason: "table deleted on one side and edited on the other" }, Some(table), None, conflicts, report, budget) {
-                return Err(BranchMergeError::BudgetExceeded { report: report.clone() });
+            if record_conflict(
+                BranchMergeConflict::Table {
+                    table,
+                    reason: "table deleted on one side and edited on the other",
+                },
+                Some(table),
+                None,
+                conflicts,
+                report,
+                budget,
+            ) {
+                return Err(BranchMergeError::BudgetExceeded {
+                    report: report.clone(),
+                });
             }
             Ok(None)
         }
@@ -1383,17 +1554,59 @@ fn merge_table<R: BranchRowSource>(
                 for index in 0..b.segments.len() {
                     let (bs, ls, rs) = (&b.segments[index], &l.segments[index], &r.segments[index]);
                     if ls.digest == rs.digest {
-                        segments.push(MergedSegment::Reuse { from: MergeSide::Left, manifest: ls.clone() });
+                        segments.push(MergedSegment::Reuse {
+                            from: MergeSide::Left,
+                            manifest: ls.clone(),
+                        });
                     } else if ls.digest == bs.digest {
-                        segments.push(MergedSegment::Reuse { from: MergeSide::Right, manifest: rs.clone() });
+                        segments.push(MergedSegment::Reuse {
+                            from: MergeSide::Right,
+                            manifest: rs.clone(),
+                        });
                     } else if rs.digest == bs.digest {
-                        segments.push(MergedSegment::Reuse { from: MergeSide::Left, manifest: ls.clone() });
+                        segments.push(MergedSegment::Reuse {
+                            from: MergeSide::Left,
+                            manifest: ls.clone(),
+                        });
                     } else {
                         let range = bs.range.clone();
-                        let base_rows = read_segment(rows, MergeSide::Base, table, Some(bs), &range, budget, report)?;
-                        let left_rows = read_segment(rows, MergeSide::Left, table, Some(ls), &range, budget, report)?;
-                        let right_rows = read_segment(rows, MergeSide::Right, table, Some(rs), &range, budget, report)?;
-                        let merged = merge_range_rows(table, range.clone(), base_rows, left_rows, right_rows, budget, conflicts, report)?;
+                        let base_rows = read_segment(
+                            rows,
+                            MergeSide::Base,
+                            table,
+                            Some(bs),
+                            &range,
+                            budget,
+                            report,
+                        )?;
+                        let left_rows = read_segment(
+                            rows,
+                            MergeSide::Left,
+                            table,
+                            Some(ls),
+                            &range,
+                            budget,
+                            report,
+                        )?;
+                        let right_rows = read_segment(
+                            rows,
+                            MergeSide::Right,
+                            table,
+                            Some(rs),
+                            &range,
+                            budget,
+                            report,
+                        )?;
+                        let merged = merge_range_rows(
+                            table,
+                            range.clone(),
+                            base_rows,
+                            left_rows,
+                            right_rows,
+                            budget,
+                            conflicts,
+                            report,
+                        )?;
                         segments.push(MergedSegment::Rows {
                             range,
                             rows: merged.rows,
@@ -1409,17 +1622,33 @@ fn merge_table<R: BranchRowSource>(
                 // and conflict details independent of source visitation and
                 // of other concurrently planned merges.
                 let range = KeyRange::all();
-                let base_rows = read_segment(rows, MergeSide::Base, table, None, &range, budget, report)?;
-                let left_rows = read_segment(rows, MergeSide::Left, table, None, &range, budget, report)?;
-                let right_rows = read_segment(rows, MergeSide::Right, table, None, &range, budget, report)?;
-                let merged = merge_range_rows(table, range.clone(), base_rows, left_rows, right_rows, budget, conflicts, report)?;
+                let base_rows =
+                    read_segment(rows, MergeSide::Base, table, None, &range, budget, report)?;
+                let left_rows =
+                    read_segment(rows, MergeSide::Left, table, None, &range, budget, report)?;
+                let right_rows =
+                    read_segment(rows, MergeSide::Right, table, None, &range, budget, report)?;
+                let merged = merge_range_rows(
+                    table,
+                    range.clone(),
+                    base_rows,
+                    left_rows,
+                    right_rows,
+                    budget,
+                    conflicts,
+                    report,
+                )?;
                 segments.push(MergedSegment::Rows {
                     range,
                     rows: merged.rows,
                     tombstones: merged.tombstones,
                 });
             }
-            Ok(Some(MergedTable { id: table, whole_table_reuse: None, segments }))
+            Ok(Some(MergedTable {
+                id: table,
+                whole_table_reuse: None,
+                segments,
+            }))
         }
     }
 }
@@ -1446,7 +1675,10 @@ fn valid_manifest(manifest: &TableManifest) -> bool {
 
 fn aligned_layouts(base: &TableManifest, left: &TableManifest, right: &TableManifest) -> bool {
     let same = |a: &TableManifest, b: &TableManifest| {
-        a.segments.iter().map(|s| &s.range).eq(b.segments.iter().map(|s| &s.range))
+        a.segments
+            .iter()
+            .map(|s| &s.range)
+            .eq(b.segments.iter().map(|s| &s.range))
     };
     same(base, left) && same(base, right)
 }
@@ -1465,29 +1697,33 @@ fn read_segment<R: BranchRowSource>(
     let mut decoded = BTreeMap::new();
     let mut budget_hit = false;
     let mut invalid = false;
-    source.visit_rows(side, table, segment, range, &mut |row| {
-        if report.rows_examined >= budget.max_rows_examined {
-            report.rows_examined = report.rows_examined.saturating_add(1);
-            budget_hit = true;
-            return false;
-        }
-        report.rows_examined += 1;
-        if row.table != table {
-            invalid = true;
-            return false;
-        }
-        let Ok(key) = row.key.encode() else {
-            invalid = true;
-            return false;
-        };
-        if !range.contains(&key) || decoded.insert(key, row).is_some() {
-            invalid = true;
-            return false;
-        }
-        true
-    }).map_err(|message| BranchMergeError::RowRead { message })?;
+    source
+        .visit_rows(side, table, segment, range, &mut |row| {
+            if report.rows_examined >= budget.max_rows_examined {
+                report.rows_examined = report.rows_examined.saturating_add(1);
+                budget_hit = true;
+                return false;
+            }
+            report.rows_examined += 1;
+            if row.table != table {
+                invalid = true;
+                return false;
+            }
+            let Ok(key) = row.key.encode() else {
+                invalid = true;
+                return false;
+            };
+            if !range.contains(&key) || decoded.insert(key, row).is_some() {
+                invalid = true;
+                return false;
+            }
+            true
+        })
+        .map_err(|message| BranchMergeError::RowRead { message })?;
     if budget_hit {
-        return Err(BranchMergeError::BudgetExceeded { report: report.clone() });
+        return Err(BranchMergeError::BudgetExceeded {
+            report: report.clone(),
+        });
     }
     if invalid {
         return Err(BranchMergeError::InvalidRow { table });
@@ -1518,8 +1754,8 @@ fn merge_range_rows(
         .collect();
     let mut keys = Vec::with_capacity(encoded_keys.len());
     for encoded in encoded_keys {
-        let key = CanonicalValue::decode(&encoded)
-            .map_err(|_| BranchMergeError::InvalidRow { table })?;
+        let key =
+            CanonicalValue::decode(&encoded).map_err(|_| BranchMergeError::InvalidRow { table })?;
         keys.push((encoded, key));
     }
     // Encoded byte order is not always the table's logical primary-key order:
@@ -1570,19 +1806,27 @@ fn merge_range_rows(
             }
             Err(RowSnapshotMergeError::Conflict(conflict)) => {
                 if record_conflict(
-                    BranchMergeConflict::Row { range: range.clone(), conflict },
+                    BranchMergeConflict::Row {
+                        range: range.clone(),
+                        conflict,
+                    },
                     Some(table),
                     Some((table, range.clone())),
                     conflicts,
                     report,
                     budget,
                 ) {
-                    return Err(BranchMergeError::BudgetExceeded { report: report.clone() });
+                    return Err(BranchMergeError::BudgetExceeded {
+                        report: report.clone(),
+                    });
                 }
             }
         }
     }
-    Ok(MergedRangeRows { rows: merged, tombstones })
+    Ok(MergedRangeRows {
+        rows: merged,
+        tombstones,
+    })
 }
 
 fn record_conflict(
@@ -1597,8 +1841,14 @@ fn record_conflict(
     // first conflict over it stops resolution and returns only its bounded
     // location summary, never an incomplete plan or an unbounded detail list.
     report.conflicts_lower_bound = report.conflicts_lower_bound.saturating_add(1);
-    if let Some(table) = table { report.affected_tables.insert(table); }
-    if let Some(range) = range { report.affected_ranges.insert(range); }
-    if conflicts.len() < budget.max_conflicts { conflicts.push(conflict); }
+    if let Some(table) = table {
+        report.affected_tables.insert(table);
+    }
+    if let Some(range) = range {
+        report.affected_ranges.insert(range);
+    }
+    if conflicts.len() < budget.max_conflicts {
+        conflicts.push(conflict);
+    }
     report.conflicts_lower_bound > budget.max_conflicts
 }
