@@ -819,6 +819,21 @@ fn every_factory_short_circuits_on_first_false_canonical_row() {
 }
 
 #[test]
+fn relation_predicate_factories_accept_an_empty_candidate_relation() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-predicates-empty-candidate.orna"
+    )));
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+    assert_eq!(
+        runtime.committed_row("Entry", &Value::int(1.into())),
+        None,
+        "insert-then-delete should leave the published relation empty"
+    );
+}
+
+#[test]
 fn table_all_unique_decimal_body_rejects_scale_alias_and_rolls_back_candidates() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     let outcome = runtime.execute_source(&fixture_source(include_str!(
