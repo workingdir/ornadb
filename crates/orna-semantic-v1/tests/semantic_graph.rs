@@ -5384,47 +5384,6 @@ fn paired_reproductions_remain_stable_across_alternating_storm_orders() {
 
 #[test]
 fn paired_checkpoints_retain_their_selected_lane_contexts() {
-    fn collect_snapshot_contexts(ty: &Type, contexts: &mut BTreeSet<String>) {
-        match ty {
-            Type::Named(name) if name.starts_with("selector:") => {
-                contexts.insert(name.clone());
-            }
-            Type::List(inner)
-            | Type::Range(inner)
-            | Type::Relation(inner)
-            | Type::Stream(inner)
-            | Type::Optional(inner) => collect_snapshot_contexts(inner, contexts),
-            Type::Applied { arguments, .. } => {
-                for argument in arguments {
-                    collect_snapshot_contexts(argument, contexts);
-                }
-            }
-            Type::Function {
-                parameters, result, ..
-            } => {
-                for parameter in parameters {
-                    collect_snapshot_contexts(parameter, contexts);
-                }
-                collect_snapshot_contexts(result, contexts);
-            }
-            Type::Record(fields) => {
-                for field in fields.values() {
-                    collect_snapshot_contexts(field, contexts);
-                }
-            }
-            Type::Tuple(items) => {
-                for item in items {
-                    collect_snapshot_contexts(item, contexts);
-                }
-            }
-            Type::MoneyPerUnit { currency, unit } => {
-                collect_snapshot_contexts(currency, contexts);
-                collect_snapshot_contexts(unit, contexts);
-            }
-            _ => {}
-        }
-    }
-
     let source = include_str!("fixtures/historical-paired-reproduction-stability-roundtrip.orna");
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
@@ -5475,6 +5434,127 @@ fn paired_checkpoints_retain_their_selected_lane_contexts() {
                 contexts,
                 expected.map(str::to_owned).into_iter().collect(),
                 "{lane}.{depth} must preserve every nested snapshot selector"
+            );
+        }
+    }
+}
+
+fn collect_snapshot_contexts(ty: &Type, contexts: &mut BTreeSet<String>) {
+    match ty {
+        Type::Named(name) if name.starts_with("selector:") => {
+            contexts.insert(name.clone());
+        }
+        Type::List(inner)
+        | Type::Range(inner)
+        | Type::Relation(inner)
+        | Type::Stream(inner)
+        | Type::Optional(inner) => collect_snapshot_contexts(inner, contexts),
+        Type::Applied { arguments, .. } => {
+            for argument in arguments {
+                collect_snapshot_contexts(argument, contexts);
+            }
+        }
+        Type::Function {
+            parameters, result, ..
+        } => {
+            for parameter in parameters {
+                collect_snapshot_contexts(parameter, contexts);
+            }
+            collect_snapshot_contexts(result, contexts);
+        }
+        Type::Record(fields) => {
+            for field in fields.values() {
+                collect_snapshot_contexts(field, contexts);
+            }
+        }
+        Type::Tuple(items) => {
+            for item in items {
+                collect_snapshot_contexts(item, contexts);
+            }
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            collect_snapshot_contexts(currency, contexts);
+            collect_snapshot_contexts(unit, contexts);
+        }
+        _ => {}
+    }
+}
+
+fn checkpoint_output_fields(ty: &Type) -> &BTreeMap<String, Type> {
+    match ty {
+        Type::List(inner) => checkpoint_output_fields(inner),
+        Type::Function { result, .. } => checkpoint_output_fields(result),
+        Type::Record(fields) => fields,
+        _ => panic!("checkpoint must resolve to a record of pinned outputs: {ty:?}"),
+    }
+}
+
+#[test]
+fn paired_checkpoint_outputs_keep_lane_to_snapshot_mapping() {
+    let source = include_str!("fixtures/historical-paired-reproduction-stability-roundtrip.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-reproduction-stability-roundtrip.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_reproductions_remain_stable_across_chained_storm_orders")
+        })
+        .expect("paired reproduction checkpoint module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_reproductions_remain_stable_across_chained_storm_orders"]
+        .ty
+    else {
+        panic!("paired reproduction proof must export a function");
+    };
+    let Type::Record(checkpoints) = result.as_ref() else {
+        panic!("paired reproduction proof must expose checkpoint records");
+    };
+
+    for (lane, root, bridge, leaf) in [
+        (
+            "left_checkpoints",
+            "selector:HEAD~840",
+            "selector:HEAD~920",
+            "selector:HEAD~880",
+        ),
+        (
+            "right_checkpoints",
+            "selector:HEAD~830",
+            "selector:HEAD~910",
+            "selector:HEAD~870",
+        ),
+    ] {
+        let ty = checkpoints.get(lane).expect("paired lane checkpoint record");
+        let Type::Record(depths) = ty else {
+            panic!("{lane} must expose checkpoint depth records");
+        };
+        let fields = checkpoint_output_fields(
+            depths
+                .get("outputs")
+                .expect("output checkpoint field"),
+        );
+        for (field, expected_context) in [
+            ("root", root),
+            ("bridge", bridge),
+            ("leaf", leaf),
+            ("terminal", root),
+        ] {
+            let ty = fields.get(field).expect("pinned output field");
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(ty, &mut contexts);
+            assert_eq!(
+                contexts,
+                BTreeSet::from([expected_context.to_owned()]),
+                "{lane}.outputs.{field} must retain its paired snapshot context"
             );
         }
     }
