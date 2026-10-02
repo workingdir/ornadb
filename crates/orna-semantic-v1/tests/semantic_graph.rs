@@ -3929,6 +3929,29 @@ fn tuple_pin_cascade_paired_depths_reject_cross_pair_mixing_after_storm_rebinds(
 }
 
 #[test]
+fn tuple_pin_cascade_paired_chains_preserve_every_depth_through_storm_rebinds() {
+    let source = include_str!("fixtures/historical-tuple-pin-cascade-paired-chain-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-tuple-pin-cascade-paired-chain-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired tuple cascade chains must preserve all depth pins through each storm rebind: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
