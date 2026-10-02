@@ -82,6 +82,69 @@ pub fn generate_host_registry(source_root: &Path) -> Result<String, String> {
     serde_json::to_string_pretty(&registry).map_err(|error| error.to_string())
 }
 
+pub fn generate_host_registry_schema() -> Result<String, String> {
+    let schema = json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://orna.dev/schemas/sys-host-operations-v1.json",
+        "title": "Orna generated sys host-operation registry",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["abi_version", "operations", "roles"],
+        "properties": {
+            "abi_version": {"$ref": "#/$defs/version"},
+            "operations": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/operation"},
+                "uniqueItems": true
+            },
+            "roles": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/role"},
+                "uniqueItems": true
+            }
+        },
+        "$defs": {
+            "version": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["major", "minor"],
+                "properties": {"major": {"type": "integer", "minimum": 0}, "minor": {"type": "integer", "minimum": 0}}
+            },
+            "operation": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "version", "signature", "parameters", "effects", "preconditions", "failures", "role", "provider", "implementation"],
+                "properties": {
+                    "name": {"type": "string", "minLength": 1},
+                    "version": {"$ref": "#/$defs/version"},
+                    "signature": {"type": "string", "minLength": 1},
+                    "parameters": {"type": "array", "items": {"type": "string"}},
+                    "effects": {"type": "array", "minItems": 1, "items": {"enum": ["read", "invoke", "admin"]}},
+                    "preconditions": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                    "failures": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                    "role": {"type": "string", "minLength": 1},
+                    "provider": {"type": "string", "minLength": 1},
+                    "implementation": {"type": "string", "minLength": 1}
+                }
+            },
+            "role": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "version", "provider", "effects", "operations", "required"],
+                "properties": {
+                    "name": {"type": "string", "minLength": 1},
+                    "version": {"$ref": "#/$defs/version"},
+                    "provider": {"type": "string", "minLength": 1},
+                    "effects": {"type": "array", "minItems": 1, "items": {"enum": ["read", "invoke", "admin"]}},
+                    "operations": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+                    "required": {"type": "boolean"}
+                }
+            }
+        }
+    });
+    serde_json::to_string_pretty(&schema).map_err(|error| error.to_string())
+}
+
 impl<'ast> Visit<'ast> for Collector {
     fn visit_impl_item_fn(&mut self, method: &'ast syn::ImplItemFn) {
         for attribute in method
@@ -171,6 +234,35 @@ fn validate_operation(metadata: &Value, method: &syn::Signature) -> Result<(), S
             "fn std.io.process.run(executable: Str, arguments: [Str], working_directory: Str, environment: [(Str, Str)], input: Blob?, timeout: Duration?, max_output_bytes: Int): (Int?, Blob, Blob)"
         }
         "std.concurrent.sleep" => "fn std.concurrent.sleep(duration: Duration): Null",
+        "std.io.fs.read_text" => "fn std.io.fs.read_text(root: Str, path: Str): Str",
+        "std.io.fs.write_text" => {
+            "fn std.io.fs.write_text(root: Str, path: Str, contents: Str, overwrite: Bool): Unit"
+        }
+        "std.io.fs.append_text" => {
+            "fn std.io.fs.append_text(root: Str, path: Str, contents: Str): Unit"
+        }
+        "std.io.fs.exists" => "fn std.io.fs.exists(root: Str, path: Str): Bool",
+        "std.io.fs.is_directory" => "fn std.io.fs.is_directory(root: Str, path: Str): Bool",
+        "std.io.fs.list" => "fn std.io.fs.list(root: Str, path: Str): [Str]",
+        "std.io.fs.metadata" => {
+            "fn std.io.fs.metadata(root: Str, path: Str): (Str, Int?, Instant?, Instant?)"
+        }
+        "std.io.fs.symlink_metadata" => {
+            "fn std.io.fs.symlink_metadata(root: Str, path: Str): (Str, Int?, Instant?, Instant?)"
+        }
+        "std.io.fs.create_dir" => {
+            "fn std.io.fs.create_dir(root: Str, path: Str, parents: Bool, exist_ok: Bool): Unit"
+        }
+        "std.io.fs.remove_file" => "fn std.io.fs.remove_file(root: Str, path: Str): Unit",
+        "std.io.fs.copy_file" => {
+            "fn std.io.fs.copy_file(root: Str, source_path: Str, destination_path: Str, overwrite: Bool): Unit"
+        }
+        "std.io.fs.move_file" => {
+            "fn std.io.fs.move_file(root: Str, source_path: Str, destination_path: Str, overwrite: Bool): Unit"
+        }
+        "std.net.http.send" => {
+            "fn std.net.http.send(method: Str, url: Str, headers: [(Str, Str)], request_body: Blob?, timeout: Duration?, max_header_bytes: Int, max_body_bytes: Int): (Int, [(Str, Str)], Blob)"
+        }
         _ => return Err("unsupported native host operation".to_owned()),
     };
     if signature != expected_signature {
@@ -278,6 +370,94 @@ fn validate_native_method_signature(
                 "ProcessProviderError",
             ),
             "std.concurrent.sleep" => (&[("duration", "Duration")], "()", "ClockProviderError"),
+            "std.io.fs.read_text" => (
+                &[("root", "&str"), ("path", "&str")],
+                "String",
+                "FilesystemProviderError",
+            ),
+            "std.io.fs.write_text" => (
+                &[
+                    ("root", "&str"),
+                    ("path", "&str"),
+                    ("contents", "&str"),
+                    ("overwrite", "bool"),
+                ],
+                "()",
+                "FilesystemProviderError",
+            ),
+            "std.io.fs.append_text" => (
+                &[("root", "&str"), ("path", "&str"), ("contents", "&str")],
+                "()",
+                "FilesystemProviderError",
+            ),
+            "std.io.fs.exists" => (
+                &[("root", "&str"), ("path", "&str")],
+                "bool",
+                "FilesystemProviderError",
+            ),
+            "std.io.fs.is_directory" => (
+                &[("root", "&str"), ("path", "&str")],
+                "bool",
+                "FilesystemProviderError",
+            ),
+            "std.io.fs.list" => (
+                &[("root", "&str"), ("path", "&str")],
+                "Vec<String>",
+                "FilesystemProviderError",
+            ),
+            "std.io.fs.metadata" | "std.io.fs.symlink_metadata" => (
+                &[("root", "&str"), ("path", "&str")],
+                "HostFilesystemMetadata",
+                "FilesystemProviderError",
+            ),
+            "std.io.fs.create_dir" => (
+                &[
+                    ("root", "&str"),
+                    ("path", "&str"),
+                    ("parents", "bool"),
+                    ("exist_ok", "bool"),
+                ],
+                "()",
+                "FilesystemProviderError",
+            ),
+            "std.io.fs.remove_file" => (
+                &[("root", "&str"), ("path", "&str")],
+                "()",
+                "FilesystemProviderError",
+            ),
+            "std.io.fs.copy_file" => (
+                &[
+                    ("root", "&str"),
+                    ("source_path", "&str"),
+                    ("destination_path", "&str"),
+                    ("overwrite", "bool"),
+                ],
+                "()",
+                "FilesystemProviderError",
+            ),
+            "std.io.fs.move_file" => (
+                &[
+                    ("root", "&str"),
+                    ("source_path", "&str"),
+                    ("destination_path", "&str"),
+                    ("overwrite", "bool"),
+                ],
+                "()",
+                "FilesystemProviderError",
+            ),
+            "std.net.http.send" => (
+                &[
+                    ("method", "&str"),
+                    ("url", "&str"),
+                    ("headers", "&[(String, String)]"),
+                    ("request_body", "Option<&[u8]>"),
+                    ("timeout", "Option<Duration>"),
+                    ("max_header_bytes", "usize"),
+                    ("max_body_bytes", "usize"),
+                ],
+                "HostHttpResponse",
+                "HttpProviderError",
+            ),
             _ => return Err("unsupported native host operation".to_owned()),
         };
     let mut inputs = method.inputs.iter();
