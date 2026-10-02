@@ -3684,6 +3684,29 @@ fn sibling_bridge_pins_do_not_merge_after_structural_round_trip() {
 }
 
 #[test]
+fn tuple_structural_storms_preserve_chained_pin_identity() {
+    let source = include_str!("fixtures/historical-pinned-closure-tuple-chain-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-closure-tuple-chain-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "tuple-nested root, bridge, and leaf pins must survive structural storm rebinding at saved stages: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
