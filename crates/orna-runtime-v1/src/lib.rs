@@ -24737,6 +24737,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_sustained_leaf_chain_take_two_conjunct_split_forms_match_on_short_failure() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=32)
+            .map(|row_id| {
+                let title = if row_id == 7 { "later" } else { "current" };
+                let target = if matches!(row_id, 31 | 32) { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(150), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // With only one match, row thirty-one reaches the late missing
+        // lookup. The reference leaves the interaction between this failure,
+        // sustained leaf limits, and explicit conjunct re-splitting open;
+        // both query forms must preserve the same short-take failure.
+        let (compound, compound_lookups, compound_scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-take-two-leaf-chain-conjunct-resplit-failure.orna"
+            ),
+        );
+        let (split, split_lookups, split_scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-take-two-leaf-chain-conjunct-resplit-split-failure.orna"
+            ),
+        );
+        let expected =
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap();
+        assert_eq!(compound.unwrap(), expected);
+        assert_eq!(split.unwrap(), expected);
+        assert_eq!((compound_lookups, compound_scans), (10, 47));
+        assert_eq!(
+            (split_lookups, split_scans),
+            (compound_lookups, compound_scans),
+            "ordered conjunct re-splitting preserves the late failure and bounded work"
+        );
+    }
+
+    #[tokio::test]
     async fn query_projection_failures_recover_at_the_outer_boundary() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
