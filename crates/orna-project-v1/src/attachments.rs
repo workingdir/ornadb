@@ -892,6 +892,7 @@ impl PackageResolver {
         retained_checkpoint_labels: &[NestedPairDepthLabel],
     ) -> Result<(ReboundPathResolution, Option<NestedPairDepthLabel>), AttachmentError> {
         checkpoint.validate_depth_identity()?;
+        previous.validate_depth_label(&checkpoint.depth_label)?;
         let Some((first, remaining)) = replacement_waves.split_first() else {
             for label in retained_checkpoint_labels {
                 previous.validate_depth_label(label)?;
@@ -948,6 +949,9 @@ impl PackageResolver {
     /// checkpoint route to retained history. Each emitted route receives its
     /// own wave/depth label, and every earlier emitted label is checked after
     /// each later fold so checkpoint history cannot be silently regrouped.
+    /// The source checkpoint is also validated against its original wave and
+    /// depth in `previous`, preventing replay after that nested identity has
+    /// been discarded or reassigned.
     /// The reference is silent on checkpoint-rooted storm folds; v1 preserves
     /// exact pins and ordering and returns no partial route if a replacement
     /// fails. An empty storm validates the checkpoint identity.
