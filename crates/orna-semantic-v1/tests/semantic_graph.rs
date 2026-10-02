@@ -3991,6 +3991,90 @@ fn concurrent_tuple_pin_callbacks_reject_cross_lane_rebind_mixing() {
 }
 
 #[test]
+fn concurrent_callback_tuples_preserve_pin_identity_across_rebind() {
+    let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-concurrent-tuple-callback-rebind.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "tuple-stored callbacks must keep their captured pins through rebinding and concurrent use: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_callback_pins_survive_tuple_rebind")
+        })
+        .expect("tuple-stored concurrent callback fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_callback_pins_survive_tuple_rebind"]
+        .ty
+    else {
+        panic!("tuple callback proof must be a function");
+    };
+    let Type::Record(streams) = result.as_ref() else {
+        panic!("tuple callback proof must expose concurrent checkpoint streams");
+    };
+    let pin_type = |name: &str| {
+        let Type::Stream(element) = streams.get(name).expect("parallel result field") else {
+            panic!("{name} must be a parallel stream");
+        };
+        assert!(
+            matches!(element.as_ref(), Type::Applied { base, .. } if base == "sys.HistoricalCallable"),
+            "{name} must preserve its captured historical callable: {element:?}"
+        );
+        element.as_ref()
+    };
+
+    assert_ne!(pin_type("saved_left_root"), pin_type("saved_right_root"));
+    assert_ne!(pin_type("saved_left_leaf"), pin_type("saved_right_leaf"));
+    assert_ne!(pin_type("saved_left_root"), pin_type("saved_left_leaf"));
+    assert_ne!(pin_type("saved_left_root"), pin_type("rebound_left_root"));
+    assert_ne!(pin_type("saved_right_leaf"), pin_type("rebound_right_leaf"));
+}
+
+#[test]
+fn concurrent_callback_tuples_reject_cross_lane_identity_mix_after_rebind() {
+    let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-concurrent-tuple-callback-rebind-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "tuple-stored callbacks from opposite paired lanes must keep distinct pins after restore: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn tuple_pin_cascade_paired_depths_reject_cross_pair_mixing_after_storm_rebinds() {
     let source = include_str!("fixtures/historical-tuple-pin-cascade-paired-depth-storm-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
