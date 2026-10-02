@@ -1033,3 +1033,45 @@ fn repl_replays_and_rejects_mixed_transitive_module_pins() {
         "ORNA-REPL-STANDARD"
     );
 }
+
+#[test]
+fn paired_transitive_sessions_keep_snapshot_pins_when_replayed_interleaved() {
+    let (_directory, historical, upgraded, snapshots) = module_chain_projects();
+    assert_ne!(snapshots[0], snapshots[1]);
+
+    let mut historical_session = AdmittedReplSession::from_loaded_project(
+        &historical,
+        historical.standard_sources().iter().cloned(),
+        Limits::default(),
+    )
+    .unwrap();
+    let mut upgraded_session = AdmittedReplSession::from_loaded_project(
+        &upgraded,
+        upgraded.standard_sources().iter().cloned(),
+        Limits::default(),
+    )
+    .unwrap();
+    for session in [&mut historical_session, &mut upgraded_session] {
+        assert_eq!(
+            session.submit(include_str!("fixtures/module-chain-use-replay.orna")),
+            Ok(None)
+        );
+    }
+
+    assert_eq!(
+        historical_session.submit(include_str!("fixtures/module-chain-call-replay.orna")),
+        Ok(Some(ints(&[20])))
+    );
+    assert_eq!(
+        upgraded_session.submit(include_str!("fixtures/module-chain-call-replay.orna")),
+        Ok(Some(ints(&[155])))
+    );
+    assert_eq!(
+        historical_session.submit(include_str!("fixtures/module-chain-call-replay.orna")),
+        Ok(Some(ints(&[20])))
+    );
+    assert_eq!(
+        upgraded_session.submit(include_str!("fixtures/module-chain-call-replay.orna")),
+        Ok(Some(ints(&[155])))
+    );
+}
