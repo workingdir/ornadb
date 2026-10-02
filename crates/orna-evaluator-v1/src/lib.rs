@@ -9716,8 +9716,8 @@ mod tests {
         let outer_first = Value::Int(8.into());
         let outer_second = Value::Int(9.into());
         let unknown_batch = RelationPlan::union(
-            RelationPlan::new("UnknownLeft".into()),
-            RelationPlan::new("UnknownRight".into()),
+            RelationPlan::new("Unknown".into()),
+            RelationPlan::new("Unknown".into()),
         )
         .with_stage(RelationStage::Filter(vec![unknown_first.clone()]))
         .with_stage(RelationStage::Filter(vec![unknown_second.clone()]));
