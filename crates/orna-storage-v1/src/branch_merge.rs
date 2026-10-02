@@ -236,6 +236,21 @@ impl BranchMergePlan {
     }
 }
 
+/// One complete paired plan released at its selected commit position, with
+/// that plan's exact row tombstones flattened in table, split-range, then
+/// canonical key order.
+///
+/// Adapters should persist `plan` as one paired step and append
+/// `ordered_row_tombstones` at `order`. This keeps each plan's depth order
+/// attached to its lineage position when concurrent waves finish out of
+/// order or use different split boundaries.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SequencedBranchMergePlan {
+    pub order: u64,
+    pub plan: BranchMergePlan,
+    pub ordered_row_tombstones: Vec<(ObjectId, CanonicalValue)>,
+}
+
 /// Buffers selected successful plans and releases them in paired lineage order,
 /// independent of the order in which concurrent workers finish.
 ///
@@ -245,11 +260,11 @@ impl BranchMergePlan {
 /// position. A later plan may finish first, but it is held until every earlier
 /// position is submitted. Each returned plan remains one atomic paired step,
 /// so adapters can persist its tables together and append its table-local
-/// deltas without replaying or re-sorting earlier history. Within a plan,
-/// `ordered_row_tombstones` retains table and split-range order; across plans,
-/// the sequencer's returned order takes precedence over key depth. The
-/// sequencer does not perform durable commits; adapters must enact returned
-/// plans in order.
+/// deltas without replaying or re-sorting earlier history. Use
+/// [`Self::submit_with_tombstone_deltas`] when consumers need each plan's
+/// lineage position and depth-ordered row delta attached to the same paired
+/// step. The sequencer does not perform durable commits; adapters must enact
+/// returned plans in order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePlanSequencer {
     next_order: Option<u64>,
@@ -279,6 +294,38 @@ impl BranchMergePlanSequencer {
         order: u64,
         plan: &BranchMergePlan,
     ) -> Result<Vec<BranchMergePlan>, BranchMergePlanSequenceError> {
+        self.submit_selected(order, plan)
+            .map(|ready| ready.into_iter().map(|(_, plan)| plan).collect())
+    }
+
+    /// Submits one selected successful plan and returns each newly contiguous
+    /// plan with its commit position and depth-ordered tombstones attached.
+    /// Tombstone order within each paired step follows table, validated split
+    /// range, and canonical key order; the returned steps preserve commit
+    /// lineage across calls, regardless of worker completion or depth layout.
+    #[must_use = "released paired plans and tombstone deltas must be enacted in lineage order"]
+    pub fn submit_with_tombstone_deltas(
+        &mut self,
+        order: u64,
+        plan: &BranchMergePlan,
+    ) -> Result<Vec<SequencedBranchMergePlan>, BranchMergePlanSequenceError> {
+        self.submit_selected(order, plan).map(|ready| {
+            ready
+                .into_iter()
+                .map(|(order, plan)| SequencedBranchMergePlan {
+                    order,
+                    ordered_row_tombstones: plan.ordered_row_tombstones(),
+                    plan,
+                })
+                .collect()
+        })
+    }
+
+    fn submit_selected(
+        &mut self,
+        order: u64,
+        plan: &BranchMergePlan,
+    ) -> Result<Vec<(u64, BranchMergePlan)>, BranchMergePlanSequenceError> {
         let Some(next_order) = self.next_order else {
             return Err(BranchMergePlanSequenceError::OrderExhausted);
         };
@@ -292,7 +339,7 @@ impl BranchMergePlanSequencer {
             let Some(plan) = self.pending.remove(&next_order) else {
                 break;
             };
-            ready.push(plan);
+            ready.push((next_order, plan));
             self.next_order = next_order.checked_add(1);
         }
         Ok(ready)
