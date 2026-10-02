@@ -21545,6 +21545,143 @@ fn paired_wave_fragment_recovery_deduplicates_appends_across_uneven_fragments() 
 }
 
 #[test]
+fn paired_recovery_retry_identity_tracks_results_across_uneven_row_segments() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let make_step = |order, split_rows, generation, change_row| {
+        let mut rows = fixture_rows[..fixture_rows.len() - 1].to_vec();
+        if change_row {
+            rows[0].fields.insert(id(2), string("changed paired row"));
+        }
+        let tombstone = fixture_key("z");
+        let segments = if split_rows {
+            let boundary = fixture_rows[4].key.encode().unwrap();
+            vec![
+                MergedSegment::Rows {
+                    range: KeyRange::new(None, Some(boundary.clone())).unwrap(),
+                    rows: rows[..4].to_vec(),
+                    tombstones: Vec::new(),
+                },
+                MergedSegment::Rows {
+                    range: KeyRange::new(Some(boundary), None).unwrap(),
+                    rows: rows[4..].to_vec(),
+                    tombstones: vec![tombstone.clone()],
+                },
+            ]
+        } else {
+            vec![MergedSegment::Rows {
+                range: KeyRange::all(),
+                rows,
+                tombstones: vec![tombstone.clone()],
+            }]
+        };
+        let mut report = orna_storage_v1::BranchMergeReport::default();
+        report.rows_examined = if split_rows { 99 } else { 10 };
+        SequencedBranchMergePlan {
+            order,
+            plan: BranchMergePlan {
+                schema: schema(true, FieldType::Str),
+                tables: BTreeMap::from([(
+                    id(1),
+                    orna_storage_v1::MergedTable {
+                        id: id(1),
+                        whole_table_reuse: None,
+                        segments,
+                    },
+                )]),
+                checkpoints: BTreeMap::from([(
+                    b"stream".to_vec(),
+                    CheckpointGeneration {
+                        generation,
+                        position: Some(b"position-1".to_vec()),
+                    },
+                )]),
+                report,
+            },
+            ordered_row_tombstones: vec![(id(1), tombstone)],
+        }
+    };
+    let repair = |fragment, tombstone: Option<&str>| BranchMergeDepthFragmentRecovery {
+        order: 0,
+        fragment,
+        fragment_count: 2,
+        tombstones: tombstone
+            .map(|key| vec![(id(1), fixture_key(key))])
+            .unwrap_or_default(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history.submit_depth_merge_fragment(0, 0, 2, &[]).unwrap();
+    history.append(&make_step(1, false, 1, false)).unwrap();
+    let before_changed_queued_retry = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[repair(1, None)],
+            &[make_step(1, true, 2, false)],
+        ),
+        Err(BranchMergeTombstoneHistoryError::AppendRetryMismatch { order: 1 }),
+        "same tombstones with a changed checkpoint are not the same paired plan",
+    );
+    assert_eq!(history, before_changed_queued_retry);
+
+    let released = history
+        .recover_depth_merge_fragments_with_appends(
+            &[repair(1, None)],
+            &[make_step(1, true, 1, false)],
+        )
+        .unwrap();
+    assert_eq!(
+        released,
+        vec![BranchMergeTombstoneEvent {
+            order: 1,
+            table: id(1),
+            key: fixture_key("z"),
+        }],
+        "equivalent materialized rows deduplicate across different depth partitions",
+    );
+    history.submit_depth_merge_fragment(2, 0, 2, &[]).unwrap();
+
+    let before_changed_committed_retry = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[BranchMergeDepthFragmentRecovery {
+                order: 2,
+                fragment: 1,
+                fragment_count: 2,
+                tombstones: Vec::new(),
+            }],
+            &[make_step(1, false, 1, true)],
+        ),
+        Err(BranchMergeTombstoneHistoryError::AppendRetryMismatch { order: 1 }),
+        "same checkpoint and tombstones with a changed materialized row are not identical",
+    );
+    assert_eq!(history, before_changed_committed_retry);
+
+    history
+        .recover_depth_merge_fragments_with_appends(
+            &[BranchMergeDepthFragmentRecovery {
+                order: 2,
+                fragment: 1,
+                fragment_count: 2,
+                tombstones: Vec::new(),
+            }],
+            &[make_step(1, true, 1, false)],
+        )
+        .unwrap();
+    assert_eq!(history.next_order(), Some(3));
+}
+
+#[test]
 fn paired_mixed_mode_priority_survives_interleaved_depth_wave_release() {
     let fixture_keys = TOMBSTONE_DEPTH_COMMIT_ORDER
         .split("\n\n")
