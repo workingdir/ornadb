@@ -1,0 +1,41 @@
+{
+  id: "root",
+  name: "Root",
+  city: "London",
+}
+
+{
+  id: "root/child",
+  name: "Child",
+  city: "London",
+}
+
+{
+  id: "root/child/deep",
+  name: "Deep",
+  city: "London",
+}
+
+{
+  id: "root/child/deep/leaf",
+  name: "Leaf",
+  city: "London",
+}
+
+{
+  id: "root/child/deep/leaf/twig",
+  name: "Twig",
+  city: "London",
+}
+
+{
+  id: "root/child/deep/leaf/twig/bud",
+  name: "Bud",
+  city: "London",
+}
+
+{
+  id: "z",
+  name: "Sibling",
+  city: "Paris",
+}

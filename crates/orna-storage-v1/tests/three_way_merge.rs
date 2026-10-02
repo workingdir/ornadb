@@ -29,6 +29,7 @@ const CHECKPOINT_TAIL_RIGHT: &str = include_str!("fixtures/merge-checkpoint-tail
 const TOMBSTONE_DEPTH_SHALLOW: &str = include_str!("fixtures/merge-tombstone-depth-shallow.orna");
 const TOMBSTONE_DEPTH_MIDDLE: &str = include_str!("fixtures/merge-tombstone-depth-middle.orna");
 const TOMBSTONE_DEPTH_DEEP: &str = include_str!("fixtures/merge-tombstone-depth-deep.orna");
+const TOMBSTONE_CHAIN: &str = include_str!("fixtures/merge-tombstone-chain.orna");
 const TOMBSTONE_RECOVERY_STORM: &str = include_str!("fixtures/merge-tombstone-recovery-storm.orna");
 const TOMBSTONE_STORM_KEYS: &[&str] = &[
     "a",
@@ -185,6 +186,138 @@ fn snapshot(schema: Schema, manifest: TableManifest, checkpoint: Option<Checkpoi
     ThreeWaySnapshot { schema, tables, checkpoints }
 }
 
+fn paired_depth_schema() -> Schema {
+    let mut schema = string_key_schema();
+    let mut paired_table = schema.tables[0].clone();
+    paired_table.id = id(2);
+    paired_table.name = "PairedContact".into();
+    schema.tables.push(paired_table);
+    schema
+}
+
+fn paired_depth_recovery_inputs(
+    reverse_rows: bool,
+) -> (
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    FixtureRows,
+) {
+    let shallow = parse_fixture(TOMBSTONE_DEPTH_SHALLOW, RowKeyKind::Explicit);
+    let middle = parse_fixture(TOMBSTONE_DEPTH_MIDDLE, RowKeyKind::Explicit);
+    let deep = parse_fixture(TOMBSTONE_DEPTH_DEEP, RowKeyKind::Explicit);
+    let mut paired_shallow = shallow.clone();
+    paired_shallow.table = id(2);
+    let mut paired_middle = middle.clone();
+    paired_middle.table = id(2);
+    let mut paired_deep = deep.clone();
+    paired_deep.table = id(2);
+
+    let mut source = FixtureRows::default();
+    source.add(
+        MergeSide::Base,
+        b"pair-a-base-root",
+        vec![shallow.clone()],
+    );
+    source.add(
+        MergeSide::Base,
+        b"pair-a-base-middle",
+        vec![middle.clone()],
+    );
+    source.add(MergeSide::Base, b"pair-a-base-deep", vec![deep.clone()]);
+    source.add(MergeSide::Left, b"pair-a-left-root", Vec::new());
+    source.add(MergeSide::Left, b"pair-a-left-middle", vec![middle]);
+    source.add(MergeSide::Left, b"pair-a-left-deep", Vec::new());
+    source.add(MergeSide::Right, b"pair-a-right-root", Vec::new());
+    source.add(MergeSide::Right, b"pair-a-right-middle", Vec::new());
+    source.add(MergeSide::Right, b"pair-a-right-deep", vec![deep]);
+
+    source.add(
+        MergeSide::Base,
+        b"pair-b-base-root",
+        vec![paired_shallow.clone()],
+    );
+    source.add(
+        MergeSide::Base,
+        b"pair-b-base-middle",
+        vec![paired_middle.clone()],
+    );
+    source.add(
+        MergeSide::Base,
+        b"pair-b-base-deep",
+        vec![paired_deep.clone()],
+    );
+    source.add(MergeSide::Left, b"pair-b-left-root", Vec::new());
+    source.add(
+        MergeSide::Left,
+        b"pair-b-left-middle",
+        vec![paired_middle.clone()],
+    );
+    source.add(
+        MergeSide::Left,
+        b"pair-b-left-deep",
+        vec![paired_deep],
+    );
+    source.add(MergeSide::Right, b"pair-b-right-root", Vec::new());
+    source.add(
+        MergeSide::Right,
+        b"pair-b-right-middle",
+        vec![paired_middle],
+    );
+    source.add(MergeSide::Right, b"pair-b-right-deep", Vec::new());
+
+    if reverse_rows {
+        for rows in source.rows.values_mut() {
+            rows.reverse();
+        }
+    }
+
+    let schema = paired_depth_schema();
+    let make_snapshot = |first, second| {
+        let mut tables = BTreeMap::new();
+        tables.insert(id(1), first);
+        tables.insert(id(2), second);
+        ThreeWaySnapshot { schema: schema.clone(), tables, checkpoints: BTreeMap::new() }
+    };
+    let base = make_snapshot(
+        depth_split_manifest(
+            41,
+            [41, 42, 43],
+            [b"pair-a-base-root", b"pair-a-base-middle", b"pair-a-base-deep"],
+        ),
+        depth_split_manifest(
+            51,
+            [51, 52, 53],
+            [b"pair-b-base-root", b"pair-b-base-middle", b"pair-b-base-deep"],
+        ),
+    );
+    let left = make_snapshot(
+        depth_split_manifest(
+            61,
+            [61, 62, 63],
+            [b"pair-a-left-root", b"pair-a-left-middle", b"pair-a-left-deep"],
+        ),
+        depth_split_manifest(
+            71,
+            [71, 72, 73],
+            [b"pair-b-left-root", b"pair-b-left-middle", b"pair-b-left-deep"],
+        ),
+    );
+    let right = make_snapshot(
+        depth_split_manifest(
+            81,
+            [81, 82, 83],
+            [b"pair-a-right-root", b"pair-a-right-middle", b"pair-a-right-deep"],
+        ),
+        depth_split_manifest(
+            91,
+            [91, 92, 93],
+            [b"pair-b-right-root", b"pair-b-right-middle", b"pair-b-right-deep"],
+        ),
+    );
+    (base, left, right, source)
+}
+
 #[derive(Default)]
 struct FixtureRows {
     rows: BTreeMap<(MergeSide, Vec<u8>), Vec<KeyedRow>>,
@@ -292,6 +425,43 @@ impl BranchRowSource for PartialRecoveringFixtureRows {
             return Err("fixture row source failed after partial storm delivery".into());
         }
         self.source.visit_rows(side, table, segment, range, visitor)
+    }
+}
+
+struct FailAfterPairedPrefixFixtureRows {
+    source: FixtureRows,
+    fail_after_rows: usize,
+    rows_delivered: usize,
+    failed_at: Option<(ObjectId, MergeSide, Vec<u8>)>,
+}
+
+impl BranchRowSource for FailAfterPairedPrefixFixtureRows {
+    fn visit_rows(
+        &mut self,
+        side: MergeSide,
+        table: ObjectId,
+        segment: Option<&RowSegmentManifest>,
+        range: &KeyRange,
+        visitor: &mut dyn FnMut(KeyedRow) -> bool,
+    ) -> Result<(), String> {
+        let locator = segment.map(|segment| segment.locator.clone()).unwrap_or_default();
+        let mut delivered = self.rows_delivered;
+        let fail_after_rows = self.fail_after_rows;
+        let mut stopped_at_failure = false;
+        self.source.visit_rows(side, table, segment, range, &mut |row| {
+            if delivered == fail_after_rows {
+                stopped_at_failure = true;
+                return false;
+            }
+            delivered += 1;
+            visitor(row)
+        })?;
+        self.rows_delivered = delivered;
+        if stopped_at_failure {
+            self.failed_at = Some((table, side, locator));
+            return Err("fixture row source failed between paired depth ranges".into());
+        }
+        Ok(())
     }
 }
 
@@ -15651,6 +15821,111 @@ fn split_cross_depth_load_inputs(
     (base, left, right, source)
 }
 
+fn chain_split_manifest(
+    digest: u8,
+    segment_digest_start: u8,
+    boundaries: &[Vec<u8>],
+    locator_prefix: &str,
+) -> (TableManifest, Vec<Vec<u8>>) {
+    let mut segments = Vec::with_capacity(boundaries.len() + 1);
+    let mut locators = Vec::with_capacity(boundaries.len() + 1);
+    for index in 0..=boundaries.len() {
+        let locator = format!("{locator_prefix}-{index}").into_bytes();
+        locators.push(locator.clone());
+        segments.push(RowSegmentManifest {
+            locator,
+            range: KeyRange::new(
+                index.checked_sub(1).map(|previous| boundaries[previous].clone()),
+                boundaries.get(index).cloned(),
+            )
+            .expect("fixture chain boundaries are in logical key order"),
+            digest: [segment_digest_start + index as u8; 32],
+        });
+    }
+    (TableManifest { digest: [digest; 32], segments }, locators)
+}
+
+fn tombstone_chain_load_inputs(
+    split_layout: bool,
+    left_keeps_even_chain_keys: bool,
+    reverse_whole_loads: bool,
+) -> (
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    FixtureRows,
+) {
+    let chain_rows = TOMBSTONE_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    assert_eq!(chain_rows.len(), 7);
+    let sibling_index = chain_rows.len() - 1;
+    let left_keeps = |index: usize| {
+        index == sibling_index || (index % 2 == 0) == left_keeps_even_chain_keys
+    };
+    let right_keeps = |index: usize| index == sibling_index || !left_keeps(index);
+    let mut source = FixtureRows::default();
+
+    if split_layout {
+        let boundaries = chain_rows
+            .iter()
+            .skip(1)
+            .map(|row| row.key.encode().unwrap())
+            .collect::<Vec<_>>();
+        let (base_manifest, base_locators) = chain_split_manifest(31, 31, &boundaries, "chain-base");
+        let (left_manifest, left_locators) = chain_split_manifest(32, 41, &boundaries, "chain-left");
+        let (right_manifest, right_locators) = chain_split_manifest(33, 51, &boundaries, "chain-right");
+        for (index, row) in chain_rows.iter().enumerate() {
+            source.add(MergeSide::Base, &base_locators[index], vec![row.clone()]);
+            source.add(
+                MergeSide::Left,
+                &left_locators[index],
+                if left_keeps(index) { vec![row.clone()] } else { Vec::new() },
+            );
+            source.add(
+                MergeSide::Right,
+                &right_locators[index],
+                if right_keeps(index) { vec![row.clone()] } else { Vec::new() },
+            );
+        }
+        (
+            snapshot(string_key_schema(), base_manifest, None),
+            snapshot(string_key_schema(), left_manifest, None),
+            snapshot(string_key_schema(), right_manifest, None),
+            source,
+        )
+    } else {
+        let mut base_rows = chain_rows.clone();
+        let mut left_rows = chain_rows
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| left_keeps(*index))
+            .map(|(_, row)| row.clone())
+            .collect::<Vec<_>>();
+        let mut right_rows = chain_rows
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| right_keeps(*index))
+            .map(|(_, row)| row.clone())
+            .collect::<Vec<_>>();
+        if reverse_whole_loads {
+            base_rows.reverse();
+            left_rows.reverse();
+            right_rows.reverse();
+        }
+        source.add(MergeSide::Base, b"chain-whole-base", base_rows);
+        source.add(MergeSide::Left, b"chain-whole-left", left_rows);
+        source.add(MergeSide::Right, b"chain-whole-right", right_rows);
+        (
+            snapshot(string_key_schema(), manifest(61, 61, b"chain-whole-base"), None),
+            snapshot(string_key_schema(), manifest(62, 62, b"chain-whole-left"), None),
+            snapshot(string_key_schema(), manifest(63, 63, b"chain-whole-right"), None),
+            source,
+        )
+    }
+}
+
 fn flattened_row_tombstones(plan: &BranchMergePlan) -> Vec<CanonicalValue> {
     plan.tables[&id(1)]
         .segments
@@ -15658,6 +15933,20 @@ fn flattened_row_tombstones(plan: &BranchMergePlan) -> Vec<CanonicalValue> {
         .flat_map(|segment| match segment {
             MergedSegment::Rows { tombstones, .. } => tombstones.clone(),
             other => panic!("expected materialized cross-depth rows, got {other:?}"),
+        })
+        .collect()
+}
+
+fn flattened_live_row_keys(plan: &BranchMergePlan) -> Vec<CanonicalValue> {
+    plan.tables[&id(1)]
+        .segments
+        .iter()
+        .flat_map(|segment| match segment {
+            MergedSegment::Rows { rows, .. } => rows
+                .iter()
+                .map(|row| row.key.clone())
+                .collect::<Vec<_>>(),
+            other => panic!("expected materialized chain rows, got {other:?}"),
         })
         .collect()
 }
@@ -16099,6 +16388,104 @@ fn concurrent_recovery_tombstone_storms_keep_canonical_key_order() {
 }
 
 #[test]
+fn paired_depth_recovery_retries_keep_table_and_tombstone_order() {
+    // MERGE-1 requires a complete isolated result but leaves paired table and
+    // depth-range ordering open. The v1 policy discards earlier tombstones
+    // when a later pair range fails, then retries the ordered walk from its
+    // first table after recovery.
+    let (base, left, right, source) = paired_depth_recovery_inputs(false);
+    let mut interrupted = FailAfterPairedPrefixFixtureRows {
+        source,
+        fail_after_rows: 6,
+        rows_delivered: 0,
+        failed_at: None,
+    };
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: 11, max_conflicts: 0 },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed between paired depth ranges".into(),
+        }),
+    );
+    assert_eq!(interrupted.rows_delivered, 6);
+    assert_eq!(
+        interrupted.failed_at,
+        Some((id(2), MergeSide::Base, b"pair-b-base-middle".to_vec())),
+        "the first table completed before the paired table failed at its middle depth",
+    );
+
+    let (base_a, left_a, right_a, source_a) = paired_depth_recovery_inputs(false);
+    let (base_b, left_b, right_b, source_b) = paired_depth_recovery_inputs(true);
+    let start = Arc::new(Barrier::new(2));
+    let start_a = Arc::clone(&start);
+    let retry_a = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows { source: source_a, first_load: Some(start_a) };
+        merge_three_way_snapshots(
+            &base_a,
+            &left_a,
+            &right_a,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 11, max_conflicts: 0 },
+        )
+    });
+    let retry_b = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows { source: source_b, first_load: Some(start) };
+        merge_three_way_snapshots(
+            &base_b,
+            &left_b,
+            &right_b,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 11, max_conflicts: 0 },
+        )
+    });
+
+    let plan_a = retry_a.join().expect("first paired-depth retry completes").unwrap();
+    let plan_b = retry_b.join().expect("second paired-depth retry completes").unwrap();
+    assert_eq!(plan_a, plan_b, "recovered paired depth merges ignore row visitation order");
+    assert_eq!(plan_a.tables.keys().copied().collect::<Vec<_>>(), vec![id(1), id(2)]);
+    assert_eq!(plan_a.report.rows_examined, 11);
+    assert_eq!(plan_a.report.conflicts_lower_bound, 0);
+
+    let table_one_tombstones = plan_a.tables[&id(1)]
+        .segments
+        .iter()
+        .flat_map(|segment| match segment {
+            MergedSegment::Rows { tombstones, .. } => tombstones.clone(),
+            other => panic!("first paired depth range is materialized: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    let table_two_tombstones = plan_a.tables[&id(2)]
+        .segments
+        .iter()
+        .flat_map(|segment| match segment {
+            MergedSegment::Rows { tombstones, .. } => tombstones.clone(),
+            other => panic!("second paired depth range is materialized: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        table_one_tombstones,
+        vec![string("root"), string("root/child"), string("root/child/deep")],
+    );
+    assert_eq!(table_two_tombstones, vec![string("root"), string("root/child/deep")]);
+    let table_two_rows = plan_a.tables[&id(2)]
+        .segments
+        .iter()
+        .flat_map(|segment| match segment {
+            MergedSegment::Rows { rows, .. } => rows.clone(),
+            other => panic!("second paired depth range is materialized: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    let mut expected_table_two_row = parse_fixture(TOMBSTONE_DEPTH_MIDDLE, RowKeyKind::Explicit);
+    expected_table_two_row.table = id(2);
+    assert_eq!(table_two_rows, vec![expected_table_two_row]);
+}
+
+#[test]
 fn concurrent_recovery_tombstone_conflict_storm_respects_the_detail_budget() {
     // A recovered conflict storm reports its full canonical sequence when it
     // fits; over budget, the first omitted conflict still advances the lower
@@ -16427,6 +16814,140 @@ fn sustained_concurrent_budget_stops_leave_complete_boundary_orders_isolated() {
                 assert_eq!(
                     plan.tables[&id(1)].segments.len(),
                     if split_layout { 3 } else { 1 },
+                );
+                complete_loads += 1;
+            }
+        }
+    }
+
+    assert_eq!(complete_loads, 36);
+    assert_eq!(capped_loads, 12);
+}
+
+#[test]
+fn sustained_concurrent_tombstone_chains_keep_logical_boundary_order() {
+    // The reference does not prescribe concurrent scheduling for nested
+    // tombstone chains. Pin canonical table-key order across every boundary.
+    const LOADS_PER_WAVE: usize = 8;
+    const WAVES: usize = 6;
+    let expected_tombstones = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .into_iter()
+    .map(string)
+    .collect::<Vec<_>>();
+    let expected_live_rows = vec![string("z")];
+    let mut completed = 0;
+
+    for wave in 0..WAVES {
+        let start = Arc::new(Barrier::new(LOADS_PER_WAVE));
+        let mut workers = Vec::with_capacity(LOADS_PER_WAVE);
+        for load in 0..LOADS_PER_WAVE {
+            let split_layout = (wave + load) % 2 == 0;
+            let (base, left, right, source) = tombstone_chain_load_inputs(
+                split_layout,
+                (wave + load) % 3 == 0,
+                (wave + load) % 2 == 1,
+            );
+            let gate = Arc::clone(&start);
+            workers.push(std::thread::spawn(move || {
+                let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+                let plan = merge_three_way_snapshots(
+                    &base,
+                    &left,
+                    &right,
+                    &mut source,
+                    BranchMergeBudget { max_rows_examined: 15, max_conflicts: 0 },
+                )
+                .expect("each synchronized chain load fits the exact fixture budget");
+                (plan, split_layout)
+            }));
+        }
+
+        for worker in workers {
+            let (plan, split_layout) = worker.join().expect("chain load worker completes");
+            assert_eq!(plan.report.rows_examined, 15);
+            assert_eq!(flattened_row_tombstones(&plan), expected_tombstones);
+            assert_eq!(flattened_live_row_keys(&plan), expected_live_rows);
+            assert_eq!(plan.tables[&id(1)].segments.len(), if split_layout { 7 } else { 1 });
+            completed += 1;
+        }
+    }
+
+    assert_eq!(completed, LOADS_PER_WAVE * WAVES);
+}
+
+#[test]
+fn sustained_concurrent_chain_budget_stops_do_not_disturb_tombstone_order() {
+    // Under the same synchronized load, a one-row-short chain scan must stop
+    // privately while exact-budget peers return the full ordered chain.
+    const LOADS_PER_WAVE: usize = 8;
+    const WAVES: usize = 6;
+    let expected_tombstones = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .into_iter()
+    .map(string)
+    .collect::<Vec<_>>();
+    let expected_live_rows = vec![string("z")];
+    let mut complete_loads = 0;
+    let mut capped_loads = 0;
+
+    for wave in 0..WAVES {
+        let start = Arc::new(Barrier::new(LOADS_PER_WAVE));
+        let mut workers = Vec::with_capacity(LOADS_PER_WAVE);
+        for load in 0..LOADS_PER_WAVE {
+            let split_layout = (wave + load) % 2 == 0;
+            let capped = (wave + load) % 4 == 0;
+            let (base, left, right, source) = tombstone_chain_load_inputs(
+                split_layout,
+                (wave + load) % 3 == 1,
+                (wave + load) % 2 == 0,
+            );
+            let gate = Arc::clone(&start);
+            workers.push(std::thread::spawn(move || {
+                let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+                let row_cap = if capped { 14 } else { 15 };
+                let result = merge_three_way_snapshots(
+                    &base,
+                    &left,
+                    &right,
+                    &mut source,
+                    BranchMergeBudget { max_rows_examined: row_cap, max_conflicts: 0 },
+                );
+                (result, capped, split_layout)
+            }));
+        }
+
+        for worker in workers {
+            let (result, capped, split_layout) =
+                worker.join().expect("budgeted chain worker completes");
+            if capped {
+                let Err(BranchMergeError::BudgetExceeded { report }) = result else {
+                    panic!("a one-row-short chain budget never returns a partial plan")
+                };
+                assert_eq!(report.rows_examined, 15);
+                assert_eq!(report.conflicts_lower_bound, 0);
+                assert!(report.affected_tables.contains(&id(1)));
+                capped_loads += 1;
+            } else {
+                let plan = result.expect("the exact-budget peer remains independent");
+                assert_eq!(plan.report.rows_examined, 15);
+                assert_eq!(flattened_row_tombstones(&plan), expected_tombstones);
+                assert_eq!(flattened_live_row_keys(&plan), expected_live_rows);
+                assert_eq!(
+                    plan.tables[&id(1)].segments.len(),
+                    if split_layout { 7 } else { 1 },
                 );
                 complete_loads += 1;
             }
