@@ -403,6 +403,10 @@ impl PackageResolver {
     /// The reference is silent on terminal rebinds in those reopened
     /// sessions, so v1 updates only each selected sibling's route and keeps
     /// every retained manifest snapshot on its original pin-to-module route.
+    /// Reordering terminal rebind events between siblings while preserving
+    /// each sibling's own event order leaves both final routes unchanged.
+    /// v1 treats the sibling sessions as independent; retained snapshots
+    /// continue to use their manifest-selected terminal pins.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
