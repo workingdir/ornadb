@@ -105,6 +105,73 @@ fn pinned_collection_views_and_slices_typecheck_as_an_ordinary_std_module() {
 }
 
 #[test]
+fn pinned_calendar_arithmetic_source_typechecks_against_core() {
+    let source = reference_standard_sources_v1()
+        .into_iter()
+        .find(|(path, _)| path == REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1)
+        .expect("the pinned source bundle includes std.time.calendar")
+        .1;
+    let parsed = orna_syntax_v1::parse_module_with_file(
+        &source,
+        REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1,
+    );
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("calendar.orna", source)],
+        &orna_semantic_v1::Catalogue::authoritative_core(),
+    );
+    assert!(
+        analysis.is_ok(),
+        "{}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+}
+
+#[test]
+fn pinned_timezone_and_calendar_surfaces_typecheck_and_publish_in_snapshot() {
+    let sources = reference_standard_sources_v1();
+    assert_eq!(sources[6].0, REFERENCE_STANDARD_TIME_PATH_V1);
+    let time = &sources[6].1;
+    for declaration in [
+        "pub fn timezone_data_version(): Str",
+        "pub fn offset_at(instant: Instant, zone: Str): Int",
+        "pub fn resolve_local(local: Str, zone: Str, ambiguous: Str): Instant",
+    ] {
+        assert!(time.contains(declaration), "missing std.time declaration `{declaration}`");
+    }
+    assert!(time.contains("orna-iana-2024a"));
+    let parsed = orna_syntax_v1::parse_module_with_file(time, REFERENCE_STANDARD_TIME_PATH_V1);
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    let catalogue = reference_standard_catalogue_v1()
+        .expect("time-zone APIs and calendar helpers resolve in the captured std profile");
+    let consumer = include_str!("fixtures/v1_timezone_calendar_consumer_b8tgd.orna");
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("timezone_calendar_consumer.orna", consumer)],
+        &catalogue,
+    );
+    assert!(
+        analysis.is_ok(),
+        "{}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+    let mut changed_time = time.clone();
+    changed_time.push_str("\n// changed after the captured snapshot\n");
+    assert!(reference_standard_profile_v1()
+        .verify_source(REFERENCE_STANDARD_TIME_PATH_V1, &changed_time)
+        .is_err());
+}
+
+#[test]
 fn pinned_reflection_and_introspection_modules_typecheck_as_ordinary_std_modules() {
     let sources = reference_standard_sources_v1();
     for (index, path) in [
