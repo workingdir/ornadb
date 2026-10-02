@@ -4371,6 +4371,79 @@ fn paired_shadowed_callback_parameter_contracts_keep_depth_pin_scope() {
 }
 
 #[test]
+fn paired_shadowed_callback_depth_rebinds_retain_untouched_lanes() {
+    let source = include_str!("fixtures/historical-paired-shadowed-callback-retention.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-shadowed-callback-retention.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_shadowed_callback_depth_rebinds_retain_untouched_lanes")
+        })
+        .expect("paired shadowed callback retention fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_shadowed_callback_depth_rebinds_retain_untouched_lanes"]
+        .ty
+    else {
+        panic!("paired shadowed callback retention proof must be a function");
+    };
+    let Type::Record(streams) = result.as_ref() else {
+        panic!("paired shadowed callback retention proof must expose concurrent pins");
+    };
+    let pin_type = |name: &str| {
+        let Type::Stream(element) = streams.get(name).expect("parallel result field") else {
+            panic!("{name} must be a stream");
+        };
+        let Type::Applied { base, arguments } = element.as_ref() else {
+            panic!("{name} must retain a historical callable pin: {element:?}");
+        };
+        assert_eq!(base, "sys.HistoricalCallable");
+        let [pin, _] = arguments.as_slice() else {
+            panic!("historical callable must expose its pin: {arguments:?}");
+        };
+        pin
+    };
+    assert_eq!(pin_type("saved_left"), pin_type("middle_left"));
+    assert_eq!(pin_type("saved_right"), pin_type("middle_right"));
+    assert_eq!(pin_type("middle_left"), pin_type("final_left"));
+    assert_eq!(pin_type("middle_right"), pin_type("final_right"));
+    assert_ne!(pin_type("final_left"), pin_type("final_right"));
+    assert_eq!(
+        pin_type("final_left"),
+        &Type::Applied {
+            base: "sys.SnapshotRefContext".into(),
+            arguments: vec![Type::Named("selector:HEAD~100".into())],
+        }
+    );
+    assert_eq!(
+        pin_type("final_right"),
+        &Type::Applied {
+            base: "sys.SnapshotRefContext".into(),
+            arguments: vec![Type::Named("selector:HEAD~90".into())],
+        }
+    );
+}
+
+#[test]
 fn concurrent_callback_tuples_reject_cross_lane_identity_mix_after_rebind() {
     let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
