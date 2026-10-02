@@ -16,6 +16,7 @@ use orna_live_v1::{
     Error as LiveError, LiveAdminEffectDispatcher, LiveApplication, LiveApplicationWorkLease,
     LiveEvalResponse, LiveEvalTransaction,
 };
+use num_bigint::BigInt;
 use orna_protocol_v1::{Envelope, Message, PresentNode, ResultStatus};
 use orna_runtime_v1::{
     NoFault, RequestIdentity, RuntimeActivationContext, RuntimeError,
@@ -693,6 +694,7 @@ pub struct SourceMutationEffectHandler {
     insert_defaults: TableInsertDefaults,
     default_functions: Functions,
     default_limits: Limits,
+    next_automatic_ids: BTreeMap<String, BigInt>,
     mutations: Vec<TableMutation>,
     next_ordinal: u64,
     publication_rows: Option<RuntimePublicationMetadataRows>,
@@ -703,11 +705,13 @@ pub struct SourceMutationEffectHandler {
 impl SourceMutationEffectHandler {
     #[must_use]
     pub fn new(tables: BTreeMap<String, TableSchema>) -> Self {
+        let next_automatic_ids = automatic_id_counters(&tables);
         Self {
             tables,
             insert_defaults: BTreeMap::new(),
             default_functions: Functions::new(),
             default_limits: Limits::default(),
+            next_automatic_ids,
             mutations: Vec::new(),
             next_ordinal: 0,
             publication_rows: None,
@@ -722,9 +726,10 @@ impl SourceMutationEffectHandler {
     ) -> Result<Self, ApplicationError> {
         let mut handler = Self::new(tables);
         let mut captured = BTreeMap::new();
-        for table in handler.tables.keys() {
+        let table_names = handler.tables.keys().cloned().collect::<Vec<_>>();
+        for table in table_names {
             let table_rows = rows
-                .get(table)
+                .get(&table)
                 .ok_or_else(|| ApplicationError::UnadmittedTable(table.clone()))?;
             let mut decoded = BTreeMap::new();
             for (key, value) in table_rows {
@@ -732,12 +737,12 @@ impl SourceMutationEffectHandler {
                     ApplicationError::Runtime("captured table row was not canonical".into())
                 })?;
                 handler
-                    .row_matches_schema(&handler.tables[table], &row)
+                    .row_matches_schema(&handler.tables[&table], &row)
                     .map_err(|_| {
                         ApplicationError::Runtime("captured table row failed its schema".into())
                     })?;
                 if handler
-                    .key_from_row(&handler.tables[table], &row)
+                    .key_from_row(&handler.tables[&table], &row)
                     .map_err(|_| {
                         ApplicationError::Runtime("captured table row had an invalid key".into())
                     })?
@@ -747,13 +752,20 @@ impl SourceMutationEffectHandler {
                         "captured table row key did not match its row".into(),
                     ));
                 }
+                handler
+                    .observe_automatic_id(&table, key)
+                    .map_err(|_| {
+                        ApplicationError::Runtime(
+                            "captured automatic table key was invalid".into(),
+                        )
+                    })?;
                 if decoded.insert(key.clone(), row).is_some() {
                     return Err(ApplicationError::Runtime(
                         "captured table snapshot had duplicate keys".into(),
                     ));
                 }
             }
-            captured.insert(table.clone(), decoded);
+            captured.insert(table, decoded);
         }
         handler.captured_rows = Some(captured);
         Ok(handler)
@@ -775,11 +787,13 @@ impl SourceMutationEffectHandler {
         tables: BTreeMap<String, TableSchema>,
         publication_rows: RuntimePublicationMetadataRows,
     ) -> Self {
+        let next_automatic_ids = automatic_id_counters(&tables);
         Self {
             tables,
             insert_defaults: BTreeMap::new(),
             default_functions: Functions::new(),
             default_limits: Limits::default(),
+            next_automatic_ids,
             mutations: Vec::new(),
             next_ordinal: 0,
             publication_rows: Some(publication_rows),
@@ -999,12 +1013,21 @@ impl SourceMutationEffectHandler {
 
         let defaults = self.insert_defaults.get(table).cloned().unwrap_or_default();
         let schema = self.table(table)?.clone();
+        let admission = self.admission(&schema)?.clone();
         let key_names = self
             .admission(&schema)?
             .keys
             .iter()
             .map(|(name, _)| name.clone())
             .collect::<std::collections::BTreeSet<_>>();
+        if admission.automatic_key {
+            if let Some(id) = fields.get("id") {
+                self.observe_automatic_id_value(table, id)?;
+            } else {
+                let id = self.allocate_automatic_id(table)?;
+                fields.insert("id".into(), id);
+            }
+        }
         for (field, expression) in defaults {
             if key_fields_only && !key_names.contains(&field) {
                 continue;
@@ -1115,6 +1138,40 @@ impl SourceMutationEffectHandler {
             components.push(value);
         }
         encoded_table_key(&components)
+    }
+
+    fn allocate_automatic_id(&mut self, table: &str) -> Result<OvbRaw, EvaluationError> {
+        let next = self
+            .next_automatic_ids
+            .get_mut(table)
+            .ok_or_else(|| Self::effect_error("ORNA-EVAL-TABLE-KEY"))?;
+        let allocated = next.clone();
+        *next += BigInt::from(1_u8);
+        Ok(OvbRaw::Int(allocated))
+    }
+
+    fn observe_automatic_id(&mut self, table: &str, encoded_key: &[u8]) -> Result<(), EvaluationError> {
+        let value = CanonicalValue::decode(encoded_key)
+            .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-KEY"))?;
+        self.observe_automatic_id_value(table, value.raw())
+    }
+
+    fn observe_automatic_id_value(
+        &mut self,
+        table: &str,
+        value: &OvbRaw,
+    ) -> Result<(), EvaluationError> {
+        let Some(next) = self.next_automatic_ids.get_mut(table) else {
+            return Ok(());
+        };
+        let OvbRaw::Int(value) = value else {
+            return Err(Self::effect_error("ORNA-EVAL-TABLE-KEY"));
+        };
+        let successor = value + BigInt::from(1_u8);
+        if successor > *next {
+            *next = successor;
+        }
+        Ok(())
     }
 
     fn row_matches_schema(
@@ -1729,6 +1786,21 @@ fn admitted_table_schemas(
                 .clone()
                 .filter(|schema| schema.admission.is_some())
                 .map(|schema| (name.clone(), schema))
+        })
+        .collect()
+}
+
+fn automatic_id_counters(
+    tables: &BTreeMap<String, TableSchema>,
+) -> BTreeMap<String, BigInt> {
+    tables
+        .iter()
+        .filter_map(|(name, schema)| {
+            schema
+                .admission
+                .as_ref()
+                .is_some_and(|admission| admission.automatic_key)
+                .then(|| (name.clone(), BigInt::from(1_u8)))
         })
         .collect()
 }
@@ -2994,6 +3066,78 @@ mod tests {
                 .expect("stored row is canonical"),
             expected
         );
+    }
+
+    #[test]
+    fn automatic_key_insert_and_upsert_allocate_after_the_snapshot_high_water_mark() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "core-table-automatic-id-om35q.orna",
+                include_str!("../tests/fixtures/core-table-automatic-id-om35q.orna"),
+                "main",
+            )
+            .expect("automatic-key table fixture should be admitted");
+        let int = |value: i64| {
+            CanonicalValue::new(OvbRaw::Int(value.into())).expect("integer is canonical")
+        };
+        let key = |value: i64| int(value).encode().expect("key is canonical");
+        let prior = CanonicalValue::new(OvbRaw::Map(vec![
+            (OvbRaw::Text("id".into()), OvbRaw::Int(4.into())),
+            (OvbRaw::Text("text".into()), OvbRaw::Text("prior".into())),
+        ]))
+        .expect("prior row is canonical");
+        let rows = BTreeMap::from([(
+            "Note".to_owned(),
+            vec![(key(4), prior.encode().expect("prior row encodes"))],
+        )]);
+        let mut effects = SourceMutationEffectHandler::with_table_rows(
+            admitted_table_schemas(&application.module_header),
+            rows,
+        )
+        .expect("snapshot row is valid")
+        .with_insert_defaults(
+            application.table_insert_defaults.clone(),
+            application.functions.clone(),
+            application.limits,
+        );
+
+        let result = invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            &Environment::new(),
+            application.limits,
+            &mut effects,
+        )
+        .expect("automatic insert and absent upsert should allocate IDs");
+        let expected = CanonicalValue::new(OvbRaw::Map(vec![
+            (OvbRaw::Text("id".into()), OvbRaw::Int(6.into())),
+            (OvbRaw::Text("text".into()), OvbRaw::Text("supplied".into())),
+        ]))
+        .expect("returned row is canonical");
+        assert_eq!(result, expected);
+
+        let mutations = effects
+            .into_mutations()
+            .expect("automatic ID mutations are canonical");
+        assert_eq!(mutations.len(), 2);
+        assert!(mutations.iter().all(TableMutation::is_insert));
+        for (mutation, (id, text)) in mutations
+            .iter()
+            .zip([(5_i64, "generated"), (6, "supplied")])
+        {
+            assert_eq!(mutation.key(), key(id));
+            assert_eq!(
+                CanonicalValue::decode(mutation.value().expect("insert row"))
+                    .expect("insert row is canonical"),
+                CanonicalValue::new(OvbRaw::Map(vec![
+                    (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
+                    (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
+                ]))
+                .expect("expected row is canonical")
+            );
+        }
     }
 
     #[test]
