@@ -1370,6 +1370,7 @@ dependencies = [
  "orna-syntax-v1",
  "orna-sys-v1",
  "orna-value-v1",
+ "sha2 0.10.9",
  "tempfile",
  "unicode-normalization",
 ]
