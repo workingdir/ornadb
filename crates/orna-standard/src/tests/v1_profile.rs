@@ -7,6 +7,7 @@ use crate::{
     REFERENCE_STANDARD_TIME_PATH_V1,
     REFERENCE_STANDARD_TIME_COMPACT_PATH_V1, REFERENCE_STANDARD_TIME_CLOCK_PATH_V1,
     REFERENCE_STANDARD_TIME_WORDS_PATH_V1, REFERENCE_STANDARD_TIME_ISO_PATH_V1,
+    REFERENCE_STANDARD_IO_PATH_V1, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1,
     reference_standard_catalogue_v1,
     reference_standard_profile_v1, reference_standard_sources_v1,
 };
@@ -39,6 +40,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         assert_eq!(sources[index].0, path);
         assert!(sources[index].1.contains(&format!("std.time.duration.{operation}.format")));
     }
+    assert_eq!(sources[11].0, REFERENCE_STANDARD_IO_PATH_V1);
+    assert_eq!(sources[11].1.trim(), "use environment;");
+    assert_eq!(sources[12].0, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1);
+    assert!(sources[12].1.contains("pub fn get(name: Str): Str?"));
 
     let profile = reference_standard_profile_v1();
     assert_eq!(profile.snapshot(), "orna.std/v1-reference-library");
