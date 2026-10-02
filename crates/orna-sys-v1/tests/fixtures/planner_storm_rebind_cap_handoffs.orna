@@ -1,0 +1,29 @@
+pub table PlannerStormRebindCapHandoffs(id: Int) {
+    first: Bool,
+    second: Bool,
+    third: Bool,
+    fourth: Bool,
+}
+pub fn rebind_cap_handoffs() = PlannerStormRebindCapHandoffs
+    | take(100)
+    | union(
+        PlannerStormRebindCapHandoffs
+            | take(100)
+            | union(
+                PlannerStormRebindCapHandoffs | take(80) | filter(row => row.third),
+                PlannerStormRebindCapHandoffs | take(80) | filter(row => row.third)
+            )
+            | take(50)
+            | filter(row => row.second),
+        PlannerStormRebindCapHandoffs | take(20) | filter(row => row.first)
+    )
+    | union(
+        PlannerStormRebindCapHandoffs
+            | take(30)
+            | union(
+                PlannerStormRebindCapHandoffs | take(16) | filter(row => row.fourth),
+                PlannerStormRebindCapHandoffs | take(16) | filter(row => row.fourth)
+            )
+            | filter(row => row.third),
+        PlannerStormRebindCapHandoffs | take(10) | filter(row => row.second)
+    );
