@@ -4686,17 +4686,13 @@ impl Context<'_, '_> {
         let input = supplied_input.ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
         let decoded = match (codec, input) {
             ("json", Value::String(input)) => {
-                let operation = if saw_options {
-                    "__decode_with_options"
-                } else {
-                    "__decode"
-                };
-                let values = if saw_options {
-                    vec![Value::String(input), Value::Bool(ignore_unknown_fields)]
-                } else {
-                    vec![Value::String(input)]
-                };
-                self.json_codec(operation, values)?
+                self.decode_json_with_witness(
+                    &input,
+                    &witness,
+                    ignore_unknown_fields,
+                    scope,
+                    depth + 1,
+                )?
             }
             ("orna", Value::String(input)) => {
                 self.orna_codec("__decode", vec![Value::String(input)])?
@@ -4706,11 +4702,93 @@ impl Context<'_, '_> {
             ("ovb", _) => return Err(error("ORNA-EVAL-TYPE")),
             _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
         };
-        if codec_type_matches(&decoded, &witness) {
+        if codec_type_matches(&decoded, &witness, &scope.3) {
             Ok(decoded)
         } else {
             Err(error("ORNA-EVAL-VALUE"))
         }
+    }
+
+    fn decode_json_with_witness(
+        &mut self,
+        input: &str,
+        witness: &str,
+        ignore_unknown_fields: bool,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        let input = self.string(input.to_owned())?;
+        let node = parse_json_node(&input)?;
+        let Some(definition) = scope.3.get(witness).cloned() else {
+            return json_node_to_value(node, self, depth);
+        };
+        if !definition.variants.is_empty() {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        self.depth(depth)?;
+        self.step()?;
+        let JsonNode::Object(entries) = node else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        self.items(entries.len())?;
+        self.items(definition.fields.len())?;
+
+        let mut supplied = BTreeMap::new();
+        for (name, value) in entries {
+            self.string(name.clone())?;
+            if definition
+                .fields
+                .iter()
+                .any(|field| field.public && field.name == name)
+            {
+                supplied.insert(name, value);
+            } else if ignore_unknown_fields {
+                // Ignored fields still consume evaluator limits so a large
+                // unknown subtree cannot bypass the bounded decoder.
+                let _ = json_node_to_value(value, self, depth + 1)?;
+            } else {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+        }
+
+        let mut construction_scope = scope.clone();
+        let mut fields = Vec::with_capacity(definition.fields.len());
+        for field in &definition.fields {
+            let value = if field.public {
+                if let Some(node) = supplied.remove(&field.name) {
+                    json_node_to_value(node, self, depth + 1)?
+                } else if let Some(default) = &field.default {
+                    let previous_namespace = self.namespace.clone();
+                    self.namespace = definition.owner.clone();
+                    let result = self.evaluate(default, &mut construction_scope, depth + 1);
+                    self.namespace = previous_namespace;
+                    result?
+                } else {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+            } else if let Some(default) = &field.default {
+                let previous_namespace = self.namespace.clone();
+                self.namespace = definition.owner.clone();
+                let result = self.evaluate(default, &mut construction_scope, depth + 1);
+                self.namespace = previous_namespace;
+                result?
+            } else {
+                return Err(error("ORNA-EVAL-VALUE"));
+            };
+            if self.transfer.is_some() {
+                return Ok(Value::Null);
+            }
+            construction_scope.0.insert(field.name.clone(), value.clone());
+            construction_scope.1.remove(&field.name);
+            fields.push((field.field_id.clone(), value));
+        }
+        if !supplied.is_empty() {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        Ok(Value::NominalRecord {
+            type_id: definition.type_id,
+            fields,
+        })
     }
 
     fn call(
@@ -5767,10 +5845,7 @@ impl Context<'_, '_> {
             ("__decode", [Value::String(input)])
             | ("__decode_with_options", [Value::String(input), Value::Bool(_)]) => {
                 self.string(input.clone())?;
-                let mut deserializer = serde_json::Deserializer::from_str(input);
-                let node = JsonNode::deserialize(&mut deserializer)
-                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
-                deserializer.end().map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                let node = parse_json_node(input)?;
                 json_node_to_value(node, self, 0)
             }
             ("__decode" | "__decode_with_options", _) => Err(error("ORNA-EVAL-TYPE")),
@@ -7883,6 +7958,13 @@ impl<'de> Deserialize<'de> for JsonNode {
     }
 }
 
+fn parse_json_node(input: &str) -> Result<JsonNode, EvaluationError> {
+    let mut deserializer = serde_json::Deserializer::from_str(input);
+    let node = JsonNode::deserialize(&mut deserializer).map_err(|_| error("ORNA-EVAL-VALUE"))?;
+    deserializer.end().map_err(|_| error("ORNA-EVAL-VALUE"))?;
+    Ok(node)
+}
+
 fn json_node_to_value(
     node: JsonNode,
     context: &mut Context<'_, '_>,
@@ -9560,7 +9642,17 @@ fn codec_decode_operation(name: &str) -> Option<(&'static str, bool)> {
     }
 }
 
-fn codec_type_matches(value: &Value, witness: &str) -> bool {
+fn codec_type_matches(
+    value: &Value,
+    witness: &str,
+    nominal_definitions: &NominalDefinitions,
+) -> bool {
+    if let Some(definition) = nominal_definitions.get(witness) {
+        return matches!(
+            value,
+            Value::NominalRecord { type_id, .. } if *type_id == definition.type_id
+        );
+    }
     match witness {
         "Str" | "Text" | "String" => matches!(value, Value::String(_)),
         "Bool" => matches!(value, Value::Bool(_)),
@@ -10035,6 +10127,28 @@ fn unescape_string_body(body: &str) -> Result<String, EvaluationError> {
             't' => output.push('\t'),
             '\\' => output.push('\\'),
             '"' => output.push('"'),
+            'u' => {
+                if characters.next() != Some('{') {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                let mut digits = String::new();
+                loop {
+                    let character = characters.next().ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+                    if character == '}' {
+                        break;
+                    }
+                    if !character.is_ascii_hexdigit() || digits.len() == 6 {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    }
+                    digits.push(character);
+                }
+                if digits.is_empty() {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                let scalar = u32::from_str_radix(&digits, 16)
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                output.push(char::from_u32(scalar).ok_or_else(|| error("ORNA-EVAL-VALUE"))?);
+            }
             _ => return Err(error("ORNA-EVAL-VALUE")),
         }
     }

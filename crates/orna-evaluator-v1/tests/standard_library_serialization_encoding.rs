@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use orna_evaluator_v1::{
-    AdmittedReplSession, Environment, Functions, Limits, PureFunction,
-    evaluate_expression, evaluate_expression_with_functions,
+    AdmittedReplSession, Environment, Functions, Limits, NominalDefinition, NominalDefinitions,
+    NominalField, PureFunction, evaluate_expression, evaluate_expression_with_functions,
+    evaluate_with_functions_and_nominals,
 };
 use orna_foundation_v1::CanonicalValue;
 use orna_value_v1::Raw;
@@ -60,6 +61,21 @@ fn eval_pinned_with_environment(
     environment: Environment,
 ) -> Result<CanonicalValue, orna_evaluator_v1::EvaluationError> {
     evaluate_expression_with_functions(source, &environment, &pinned_functions(), Limits::default())
+}
+
+fn eval_pinned_with_nominals(
+    source: &str,
+    definitions: &NominalDefinitions,
+) -> Result<CanonicalValue, orna_evaluator_v1::EvaluationError> {
+    let parsed = orna_syntax_v1::parse_expression(source);
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    evaluate_with_functions_and_nominals(
+        &parsed.value,
+        &Environment::new(),
+        &pinned_functions(),
+        definitions,
+        Limits::default(),
+    )
 }
 
 fn money_value(coefficient: i64, exponent10: i64, currency: [u8; 16]) -> CanonicalValue {
@@ -213,4 +229,45 @@ fn exact_money_allocation_distributes_remainders_stably_and_preserves_total() {
         ]))
         .unwrap())
     );
+}
+
+#[test]
+fn json_schema_decode_preserves_null_defaults_and_unknown_field_policy() {
+    let default = orna_syntax_v1::parse_expression("\"fallback\"");
+    assert!(default.is_ok(), "{:#?}", default.diagnostics);
+    let definition = NominalDefinition::new(
+        [0x11; 16],
+        None,
+        vec![
+            NominalField::public([0x22; 16], "answer"),
+            NominalField::public_with_default([0x33; 16], "label", default.value),
+        ],
+    );
+    let definitions = NominalDefinitions::from([("CodecRecord".into(), definition)]);
+
+    for fixture in [
+        include_str!("fixtures/stdlib-codec-json-nominal-ignore-extra-rl767.orna"),
+        include_str!("fixtures/stdlib-codec-json-nominal-default-rl767.orna"),
+        include_str!("fixtures/stdlib-codec-json-nominal-explicit-null-rl767.orna"),
+    ] {
+        let actual = eval_pinned_with_nominals(fixture, &definitions)
+            .unwrap_or_else(|error| panic!("schema decode failed: {}", error.code()));
+        assert_eq!(
+            actual,
+            bool_value(true),
+            "{fixture}"
+        );
+    }
+    for fixture in [
+        include_str!("fixtures/stdlib-codec-json-nominal-unknown-rejected-rl767.orna"),
+        include_str!("fixtures/stdlib-codec-json-nominal-required-missing-rl767.orna"),
+    ] {
+        assert_eq!(
+            eval_pinned_with_nominals(fixture, &definitions)
+                .unwrap_err()
+                .code(),
+            "ORNA-EVAL-VALUE",
+            "{fixture}"
+        );
+    }
 }
