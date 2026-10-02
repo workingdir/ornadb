@@ -3880,6 +3880,55 @@ fn tuple_pin_cascade_depths_reject_cross_depth_mixing_after_storm_rebinds() {
 }
 
 #[test]
+fn tuple_pin_cascade_paired_depths_preserve_each_side_through_storm_rebinds() {
+    let source = include_str!("fixtures/historical-tuple-pin-cascade-paired-depth-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-tuple-pin-cascade-paired-depth-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired tuple cascades must preserve left and right pins at every depth and saved storm stage: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn tuple_pin_cascade_paired_depths_reject_cross_pair_mixing_after_storm_rebinds() {
+    let source = include_str!("fixtures/historical-tuple-pin-cascade-paired-depth-storm-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-tuple-pin-cascade-paired-depth-storm-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "paired cascade results from separate pin trees must remain type-distinct: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
