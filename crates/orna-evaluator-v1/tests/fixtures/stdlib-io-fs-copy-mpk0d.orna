@@ -1,0 +1,1 @@
+std.io.fs.copy_file("ROOT_PATH", "input.txt", "copy.txt", false)
