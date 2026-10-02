@@ -1,6 +1,6 @@
 use orna_evolution_v1::{
     CanonicalValue, CheckpointGeneration, Field, FieldRole, FieldType, KeyedRow, ObjectId,
-    RowKeyKind, Schema, Table,
+    RowKeyKind, RowMergeConflict, Schema, Table,
 };
 use orna_foundation_v1::OvbRaw;
 use orna_storage_v1::{
@@ -31,6 +31,8 @@ const TOMBSTONE_DEPTH_MIDDLE: &str = include_str!("fixtures/merge-tombstone-dept
 const TOMBSTONE_DEPTH_DEEP: &str = include_str!("fixtures/merge-tombstone-depth-deep.orna");
 const TOMBSTONE_CHAIN: &str = include_str!("fixtures/merge-tombstone-chain.orna");
 const TOMBSTONE_DELTA_RESTORES: &str = include_str!("fixtures/merge-tombstone-delta-restores.orna");
+const TOMBSTONE_DELTA_CONFLICTING_RESTORES: &str =
+    include_str!("fixtures/merge-tombstone-delta-conflicting-restores.orna");
 const TOMBSTONE_PAIRED_CHAIN: &str = include_str!("fixtures/merge-tombstone-paired-chain.orna");
 const TOMBSTONE_RECOVERY_STORM: &str = include_str!("fixtures/merge-tombstone-recovery-storm.orna");
 const TOMBSTONE_STORM_KEYS: &[&str] = &[
@@ -18090,6 +18092,339 @@ fn paired_depth_delta_storms_restore_then_redelete_exact_keys() {
         .map(string),
         "each paired table retains its own ordered delete history",
     );
+}
+
+#[test]
+fn paired_depth_chain_reinsert_conflicts_ignore_prior_tombstones() {
+    // Once a delete is committed, later plans use the now-absent row as their
+    // base. Two unequal explicit-row restorations conflict as ordinary creates;
+    // the old tombstone cannot prefer either branch or reorder the conflicts.
+    let fixture_rows = TOMBSTONE_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let conflicting_restores = TOMBSTONE_DELTA_CONFLICTING_RESTORES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let identical_restores = TOMBSTONE_DELTA_RESTORES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_rows.len(), 7);
+    assert_eq!(conflicting_restores.len(), 4);
+    assert_eq!(identical_restores.len(), 2);
+    assert_eq!(conflicting_restores[0].key, string("root"));
+    assert_eq!(conflicting_restores[1].key, string("root"));
+    assert_eq!(conflicting_restores[2].key, string("root/child"));
+    assert_eq!(conflicting_restores[3].key, string("root/child"));
+
+    let (base, left, right, mut source) = paired_chained_storm_inputs(
+        &fixture_rows,
+        &["root"],
+        &["root/child"],
+        0,
+        false,
+        "competing-restore-wave-one",
+    );
+    let deleted = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 38, max_conflicts: 0 },
+    )
+    .expect("the first wave commits the two chain tombstones");
+    let prior_delta = ["root", "root/child"].map(string);
+    for table in [id(1), id(2)] {
+        assert_eq!(table_row_tombstones(&deleted, table), prior_delta);
+        assert!(!table_live_row_keys(&deleted, table).contains(&string("root")));
+        assert!(!table_live_row_keys(&deleted, table).contains(&string("root/child")));
+    }
+
+    let next_base_rows = table_live_rows(&deleted, id(1));
+    // Equal explicit restorations converge from the absent post-delete base.
+    // This plan is an alternative to the conflicting branch inputs below.
+    let (base, left, right, mut source) = paired_chained_storm_inputs(
+        &next_base_rows,
+        &[],
+        &[],
+        1,
+        true,
+        "equal-restore-wave-two",
+    );
+    add_chained_storm_fixture_rows(
+        &left,
+        &mut source,
+        MergeSide::Left,
+        id(1),
+        &[identical_restores[0].clone()],
+    );
+    add_chained_storm_fixture_rows(
+        &right,
+        &mut source,
+        MergeSide::Right,
+        id(1),
+        &[identical_restores[0].clone()],
+    );
+    add_chained_storm_fixture_rows(
+        &left,
+        &mut source,
+        MergeSide::Left,
+        id(2),
+        &[identical_restores[1].clone()],
+    );
+    add_chained_storm_fixture_rows(
+        &right,
+        &mut source,
+        MergeSide::Right,
+        id(2),
+        &[identical_restores[1].clone()],
+    );
+    let converged = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 64, max_conflicts: 8 },
+    )
+    .expect("equal explicit restorations of prior tombstones converge");
+    for table in [id(1), id(2)] {
+        assert!(table_row_tombstones(&converged, table).is_empty());
+    }
+    let mut expected_root = identical_restores[0].clone();
+    expected_root.table = id(1);
+    let mut expected_child = identical_restores[1].clone();
+    expected_child.table = id(2);
+    assert!(table_live_rows(&converged, id(1)).contains(&expected_root));
+    assert!(table_live_rows(&converged, id(2)).contains(&expected_child));
+
+    const RETRIES: usize = 8;
+    let start = Arc::new(Barrier::new(RETRIES));
+    let mut workers = Vec::with_capacity(RETRIES);
+    for retry in 0..RETRIES {
+        let (base, left, right, mut source) = paired_chained_storm_inputs(
+            &next_base_rows,
+            &[],
+            &[],
+            retry % 2,
+            false,
+            "competing-restore-wave-two",
+        );
+        add_chained_storm_fixture_rows(
+            &left,
+            &mut source,
+            MergeSide::Left,
+            id(1),
+            &[conflicting_restores[0].clone()],
+        );
+        add_chained_storm_fixture_rows(
+            &right,
+            &mut source,
+            MergeSide::Right,
+            id(1),
+            &[conflicting_restores[1].clone()],
+        );
+        add_chained_storm_fixture_rows(
+            &left,
+            &mut source,
+            MergeSide::Left,
+            id(2),
+            &[conflicting_restores[2].clone()],
+        );
+        add_chained_storm_fixture_rows(
+            &right,
+            &mut source,
+            MergeSide::Right,
+            id(2),
+            &[conflicting_restores[3].clone()],
+        );
+        if retry % 2 == 1 {
+            for rows in source.rows.values_mut() {
+                rows.reverse();
+            }
+        }
+        let gate = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+            merge_three_way_snapshots(
+                &base,
+                &left,
+                &right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 64, max_conflicts: 8 },
+            )
+        }));
+    }
+
+    let expected_conflicts = vec![
+        (id(1), string("root")),
+        (id(2), string("root/child")),
+    ];
+    for worker in workers {
+        let result = worker.join().expect("competing restore retry completes");
+        let Err(BranchMergeError::Conflicts { conflicts, report }) = result else {
+            panic!("unequal paired restorations of prior tombstones must conflict")
+        };
+        assert_eq!(report.conflicts_lower_bound, 2);
+        assert!(report.rows_examined > 0);
+        assert!(report.affected_tables.contains(&id(1)));
+        assert!(report.affected_tables.contains(&id(2)));
+        let observed_conflicts = conflicts
+            .into_iter()
+            .map(|conflict| {
+                let BranchMergeConflict::Row {
+                    conflict: RowMergeConflict::KeyCollision { table, key },
+                    ..
+                } = conflict
+                else {
+                    panic!("reinserted explicit keys use ordinary key-collision conflicts")
+                };
+                (table, key)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observed_conflicts,
+            expected_conflicts,
+            "paired retries retain ascending table and exact chain-key order",
+        );
+    }
+}
+
+#[test]
+fn paired_depth_chain_restore_conflicts_keep_order_when_branches_swap() {
+    // The same competing restores must report the same exact-key conflicts if
+    // left/right inputs are exchanged, regardless of chain split layout or row
+    // source visitation order.
+    let fixture_rows = TOMBSTONE_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let conflicting_restores = TOMBSTONE_DELTA_CONFLICTING_RESTORES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let (base, left, right, mut source) = paired_chained_storm_inputs(
+        &fixture_rows,
+        &["root"],
+        &["root/child"],
+        0,
+        false,
+        "branch-symmetric-restore-wave-one",
+    );
+    let deleted = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 38, max_conflicts: 0 },
+    )
+    .expect("the setup wave commits the same prior chain tombstones");
+    let next_base_rows = table_live_rows(&deleted, id(1));
+
+    const RETRIES: usize = 8;
+    let start = Arc::new(Barrier::new(RETRIES));
+    let mut workers = Vec::with_capacity(RETRIES);
+    for retry in 0..RETRIES {
+        let (base, left, right, mut source) = paired_chained_storm_inputs(
+            &next_base_rows,
+            &[],
+            &[],
+            (retry / 2) % 2,
+            false,
+            "branch-symmetric-restore-wave-two",
+        );
+        add_chained_storm_fixture_rows(
+            &left,
+            &mut source,
+            MergeSide::Left,
+            id(1),
+            &[conflicting_restores[0].clone()],
+        );
+        add_chained_storm_fixture_rows(
+            &right,
+            &mut source,
+            MergeSide::Right,
+            id(1),
+            &[conflicting_restores[1].clone()],
+        );
+        add_chained_storm_fixture_rows(
+            &left,
+            &mut source,
+            MergeSide::Left,
+            id(2),
+            &[conflicting_restores[2].clone()],
+        );
+        add_chained_storm_fixture_rows(
+            &right,
+            &mut source,
+            MergeSide::Right,
+            id(2),
+            &[conflicting_restores[3].clone()],
+        );
+        let reverse_branches = retry % 2 == 1;
+        if retry % 4 >= 2 {
+            for rows in source.rows.values_mut() {
+                rows.reverse();
+            }
+        }
+        if reverse_branches {
+            let original_rows = std::mem::take(&mut source.rows);
+            source.rows = original_rows
+                .into_iter()
+                .map(|((side, locator), rows)| {
+                    let side = match side {
+                        MergeSide::Left => MergeSide::Right,
+                        MergeSide::Right => MergeSide::Left,
+                        MergeSide::Base => MergeSide::Base,
+                    };
+                    ((side, locator), rows)
+                })
+                .collect();
+        }
+        let gate = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+            let (merge_left, merge_right) = if reverse_branches {
+                (&right, &left)
+            } else {
+                (&left, &right)
+            };
+            merge_three_way_snapshots(
+                &base,
+                merge_left,
+                merge_right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 64, max_conflicts: 8 },
+            )
+        }));
+    }
+
+    let expected_conflicts = vec![
+        (id(1), string("root")),
+        (id(2), string("root/child")),
+    ];
+    for worker in workers {
+        let result = worker.join().expect("branch-swap conflict retry completes");
+        let Err(BranchMergeError::Conflicts { conflicts, report }) = result else {
+            panic!("competing restores remain conflicts after exchanging branch orientation")
+        };
+        assert_eq!(report.conflicts_lower_bound, 2);
+        let observed = conflicts
+            .into_iter()
+            .map(|conflict| {
+                let BranchMergeConflict::Row {
+                    conflict: RowMergeConflict::KeyCollision { table, key },
+                    ..
+                } = conflict
+                else {
+                    panic!("branch swapping preserves ordinary exact-key create conflicts")
+                };
+                (table, key)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(observed, expected_conflicts);
+    }
 }
 
 #[test]
