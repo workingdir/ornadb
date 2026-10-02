@@ -1,0 +1,19 @@
+pub table PlannerDisjunctBranchLimitConjunctCascade(id: Int) {
+    first: Bool,
+    second: Bool,
+    third: Bool,
+    fourth: Bool,
+}
+pub fn after_branch_limit_cascades() = PlannerDisjunctBranchLimitConjunctCascade
+    | take(80)
+    | take(50)
+    | filter(row => row.first && row.second)
+    | union(
+        PlannerDisjunctBranchLimitConjunctCascade
+            | take(80)
+            | take(50)
+            | filter(row => row.third && row.fourth)
+    )
+    | take(12)
+    | take(8)
+    | take(3);
