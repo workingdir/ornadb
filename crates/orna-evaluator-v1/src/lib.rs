@@ -9266,6 +9266,30 @@ mod tests {
     }
 
     #[test]
+    fn relation_plan_fuses_adjacent_filters_in_order_without_crossing_map() {
+        let first = Value::Bool(true);
+        let second = Value::Bool(false);
+        let transform = Value::Int(7.into());
+        let third = Value::Bool(true);
+        let plan = RelationPlan::new("Note".into())
+            .with_stage(RelationStage::Filter(vec![first.clone()]))
+            .with_stage(RelationStage::Filter(vec![second.clone()]))
+            .with_stage(RelationStage::Map(transform.clone()))
+            .with_stage(RelationStage::Filter(vec![third.clone()]))
+            .with_stage(RelationStage::Take(2));
+
+        assert_eq!(
+            plan.stages,
+            vec![
+                RelationStage::Filter(vec![first, second]),
+                RelationStage::Map(transform),
+                RelationStage::Filter(vec![third]),
+                RelationStage::Take(2),
+            ]
+        );
+    }
+
+    #[test]
     fn relation_scan_checks_cancellation_before_each_page() {
         let functions = Functions::new();
         let cancellation = CancellationToken::new();
