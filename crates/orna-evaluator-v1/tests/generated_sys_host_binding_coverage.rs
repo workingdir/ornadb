@@ -200,21 +200,67 @@ fn every_generated_host_binding_has_a_fixture_and_native_value_proof() {
         },
     ];
 
+    let registry = system_host_operation_registry();
     let audited_names = proofs
         .iter()
         .map(|proof| proof.operation)
         .collect::<BTreeSet<_>>();
-    let registry_names = system_host_operation_registry()
+    assert_eq!(
+        audited_names.len(),
+        proofs.len(),
+        "the coverage ledger has exactly one behavior proof per operation"
+    );
+    let registry_names = registry
         .operations()
         .map(|operation| operation.name.as_str())
         .collect::<BTreeSet<_>>();
     assert_eq!(audited_names, registry_names);
 
+    let ledger_providers = proofs
+        .iter()
+        .map(|proof| proof.provider)
+        .collect::<BTreeSet<_>>();
+    let registry_providers = registry
+        .roles()
+        .map(|role| role.provider.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        ledger_providers, registry_providers,
+        "the coverage ledger includes every native host provider"
+    );
+
+    for role in registry.roles() {
+        let registered_operations = role
+            .operations
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let proof_operations = proofs
+            .iter()
+            .filter(|proof| {
+                registry
+                    .operation(proof.operation)
+                    .is_some_and(|operation| operation.role == role.name)
+            })
+            .map(|proof| proof.operation)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            proof_operations, registered_operations,
+            "provider role {} has a value-proof row for each registered operation",
+            role.name
+        );
+    }
+
     for proof in proofs {
-        let operation = system_host_operation_registry()
+        let operation = registry
             .operation(proof.operation)
             .expect("every generated operation has a coverage row");
         assert_eq!(operation.provider, proof.provider, "{}", proof.operation);
+        assert!(
+            !["stub", "noop", "todo", "unimplemented"].contains(&operation.implementation.as_str()),
+            "{} names a concrete native implementation",
+            proof.operation
+        );
         assert!(proof.fixture.contains(proof.call), "{}", proof.operation);
         assert!(
             proof
