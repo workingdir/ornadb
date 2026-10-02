@@ -1088,6 +1088,11 @@ pub fn explain_query_with_disjunct_storm_chain(
 /// declaration order, each consuming the previous rebind's bounded result.
 /// Row and byte estimates are capped independently; an unknown dimension stays
 /// unknown while a known dimension continues to use its immediate input cap.
+/// Unknown row-based work does not erase a known byte estimate.
+/// A rebind nested inside a cascade uses that nested branch's own post-limit
+/// estimate as its cap, so nested work cannot borrow a wider ancestor cap.
+/// The known byte cap therefore follows the immediate branch input at every
+/// rebind depth, even when every row-based work estimate is unknown.
 /// Since
 /// `sys.PlanNodeKind` has no union node, each storm is one aggregate filter
 /// node whose details retain the exact branch chains and rebind points; this
@@ -2094,6 +2099,18 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
                 PlanDetail::Text(
                     "rows_and_bytes_capped_independently_unknown_dimensions_remain_unknown"
                         .to_owned(),
+                ),
+            ),
+            (
+                "limit_chain_rebind_work_scope".to_owned(),
+                PlanDetail::Text(
+                    "unknown_row_work_does_not_erase_known_byte_estimates".to_owned(),
+                ),
+            ),
+            (
+                "nested_limit_chain_rebind_byte_cap_scope".to_owned(),
+                PlanDetail::Text(
+                    "immediate_post_limit_branch_bytes_at_every_rebind_nesting_depth".to_owned(),
                 ),
             ),
             (
