@@ -24,6 +24,7 @@ use crate::{
     REFERENCE_STANDARD_GENERICS_PATH_V1, REFERENCE_STANDARD_TYPE_UTILS_PATH_V1,
     REFERENCE_STANDARD_PATTERN_PATH_V1,
     REFERENCE_STANDARD_ITERATOR_PATH_V1, REFERENCE_STANDARD_LAZY_PATH_V1,
+    REFERENCE_STANDARD_VIEWS_PATH_V1,
     reference_standard_catalogue_v1,
     reference_standard_profile_v1, reference_standard_sources_v1,
 };
@@ -44,6 +45,7 @@ fn pinned_std_entrypoint_imports_optional_content_modules() {
     assert!(entrypoint.lines().any(|line| line.trim() == "use pattern;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use iterator;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use lazy;"));
+    assert!(entrypoint.lines().any(|line| line.trim() == "use views;"));
 }
 
 #[test]
@@ -70,6 +72,33 @@ fn pinned_iterator_and_lazy_surfaces_typecheck_as_ordinary_std_modules() {
         assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
     }
     reference_standard_catalogue_v1().expect("iterator and lazy module sources check in the pinned profile");
+}
+
+#[test]
+fn pinned_collection_views_and_slices_typecheck_as_an_ordinary_std_module() {
+    let sources = reference_standard_sources_v1();
+    assert_eq!(sources[39].0, REFERENCE_STANDARD_VIEWS_PATH_V1);
+    let parsed = orna_syntax_v1::parse_module_with_file(
+        &sources[39].1,
+        REFERENCE_STANDARD_VIEWS_PATH_V1,
+    );
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    let catalogue = reference_standard_catalogue_v1().expect("views source checks in the pinned std profile");
+    let consumer = include_str!("fixtures/v1_views_consumer_wc6kr.orna");
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("views_consumer.orna", consumer)],
+        &catalogue,
+    );
+    assert!(
+        analysis.is_ok(),
+        "{}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
 }
 
 #[test]
@@ -515,7 +544,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
-    assert_eq!(sources.len(), 39);
+    assert_eq!(sources.len(), 40);
     assert_eq!(sources[34].0, REFERENCE_STANDARD_GENERICS_PATH_V1);
     for declaration in [
         "pub fn identity<T>(value: T): T",
@@ -623,6 +652,32 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[38].1.contains(contract), "missing std.lazy contract `{contract}`");
     }
+    assert_eq!(sources[39].0, REFERENCE_STANDARD_VIEWS_PATH_V1);
+    for declaration in [
+        "pub enum View<T>",
+        "pub fn from_list<T>(source: [T]): View<T>",
+        "pub fn length<T>(view: View<T>): Int",
+        "pub fn is_empty<T>(view: View<T>): Bool",
+        "pub fn get<T>(view: View<T>, index: Int): T?",
+        "pub fn slice<T>(view: View<T>, start: Int, end: Int): View<T>",
+        "pub fn take<T>(view: View<T>, count: Int): View<T>",
+        "pub fn drop<T>(view: View<T>, count: Int): View<T>",
+        "pub fn to_list<T>(view: View<T>): [T]",
+        "pub fn windows<T>(view: View<T>, width: Int, step: Int = 1): [View<T>]",
+    ] {
+        assert!(sources[39].1.contains(declaration), "missing std.views declaration `{declaration}`");
+    }
+    for contract in [
+        "zero-based half-open range",
+        "materializes the selected values in source order",
+        "operations validate ranges constructed",
+        "get` returns null for any negative or out-of-range index",
+        "Invalid bounds fail instead of being clamped",
+        "view count must be nonnegative",
+        "An incomplete final window is omitted",
+    ] {
+        assert!(sources[39].1.contains(contract), "missing std.views contract `{contract}`");
+    }
     assert_eq!(sources[19].0, REFERENCE_STANDARD_ERROR_PATH_V1);
     assert!(sources[19].1.contains("pub fn make(code: Str, message: Str): Error"));
     assert!(sources[19]
@@ -711,6 +766,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         (REFERENCE_STANDARD_PATTERN_PATH_V1, 36),
         (REFERENCE_STANDARD_ITERATOR_PATH_V1, 37),
         (REFERENCE_STANDARD_LAZY_PATH_V1, 38),
+        (REFERENCE_STANDARD_VIEWS_PATH_V1, 39),
     ] {
         let mut changed_source = sources[source_index].1.clone();
         changed_source.push_str("\n// changed after the captured snapshot\n");
