@@ -469,6 +469,48 @@ impl BranchRowSource for FailAfterRowsFixtureRows {
     }
 }
 
+struct FailOnTableAfterRowsFixtureRows {
+    source: FixtureRows,
+    table: ObjectId,
+    side: MergeSide,
+    fail_after_rows: usize,
+    rows_delivered: usize,
+    failed_at: Option<(ObjectId, MergeSide, Vec<u8>)>,
+}
+
+impl BranchRowSource for FailOnTableAfterRowsFixtureRows {
+    fn visit_rows(
+        &mut self,
+        side: MergeSide,
+        table: ObjectId,
+        segment: Option<&RowSegmentManifest>,
+        range: &KeyRange,
+        visitor: &mut dyn FnMut(KeyedRow) -> bool,
+    ) -> Result<(), String> {
+        if table != self.table || side != self.side {
+            return self.source.visit_rows(side, table, segment, range, visitor);
+        }
+
+        let locator = segment.map(|segment| segment.locator.clone()).unwrap_or_default();
+        let mut delivered = self.rows_delivered;
+        let mut stopped_at_failure = false;
+        self.source.visit_rows(side, table, segment, range, &mut |row| {
+            if delivered == self.fail_after_rows {
+                stopped_at_failure = true;
+                return false;
+            }
+            delivered += 1;
+            visitor(row)
+        })?;
+        self.rows_delivered = delivered;
+        if stopped_at_failure {
+            self.failed_at = Some((table, side, locator));
+            return Err("fixture row source failed after a partial row prefix".into());
+        }
+        Ok(())
+    }
+}
+
 fn budget() -> BranchMergeBudget {
     BranchMergeBudget { max_rows_examined: 100, max_conflicts: 20 }
 }
@@ -18487,6 +18529,197 @@ fn paired_depth_chain_restore_conflicts_keep_order_when_branches_swap() {
             })
             .collect::<Vec<_>>();
         assert_eq!(observed, expected_conflicts);
+    }
+}
+
+#[test]
+fn paired_depth_restore_storm_retries_rebuild_after_later_table_failure() {
+    // A failed restoration storm has no partial upsert plan. Every concurrent
+    // retry starts from the same post-delete base and reconstructs the same
+    // restored rows without replaying the already committed tombstones.
+    let fixture_rows = TOMBSTONE_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let restored_rows = TOMBSTONE_DELTA_RESTORES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_rows.len(), 7);
+    assert_eq!(restored_rows.len(), 2);
+
+    let (base, left, right, mut source) = paired_chained_storm_inputs(
+        &fixture_rows,
+        &["root"],
+        &["root/child"],
+        0,
+        false,
+        "restore-retry-wave-one",
+    );
+    let deleted = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 38, max_conflicts: 0 },
+    )
+    .expect("the setup wave commits the paired chain deletes");
+    let committed_tombstones = ["root", "root/child"].map(string);
+    for table in [id(1), id(2)] {
+        assert_eq!(table_row_tombstones(&deleted, table), committed_tombstones);
+    }
+    let post_delete_base = table_live_rows(&deleted, id(1));
+
+    let (base, left, right, mut source) = paired_chained_storm_inputs(
+        &post_delete_base,
+        &[],
+        &[],
+        0,
+        false,
+        "restore-retry-failed-wave",
+    );
+    for table in [id(1), id(2)] {
+        let restored = if table == id(1) { &restored_rows[0] } else { &restored_rows[1] };
+        add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, table, &[restored.clone()]);
+        add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, table, &[restored.clone()]);
+    }
+    let mut interrupted = FailOnTableAfterRowsFixtureRows {
+        source,
+        table: id(2),
+        side: MergeSide::Base,
+        fail_after_rows: 2,
+        rows_delivered: 0,
+        failed_at: None,
+    };
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: 64, max_conflicts: 0 },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed after a partial row prefix".into(),
+        }),
+    );
+    assert_eq!(interrupted.rows_delivered, 2);
+    assert_eq!(
+        interrupted.failed_at.as_ref().map(|(table, side, _)| (*table, *side)),
+        Some((id(2), MergeSide::Base)),
+    );
+    assert!(
+        interrupted.source.visited.iter().any(|(_, locator)| {
+            locator.starts_with(b"restore-retry-failed-wave-table-0-")
+        }),
+        "the first paired table's restored candidate was scanned before the second table failed",
+    );
+
+    const RETRIES: usize = 8;
+    let start = Arc::new(Barrier::new(RETRIES));
+    let mut workers = Vec::with_capacity(RETRIES);
+    for retry in 0..RETRIES {
+        let (base, left, right, mut source) = paired_chained_storm_inputs(
+            &post_delete_base,
+            &[],
+            &[],
+            (retry / 2) % 2,
+            false,
+            "restore-retry-wave-recovered",
+        );
+        for table in [id(1), id(2)] {
+            let restored = if table == id(1) { &restored_rows[0] } else { &restored_rows[1] };
+            add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, table, &[restored.clone()]);
+            add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, table, &[restored.clone()]);
+        }
+        if retry % 4 >= 2 {
+            for rows in source.rows.values_mut() {
+                rows.reverse();
+            }
+        }
+        let reverse_branches = retry % 2 == 1;
+        if reverse_branches {
+            let original_rows = std::mem::take(&mut source.rows);
+            source.rows = original_rows
+                .into_iter()
+                .map(|((side, locator), rows)| {
+                    let side = match side {
+                        MergeSide::Left => MergeSide::Right,
+                        MergeSide::Right => MergeSide::Left,
+                        MergeSide::Base => MergeSide::Base,
+                    };
+                    ((side, locator), rows)
+                })
+                .collect();
+        }
+        let gate = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+            let (merge_left, merge_right) = if reverse_branches {
+                (&right, &left)
+            } else {
+                (&left, &right)
+            };
+            merge_three_way_snapshots(
+                &base,
+                merge_left,
+                merge_right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 64, max_conflicts: 0 },
+            )
+            .expect("recovered restoration retry fits its private budget")
+        }));
+    }
+
+    let expected_table_one_keys = [
+        "root",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+        "z",
+    ]
+    .map(string);
+    let expected_table_two_keys = [
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+        "z",
+    ]
+    .map(string);
+    let mut committed_retry = None;
+    for worker in workers {
+        let plan = worker.join().expect("restoration storm retry worker completes");
+        assert!(plan.report.rows_examined > 0);
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        for (table, expected_keys) in [
+            (id(1), &expected_table_one_keys),
+            (id(2), &expected_table_two_keys),
+        ] {
+            assert!(table_row_tombstones(&plan, table).is_empty());
+            assert_eq!(table_live_row_keys(&plan, table), *expected_keys);
+        }
+        let mut expected_root = restored_rows[0].clone();
+        expected_root.table = id(1);
+        let mut expected_child = restored_rows[1].clone();
+        expected_child.table = id(2);
+        assert!(table_live_rows(&plan, id(1)).contains(&expected_root));
+        assert!(table_live_rows(&plan, id(2)).contains(&expected_child));
+        if committed_retry.is_none() {
+            committed_retry = Some(plan);
+        }
+    }
+    let selected = committed_retry.expect("at least one recovered retry completes");
+    for table in [id(1), id(2)] {
+        let mut history = table_row_tombstones(&deleted, table);
+        history.extend(table_row_tombstones(&selected, table));
+        assert_eq!(
+            history,
+            committed_tombstones,
+            "commit one restored retry without replaying the prior delete delta",
+        );
     }
 }
 
