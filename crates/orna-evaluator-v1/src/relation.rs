@@ -390,6 +390,11 @@ impl RelationPlan {
     }
 
     pub(super) fn union(left: Self, right: Self) -> Self {
+        // A nested union is a composition boundary for either operand's
+        // pending cascade. Flush each completed operand before making it a
+        // child, so its filters compile through its own union storm once.
+        let left = left.flush_filter_cascade();
+        let right = right.flush_filter_cascade();
         Self {
             source: String::new(),
             source_union: Some((Box::new(left), Box::new(right))),
