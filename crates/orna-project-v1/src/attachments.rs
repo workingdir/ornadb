@@ -411,6 +411,14 @@ impl PackageResolver {
     /// sibling on its own final pin while snapshots from earlier waves retain
     /// the route they captured. The reference is silent on repeated waves, so
     /// v1 applies the exact-pin rule independently on every rebind.
+    /// Repeating paired middle and deep rebinds after those terminal storms
+    /// opens each new terminal route from the exact selected deep pin; the
+    /// earlier terminal sessions keep their captured routes. The reference
+    /// does not define this post-storm sequence, so v1 resolves each edge from
+    /// the pin selected in that wave.
+    /// Reopening a retained pre-rebind middle snapshot after later paired
+    /// depth waves still follows the deep and terminal pins in that snapshot's
+    /// manifest, even if a sibling's newer rebound route now differs.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,

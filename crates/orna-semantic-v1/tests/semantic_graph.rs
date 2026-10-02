@@ -3903,6 +3903,178 @@ fn tuple_pin_cascade_paired_depths_preserve_each_side_through_storm_rebinds() {
 }
 
 #[test]
+fn concurrent_tuple_pin_callbacks_keep_paired_depth_identities_after_rebind() {
+    let source = include_str!("fixtures/historical-concurrent-paired-tuple-pin-rebind.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-concurrent-paired-tuple-pin-rebind.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "same-lane callbacks must retain their tuple pin through paired-depth rebind and restore: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("concurrent_paired_tuple_pins_survive_rebind")
+        })
+        .expect("concurrent paired tuple-pin fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["concurrent_paired_tuple_pins_survive_rebind"]
+        .ty
+    else {
+        panic!("paired callback proof must be a function");
+    };
+    let Type::Record(streams) = result.as_ref() else {
+        panic!("paired callback proof must expose its concurrent checkpoints");
+    };
+    let pin_type = |name: &str| {
+        let Type::Stream(element) = streams.get(name).expect("parallel result field") else {
+            panic!("{name} must be a parallel stream");
+        };
+        assert!(
+            matches!(element.as_ref(), Type::Applied { base, .. } if base == "sys.HistoricalCallable"),
+            "{name} must carry the captured historical callable identity: {element:?}"
+        );
+        element.as_ref()
+    };
+
+    // The reference requires one common callback result type, but does not
+    // define an identity merge for captured historical pins. Keep each lane
+    // and depth exact so a rebind cannot make unrelated concurrent callbacks
+    // type-compatible.
+    assert_ne!(pin_type("restored_left_root"), pin_type("restored_right_root"));
+    assert_ne!(pin_type("restored_left_leaf"), pin_type("restored_right_leaf"));
+    assert_ne!(pin_type("restored_left_root"), pin_type("restored_left_leaf"));
+    assert_ne!(pin_type("rebound_left_root"), pin_type("restored_left_root"));
+    assert_ne!(pin_type("rebound_right_leaf"), pin_type("restored_right_leaf"));
+}
+
+#[test]
+fn concurrent_tuple_pin_callbacks_reject_cross_lane_rebind_mixing() {
+    let source = include_str!("fixtures/historical-concurrent-paired-tuple-pin-rebind-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-concurrent-paired-tuple-pin-rebind-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "parallel callbacks restored from opposite tuple lanes must not collapse to one pin identity: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn concurrent_callback_tuples_preserve_pin_identity_across_rebind() {
+    let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-concurrent-tuple-callback-rebind.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "tuple-stored callbacks must keep their captured pins through rebinding and concurrent use: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_callback_pins_survive_tuple_rebind")
+        })
+        .expect("tuple-stored concurrent callback fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_callback_pins_survive_tuple_rebind"]
+        .ty
+    else {
+        panic!("tuple callback proof must be a function");
+    };
+    let Type::Record(streams) = result.as_ref() else {
+        panic!("tuple callback proof must expose concurrent checkpoint streams");
+    };
+    let pin_type = |name: &str| {
+        let Type::Stream(element) = streams.get(name).expect("parallel result field") else {
+            panic!("{name} must be a parallel stream");
+        };
+        assert!(
+            matches!(element.as_ref(), Type::Applied { base, .. } if base == "sys.HistoricalCallable"),
+            "{name} must preserve its captured historical callable: {element:?}"
+        );
+        element.as_ref()
+    };
+
+    assert_ne!(pin_type("saved_left_root"), pin_type("saved_right_root"));
+    assert_ne!(pin_type("saved_left_leaf"), pin_type("saved_right_leaf"));
+    assert_ne!(pin_type("saved_left_root"), pin_type("saved_left_leaf"));
+    assert_ne!(pin_type("saved_left_root"), pin_type("rebound_left_root"));
+    assert_ne!(pin_type("saved_right_leaf"), pin_type("rebound_right_leaf"));
+}
+
+#[test]
+fn concurrent_callback_tuples_reject_cross_lane_identity_mix_after_rebind() {
+    let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-concurrent-tuple-callback-rebind-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "tuple-stored callbacks from opposite paired lanes must keep distinct pins after restore: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn tuple_pin_cascade_paired_depths_reject_cross_pair_mixing_after_storm_rebinds() {
     let source = include_str!("fixtures/historical-tuple-pin-cascade-paired-depth-storm-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
@@ -5203,6 +5375,157 @@ fn paired_reproductions_remain_stable_across_alternating_storm_orders() {
             );
         }
     }
+    assert_ne!(
+        outputs.get("left_checkpoints"),
+        outputs.get("right_checkpoints"),
+        "paired storm orders must retain lane-specific snapshot identities"
+    );
+}
+
+#[test]
+fn paired_checkpoints_retain_their_selected_lane_contexts() {
+    fn collect_snapshot_contexts(ty: &Type, contexts: &mut BTreeSet<String>) {
+        match ty {
+            Type::Named(name) if name.starts_with("selector:") => {
+                contexts.insert(name.clone());
+            }
+            Type::List(inner)
+            | Type::Range(inner)
+            | Type::Relation(inner)
+            | Type::Stream(inner)
+            | Type::Optional(inner) => collect_snapshot_contexts(inner, contexts),
+            Type::Applied { arguments, .. } => {
+                for argument in arguments {
+                    collect_snapshot_contexts(argument, contexts);
+                }
+            }
+            Type::Function {
+                parameters, result, ..
+            } => {
+                for parameter in parameters {
+                    collect_snapshot_contexts(parameter, contexts);
+                }
+                collect_snapshot_contexts(result, contexts);
+            }
+            Type::Record(fields) => {
+                for field in fields.values() {
+                    collect_snapshot_contexts(field, contexts);
+                }
+            }
+            Type::Tuple(items) => {
+                for item in items {
+                    collect_snapshot_contexts(item, contexts);
+                }
+            }
+            Type::MoneyPerUnit { currency, unit } => {
+                collect_snapshot_contexts(currency, contexts);
+                collect_snapshot_contexts(unit, contexts);
+            }
+            _ => {}
+        }
+    }
+
+    let source = include_str!("fixtures/historical-paired-reproduction-stability-roundtrip.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-reproduction-stability-roundtrip.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_reproductions_remain_stable_across_chained_storm_orders")
+        })
+        .expect("paired reproduction checkpoint module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_reproductions_remain_stable_across_chained_storm_orders"]
+        .ty
+    else {
+        panic!("paired reproduction proof must export a function");
+    };
+    let Type::Record(checkpoints) = result.as_ref() else {
+        panic!("paired reproduction proof must expose checkpoint records");
+    };
+
+    for (lane, expected) in [
+        (
+            "left_checkpoints",
+            ["selector:HEAD~840", "selector:HEAD~880", "selector:HEAD~920"],
+        ),
+        (
+            "right_checkpoints",
+            ["selector:HEAD~830", "selector:HEAD~870", "selector:HEAD~910"],
+        ),
+    ] {
+        let ty = checkpoints.get(lane).expect("paired lane checkpoint record");
+        let Type::Record(depths) = ty else {
+            panic!("{lane} must expose checkpoint depth records");
+        };
+        for depth in ["roots", "bridges", "leaves", "outputs"] {
+            let ty = depths.get(depth).expect("checkpoint depth field");
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(ty, &mut contexts);
+            assert_eq!(
+                contexts,
+                expected.map(str::to_owned).into_iter().collect(),
+                "{lane}.{depth} must preserve every nested snapshot selector"
+            );
+        }
+    }
+}
+
+#[test]
+fn paired_reproduction_checkpoint_types_stay_stable_across_interleaved_analyses() {
+    const FUNCTION: &str =
+        "paired_reproductions_remain_stable_across_chained_storm_orders";
+    let paired = include_str!("fixtures/historical-paired-reproduction-stability-roundtrip.orna");
+    let mixed =
+        include_str!("fixtures/historical-paired-reproduction-stability-roundtrip-mixed.orna");
+    let catalogue = historical_nested_callable_catalogue();
+    let analyze_fixture = |path, source| {
+        analyze_with_catalogue(&[ModuleInput::new(path, source)], &catalogue)
+    };
+    let checkpoint_type = |analysis: &orna_semantic_v1::Analysis| {
+        analysis
+            .modules
+            .values()
+            .find_map(|module| module.symbols.get(FUNCTION))
+            .expect("paired reproduction function")
+            .ty
+            .clone()
+    };
+
+    let first = analyze_fixture("paired-reproduction.orna", paired);
+    assert!(first.is_ok(), "{:?}", first.diagnostics);
+    let first_checkpoint_type = checkpoint_type(&first);
+
+    let mixed_result = analyze_fixture("paired-reproduction-mixed.orna", mixed);
+    assert!(
+        mixed_result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "cross-lane checkpoint mixing must remain rejected: {:?}",
+        mixed_result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+
+    let repeated = analyze_fixture("paired-reproduction.orna", paired);
+    assert!(repeated.is_ok(), "{:?}", repeated.diagnostics);
+    assert_eq!(
+        first_checkpoint_type,
+        checkpoint_type(&repeated),
+        "rejected cross-lane analysis must not change either lane's checkpoint identity"
+    );
 }
 
 #[test]

@@ -23827,6 +23827,193 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_chained_filter_storm_selectivity_stops_at_second_lookup_match() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=20)
+            .map(|row_id| {
+                let title = if matches!(row_id, 8 | 16) {
+                    "later"
+                } else {
+                    "current"
+                };
+                let target = if row_id == 20 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(159), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference guarantees ordered base scans and order-preserving
+        // filters, but leaves page demand for a chain of selective filters
+        // unspecified. The chain reduces fourteen rows to candidates 8, 16,
+        // and 20; after two lookup matches, row 20 must remain unopened.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-relation-scan-chained-filter-selectivity.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(2u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 10),
+            "selective rejects consume source pages through id 16, then take closes before id 20"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_chained_filter_storm_selectivity_reaches_tail_failure() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=20)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 20 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(160), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // When only candidate eight matches, candidate sixteen is rejected
+        // by the lookup predicate and candidate twenty then fails. The
+        // reference does not prescribe relation page counts for this storm;
+        // the ordered scan must nevertheless continue until that failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-relation-scan-chained-filter-selectivity.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 14),
+            "the chain evaluates the selected tail after one match and preserves its missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_filter_storm_cascade_stops_after_second_selected_row() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=40)
+            .map(|row_id| {
+                let title = if matches!(row_id, 10 | 20) {
+                    "later"
+                } else {
+                    "current"
+                };
+                let target = if row_id == 30 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(161), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference gives filter order and take's bounded observation,
+        // but not the page demand for this seven-stage selectivity cascade.
+        // It narrows 34 rows to candidates 10, 20, and 30; after the second
+        // match, the missing lookup at 30 is beyond the requested prefix.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-relation-scan-selectivity-storm-cascade.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(2u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 14),
+            "the cascaded rejects scan through row 20 and stop before selected row 30"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_filter_storm_cascade_preserves_tail_failure() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=40)
+            .map(|row_id| {
+                let title = if row_id == 10 { "later" } else { "current" };
+                let target = if row_id == 30 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(162), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // Only candidate ten matches before candidate twenty is rejected and
+        // candidate thirty fails lookup. The selectivity cascade cannot treat
+        // exhausted intermediate stages as satisfying take(2).
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-relation-scan-selectivity-storm-cascade.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 24),
+            "the underfilled take follows the candidate cascade through row 30's failure"
+        );
+    }
+
+    #[tokio::test]
     async fn query_take_two_preserves_results_across_conjunct_filter_splits() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
