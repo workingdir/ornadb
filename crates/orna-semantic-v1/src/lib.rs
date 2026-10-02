@@ -7577,6 +7577,7 @@ fn infer(
                             &values,
                             local,
                             span,
+                            historical_context.as_ref(),
                         )
                     });
                     Inferred {
@@ -16138,6 +16139,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
     argument_types: &[Type],
     local: &BTreeMap<String, Symbol>,
     call_span: &SyntaxSpan,
+    historical_context: Option<&Type>,
 ) -> Type {
     match ty {
         Type::Applied { base, arguments: values }
@@ -16157,12 +16159,16 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                     call_span,
                     local,
                 )
-            } else if argument_types
-                .iter()
-                .any(|actual| contains_snapshot_context_key(actual, selector))
+            } else if historical_context.is_some_and(|context| context == ty)
+                || argument_types
+                    .iter()
+                    .any(|actual| contains_snapshot_context_key(actual, selector))
             {
-                // `database.as_of(pin)` forwards the context already carried
-                // by its argument instead of selecting a new dynamic pin.
+                // A closure's result may mention its captured selector even
+                // when the current zero-argument call has no parameter to
+                // substitute. Preserve that exact context instead of
+                // inventing a call-site identity. `database.as_of(pin)` also
+                // forwards the context already carried by its argument.
                 ty.clone()
             } else {
                 contextual_snapshot_ref(&format!(
@@ -16189,6 +16195,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                         argument_types,
                         local,
                         call_span,
+                        historical_context,
                     )
                 })
                 .collect(),
@@ -16201,6 +16208,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 argument_types,
                 local,
                 call_span,
+                historical_context,
             )),
         },
         Type::List(element) => Type::List(Box::new(
@@ -16211,6 +16219,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 argument_types,
                 local,
                 call_span,
+                historical_context,
             ),
         )),
         Type::Range(element) => Type::Range(Box::new(
@@ -16221,6 +16230,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 argument_types,
                 local,
                 call_span,
+                historical_context,
             ),
         )),
         Type::Relation(element) => Type::Relation(Box::new(
@@ -16231,6 +16241,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 argument_types,
                 local,
                 call_span,
+                historical_context,
             ),
         )),
         Type::Stream(element) => Type::Stream(Box::new(
@@ -16241,6 +16252,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 argument_types,
                 local,
                 call_span,
+                historical_context,
             ),
         )),
         Type::Optional(element) => Type::Optional(Box::new(
@@ -16251,6 +16263,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 argument_types,
                 local,
                 call_span,
+                historical_context,
             ),
         )),
         Type::Record(fields) => Type::Record(
@@ -16266,6 +16279,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                             argument_types,
                             local,
                             call_span,
+                            historical_context,
                         ),
                     )
                 })
@@ -16282,6 +16296,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                         argument_types,
                         local,
                         call_span,
+                        historical_context,
                     )
                 })
                 .collect(),
@@ -16298,6 +16313,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                         argument_types,
                         local,
                         call_span,
+                        historical_context,
                     )
                 })
                 .collect(),
