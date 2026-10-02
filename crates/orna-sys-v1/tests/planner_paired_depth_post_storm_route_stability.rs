@@ -9,6 +9,8 @@ use orna_sys_v1::{
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_paired_depth_post_storm_route_stability.orna");
+const UNKNOWN_STAGE_OUTPUT_HANDOFF_FIXTURE: &str =
+    include_str!("fixtures/planner_unknown_stage_output_handoff.orna");
 
 fn branch(
     limits: &[u64],
@@ -375,6 +377,65 @@ fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
                 .unwrap()
                 .len(),
             4
+        );
+    }
+}
+
+#[test]
+fn unknown_byte_handoffs_retain_prior_stage_output_paths() {
+    let parsed = orna_syntax_v1::parse_module(UNKNOWN_STAGE_OUTPUT_HANDOFF_FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let stages = (1..=3)
+        .map(|stage| {
+            storm(
+                &format!("expr:unknown-stage-{stage}"),
+                vec![branch(
+                    &[64],
+                    vec![rebind(1, &format!("unknown-stage-{stage}-cascade"), 32)],
+                    Vec::new(),
+                )],
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut query = query();
+    query.source_statistics = None;
+    let explained = explain_query_with_disjunct_storm_branch_limit_chains(&query, &stages, &[])
+        .expect("unknown byte estimates keep typed stage handoff routes");
+
+    for stage in 1..=3 {
+        let routes = routes_for_stage(&explained, stage);
+        assert_eq!(routes.len(), 1);
+        assert!(routes[0].input_bytes.is_none());
+        assert!(routes[0].output_bytes.is_none());
+
+        let mut expected_input_scope = "root".to_owned();
+        for prior_stage in 1..stage {
+            expected_input_scope.push_str(&format!(
+                "/storm{prior_stage}/storm_stage_output{prior_stage}"
+            ));
+        }
+        expected_input_scope.push_str(&format!("/storm{stage}/branch1/limit1"));
+        assert_eq!(routes[0].input_scope, expected_input_scope);
+        assert_eq!(
+            routes[0].output_scope,
+            format!("{expected_input_scope}/rebind1/cascade1")
+        );
+
+        let mut expected_prior_outputs = Vec::new();
+        for prior_stage in 1..stage {
+            expected_prior_outputs.extend([
+                PlanByteCapScopeSegment::StormStage {
+                    index: prior_stage as usize,
+                },
+                PlanByteCapScopeSegment::StormStageOutput {
+                    index: prior_stage as usize,
+                },
+            ]);
+        }
+        assert_eq!(
+            &routes[0].input_path[..expected_prior_outputs.len()],
+            expected_prior_outputs
         );
     }
 }
