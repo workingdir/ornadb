@@ -282,6 +282,9 @@ pub(super) struct FilterBatch {
     flattened: OnceLock<Vec<Arc<Vec<Value>>>>,
     // Weak entries allow cloned shared prefixes to reuse joins without cycles.
     continuations: Mutex<HashMap<usize, Weak<FilterBatch>>>,
+    // Cloned leaf plans can carry equal, separately owned filter prefixes.
+    // Keep their joins shared when they append the same outer suffix.
+    prefixed_batches: Mutex<Vec<Weak<FilterBatch>>>,
 }
 
 #[derive(Debug)]
@@ -296,6 +299,7 @@ impl FilterBatch {
             node: FilterBatchNode::Values(Arc::new(values)),
             flattened: OnceLock::new(),
             continuations: Mutex::new(HashMap::new()),
+            prefixed_batches: Mutex::new(Vec::new()),
         })
     }
 
@@ -316,13 +320,29 @@ impl FilterBatch {
             node: FilterBatchNode::Then(Arc::clone(previous), Arc::clone(next)),
             flattened: OnceLock::new(),
             continuations: Mutex::new(HashMap::new()),
+            prefixed_batches: Mutex::new(Vec::new()),
         });
         continuations.insert(key, Arc::downgrade(&batch));
         batch
     }
 
     fn prefixed_by(values: Vec<Value>, next: &Arc<Self>) -> Arc<Self> {
-        Self::followed_by(&Self::from_values(values), next)
+        let mut prefixed_batches = next
+            .prefixed_batches
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        prefixed_batches.retain(|batch| batch.strong_count() > 0);
+        for batch in prefixed_batches.iter().filter_map(Weak::upgrade) {
+            let FilterBatchNode::Then(previous, suffix) = &batch.node else {
+                continue;
+            };
+            if Arc::ptr_eq(suffix, next) && previous.values().eq(values.iter()) {
+                return batch;
+            }
+        }
+        let batch = Self::followed_by(&Self::from_values(values), next);
+        prefixed_batches.push(Arc::downgrade(&batch));
+        batch
     }
 
     pub(super) fn chunks(&self) -> &[Arc<Vec<Value>>] {
