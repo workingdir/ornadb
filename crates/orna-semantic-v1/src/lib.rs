@@ -16510,14 +16510,44 @@ fn callable_function_type(ty: &Type) -> Option<&Type> {
 }
 
 fn historical_callable_rebind_compatible(expected: &Type, actual: &Type) -> bool {
-    historical_callable_context(expected).is_some()
-        && historical_callable_context(actual).is_some()
+    type_contains_historical_callable(expected)
+        && type_contains_historical_callable(actual)
         && historical_callable_shape_matches(expected, actual)
 }
 
+fn type_contains_historical_callable(ty: &Type) -> bool {
+    match ty {
+        Type::Applied { base, .. } if base == "sys.HistoricalCallable" => {
+            historical_callable_context(ty).is_some()
+        }
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => type_contains_historical_callable(element),
+        Type::Record(fields) => fields.values().any(type_contains_historical_callable),
+        Type::Tuple(elements) => elements.iter().any(type_contains_historical_callable),
+        Type::Applied { arguments, .. } => {
+            arguments.iter().any(type_contains_historical_callable)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_historical_callable(currency) || type_contains_historical_callable(unit)
+        }
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters.iter().any(type_contains_historical_callable)
+                || type_contains_historical_callable(result)
+        }
+        _ => false,
+    }
+}
+
 /// Closure rebinding may change pinned snapshot identity while preserving the
-/// callable contract. Compare all nested structure and ignore only snapshot
-/// arguments owned by historical callable wrappers.
+/// value shape and callable contracts. The reference fixes `SnapshotRef` at
+/// historical reads but is silent about structured local rebinding; permit it
+/// when the only type differences are snapshot arguments of historical
+/// callable wrappers. Saved aliases retain their original types and pins.
 fn historical_callable_shape_matches(expected: &Type, actual: &Type) -> bool {
     if expected == actual {
         return true;
