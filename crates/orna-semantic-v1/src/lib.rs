@@ -8662,11 +8662,11 @@ fn infer_assignment(
                     }
                 }
                 Some(expected)
-                    if historical_callable_rebind_compatible(&expected, &value.ty) =>
+                    if pinned_snapshot_rebind_compatible(&expected, &value.ty) =>
                 {
-                    // A local historical closure now refers to the new pin;
-                    // aliases inferred before this assignment keep their old
-                    // snapshot context.
+                    // A local pin aggregate or historical closure now refers
+                    // to the new selector identities; aliases inferred before
+                    // this assignment keep their old contexts.
                     if let Some(symbol) = local.get_mut(name) {
                         symbol.ty = value.ty.clone();
                     }
@@ -16539,14 +16539,17 @@ fn callable_function_type(ty: &Type) -> Option<&Type> {
     }
 }
 
-fn historical_callable_rebind_compatible(expected: &Type, actual: &Type) -> bool {
-    type_contains_historical_callable(expected)
-        && type_contains_historical_callable(actual)
-        && historical_callable_shape_matches(expected, actual)
+fn pinned_snapshot_rebind_compatible(expected: &Type, actual: &Type) -> bool {
+    type_contains_pinned_snapshot_identity(expected)
+        && type_contains_pinned_snapshot_identity(actual)
+        && pinned_snapshot_shape_matches(expected, actual)
 }
 
-fn type_contains_historical_callable(ty: &Type) -> bool {
+fn type_contains_pinned_snapshot_identity(ty: &Type) -> bool {
     match ty {
+        Type::Applied { base, .. } if base == "sys.SnapshotRefContext" => {
+            is_contextual_snapshot_ref(ty)
+        }
         Type::Applied { base, .. } if base == "sys.HistoricalCallable" => {
             historical_callable_context(ty).is_some()
         }
@@ -16554,31 +16557,32 @@ fn type_contains_historical_callable(ty: &Type) -> bool {
         | Type::Range(element)
         | Type::Relation(element)
         | Type::Stream(element)
-        | Type::Optional(element) => type_contains_historical_callable(element),
-        Type::Record(fields) => fields.values().any(type_contains_historical_callable),
-        Type::Tuple(elements) => elements.iter().any(type_contains_historical_callable),
+        | Type::Optional(element) => type_contains_pinned_snapshot_identity(element),
+        Type::Record(fields) => fields.values().any(type_contains_pinned_snapshot_identity),
+        Type::Tuple(elements) => elements.iter().any(type_contains_pinned_snapshot_identity),
         Type::Applied { arguments, .. } => {
-            arguments.iter().any(type_contains_historical_callable)
+            arguments.iter().any(type_contains_pinned_snapshot_identity)
         }
         Type::MoneyPerUnit { currency, unit } => {
-            type_contains_historical_callable(currency) || type_contains_historical_callable(unit)
+            type_contains_pinned_snapshot_identity(currency)
+                || type_contains_pinned_snapshot_identity(unit)
         }
         Type::Function {
             parameters, result, ..
         } => {
-            parameters.iter().any(type_contains_historical_callable)
-                || type_contains_historical_callable(result)
+            parameters.iter().any(type_contains_pinned_snapshot_identity)
+                || type_contains_pinned_snapshot_identity(result)
         }
         _ => false,
     }
 }
 
-/// Closure rebinding may change pinned snapshot identity while preserving the
-/// value shape and callable contracts. The reference fixes `SnapshotRef` at
-/// historical reads but is silent about structured local rebinding; permit it
-/// when the only type differences are snapshot arguments of historical
-/// callable wrappers. Saved aliases retain their original types and pins.
-fn historical_callable_shape_matches(expected: &Type, actual: &Type) -> bool {
+/// Rebinding a local aggregate may change contextual `SnapshotRef` identities
+/// or historical callable pins while preserving its structural shape. The
+/// reference fixes identity for historical reads but is silent about structured
+/// local rebinding; permit it when the only differences are selector contexts
+/// on pinned snapshot values. Saved aliases retain their original identities.
+fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
     if expected == actual {
         return true;
     }
@@ -16597,10 +16601,27 @@ fn historical_callable_shape_matches(expected: &Type, actual: &Type) -> bool {
         {
             match (expected_arguments.as_slice(), actual_arguments.as_slice()) {
                 ([_, expected_callable], [_, actual_callable]) => {
-                    historical_callable_shape_matches(expected_callable, actual_callable)
+                    pinned_snapshot_shape_matches(expected_callable, actual_callable)
                 }
                 _ => false,
             }
+        }
+        (
+            Type::Applied {
+                base: expected_base,
+                arguments: expected_arguments,
+            },
+            Type::Applied {
+                base: actual_base,
+                arguments: actual_arguments,
+            },
+        ) if expected_base == "sys.SnapshotRefContext"
+            && actual_base == "sys.SnapshotRefContext" =>
+        {
+            matches!(
+                (expected_arguments.as_slice(), actual_arguments.as_slice()),
+                ([Type::Named(_)], [Type::Named(_)])
+            )
         }
         (
             Type::Function {
@@ -16623,22 +16644,22 @@ fn historical_callable_shape_matches(expected: &Type, actual: &Type) -> bool {
                     .iter()
                     .zip(actual_parameters)
                     .all(|(expected, actual)| {
-                        historical_callable_shape_matches(expected, actual)
+                        pinned_snapshot_shape_matches(expected, actual)
                     })
-                && historical_callable_shape_matches(expected_result, actual_result)
+                && pinned_snapshot_shape_matches(expected_result, actual_result)
         }
         (Type::List(expected), Type::List(actual))
         | (Type::Range(expected), Type::Range(actual))
         | (Type::Relation(expected), Type::Relation(actual))
         | (Type::Stream(expected), Type::Stream(actual))
         | (Type::Optional(expected), Type::Optional(actual)) => {
-            historical_callable_shape_matches(expected, actual)
+            pinned_snapshot_shape_matches(expected, actual)
         }
         (Type::Record(expected), Type::Record(actual)) => {
             expected.len() == actual.len()
                 && expected.iter().all(|(name, expected)| {
                     actual.get(name).is_some_and(|actual| {
-                        historical_callable_shape_matches(expected, actual)
+                        pinned_snapshot_shape_matches(expected, actual)
                     })
                 })
         }
@@ -16648,7 +16669,7 @@ fn historical_callable_shape_matches(expected: &Type, actual: &Type) -> bool {
                     .iter()
                     .zip(actual)
                     .all(|(expected, actual)| {
-                        historical_callable_shape_matches(expected, actual)
+                        pinned_snapshot_shape_matches(expected, actual)
                     })
         }
         (
@@ -16667,7 +16688,7 @@ fn historical_callable_shape_matches(expected: &Type, actual: &Type) -> bool {
                     .iter()
                     .zip(actual_arguments)
                     .all(|(expected, actual)| {
-                        historical_callable_shape_matches(expected, actual)
+                        pinned_snapshot_shape_matches(expected, actual)
                     })
         }
         (
@@ -16680,8 +16701,8 @@ fn historical_callable_shape_matches(expected: &Type, actual: &Type) -> bool {
                 unit: actual_unit,
             },
         ) => {
-            historical_callable_shape_matches(expected_currency, actual_currency)
-                && historical_callable_shape_matches(expected_unit, actual_unit)
+            pinned_snapshot_shape_matches(expected_currency, actual_currency)
+                && pinned_snapshot_shape_matches(expected_unit, actual_unit)
         }
         _ => false,
     }

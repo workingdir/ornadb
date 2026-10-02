@@ -284,6 +284,10 @@ pub struct BranchMergePlan {
 /// still-live keys in either paired table. The candidate contains only those
 /// new table-local deletes, and a later-chain read failure returns no part of
 /// the deeper table's or its peer's restore plan.
+/// A subsequent wave may restore keys deleted by that storm wave while
+/// deleting storm or chain keys restored in it. Retries start from that latest
+/// paired base, emit only the new exact-key deletions, and append one selected
+/// plan so re-deletes become new history events without replaying old ones.
 ///
 /// A read failure at any table or range aborts the whole invocation. Facts
 /// gathered from earlier tables or depth ranges remain private; after source
