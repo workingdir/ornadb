@@ -4638,6 +4638,32 @@ fn paired_followup_continuation_checkpoints_verify_nested_storm_rebinds() {
 }
 
 #[test]
+fn paired_followup_continuation_checkpoints_reject_cross_pair_mixing() {
+    let source = include_str!("fixtures/historical-paired-depth-storm-followup-continuation-verification-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-depth-storm-followup-continuation-verification-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "terminal outputs from different paired follow-up chains must retain distinct snapshot identities: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
