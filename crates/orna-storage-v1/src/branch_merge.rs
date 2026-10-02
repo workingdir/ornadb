@@ -306,26 +306,29 @@ enum BranchMergeTombstoneSubmissionMode {
 ///
 /// MERGE-1 is silent on tombstone accumulation across committed waves,
 /// overlapping depth fragments, and cross-mode retries after release. This v1
-/// policy retains the accepted mode for each released position so cross-mode
-/// conflicts stay distinguishable from same-mode stale retries. It accepts
-/// paired plans at exact lineage positions and appends table/key-ordered
+/// policy retains the accepted mode for each released position and the first
+/// mode rejected by a cross-position duplicate until a corrected delta is
+/// buffered. It accepts paired plans at exact lineage positions and appends table/key-ordered
 /// deletion events in lineage order, advancing through restore-only empty deltas.
 /// Duplicate table/key events within one lineage position are rejected as
 /// soon as the overlapping fragment arrives. Two concurrently buffered
 /// positions cannot record the same logical key when every intervening
-/// position is buffered and also records that key. A duplicate reports both
-/// positions and leaves the attempted submission unchanged. A missing
-/// position delays that decision; an intervening position that omits the key
+/// position is buffered and also records that key. A cross-position duplicate
+/// reports both positions and buffers no tombstone data. If the rejected
+/// submission passes local shape and within-wave checks but is rejected by a
+/// cross-position duplicate, its mode remains as retry intent until a corrected
+/// same-mode delta is buffered; an opposite-mode retry conflicts. A missing
+/// position delays duplicate classification; an intervening position that omits the key
 /// separates a later re-delete. Once an earlier position has been released,
 /// a later position may record the key again as a separate event.
 /// Submission positions are classified centrally. Exhaustion takes priority;
-/// otherwise an already accepted position keeps its mode after release.
-/// `submit` and fragment submission classify same-mode retries as stale and
-/// cross-mode retries as conflicts. `append` preserves its strict `OutOfOrder`
-/// result for same-mode or unoccupied position mismatches but checks known
-/// cross-mode conflicts first.
-/// Unrecorded stale order precedes pending-mode checks, and mixed-mode
-/// conflicts precede fragment-index or tombstone-content validation.
+/// accepted and duplicate-retry positions keep their mode through release.
+/// `submit` and fragment submission classify replays of accepted positions as
+/// stale and cross-mode retries as conflicts. `append` preserves its strict
+/// `OutOfOrder` result for same-mode or unoccupied position mismatches but
+/// checks known cross-mode conflicts first. Unrecorded stale order precedes
+/// buffered and retry-mode checks, and mixed-mode conflicts precede
+/// fragment-index or tombstone-content validation.
 /// Concurrent completions may arrive out of order; future deltas wait until
 /// every earlier paired position is present. Split waves wait until every
 /// fragment arrives, then flatten in canonical table/key order atomically.
@@ -335,6 +338,7 @@ pub struct BranchMergeTombstoneHistory {
     events: Vec<BranchMergeTombstoneEvent>,
     pending_deltas: BTreeMap<u64, BufferedBranchMergeTombstoneDelta>,
     committed_modes: BTreeMap<u64, BranchMergeTombstoneSubmissionMode>,
+    duplicate_retry_modes: BTreeMap<u64, BranchMergeTombstoneSubmissionMode>,
 }
 
 impl BranchMergeTombstoneHistory {
@@ -345,6 +349,7 @@ impl BranchMergeTombstoneHistory {
             events: Vec::new(),
             pending_deltas: BTreeMap::new(),
             committed_modes: BTreeMap::new(),
+            duplicate_retry_modes: BTreeMap::new(),
         }
     }
 
@@ -374,7 +379,7 @@ impl BranchMergeTombstoneHistory {
     /// Submits a completed paired plan, buffering future lineage positions
     /// until the missing prefix arrives. Returns only the new contiguous
     /// tombstone events released by this submission. Repeated or stale
-    /// positions are rejected without changing buffered or committed history.
+    /// positions are rejected without changing buffered or committed tombstones.
     pub fn submit(
         &mut self,
         step: &SequencedBranchMergePlan,
@@ -391,9 +396,14 @@ impl BranchMergeTombstoneHistory {
         if let Some(other_order) =
             self.pending_duplicate_order(step.order, &step.ordered_row_tombstones)
         {
+            self.reserve_duplicate_retry_mode(
+                step.order,
+                BranchMergeTombstoneSubmissionMode::WholePlan,
+            );
             return Err(concurrent_duplicate_error(step.order, other_order));
         }
 
+        self.duplicate_retry_modes.remove(&step.order);
         self.pending_deltas.insert(
             step.order,
             BufferedBranchMergeTombstoneDelta::WholePlan(step.ordered_row_tombstones.clone()),
@@ -459,9 +469,14 @@ impl BranchMergeTombstoneHistory {
             return Err(BranchMergeTombstoneHistoryError::DuplicateTombstone { order });
         }
         if let Some(other_order) = self.pending_duplicate_order(order, tombstones) {
+            self.reserve_duplicate_retry_mode(
+                order,
+                BranchMergeTombstoneSubmissionMode::DepthFragments,
+            );
             return Err(concurrent_duplicate_error(order, other_order));
         }
 
+        self.duplicate_retry_modes.remove(&order);
         let buffered = self.pending_deltas.entry(order).or_insert_with(|| {
             BufferedBranchMergeTombstoneDelta::DepthFragments {
                 fragment_count,
@@ -491,6 +506,7 @@ impl BranchMergeTombstoneHistory {
             }
             let delta = self.pending_deltas.remove(&order).expect("ready delta is buffered");
             let mode = delta.submission_mode();
+            self.duplicate_retry_modes.remove(&order);
             let mut tombstones = match delta {
                 BufferedBranchMergeTombstoneDelta::WholePlan(tombstones) => tombstones,
                 BufferedBranchMergeTombstoneDelta::DepthFragments { fragments, .. } => {
@@ -558,11 +574,22 @@ impl BranchMergeTombstoneHistory {
                 self.pending_deltas
                     .get(&order)
                     .map(BufferedBranchMergeTombstoneDelta::submission_mode)
-            });
+            })
+            .or_else(|| self.duplicate_retry_modes.get(&order).copied());
         if existing_mode.is_some_and(|mode| mode != incoming_mode) {
             Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order })
         } else {
             Ok(())
+        }
+    }
+
+    fn reserve_duplicate_retry_mode(
+        &mut self,
+        order: u64,
+        mode: BranchMergeTombstoneSubmissionMode,
+    ) {
+        if !self.pending_deltas.contains_key(&order) && !self.committed_modes.contains_key(&order) {
+            self.duplicate_retry_modes.entry(order).or_insert(mode);
         }
     }
 
