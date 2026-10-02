@@ -240,6 +240,9 @@ impl PackageResolver {
     /// session and do not retarget the replacement's closure. Each replacement
     /// starts a new resolution branch: aliases from the prior parent's
     /// manifest are not inherited or used as fallback at the next depth. The
+    /// If an alias is rebound through several candidates before nested
+    /// expansion, only the currently attached pin supplies that next manifest;
+    /// the earlier candidates' manifests are not accumulated. The
     /// selected session keeps every unmodified exact key pinned, including a
     /// longer prefix-related sibling. Expanding the rebound database gives
     /// its own manifest a fresh next-depth session, even when one of its keys
