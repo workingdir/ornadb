@@ -296,6 +296,12 @@ enum BufferedBranchMergeTombstoneDelta {
     },
 }
 
+#[derive(Clone, Copy)]
+enum BranchMergeTombstoneSubmissionMode {
+    WholePlan,
+    DepthFragments,
+}
+
 /// Append-only tombstone history for committed paired merge plans.
 ///
 /// MERGE-1 is silent on tombstone accumulation across committed waves and on
@@ -311,8 +317,8 @@ enum BufferedBranchMergeTombstoneDelta {
 /// separates a later re-delete. Once an earlier position has been released,
 /// a later position may record the key again as a separate event.
 /// Mixing whole-plan and depth-fragment submissions at one pending position
-/// reports `ConflictingSubmission` before fragment-index validation; the mode
-/// conflict takes precedence for that position.
+/// reports `ConflictingSubmission` before fragment-index or tombstone-content
+/// validation; for a non-stale position, the mode conflict takes precedence.
 /// Concurrent completions may arrive out of order; future deltas wait until
 /// every earlier paired position is present. Split waves wait until every
 /// fragment arrives, then flatten in canonical table/key order atomically.
@@ -368,18 +374,10 @@ impl BranchMergeTombstoneHistory {
                 order: step.order,
             });
         }
-        match self.pending_deltas.get(&step.order) {
-            Some(BufferedBranchMergeTombstoneDelta::DepthFragments { .. }) => {
-                return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission {
-                    order: step.order,
-                });
-            }
-            Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => {
-                return Err(BranchMergeTombstoneHistoryError::DuplicateOrStale {
-                    order: step.order,
-                });
-            }
-            None => {}
+        if let Some(error) =
+            self.pending_submission_error(step.order, BranchMergeTombstoneSubmissionMode::WholePlan)
+        {
+            return Err(error);
         }
         if has_duplicate_tombstones_in_wave(&step.ordered_row_tombstones) {
             return Err(BranchMergeTombstoneHistoryError::DuplicateTombstone {
@@ -416,11 +414,11 @@ impl BranchMergeTombstoneHistory {
         if order < expected {
             return Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order });
         }
-        if matches!(
-            self.pending_deltas.get(&order),
-            Some(BufferedBranchMergeTombstoneDelta::WholePlan(_))
+        if let Some(error) = self.pending_submission_error(
+            order,
+            BranchMergeTombstoneSubmissionMode::DepthFragments,
         ) {
-            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+            return Err(error);
         }
         if fragment_count == 0 || fragment >= fragment_count {
             return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
@@ -430,9 +428,9 @@ impl BranchMergeTombstoneHistory {
         }
 
         match self.pending_deltas.get(&order) {
-            Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => {
-                return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
-            }
+            Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => unreachable!(
+                "whole-plan mode conflicts are classified before fragment validation"
+            ),
             Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
                 fragment_count: expected_count,
                 fragments,
@@ -514,6 +512,30 @@ impl BranchMergeTombstoneHistory {
         }
 
         self.events[first_new_event..].to_vec()
+    }
+
+    fn pending_submission_error(
+        &self,
+        order: u64,
+        incoming_mode: BranchMergeTombstoneSubmissionMode,
+    ) -> Option<BranchMergeTombstoneHistoryError> {
+        match (self.pending_deltas.get(&order), incoming_mode) {
+            (
+                Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)),
+                BranchMergeTombstoneSubmissionMode::WholePlan,
+            ) => Some(BranchMergeTombstoneHistoryError::DuplicateOrStale { order }),
+            (
+                Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)),
+                BranchMergeTombstoneSubmissionMode::DepthFragments,
+            )
+            | (
+                Some(BufferedBranchMergeTombstoneDelta::DepthFragments { .. }),
+                BranchMergeTombstoneSubmissionMode::WholePlan,
+            ) => Some(BranchMergeTombstoneHistoryError::ConflictingSubmission { order }),
+            (Some(BufferedBranchMergeTombstoneDelta::DepthFragments { .. }),
+             BranchMergeTombstoneSubmissionMode::DepthFragments)
+            | (None, _) => None,
+        }
     }
 
     fn pending_duplicate_order(
