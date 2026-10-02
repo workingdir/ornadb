@@ -343,6 +343,8 @@ enum BranchMergeTombstoneSubmissionMode {
 /// Multiple wave restarts can be applied as one transaction: the batch is
 /// normalized by lineage order, and any invalid member leaves every wave and
 /// queued append unchanged.
+/// A recovery batch may also include new whole-plan appends, which are applied
+/// after the restarts and participate in the same all-or-nothing transaction.
 /// Unrecorded stale order precedes
 /// buffered and retry-mode checks, and mixed-mode conflicts precede
 /// fragment-index or tombstone-content validation.
@@ -586,6 +588,29 @@ impl BranchMergeTombstoneHistory {
         for (order, fragment_count) in restarts {
             candidate.restart_depth_merge_wave(order, fragment_count)?;
         }
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Atomically restarts incomplete depth waves and adds whole-plan appends
+    /// to the resulting queue. Appends are processed in ascending lineage
+    /// order after wave validation. If any restart or append fails, neither
+    /// the wave replacements nor any earlier append in this batch is retained.
+    /// Existing queued appends remain in place throughout the transaction.
+    pub fn restart_depth_merge_waves_with_appends(
+        &mut self,
+        restarts: &[(u64, usize)],
+        appends: &[SequencedBranchMergePlan],
+    ) -> Result<(), BranchMergeTombstoneHistoryError> {
+        let mut candidate = self.clone();
+        candidate.restart_depth_merge_waves(restarts)?;
+
+        let mut appends = appends.to_vec();
+        appends.sort_unstable_by_key(|step| step.order);
+        for step in &appends {
+            candidate.append(step)?;
+        }
+
         *self = candidate;
         Ok(())
     }
