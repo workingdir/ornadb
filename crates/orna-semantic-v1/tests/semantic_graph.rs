@@ -4419,6 +4419,29 @@ fn paired_depth_storm_reproductions_reject_cross_lane_terminal_mixing() {
 }
 
 #[test]
+fn paired_depth_storm_reproductions_preserve_chained_nested_identity() {
+    let source = include_str!("fixtures/historical-paired-depth-storm-chained-reproduction.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-depth-storm-chained-reproduction.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "the reproduced paired chain and its chained follow-up must agree on every captured pin after depth storms: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
