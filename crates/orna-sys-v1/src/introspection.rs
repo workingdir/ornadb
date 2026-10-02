@@ -730,6 +730,9 @@ pub enum PlanByteCapScopeSegment {
     Branch { index: usize },
     /// A one-based nested limit position within a branch.
     Limit { position: usize },
+    /// The bounded output of a one-based branch after its limits, rebinds,
+    /// and conjuncts, before that branch's nested storms.
+    BranchOutput { index: usize },
     /// A one-based rebind declaration position within a branch.
     Rebind { position: usize },
     /// A one-based cascade position within a rebind.
@@ -3098,6 +3101,14 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
         }
 
         let mut prior_nested_storm_path = branch_byte_scope_path.clone();
+        if !branch.nested_storms.is_empty() {
+            // ORNA-PLAN does not name this intermediate scope. Keep a typed
+            // boundary so unknown estimates still preserve the bounded
+            // parent-branch output consumed by nested storms.
+            prior_nested_storm_path.push(PlanByteCapScopeSegment::BranchOutput {
+                index: branch_index + 1,
+            });
+        }
         for (nested_index, nested_storm) in branch.nested_storms.iter().enumerate() {
             let nested_scope = format!(
                 "{storm_path}/branch{}/nested{}",
@@ -3635,6 +3646,10 @@ fn hash_byte_cap_scope_path(hash: &mut Sha256, path: &[PlanByteCapScopeSegment])
             PlanByteCapScopeSegment::Limit { position } => {
                 hash.update([2]);
                 hash.update((*position as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::BranchOutput { index } => {
+                hash.update([9]);
+                hash.update((*index as u64).to_be_bytes());
             }
             PlanByteCapScopeSegment::Rebind { position } => {
                 hash.update([3]);
