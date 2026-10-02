@@ -1,0 +1,66 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn final_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+            };
+
+pub fn followup_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+                continuation: final_at(terminal_pin),
+            };
+
+pub fn cascade_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+                followup: followup_at(terminal_pin),
+            };
+
+// Restoring each lane after repeated rebinds must not erase its pin identity.
+pub fn paired_continuation_reproduction_consistency_rejects_lane_mixing() {
+    let left_origin = cascade_at(sys.snapshot("HEAD~1200"))(sys.snapshot("HEAD~1160"))(sys.snapshot("HEAD~1120"))(sys.snapshot("HEAD~1080"));
+    let right_origin = cascade_at(sys.snapshot("HEAD~1190"))(sys.snapshot("HEAD~1150"))(sys.snapshot("HEAD~1110"))(sys.snapshot("HEAD~1070"));
+    let left_root = left_origin.followup;
+    let right_root = right_origin.followup;
+    let left_probe_one = left_root(sys.snapshot("HEAD~1041"))(sys.snapshot("HEAD~1021"))(sys.snapshot("HEAD~1001"));
+    let left_probe_two = left_root(sys.snapshot("HEAD~1042"))(sys.snapshot("HEAD~1022"))(sys.snapshot("HEAD~1002"));
+    let right_probe_one = right_root(sys.snapshot("HEAD~1031"))(sys.snapshot("HEAD~1011"))(sys.snapshot("HEAD~991"));
+    let right_probe_two = right_root(sys.snapshot("HEAD~1032"))(sys.snapshot("HEAD~1012"))(sys.snapshot("HEAD~992"));
+
+    let left_reproduced = cascade_at(sys.snapshot("HEAD~1200"))(sys.snapshot("HEAD~1160"))(sys.snapshot("HEAD~1120"))(sys.snapshot("HEAD~1080"));
+    let right_reproduced = cascade_at(sys.snapshot("HEAD~1190"))(sys.snapshot("HEAD~1150"))(sys.snapshot("HEAD~1110"))(sys.snapshot("HEAD~1070"));
+    let left_reproduced_root = left_reproduced.followup;
+    let right_reproduced_root = right_reproduced.followup;
+    let left_restored = left_reproduced_root(sys.snapshot("HEAD~1040"))(sys.snapshot("HEAD~1020"))(sys.snapshot("HEAD~1000"));
+    let right_restored = right_reproduced_root(sys.snapshot("HEAD~1030"))(sys.snapshot("HEAD~1010"))(sys.snapshot("HEAD~990"));
+    let left_terminal_probe_one = left_restored.continuation(sys.snapshot("HEAD~961"))(sys.snapshot("HEAD~941"))(sys.snapshot("HEAD~921"));
+    let left_terminal_probe_two = left_restored.continuation(sys.snapshot("HEAD~962"))(sys.snapshot("HEAD~942"))(sys.snapshot("HEAD~922"));
+    let right_terminal_probe_one = right_restored.continuation(sys.snapshot("HEAD~951"))(sys.snapshot("HEAD~931"))(sys.snapshot("HEAD~911"));
+    let right_terminal_probe_two = right_restored.continuation(sys.snapshot("HEAD~952"))(sys.snapshot("HEAD~932"))(sys.snapshot("HEAD~912"));
+    let left_terminal = left_restored.continuation(sys.snapshot("HEAD~960"))(sys.snapshot("HEAD~940"))(sys.snapshot("HEAD~920"));
+    let right_terminal = right_restored.continuation(sys.snapshot("HEAD~950"))(sys.snapshot("HEAD~930"))(sys.snapshot("HEAD~910"));
+
+    {
+        cross_lane: [left_terminal.terminal, right_terminal.terminal],
+    }
+}
