@@ -11,12 +11,8 @@ fn bool_value(value: bool) -> CanonicalValue {
     CanonicalValue::new(Raw::Bool(value)).unwrap()
 }
 
-fn text_value(value: &str) -> CanonicalValue {
-    CanonicalValue::new(Raw::Text(value.to_owned())).unwrap()
-}
-
 #[test]
-fn process_and_environment_host_effects_fail_closed_without_bindings() {
+fn process_and_environment_host_effects_require_a_host_effect_handler() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
         .unwrap_or_else(|error| panic!("reference std failed to load: {}", error.code()));
     session
@@ -30,7 +26,7 @@ fn process_and_environment_host_effects_fail_closed_without_bindings() {
     ] {
         assert_eq!(
             session.submit(source).unwrap_err().code(),
-            "ORNA-EVAL-ERROR"
+            "ORNA-EVAL-UNSUPPORTED"
         );
     }
 }
@@ -83,21 +79,38 @@ fn typed_sys_environment_bindings_execute_native_allowlisted_provider() {
             include_str!("fixtures/stdlib-io-environment-get-host-call-xbf3n.orna"),
             &mut bindings,
         ),
-        Ok(Some(text_value("fixture-home")))
+        Ok(Some(
+            CanonicalValue::new(Raw::Tag(
+                60013,
+                Box::new(Raw::Array(vec![
+                    Raw::Int(1.into()),
+                    Raw::Text("fixture-home".into()),
+                ])),
+            ))
+            .unwrap()
+        ))
     );
     assert_eq!(
         session.submit_with_sys_host_bindings(
             include_str!("fixtures/stdlib-io-environment-require-host-call-xbf3n.orna"),
             &mut bindings,
         ),
-        Ok(Some(text_value("fixture-path")))
+        Ok(Some(
+            CanonicalValue::new(Raw::Text("fixture-path".into())).unwrap()
+        ))
     );
     assert_eq!(
         session.submit_with_sys_host_bindings(
             include_str!("fixtures/stdlib-io-environment-get-unset-host-call-xufpz.orna"),
             &mut bindings,
         ),
-        Ok(Some(CanonicalValue::new(Raw::Null).unwrap()))
+        Ok(Some(
+            CanonicalValue::new(Raw::Tag(
+                60013,
+                Box::new(Raw::Array(vec![Raw::Int(0.into())])),
+            ))
+            .unwrap()
+        ))
     );
     assert_eq!(
         session
