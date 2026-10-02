@@ -737,6 +737,22 @@ impl PlanByteCapHandoffRoute {
             output_bytes,
         }
     }
+
+    /// Returns the canonical input label derived from `input_path`.
+    ///
+    /// The typed path is authoritative even if the public `input_scope` field
+    /// was changed after this route was constructed.
+    pub fn input_scope_label(&self) -> String {
+        byte_cap_scope_path_label(&self.input_path)
+    }
+
+    /// Returns the canonical output label derived from `output_path`.
+    ///
+    /// The typed path is authoritative even if the public `output_scope`
+    /// field was changed after this route was constructed.
+    pub fn output_scope_label(&self) -> String {
+        byte_cap_scope_path_label(&self.output_path)
+    }
 }
 
 impl Serialize for PlanByteCapHandoffRoute {
@@ -750,14 +766,8 @@ impl Serialize for PlanByteCapHandoffRoute {
         route.serialize_field("depth", &self.depth)?;
         route.serialize_field("input_path", &self.input_path)?;
         route.serialize_field("output_path", &self.output_path)?;
-        route.serialize_field(
-            "input_scope",
-            &byte_cap_scope_path_label(&self.input_path),
-        )?;
-        route.serialize_field(
-            "output_scope",
-            &byte_cap_scope_path_label(&self.output_path),
-        )?;
+        route.serialize_field("input_scope", &self.input_scope_label())?;
+        route.serialize_field("output_scope", &self.output_scope_label())?;
         route.serialize_field("input_bytes", &self.input_bytes)?;
         route.serialize_field("output_bytes", &self.output_bytes)?;
         route.end()
@@ -2948,7 +2958,7 @@ fn rebind_byte_cap_handoff_scopes_by_depth_text(
             .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
         by_depth.entry(route.depth).or_default().push(format!(
             "{}={input_bytes}>{output_bytes}",
-            route.output_scope
+            route.output_scope_label()
         ));
     }
     by_depth
@@ -2971,7 +2981,8 @@ fn rebind_byte_cap_handoff_routes_by_depth_text(
             .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
         by_depth.entry(route.depth).or_default().push(format!(
             "{}=>{}={input_bytes}>{output_bytes}",
-            route.input_scope, route.output_scope
+            route.input_scope_label(),
+            route.output_scope_label()
         ));
     }
     by_depth
@@ -3700,8 +3711,8 @@ fn hash_plan_detail(hash: &mut Sha256, detail: &PlanDetail) {
                 hash.update((route.depth as u64).to_be_bytes());
                 hash_byte_cap_scope_path(hash, &route.input_path);
                 hash_byte_cap_scope_path(hash, &route.output_path);
-                hash_part(hash, route.input_scope.as_bytes());
-                hash_part(hash, route.output_scope.as_bytes());
+                hash_part(hash, route.input_scope_label().as_bytes());
+                hash_part(hash, route.output_scope_label().as_bytes());
                 hash_optional_u64(hash, route.input_bytes);
                 hash_optional_u64(hash, route.output_bytes);
             }
@@ -3775,5 +3786,56 @@ impl PlanNodeKind {
             Self::CheckpointUpdate => "checkpoint_update",
             Self::External => "external",
         }
+    }
+}
+
+#[cfg(test)]
+mod byte_cap_handoff_route_scope_tests {
+    use super::*;
+
+    #[test]
+    fn typed_paths_drive_scope_summaries_and_route_fingerprint() {
+        let input_path = vec![
+            PlanByteCapScopeSegment::StormStage { index: 1 },
+            PlanByteCapScopeSegment::StormStageOutput { index: 1 },
+            PlanByteCapScopeSegment::StormStage { index: 2 },
+            PlanByteCapScopeSegment::Branch { index: 1 },
+            PlanByteCapScopeSegment::Limit { position: 1 },
+        ];
+        let mut output_path = input_path.clone();
+        output_path.extend([
+            PlanByteCapScopeSegment::Rebind { position: 1 },
+            PlanByteCapScopeSegment::Cascade { index: 1 },
+        ]);
+        let mut stale_route = PlanByteCapHandoffRoute::from_typed_paths(
+            2,
+            input_path,
+            output_path,
+            None,
+            None,
+        );
+        stale_route.input_scope = "stale input scope".to_owned();
+        stale_route.output_scope = "stale output scope".to_owned();
+
+        let input_scope = "root/storm1/storm_stage_output1/storm2/branch1/limit1";
+        let output_scope = format!("{input_scope}/rebind1/cascade1");
+        assert_eq!(
+            rebind_byte_cap_handoff_scopes_by_depth_text(&[stale_route.clone()]),
+            format!("2:{output_scope}=?>?")
+        );
+        assert_eq!(
+            rebind_byte_cap_handoff_routes_by_depth_text(&[stale_route.clone()]),
+            format!("2:{input_scope}=>{output_scope}=?>?")
+        );
+
+        let mut canonical_route = stale_route.clone();
+        canonical_route.input_scope = input_scope.to_owned();
+        canonical_route.output_scope = output_scope;
+        let fingerprint = |route| {
+            let mut hash = Sha256::new();
+            hash_plan_detail(&mut hash, &PlanDetail::ByteCapHandoffRoutes(vec![route]));
+            hash.finalize()
+        };
+        assert_eq!(fingerprint(stale_route), fingerprint(canonical_route));
     }
 }
