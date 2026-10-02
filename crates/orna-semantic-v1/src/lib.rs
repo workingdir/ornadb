@@ -5910,6 +5910,29 @@ fn constrain_generic_type(
             constrain_generic_type(expected, actual, generic_names, substitutions, diagnostics)
         }
         (
+            Type::Function {
+                parameters: expected_parameters,
+                result: expected_result,
+                ..
+            },
+            Type::Function {
+                parameters: actual_parameters,
+                result: actual_result,
+                ..
+            },
+        ) if expected_parameters.len() == actual_parameters.len() => {
+            for (expected, actual) in expected_parameters.iter().zip(actual_parameters) {
+                constrain_generic_type(expected, actual, generic_names, substitutions, diagnostics);
+            }
+            constrain_generic_type(
+                expected_result,
+                actual_result,
+                generic_names,
+                substitutions,
+                diagnostics,
+            );
+        }
+        (
             Type::Applied {
                 base: expected_base,
                 arguments: expected_arguments,
@@ -7362,6 +7385,30 @@ fn infer(
                 && !scope.names.contains_key("error")
             {
                 return infer_error_call(arguments, scope, local, diagnostics);
+            }
+            if matches!(callee.as_ref(), Expr::Name { text, .. } if text == "Some")
+                && !local.contains_key("Some")
+                && !scope.names.contains_key("Some")
+            {
+                if let [argument] = arguments.as_slice()
+                    && argument.name.is_none()
+                {
+                    let value = infer(&argument.value, scope, local, diagnostics);
+                    return Inferred {
+                        ty: Type::Optional(Box::new(value.ty)),
+                        effects: value.effects,
+                    };
+                }
+                let mut effects = EffectSummary::default();
+                for argument in arguments {
+                    let value = infer(&argument.value, scope, local, diagnostics);
+                    effects.join(&value.effects);
+                }
+                diagnostics.push(diag(DIAG_TYPE, "Some requires exactly one positional value"));
+                return Inferred {
+                    ty: Type::Error,
+                    effects,
+                };
             }
             if qualified_path(callee)
                 .as_deref()
@@ -10045,16 +10092,6 @@ fn infer_finite_list_collection(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
-    if operation == "bucket_by" {
-        diagnostics.push(diag(
-            DIAG_TYPE,
-            "bucket_by requires a relation with an explicit time source",
-        ));
-        return Inferred {
-            ty: Type::Error,
-            effects: input.map_or_else(EffectSummary::default, |input| input.effects),
-        };
-    }
     if matches!(
         operation,
         "chunk"
@@ -10069,6 +10106,7 @@ fn infer_finite_list_collection(
             | "split_when"
             | "rank"
             | "asof_join"
+            | "bucket_by"
     ) {
         return infer_finite_list_helper_collection(
             operation,
@@ -10279,6 +10317,7 @@ fn infer_finite_list_helper_collection(
         "group_by" | "rank" => &["values", "key"],
         "window" => &["values", "size", "step"],
         "asof_join" => &["left", "right", "time", "by"],
+        "bucket_by" => &["rows", "period", "zone"],
         _ => unreachable!("finite-list helper was checked"),
     };
     let pipeline = input.is_some();
@@ -10488,6 +10527,17 @@ fn infer_finite_list_helper_collection(
                 first.clone(),
                 Type::Optional(Box::new(first)),
             ])))
+        }
+        "bucket_by" => {
+            let time_shape = matches!(&first, Type::Instant)
+                || matches!(&first, Type::Record(fields) if fields.get("time") == Some(&Type::Instant));
+            if !time_shape && first != Type::Error {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "bucket_by requires Instant values or rows with an Instant time field",
+                ));
+            }
+            Type::List(Box::new(Type::List(Box::new(first))))
         }
         _ => unreachable!("finite-list helper was checked"),
     };
@@ -14278,6 +14328,28 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
                         && actual_unit.rsplit('.').next() == Some("kWh")
             )
         }
+        (
+            Type::Function {
+                parameters: expected_parameters,
+                default_parameters: expected_defaults,
+                result: expected_result,
+                ..
+            },
+            Type::Function {
+                parameters: actual_parameters,
+                default_parameters: actual_defaults,
+                result: actual_result,
+                ..
+            },
+        ) => {
+            expected_parameters.len() == actual_parameters.len()
+                && expected_defaults == actual_defaults
+                && expected_parameters
+                    .iter()
+                    .zip(actual_parameters)
+                    .all(|(expected, actual)| types_match(expected, actual))
+                && types_match(expected_result, actual_result)
+        }
         _ => false,
     }
 }
@@ -17316,8 +17388,12 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
             && actual_base == "sys.HistoricalCallable" =>
         {
             match (expected_arguments.as_slice(), actual_arguments.as_slice()) {
-                ([_, expected_callable], [_, actual_callable]) => {
-                    pinned_snapshot_shape_matches(expected_callable, actual_callable)
+                ([expected_snapshot, expected_callable], [actual_snapshot, actual_callable]) => {
+                    // The captured context is part of the callable's pin-map
+                    // shape: rebinding may replace selectors, but must retain
+                    // the same number of captured pins.
+                    pinned_snapshot_shape_matches(expected_snapshot, actual_snapshot)
+                        && pinned_snapshot_shape_matches(expected_callable, actual_callable)
                 }
                 _ => false,
             }
@@ -19393,9 +19469,9 @@ mod tests {
         let wider = Type::Applied {
             base: "semantic.SnapshotContextMap".into(),
             arguments: vec![
-                Type::Named("selector:HEAD~6".into()),
-                Type::Named("selector:HEAD~5".into()),
                 Type::Named("selector:HEAD~4".into()),
+                Type::Named("selector:HEAD~5".into()),
+                Type::Named("selector:HEAD~6".into()),
             ],
         };
         let malformed = Type::Applied {
@@ -19441,6 +19517,31 @@ mod tests {
         assert!(type_contains_pinned_snapshot_identity(&first));
         assert!(pinned_snapshot_rebind_compatible(&first, &second));
         assert!(!pinned_snapshot_rebind_compatible(&first, &wider));
+        let terminal_factory = Type::Function {
+            parameters: vec![],
+            parameter_names: Some(vec![]),
+            default_parameters: BTreeSet::new(),
+            result: Box::new(Type::Named("domain.Factory".into())),
+        };
+        let first_pinned_factory = historical_callable_type(&first, &terminal_factory);
+        let second_pinned_factory = historical_callable_type(&second, &terminal_factory);
+        let wider_pinned_factory = historical_callable_type(&wider, &terminal_factory);
+        assert!(pinned_snapshot_shape_matches(
+            &first_pinned_factory,
+            &second_pinned_factory
+        ));
+        assert!(!pinned_snapshot_shape_matches(
+            &first_pinned_factory,
+            &wider_pinned_factory
+        ));
+        assert!(pinned_snapshot_rebind_compatible(
+            &first_pinned_factory,
+            &second_pinned_factory
+        ));
+        assert!(!pinned_snapshot_rebind_compatible(
+            &first_pinned_factory,
+            &wider_pinned_factory
+        ));
         assert!(!is_snapshot_context_map_shape(&malformed));
         assert!(!types_match(&malformed, &malformed));
         assert!(!types_match(&malformed, &Type::Bottom));

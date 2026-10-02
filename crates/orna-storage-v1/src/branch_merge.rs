@@ -340,6 +340,45 @@ enum BranchMergeTombstoneSubmissionMode {
     DepthFragments,
 }
 
+type PairedRetryPlanSignature = (u64, [u8; 32], Vec<(ObjectId, CanonicalValue)>);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AppliedDepthFragmentRetryTransaction {
+    bindings: Vec<PairedRetryPlanSignature>,
+    recoveries: Vec<BranchMergeDepthFragmentRecovery>,
+    appends: Vec<PairedRetryPlanSignature>,
+}
+
+impl AppliedDepthFragmentRetryTransaction {
+    fn new(
+        bindings: &[SequencedBranchMergePlan],
+        recoveries: &[BranchMergeDepthFragmentRecovery],
+        appends: &[SequencedBranchMergePlan],
+    ) -> Self {
+        let plan_signatures = |steps: &[SequencedBranchMergePlan]| {
+            let mut signatures = steps
+                .iter()
+                .map(|step| {
+                    (
+                        step.order,
+                        paired_plan_retry_identity(&step.plan),
+                        step.ordered_row_tombstones.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            signatures.sort_unstable_by_key(|(order, _, _)| *order);
+            signatures
+        };
+        let mut recoveries = recoveries.to_vec();
+        recoveries.sort_unstable_by_key(|recovery| (recovery.order, recovery.fragment));
+        Self {
+            bindings: plan_signatures(bindings),
+            recoveries,
+            appends: plan_signatures(appends),
+        }
+    }
+}
+
 /// Append-only tombstone history for committed paired merge plans.
 ///
 /// MERGE-1 is silent on tombstone accumulation across committed waves,
@@ -393,7 +432,10 @@ enum BranchMergeTombstoneSubmissionMode {
 /// waves can compare only their tombstone projection because fragment
 /// submissions carry no schema, checkpoint, or row state. Incomplete or
 /// changed cross-mode deltas still return `ConflictingSubmission`; ordinary
-/// submission APIs remain mode-strict.
+/// submission APIs remain mode-strict. A successful combined bind/recovery
+/// transaction records its normalized request, so replaying the same paired
+/// identities and fragment repairs returns no events and cannot duplicate
+/// committed tombstones.
 /// Unrecorded stale order precedes
 /// buffered and retry-mode checks, and mixed-mode conflicts precede
 /// fragment-index or tombstone-content validation.
@@ -409,6 +451,7 @@ pub struct BranchMergeTombstoneHistory {
     committed_modes: BTreeMap<u64, BranchMergeTombstoneSubmissionMode>,
     committed_plan_identities: BTreeMap<u64, [u8; 32]>,
     duplicate_retry_modes: BTreeMap<u64, BranchMergeTombstoneSubmissionMode>,
+    applied_fragment_retry_transactions: Vec<AppliedDepthFragmentRetryTransaction>,
 }
 
 impl BranchMergeTombstoneHistory {
@@ -422,6 +465,7 @@ impl BranchMergeTombstoneHistory {
             committed_modes: BTreeMap::new(),
             committed_plan_identities: BTreeMap::new(),
             duplicate_retry_modes: BTreeMap::new(),
+            applied_fragment_retry_transactions: Vec::new(),
         }
     }
 
@@ -682,6 +726,95 @@ impl BranchMergeTombstoneHistory {
         Ok(())
     }
 
+    /// Rebinds the full paired identity for one complete, still-pending depth
+    /// fragment wave. The replacement plan must retain the exact tombstone
+    /// encoding already submitted by the fragments. Released waves cannot be
+    /// rebound because their committed event history is immutable.
+    ///
+    /// MERGE-1 is silent on revised paired plans during a blocked cascade.
+    /// This v1 policy permits identity changes only before release and only
+    /// when the tombstone projection is unchanged. Successful rebinding also
+    /// invalidates replay receipts that refer to the previous identity.
+    pub fn rebind_depth_fragment_retry_plan(
+        &mut self,
+        step: &SequencedBranchMergePlan,
+    ) -> Result<(), BranchMergeTombstoneHistoryError> {
+        let order = step.order;
+        let planned_tombstones = step.plan.ordered_row_tombstones();
+        if has_duplicate_tombstones_in_wave(&planned_tombstones)
+            || !same_tombstone_encoding_delta(&planned_tombstones, &step.ordered_row_tombstones)
+        {
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+        }
+
+        let existing = match self.pending_deltas.get(&order) {
+            Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
+                fragment_count,
+                fragments,
+            }) if fragments.len() == *fragment_count => {
+                Some(fragments.values().flatten().cloned().collect::<Vec<_>>())
+            }
+            _ => None,
+        };
+        let Some(existing) = existing else {
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+        };
+        if !same_tombstone_encoding_delta(&existing, &step.ordered_row_tombstones) {
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+        }
+
+        let Some(previous) = self.pending_plan_identities.get(&order).copied() else {
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+        };
+        let identity = paired_plan_retry_identity(&step.plan);
+        if previous != identity {
+            self.pending_plan_identities.insert(order, identity);
+            self.applied_fragment_retry_transactions.retain(|transaction| {
+                !transaction
+                    .bindings
+                    .iter()
+                    .chain(&transaction.appends)
+                    .any(|(transaction_order, _, _)| *transaction_order == order)
+            });
+        }
+        Ok(())
+    }
+
+    /// Atomically rebinds several complete pending depth waves through one
+    /// paired cascade. Positions are checked in lineage order, must be
+    /// unique, and must preserve each wave's tombstone projection. If any
+    /// position is missing, incomplete, released, or mismatched, no identity
+    /// or replay receipt changes. Empty and duplicate batches are rejected.
+    pub fn rebind_depth_fragment_retry_plans(
+        &mut self,
+        steps: &[SequencedBranchMergePlan],
+    ) -> Result<(), BranchMergeTombstoneHistoryError> {
+        if steps.is_empty() {
+            return Err(
+                BranchMergeTombstoneHistoryError::EmptyDepthFragmentRetryPlanBindingBatch,
+            );
+        }
+
+        let mut steps = steps.to_vec();
+        steps.sort_unstable_by_key(|step| step.order);
+        for pair in steps.windows(2) {
+            if pair[0].order == pair[1].order {
+                return Err(
+                    BranchMergeTombstoneHistoryError::DuplicateDepthFragmentRetryPlanBinding {
+                        order: pair[0].order,
+                    },
+                );
+            }
+        }
+
+        let mut candidate = self.clone();
+        for step in &steps {
+            candidate.rebind_depth_fragment_retry_plan(step)?;
+        }
+        *self = candidate;
+        Ok(())
+    }
+
     /// Atomically binds paired retry identities, applies fragment recoveries,
     /// and validates same-position paired retry appends as one transaction.
     /// Bindings run first so recovered appends are checked against full paired
@@ -692,15 +825,29 @@ impl BranchMergeTombstoneHistory {
     /// MERGE-1 is silent on composing retry identity binding with fragment
     /// recovery. This v1 policy makes the combined operation all-or-nothing;
     /// callers that need separate transactions can use the constituent APIs.
+    /// A successful equivalent request can be retried: it returns no new
+    /// events and leaves the already-committed result unchanged.
     pub fn bind_depth_fragment_retry_plans_with_recovery(
         &mut self,
         bindings: &[SequencedBranchMergePlan],
         recoveries: &[BranchMergeDepthFragmentRecovery],
         appends: &[SequencedBranchMergePlan],
     ) -> Result<Vec<BranchMergeTombstoneEvent>, BranchMergeTombstoneHistoryError> {
+        let transaction =
+            AppliedDepthFragmentRetryTransaction::new(bindings, recoveries, appends);
+        if self
+            .applied_fragment_retry_transactions
+            .contains(&transaction)
+        {
+            return Ok(Vec::new());
+        }
+
         let mut candidate = self.clone();
         candidate.bind_depth_fragment_retry_plans(bindings)?;
         let released = candidate.recover_depth_merge_fragments_with_appends(recoveries, appends)?;
+        candidate
+            .applied_fragment_retry_transactions
+            .push(transaction);
         *self = candidate;
         Ok(released)
     }
