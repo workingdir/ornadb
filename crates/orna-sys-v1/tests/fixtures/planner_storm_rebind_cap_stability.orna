@@ -1,0 +1,38 @@
+pub table PlannerStormRebindCapStability(id: Int) {
+    early: Bool,
+    middle: Bool,
+    deep: Bool,
+    sibling: Bool,
+}
+pub fn rebind_cap_stability() = PlannerStormRebindCapStability
+    | union(
+        PlannerStormRebindCapStability
+            | take(19)
+            | union(
+                PlannerStormRebindCapStability | take(40) | filter(row => row.deep),
+                PlannerStormRebindCapStability | take(40) | filter(row => row.deep),
+                PlannerStormRebindCapStability | take(40) | filter(row => row.deep)
+            )
+            | take(11)
+            | union(
+                PlannerStormRebindCapStability | take(30) | filter(row => row.middle),
+                PlannerStormRebindCapStability | take(30) | filter(row => row.middle)
+            )
+            | filter(row => row.early),
+        PlannerStormRebindCapStability | take(7) | filter(row => row.sibling)
+    )
+    | union(
+        PlannerStormRebindCapStability
+            | take(8)
+            | union(
+                PlannerStormRebindCapStability | take(24) | filter(row => row.deep),
+                PlannerStormRebindCapStability | take(24) | filter(row => row.deep)
+            )
+            | take(5)
+            | filter(row => row.middle),
+        PlannerStormRebindCapStability | take(4) | filter(row => row.sibling)
+    )
+    | union(
+        PlannerStormRebindCapStability | take(3) | filter(row => row.early),
+        PlannerStormRebindCapStability | take(2) | filter(row => row.sibling)
+    );
