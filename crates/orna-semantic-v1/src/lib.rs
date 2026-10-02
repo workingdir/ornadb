@@ -14206,6 +14206,40 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
     }
 }
 
+/// `types_match` intentionally treats `Error` as compatible to avoid
+/// cascading diagnostics. Tuple pin specialization must instead fail closed
+/// when recovery left an invalid component, or valid siblings could leak a
+/// partial set of capture identities into a later wave.
+fn contains_type_error(ty: &Type) -> bool {
+    match ty {
+        Type::Error => true,
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => contains_type_error(element),
+        Type::Record(fields) => fields.values().any(contains_type_error),
+        Type::Tuple(elements) => elements.iter().any(contains_type_error),
+        Type::Applied { arguments, .. } => arguments.iter().any(contains_type_error),
+        Type::MoneyPerUnit { currency, unit } => {
+            contains_type_error(currency) || contains_type_error(unit)
+        }
+        Type::Function {
+            parameters, result, ..
+        } => parameters.iter().any(contains_type_error) || contains_type_error(result),
+        Type::Int
+        | Type::Decimal
+        | Type::Float
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null
+        | Type::Named(_)
+        | Type::Bottom => false,
+    }
+}
+
 fn table_row_types_match(expected: &Type, actual: &Type, scope: &Scope) -> bool {
     let (Type::Named(expected), Type::Named(actual)) = (expected, actual) else {
         return false;
@@ -16423,7 +16457,11 @@ fn specialize_dynamic_parameter_snapshot_contexts(
         };
         // A destructured parameter is one callback argument. Do not partially
         // bind earlier tuple pins if a later nested component is incompatible.
-        if matches!(formal, Type::Tuple(_)) && !types_match(formal, actual) {
+        if matches!(formal, Type::Tuple(_))
+            && (contains_type_error(formal)
+                || contains_type_error(actual)
+                || !types_match(formal, actual))
+        {
             continue;
         }
         collect_snapshot_binder_contexts(formal, actual, &mut binder_contexts);
@@ -17021,6 +17059,9 @@ fn type_contains_pinned_snapshot_identity(ty: &Type) -> bool {
         }
         Type::Applied { base, .. } if base == "sys.HistoricalCallable" => {
             historical_callable_context(ty).is_some()
+        }
+        Type::Applied { base, .. } if base == "semantic.SnapshotContextMap" => {
+            is_snapshot_context_map_shape(ty)
         }
         Type::List(element)
         | Type::Range(element)

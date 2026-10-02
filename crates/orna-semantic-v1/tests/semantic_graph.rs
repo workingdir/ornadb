@@ -4809,6 +4809,46 @@ fn malformed_nested_tuple_does_not_partially_bind_snapshot_identities() {
 }
 
 #[test]
+fn nested_tuple_error_wave_keeps_paired_capture_pins_atomic() {
+    let source = include_str!("fixtures/historical-paired-nested-tuple-error-wave.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-tuple-error-wave.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_UNRESOLVED),
+        "the recovery wave must retain its unresolved-name diagnostic"
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_nested_tuple_error_wave_atomicity")
+        })
+        .expect("paired tuple error-wave fixture module");
+    let ty = &module.symbols["paired_nested_tuple_error_wave_atomicity"].ty;
+    let summary = format!("{ty:?}");
+    assert!(
+        !summary.contains("HEAD~380") && !summary.contains("HEAD~370"),
+        "an error in a later nested tuple leaf must not specialize earlier pins in that wave: {summary}"
+    );
+    assert!(
+        summary.contains("HEAD~450") && summary.contains("HEAD~320"),
+        "the failed wave must preserve earlier and later valid capture depths: {summary}"
+    );
+}
+
+#[test]
 fn concurrent_callback_tuples_reject_cross_lane_identity_mix_after_rebind() {
     let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
@@ -6685,6 +6725,201 @@ fn paired_checkpoint_maps_merge_distinct_lambda_binders_without_cross_field_loss
         lane_child_maps.get("left"),
         lane_child_maps.get("right"),
         "the two lanes' child binders must remain distinct"
+    );
+}
+
+#[test]
+fn paired_checkpoint_snapshot_maps_survive_chained_depth_storms() {
+    let source = include_str!(
+        "fixtures/historical-paired-checkpoint-snapshot-retention-depth-storm.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-checkpoint-snapshot-retention-depth-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_checkpoint_snapshot_retention_across_depth_storms")
+        })
+        .expect("paired depth-storm snapshot-retention module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_checkpoint_snapshot_retention_across_depth_storms"].ty
+    else {
+        panic!("paired checkpoint retention must be callable");
+    };
+    let Type::Record(lanes) = result.as_ref() else {
+        panic!("paired checkpoint retention must retain both lanes");
+    };
+
+    let mut retained_lane_maps = BTreeMap::new();
+    for (lane, stages) in [
+        (
+            "left",
+            [
+                ("saved", &["950", "948"][..]),
+                ("after_storm", &["945", "944"][..]),
+                ("restored", &["950", "948"][..]),
+            ],
+        ),
+        (
+            "right",
+            [
+                ("saved", &["930", "928"][..]),
+                ("after_storm", &["925", "924"][..]),
+                ("restored", &["930", "928"][..]),
+            ],
+        ),
+    ] {
+        let Type::Record(checkpoints) = lanes.get(lane).expect("paired lane") else {
+            panic!("{lane} must retain all checkpoint stages");
+        };
+        let mut field_maps = BTreeMap::new();
+        for (stage, roots) in stages {
+            let fields = checkpoint_output_fields(checkpoints.get(stage).expect("stage"));
+            let expected_roots = roots
+                .iter()
+                .map(|root| format!("selector:HEAD~{root}"))
+                .collect::<BTreeSet<_>>();
+            for field in ["root_pin", "root"] {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(
+                    fields.get(field).expect("root field"),
+                    &mut contexts,
+                );
+                assert_eq!(contexts, expected_roots, "{lane}.{stage}.{field} root map");
+            }
+            for field in ["middle_pin", "middle", "leaf_pin", "leaf"] {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(
+                    fields.get(field).expect("nested checkpoint field"),
+                    &mut contexts,
+                );
+                assert_eq!(
+                    contexts.len(),
+                    2,
+                    "{lane}.{stage}.{field} must retain both nested snapshot binders: {contexts:?}"
+                );
+                assert!(
+                    contexts
+                        .iter()
+                        .all(|context| context.starts_with("selector:binder:")),
+                    "{lane}.{stage}.{field} must not absorb the root snapshot map: {contexts:?}"
+                );
+                if let Some(expected) = field_maps.get(field) {
+                    assert_eq!(
+                        &contexts, expected,
+                        "{lane}.{stage}.{field} pin map must survive rebind and restore"
+                    );
+                } else {
+                    field_maps.insert(field.to_owned(), contexts);
+                }
+            }
+            assert_eq!(
+                field_maps.get("middle_pin"),
+                field_maps.get("middle"),
+                "{lane}.{stage} middle pin and historical field maps must agree"
+            );
+            assert_eq!(
+                field_maps.get("leaf_pin"),
+                field_maps.get("leaf"),
+                "{lane}.{stage} leaf pin and historical field maps must agree"
+            );
+        }
+        retained_lane_maps.insert(lane, field_maps);
+    }
+    assert_ne!(
+        retained_lane_maps
+            .get("left")
+            .and_then(|maps| maps.get("middle_pin")),
+        retained_lane_maps
+            .get("right")
+            .and_then(|maps| maps.get("middle_pin")),
+        "paired lanes must retain separate nested snapshot maps"
+    );
+}
+
+#[test]
+fn paired_checkpoint_retains_merged_snapshot_maps_through_rebind_storms() {
+    let source = include_str!("fixtures/historical-paired-checkpoint-retained-maps-rebind-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-checkpoint-retained-maps-rebind-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_checkpoint_retained_maps_across_rebind_storms")
+        })
+        .expect("paired retained-map checkpoint module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_checkpoint_retained_maps_across_rebind_storms"].ty
+    else {
+        panic!("paired retained-map checkpoint must be callable");
+    };
+    let Type::Record(lanes) = result.as_ref() else {
+        panic!("paired retained-map checkpoint must expose both lanes");
+    };
+
+    let mut lane_maps = BTreeMap::new();
+    for lane in ["left", "right"] {
+        let Type::Record(stages) = lanes.get(lane).expect("paired lane") else {
+            panic!("{lane} must retain saved, storm, and restored maps");
+        };
+        let mut stage_maps = BTreeMap::new();
+        for stage in ["saved", "after_storm", "restored"] {
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(
+                stages.get(stage).expect("checkpoint stage"),
+                &mut contexts,
+            );
+            assert_eq!(
+                contexts.len(),
+                2,
+                "{lane}.{stage} must retain both function-parameter map entries: {contexts:?}"
+            );
+            assert!(
+                contexts
+                    .iter()
+                    .all(|context| context.starts_with("selector:binder:")),
+                "{lane}.{stage} must retain binder maps, not substitute other snapshots: {contexts:?}"
+            );
+            stage_maps.insert(stage, contexts);
+        }
+        assert_eq!(
+            stage_maps.get("saved"),
+            stage_maps.get("restored"),
+            "{lane} restoring a checkpoint must restore its original field map"
+        );
+        assert_ne!(
+            stage_maps.get("saved"),
+            stage_maps.get("after_storm"),
+            "{lane} storm maps must retain their own snapshot identities"
+        );
+        lane_maps.insert(lane, stage_maps);
+    }
+    assert_ne!(
+        lane_maps["left"]["saved"],
+        lane_maps["right"]["saved"],
+        "paired lanes must not collapse retained checkpoint maps"
     );
 }
 
