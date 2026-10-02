@@ -219,8 +219,8 @@ pub struct BranchMergePlan {
 }
 
 impl BranchMergePlan {
-    /// Flattens this plan's row tombstones in table, split-range, then
-    /// canonical key order. Concatenate results from
+    /// Flattens this plan's row tombstones in table and canonical primary-key
+    /// order, independent of its split layout. Concatenate results from
     /// [`BranchMergePlanSequencer`] in the released order to retain commit
     /// lineage across plans whose depth splits differ.
     pub fn ordered_row_tombstones(&self) -> Vec<(ObjectId, CanonicalValue)> {
@@ -232,13 +232,18 @@ impl BranchMergePlan {
                 }
             }
         }
+        ordered.sort_by(|(left_table, left_key), (right_table, right_key)| {
+            left_table.cmp(right_table).then_with(|| {
+                compare_primary_keys(left_key, right_key).unwrap_or(Ordering::Equal)
+            })
+        });
         ordered
     }
 }
 
 /// One complete paired plan released at its selected commit position, with
-/// that plan's exact row tombstones flattened in table, split-range, then
-/// canonical key order.
+/// that plan's exact row tombstones flattened in table and canonical key
+/// order, independent of the plan's split layout.
 ///
 /// Adapters should persist `plan` as one paired step and append
 /// `ordered_row_tombstones` at `order`. This keeps each plan's depth order
@@ -249,6 +254,77 @@ pub struct SequencedBranchMergePlan {
     pub order: u64,
     pub plan: BranchMergePlan,
     pub ordered_row_tombstones: Vec<(ObjectId, CanonicalValue)>,
+}
+
+/// One exact-key tombstone event retained in committed paired history.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeTombstoneEvent {
+    pub order: u64,
+    pub table: ObjectId,
+    pub key: CanonicalValue,
+}
+
+/// Error returned when a sequenced plan cannot extend a tombstone history.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BranchMergeTombstoneHistoryError {
+    /// The supplied step is not the next lineage position.
+    OutOfOrder { expected: u64, actual: u64 },
+    /// The history already consumed the final representable lineage position.
+    OrderExhausted,
+}
+
+/// Append-only tombstone history for committed paired merge plans.
+///
+/// MERGE-1 is silent on how tombstones accumulate across committed waves. This
+/// v1 policy accepts each sequenced paired plan at exactly the next position,
+/// appends its table/key-ordered exact deletions without deduplicating prior
+/// events, and advances the position even when a restore wave has no new
+/// tombstones. A later deletion of a restored key is therefore a new event at
+/// its own commit position. A paired step is checked and appended atomically.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeTombstoneHistory {
+    next_order: Option<u64>,
+    events: Vec<BranchMergeTombstoneEvent>,
+}
+
+impl BranchMergeTombstoneHistory {
+    /// Starts history after the caller's already-committed prefix.
+    pub fn new(first_order: u64) -> Self {
+        Self { next_order: Some(first_order), events: Vec::new() }
+    }
+
+    /// Appends one plan emitted by [`BranchMergePlanSequencer`] at its next
+    /// lineage position. Empty deltas still consume their paired plan order.
+    pub fn append(
+        &mut self,
+        step: &SequencedBranchMergePlan,
+    ) -> Result<(), BranchMergeTombstoneHistoryError> {
+        let Some(expected) = self.next_order else {
+            return Err(BranchMergeTombstoneHistoryError::OrderExhausted);
+        };
+        if step.order != expected {
+            return Err(BranchMergeTombstoneHistoryError::OutOfOrder {
+                expected,
+                actual: step.order,
+            });
+        }
+
+        self.events.extend(step.ordered_row_tombstones.iter().map(|(table, key)| {
+            BranchMergeTombstoneEvent { order: step.order, table: *table, key: key.clone() }
+        }));
+        self.next_order = expected.checked_add(1);
+        Ok(())
+    }
+
+    /// Returns the next lineage position required by this history.
+    pub fn next_order(&self) -> Option<u64> {
+        self.next_order
+    }
+
+    /// Returns exact deletion events in their append order.
+    pub fn events(&self) -> &[BranchMergeTombstoneEvent] {
+        &self.events
+    }
 }
 
 /// Buffers selected successful plans and releases them in paired lineage order,
@@ -300,9 +376,10 @@ impl BranchMergePlanSequencer {
 
     /// Submits one selected successful plan and returns each newly contiguous
     /// plan with its commit position and depth-ordered tombstones attached.
-    /// Tombstone order within each paired step follows table, validated split
-    /// range, and canonical key order; the returned steps preserve commit
-    /// lineage across calls, regardless of worker completion or depth layout.
+    /// Tombstone order within each paired step follows table and canonical key
+    /// order, independent of validated split ranges; the returned steps
+    /// preserve commit lineage across calls, regardless of worker completion
+    /// or depth layout.
     #[must_use = "released paired plans and tombstone deltas must be enacted in lineage order"]
     pub fn submit_with_tombstone_deltas(
         &mut self,
@@ -442,8 +519,9 @@ impl BranchMergePlanSequencer {
 /// commits append by lineage: a later shallow ancestor tombstone follows
 /// earlier descendant storm events instead of being sorted ahead of them.
 /// If successive plans use different split boundaries, each plan first
-/// flattens its keys in that plan's table and validated range order; depth
-/// changes never reorder or repartition the already-committed prefix.
+/// flattens its keys in table and canonical primary-key order, independent of
+/// that plan's ranges; depth changes never reorder or repartition the already-
+/// committed prefix.
 /// A conflicted candidate is not a paired commit step and has no appendable
 /// delta; concurrent retries from its base are alternatives, and at most one
 /// successful plan advances that paired lineage position.

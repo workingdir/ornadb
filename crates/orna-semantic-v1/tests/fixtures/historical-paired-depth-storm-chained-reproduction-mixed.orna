@@ -1,0 +1,116 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn followup_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+            };
+
+pub fn cascade_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+                followup: followup_at(terminal_pin),
+            };
+
+pub fn pair_at(left_root: sys.SnapshotRef, right_root: sys.SnapshotRef) =
+    (cascade_at(left_root), cascade_at(right_root));
+pub fn forwarded_pair(left_root: sys.SnapshotRef, right_root: sys.SnapshotRef) =
+    pair_at(left_root, right_root);
+pub fn chained_pair(left_root: sys.SnapshotRef, right_root: sys.SnapshotRef) =
+    forwarded_pair(left_root, right_root);
+
+// Reproduce both sides after storms hit the paired chains at different depths and in different orders.
+pub fn paired_depth_storm_reproductions_keep_nested_pins_consistent() {
+    let roots_origin = chained_pair(sys.snapshot("HEAD~760"), sys.snapshot("HEAD~750"));
+    let (left_root_origin, right_root_origin) = roots_origin;
+    let bridges_origin = (
+        left_root_origin(sys.snapshot("HEAD~720")),
+        right_root_origin(sys.snapshot("HEAD~710")),
+    );
+    let (left_bridge_origin, right_bridge_origin) = bridges_origin;
+    let leaves_origin = (
+        left_bridge_origin(sys.snapshot("HEAD~680")),
+        right_bridge_origin(sys.snapshot("HEAD~670")),
+    );
+    let (left_leaf_origin, right_leaf_origin) = leaves_origin;
+    let left_origin = left_leaf_origin(sys.snapshot("HEAD~640"));
+    let right_origin = right_leaf_origin(sys.snapshot("HEAD~630"));
+
+    // Left side storms from root down; rebuild at every depth from its original pins.
+    let left_root_rolling = left_root_origin;
+    left_root_rolling = cascade_at(sys.snapshot("HEAD~759"));
+    left_root_rolling = cascade_at(sys.snapshot("HEAD~758"));
+    left_root_rolling = cascade_at(sys.snapshot("HEAD~757"));
+    let left_root_reproduced = cascade_at(sys.snapshot("HEAD~760"));
+
+    let left_bridge_rolling = left_root_reproduced(sys.snapshot("HEAD~720"));
+    left_bridge_rolling = left_root_reproduced(sys.snapshot("HEAD~718"));
+    left_bridge_rolling = left_root_reproduced(sys.snapshot("HEAD~719"));
+    left_bridge_rolling = left_root_reproduced(sys.snapshot("HEAD~717"));
+    let left_bridge_reproduced = left_root_reproduced(sys.snapshot("HEAD~720"));
+
+    let left_leaf_rolling = left_bridge_reproduced(sys.snapshot("HEAD~680"));
+    left_leaf_rolling = left_bridge_reproduced(sys.snapshot("HEAD~678"));
+    left_leaf_rolling = left_bridge_reproduced(sys.snapshot("HEAD~679"));
+    left_leaf_rolling = left_bridge_reproduced(sys.snapshot("HEAD~677"));
+    let left_leaf_reproduced = left_bridge_reproduced(sys.snapshot("HEAD~680"));
+    let left_reproduced = left_leaf_reproduced(sys.snapshot("HEAD~640"));
+
+    // Right side storms bridge before root, then leaf, to exercise the paired order crossing.
+    let right_bridge_rolling = right_root_origin(sys.snapshot("HEAD~710"));
+    right_bridge_rolling = right_root_origin(sys.snapshot("HEAD~708"));
+    right_bridge_rolling = right_root_origin(sys.snapshot("HEAD~709"));
+    right_bridge_rolling = right_root_origin(sys.snapshot("HEAD~707"));
+
+    let right_root_rolling = right_root_origin;
+    right_root_rolling = cascade_at(sys.snapshot("HEAD~756"));
+    right_root_rolling = cascade_at(sys.snapshot("HEAD~755"));
+    right_root_rolling = cascade_at(sys.snapshot("HEAD~754"));
+    let right_root_reproduced = cascade_at(sys.snapshot("HEAD~750"));
+
+    let right_bridge_reproduced = right_root_reproduced(sys.snapshot("HEAD~710"));
+    let right_leaf_rolling = right_bridge_reproduced(sys.snapshot("HEAD~670"));
+    right_leaf_rolling = right_bridge_reproduced(sys.snapshot("HEAD~668"));
+    right_leaf_rolling = right_bridge_reproduced(sys.snapshot("HEAD~669"));
+    right_leaf_rolling = right_bridge_reproduced(sys.snapshot("HEAD~667"));
+    let right_leaf_reproduced = right_bridge_reproduced(sys.snapshot("HEAD~670"));
+    let right_reproduced = right_leaf_reproduced(sys.snapshot("HEAD~630"));
+
+    let left_origin_followup = left_origin.followup(sys.snapshot("HEAD~600"))(sys.snapshot("HEAD~580"))(sys.snapshot("HEAD~560"));
+    let left_reproduced_followup = left_reproduced.followup(sys.snapshot("HEAD~600"))(sys.snapshot("HEAD~580"))(sys.snapshot("HEAD~560"));
+    let right_origin_followup = right_origin.followup(sys.snapshot("HEAD~590"))(sys.snapshot("HEAD~570"))(sys.snapshot("HEAD~550"));
+    let right_reproduced_followup = right_reproduced.followup(sys.snapshot("HEAD~590"))(sys.snapshot("HEAD~570"))(sys.snapshot("HEAD~550"));
+
+    {
+        left: {
+            root: [left_origin.root, left_reproduced.root, chained_factory(sys.snapshot("HEAD~760"))],
+            bridge: [left_origin.bridge, left_reproduced.bridge, chained_factory(sys.snapshot("HEAD~720"))().read],
+            leaf: [left_origin.leaf, left_reproduced.leaf, chained_factory(sys.snapshot("HEAD~680"))().read],
+            terminal: [left_origin.terminal, left_reproduced.terminal, chained_factory(sys.snapshot("HEAD~640"))().read()],
+        },
+        right: {
+            root: [right_origin.root, right_reproduced.root, chained_factory(sys.snapshot("HEAD~750"))],
+            bridge: [right_origin.bridge, right_reproduced.bridge, chained_factory(sys.snapshot("HEAD~710"))().read],
+            leaf: [right_origin.leaf, right_reproduced.leaf, chained_factory(sys.snapshot("HEAD~670"))().read],
+            terminal: [right_origin.terminal, right_reproduced.terminal, chained_factory(sys.snapshot("HEAD~630"))().read()],
+        },
+        chained_reproduction: {
+            left: [left_origin_followup, left_reproduced_followup],
+            right: [right_origin_followup, right_reproduced_followup],
+        },
+        cross_chain: [left_origin_followup.terminal, right_reproduced_followup.terminal],
+    }
+}
