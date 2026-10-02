@@ -9388,16 +9388,31 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
                 default_parameters: right_defaults,
             },
         ) => {
-            if left_parameters.len() != right_parameters.len()
-                || left_parameters
-                    .iter()
-                    .zip(right_parameters)
-                    .any(|(left, right)| left != right)
-            {
+            if left_parameters.len() != right_parameters.len() {
                 return None;
             }
+            // Distinct checkpoint closures can have the same callable shape
+            // while their SnapshotRef parameters carry different lexical
+            // binder IDs. Merge only those pinned parameter shapes, retaining
+            // their context map; keep all other parameter contracts exact.
+            let parameters = left_parameters
+                .iter()
+                .zip(right_parameters)
+                .map(|(left, right)| {
+                    if left == right {
+                        Some(left.clone())
+                    } else if type_contains_pinned_snapshot_identity(left)
+                        && type_contains_pinned_snapshot_identity(right)
+                        && pinned_snapshot_shape_matches(left, right)
+                    {
+                        merge_checkpoint_field_map(left, right)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Option<Vec<_>>>()?;
             Some(Type::Function {
-                parameters: left_parameters.clone(),
+                parameters,
                 default_parameters: left_defaults
                     .intersection(right_defaults)
                     .copied()
@@ -16406,6 +16421,11 @@ fn specialize_dynamic_parameter_snapshot_contexts(
         let Some(actual) = argument_types.get(argument_index) else {
             continue;
         };
+        // A destructured parameter is one callback argument. Do not partially
+        // bind earlier tuple pins if a later nested component is incompatible.
+        if matches!(formal, Type::Tuple(_)) && !types_match(formal, actual) {
+            continue;
+        }
         collect_snapshot_binder_contexts(formal, actual, &mut binder_contexts);
     }
     specialize_dynamic_parameter_snapshot_contexts_scoped(
