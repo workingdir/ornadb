@@ -221,13 +221,20 @@ pub struct BranchMergePlan {
 /// Computes a complete semantic merge plan or returns bounded conflict facts.
 /// It never writes files, advances refs, or mutates input snapshots.
 ///
-/// Row conflicts are visited in canonical primary-key order after each source
-/// range has been read completely. This ordering is independent of adapter
-/// visitation order and remains the same for fresh concurrent retries after a
-/// recoverable read failure. Clean tombstones do not consume conflict budget.
-/// If the conflict budget is exceeded, the result contains no partial conflict
-/// list or candidate plan; its lower bound includes the first conflict beyond
-/// the configured limit, and its affected ranges identify the bounded scan.
+/// MERGE-1 leaves ordering across tables, split ranges, and recovery retries
+/// open. This v1 policy walks table IDs in ascending order, aligned manifest
+/// ranges in their validated order, and exact row keys in canonical
+/// primary-key order. It therefore gives paired depth merges the same
+/// tombstone and conflict order regardless of adapter visitation order or
+/// concurrent scheduling.
+///
+/// A read failure at any table or range aborts the whole invocation. Facts
+/// gathered from earlier tables or depth ranges remain private; after source
+/// recovery, a fresh retry starts from the first table and range. Clean
+/// tombstones do not consume conflict budget. If the conflict budget is
+/// exceeded, the result contains no partial conflict list or candidate plan;
+/// its lower bound includes the first conflict beyond the configured limit,
+/// and its affected ranges identify the bounded scan.
 pub fn merge_three_way_snapshots<R: BranchRowSource>(
     base: &ThreeWaySnapshot,
     left: &ThreeWaySnapshot,
@@ -277,6 +284,8 @@ pub fn merge_three_way_snapshots<R: BranchRowSource>(
         }
     };
 
+    // The ascending union is part of the recovery ordering policy: a paired
+    // depth walk cannot reorder tombstones or conflicts by table visitation.
     let table_ids: BTreeSet<_> = base.tables.keys().chain(left.tables.keys()).chain(right.tables.keys()).copied().collect();
     let mut merged_tables = BTreeMap::new();
     for table in table_ids {
