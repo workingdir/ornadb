@@ -1,0 +1,29 @@
+query_ops.filter([1, 2, 3], value => value > 1) == [2, 3]
+&& query_ops.map([1, 2], value => value * 2) == [2, 4]
+&& query_ops.flat_map([1, 2], value => [value, value + 10]) == [1, 11, 2, 12]
+&& query_ops.sort_by([3, 1, 2], value => value) == [1, 2, 3]
+&& query_ops.take([1, 2, 3], 2) == [1, 2]
+&& query_ops.drop([1, 2, 3], 2) == [3]
+&& query_ops.distinct([1, 2, 1]) == [1, 2]
+&& query_ops.union([1, 2], [2, 3]) == [1, 2, 2, 3]
+&& query_ops.count([9, 8]) == 2
+&& query_ops.first([9, 8]) != null
+&& query_ops.one([1, 2, 3], value => value == 2) == 2
+&& query_ops.sum([1, 2, 3]) == 6
+&& query_ops.min([3, 1, 2]) == first([1])
+&& query_ops.max([3, 1, 2]) == first([3])
+&& query_ops.every([1, 2, 3], value => value > 0)
+&& query_ops.exists([1, 2, 3], value => value == 2)
+&& query_ops.chunk([1, 2, 3], 2) == [[1, 2], [3]]
+&& query_ops.flatten([[1, 2], [3]]) == [1, 2, 3]
+&& query_ops.partition([1, 2, 3], value => value % 2 == 1) == ([1, 3], [2])
+&& query_ops.zip([1, 2], ["a", "b", "c"]) == [(1, "a"), (2, "b")]
+&& query_ops.zip_exact([1, 2], ["a", "b"]) == [(1, "a"), (2, "b")]
+&& query_ops.unique([1, 2, 1]) == [1, 2]
+&& query_ops.group_by([31, 12, 22, 13, 33], value => value % 10) == [(1, [31]), (2, [12, 22]), (3, [13, 33])]
+&& query_ops.pairs([1, 2, 3]) == [(1, 2), (2, 3)]
+&& query_ops.window([1, 2, 3, 4], 2, 2) == [[1, 2], [3, 4]]
+&& query_ops.split_when([1, 2, 3, 4], value => value % 2 == 0) == [[1], [2, 3], [4]]
+&& query_ops.rank([3, 1, 2, 1], value => value) == [(1, 1), (1, 1), (2, 3), (3, 4)]
+&& query_ops.asof_join([10], [9, 11], value => value, value => 0) == [(10, Some(9))]
+&& query_ops.bucket_by([1970-01-01T00:00:01Z, 1970-01-01T00:00:09Z, 1970-01-01T00:00:10Z, 1970-01-01T00:00:11Z], 10.seconds, "UTC") == [[1970-01-01T00:00:01Z, 1970-01-01T00:00:09Z], [1970-01-01T00:00:10Z, 1970-01-01T00:00:11Z]]

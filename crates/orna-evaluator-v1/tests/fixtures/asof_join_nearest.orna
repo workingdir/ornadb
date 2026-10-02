@@ -4,11 +4,13 @@
     { group: "missing", at: 10, label: "left-no-match" }
 ] | std.collection.asof_join(
     right: [
-        { group: "east", at: 12, label: "tie-earlier-source" },
-        { group: "east", at: 8, label: "tie-later-source" },
+        { group: "east", at: 12, label: "key-aaa" },
+        { group: "east", at: 12, label: "key-zzz" },
+    { group: "east", at: 8, label: "tie-later-source" },
         { group: "east", at: 11, label: "nearest-future" },
         { group: "east", at: 22, label: "upper-tie-earlier-source" },
-        { group: "east", at: 18, label: "lower-tie-later-source" }
+        { group: "east", at: 18, label: "key-aaa" },
+        { group: "east", at: 18, label: "key-zzz" }
     ],
     time: row => row.at,
     by: row => row.group

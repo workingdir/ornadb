@@ -1,0 +1,1 @@
+std.io.fs.write_text("ROOT_PATH", "output.txt", "native-write", false)

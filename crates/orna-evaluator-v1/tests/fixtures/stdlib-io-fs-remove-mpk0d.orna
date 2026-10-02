@@ -1,0 +1,1 @@
+std.io.fs.remove_file("ROOT_PATH", "moved.txt")

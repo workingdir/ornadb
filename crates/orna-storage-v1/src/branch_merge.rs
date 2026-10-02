@@ -726,6 +726,95 @@ impl BranchMergeTombstoneHistory {
         Ok(())
     }
 
+    /// Rebinds the full paired identity for one complete, still-pending depth
+    /// fragment wave. The replacement plan must retain the exact tombstone
+    /// encoding already submitted by the fragments. Released waves cannot be
+    /// rebound because their committed event history is immutable.
+    ///
+    /// MERGE-1 is silent on revised paired plans during a blocked cascade.
+    /// This v1 policy permits identity changes only before release and only
+    /// when the tombstone projection is unchanged. Successful rebinding also
+    /// invalidates replay receipts that refer to the previous identity.
+    pub fn rebind_depth_fragment_retry_plan(
+        &mut self,
+        step: &SequencedBranchMergePlan,
+    ) -> Result<(), BranchMergeTombstoneHistoryError> {
+        let order = step.order;
+        let planned_tombstones = step.plan.ordered_row_tombstones();
+        if has_duplicate_tombstones_in_wave(&planned_tombstones)
+            || !same_tombstone_encoding_delta(&planned_tombstones, &step.ordered_row_tombstones)
+        {
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+        }
+
+        let existing = match self.pending_deltas.get(&order) {
+            Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
+                fragment_count,
+                fragments,
+            }) if fragments.len() == *fragment_count => {
+                Some(fragments.values().flatten().cloned().collect::<Vec<_>>())
+            }
+            _ => None,
+        };
+        let Some(existing) = existing else {
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+        };
+        if !same_tombstone_encoding_delta(&existing, &step.ordered_row_tombstones) {
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+        }
+
+        let Some(previous) = self.pending_plan_identities.get(&order).copied() else {
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+        };
+        let identity = paired_plan_retry_identity(&step.plan);
+        if previous != identity {
+            self.pending_plan_identities.insert(order, identity);
+            self.applied_fragment_retry_transactions.retain(|transaction| {
+                !transaction
+                    .bindings
+                    .iter()
+                    .chain(&transaction.appends)
+                    .any(|(transaction_order, _, _)| *transaction_order == order)
+            });
+        }
+        Ok(())
+    }
+
+    /// Atomically rebinds several complete pending depth waves through one
+    /// paired cascade. Positions are checked in lineage order, must be
+    /// unique, and must preserve each wave's tombstone projection. If any
+    /// position is missing, incomplete, released, or mismatched, no identity
+    /// or replay receipt changes. Empty and duplicate batches are rejected.
+    pub fn rebind_depth_fragment_retry_plans(
+        &mut self,
+        steps: &[SequencedBranchMergePlan],
+    ) -> Result<(), BranchMergeTombstoneHistoryError> {
+        if steps.is_empty() {
+            return Err(
+                BranchMergeTombstoneHistoryError::EmptyDepthFragmentRetryPlanBindingBatch,
+            );
+        }
+
+        let mut steps = steps.to_vec();
+        steps.sort_unstable_by_key(|step| step.order);
+        for pair in steps.windows(2) {
+            if pair[0].order == pair[1].order {
+                return Err(
+                    BranchMergeTombstoneHistoryError::DuplicateDepthFragmentRetryPlanBinding {
+                        order: pair[0].order,
+                    },
+                );
+            }
+        }
+
+        let mut candidate = self.clone();
+        for step in &steps {
+            candidate.rebind_depth_fragment_retry_plan(step)?;
+        }
+        *self = candidate;
+        Ok(())
+    }
+
     /// Atomically binds paired retry identities, applies fragment recoveries,
     /// and validates same-position paired retry appends as one transaction.
     /// Bindings run first so recovered appends are checked against full paired
@@ -912,7 +1001,10 @@ impl BranchMergeTombstoneHistory {
     /// not being replaced in this batch. Incomplete or changed waves remain
     /// conflicts. A changed paired result at that order fails with
     /// [`BranchMergeTombstoneHistoryError::AppendRetryMismatch`]. Standalone
-    /// [`Self::append`] remains strict and rejects reused positions.
+    /// [`Self::append`] remains strict and rejects reused positions. When a
+    /// retry plan carries tombstones, its exact projection must match the
+    /// separately supplied delta even for unbound fragment waves. Legacy
+    /// projection-only plans with no embedded tombstones remain supported.
     pub fn recover_depth_merge_fragments_with_appends(
         &mut self,
         recoveries: &[BranchMergeDepthFragmentRecovery],
@@ -972,15 +1064,16 @@ impl BranchMergeTombstoneHistory {
                 .pending_plan_identities
                 .get(&step.order)
                 .or_else(|| self.committed_plan_identities.get(&step.order));
+            let projection_only_legacy_plan = identity.is_none() && plan_tombstones.is_empty();
+            let paired_projection_matches = projection_only_legacy_plan
+                || (!has_duplicate_tombstones_in_wave(&plan_tombstones)
+                    && same_tombstone_encoding_delta(
+                        &plan_tombstones,
+                        &step.ordered_row_tombstones,
+                    ));
             if !replaces_same_order
                 && !has_duplicate_tombstones_in_wave(&step.ordered_row_tombstones)
-                && identity.is_none_or(|_| {
-                    !has_duplicate_tombstones_in_wave(&plan_tombstones)
-                        && same_tombstone_encoding_delta(
-                            &plan_tombstones,
-                            &step.ordered_row_tombstones,
-                        )
-                })
+                && paired_projection_matches
             {
                 let existing = match self.pending_deltas.get(&step.order) {
                     Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
