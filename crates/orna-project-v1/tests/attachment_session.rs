@@ -10754,6 +10754,28 @@ fn paired_depth_storm_rebinds_keep_sibling_terminal_routes_consistent() {
             sibling,
             middle_variant,
         );
+        let reopened_manifest_terminal = resolver
+            .resolve_for_parent(manifest_middle.database(aliases[2]).unwrap().clone())
+            .unwrap();
+        assert_pin(
+            &reopened_manifest_terminal,
+            aliases[3],
+            &terminal_commits[middle_variant],
+        );
+        assert_route(
+            &reopened_manifest_terminal,
+            &format!("{}.orna", aliases[3]),
+            3,
+            0,
+            middle_variant,
+        );
+        assert_route(
+            &reopened_manifest_terminal,
+            "main.orna",
+            2,
+            sibling,
+            middle_variant,
+        );
         assert_pin(
             &rebound_middle,
             aliases[2],
