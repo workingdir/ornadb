@@ -4,8 +4,8 @@
 //! immutable project and optional verified standard sources, then receives an
 //! isolated session which parses source once, stages semantic state, rejects
 //! effects before evaluation, and publishes semantic/runtime successors
-//! together. It intentionally does not provide tables, activation writes,
-//! clocks, external effects, or presentation execution.
+//! together. Ordinary pure submission has no external effects; the explicit
+//! host-binding path admits only capabilities installed by the caller.
 
 use orna_foundation_v1::{
     CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, SafeText,
@@ -329,9 +329,10 @@ impl AdmittedReplSession {
         Ok(value)
     }
 
-    /// Executes a checked input with the read-only native sys host bindings.
-    /// Environment reads are limited to the explicit provider allowlist; this
-    /// path does not grant database, process, or mutation effects.
+    /// Executes a checked input with explicitly installed native sys providers.
+    /// Environment names, process executables and roots, and clock waits remain
+    /// bounded by the capabilities supplied in `bindings`. Missing providers
+    /// fail closed; this path does not grant database effects.
     pub fn submit_with_sys_host_bindings(
         &mut self,
         source: &str,
