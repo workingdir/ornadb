@@ -766,11 +766,26 @@ impl PlanByteCapHandoffRoute {
         )
     }
 
+    /// Returns the canonical labels as an explicitly named input/output pair.
+    fn named_scope_labels(&self) -> PlanByteCapScopeLabels {
+        let (input, output) = self.scope_labels();
+        PlanByteCapScopeLabels { input, output }
+    }
+
     /// Returns the canonical input-to-output scope label for this route.
     pub fn paired_scope_label(&self) -> String {
         let (input_scope, output_scope) = self.scope_labels();
         format!("{input_scope}=>{output_scope}")
     }
+}
+
+/// Serialized canonical byte-cap handoff labels with explicit input/output names.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct PlanByteCapScopeLabels {
+    /// Label derived from the route's typed input ancestry.
+    pub input: String,
+    /// Label derived from the route's typed output ancestry.
+    pub output: String,
 }
 
 impl Serialize for PlanByteCapHandoffRoute {
@@ -780,7 +795,7 @@ impl Serialize for PlanByteCapHandoffRoute {
     where
         S: serde::Serializer,
     {
-        let mut route = serializer.serialize_struct("PlanByteCapHandoffRoute", 8)?;
+        let mut route = serializer.serialize_struct("PlanByteCapHandoffRoute", 9)?;
         route.serialize_field("depth", &self.depth)?;
         route.serialize_field("input_path", &self.input_path)?;
         route.serialize_field("output_path", &self.output_path)?;
@@ -788,6 +803,7 @@ impl Serialize for PlanByteCapHandoffRoute {
         route.serialize_field("input_scope", &input_scope)?;
         route.serialize_field("output_scope", &output_scope)?;
         route.serialize_field("paired_scope_label", &self.paired_scope_label())?;
+        route.serialize_field("scope_labels", &self.named_scope_labels())?;
         route.serialize_field("input_bytes", &self.input_bytes)?;
         route.serialize_field("output_bytes", &self.output_bytes)?;
         route.end()
@@ -3889,6 +3905,19 @@ mod byte_cap_handoff_route_scope_tests {
             stale_route.paired_scope_label(),
             format!("{input_scope}=>{output_scope}")
         );
+        assert_eq!(
+            stale_route.named_scope_labels(),
+            PlanByteCapScopeLabels {
+                input: input_scope.to_owned(),
+                output: output_scope.clone(),
+            }
+        );
+        let serialized_route = serde_json::to_value(&stale_route).unwrap();
+        assert_eq!(
+            serialized_route["scope_labels"],
+            serde_json::json!({ "input": input_scope, "output": output_scope })
+        );
+        assert!(serialized_route["scope_labels"].is_object());
         assert_eq!(
             rebind_byte_cap_handoff_scopes_by_depth_text(&[stale_route.clone()]),
             format!("2:{output_scope}=?>?")

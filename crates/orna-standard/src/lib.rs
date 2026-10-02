@@ -92,6 +92,7 @@ pub const STANDARD_LIBRARY_VERSION_IDENTITY: &str = "orna.std/1";
 /// Logical source path of the pinned Orna 1.0.0 reference math module.
 pub const REFERENCE_STANDARD_MATH_PATH_V1: &str = "std/math.orna";
 pub const REFERENCE_STANDARD_COLLECTION_PATH_V1: &str = "std/collection.orna";
+pub const REFERENCE_STANDARD_ALGORITHM_PATH_V1: &str = "std/algorithm.orna";
 pub const REFERENCE_STANDARD_QUERY_PATH_V1: &str = "std/query.orna";
 pub const REFERENCE_STANDARD_TEXT_PATH_V1: &str = "std/text.orna";
 pub const REFERENCE_STANDARD_BITS_PATH_V1: &str = "std/bits.orna";
@@ -141,6 +142,8 @@ pub const REFERENCE_STANDARD_REFLECTION_PATH_V1: &str = "std/reflection.orna";
 const REFERENCE_STANDARD_MATH_SOURCE_V1: &str = include_str!("../../../stdlib/std/math.orna");
 const REFERENCE_STANDARD_COLLECTION_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/collection.orna");
+const REFERENCE_STANDARD_ALGORITHM_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/algorithm.orna");
 const REFERENCE_STANDARD_QUERY_SOURCE_V1: &str = include_str!("../../../stdlib/std/query.orna");
 const REFERENCE_STANDARD_TEXT_SOURCE_V1: &str = include_str!("../../../stdlib/std/text.orna");
 const REFERENCE_STANDARD_BITS_SOURCE_V1: &str = include_str!("../../../stdlib/std/bits.orna");
@@ -216,7 +219,7 @@ const REFERENCE_STANDARD_REFLECTION_SOURCE_V1: &str =
 /// This is the current source-backed standard boundary. The retained `orna.std/1`–
 /// `orna.std/11` APIs below model older, explicitly versioned snapshots.
 #[must_use]
-pub fn reference_standard_sources_v1() -> [(String, String); 47] {
+pub fn reference_standard_sources_v1() -> [(String, String); 48] {
     [
         (
             REFERENCE_STANDARD_MATH_PATH_V1.into(),
@@ -401,6 +404,10 @@ pub fn reference_standard_sources_v1() -> [(String, String); 47] {
         (
             REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1.into(),
             REFERENCE_STANDARD_IO_ENVIRONMENT_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_ALGORITHM_PATH_V1.into(),
+            REFERENCE_STANDARD_ALGORITHM_SOURCE_V1.into(),
         ),
         (
             REFERENCE_STANDARD_REGEX_PATH_V1.into(),
