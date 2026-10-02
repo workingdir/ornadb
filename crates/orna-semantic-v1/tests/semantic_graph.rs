@@ -5636,6 +5636,117 @@ fn missing_required_sibling_suppresses_tuple_pin_rebinding() {
 }
 
 #[test]
+fn omitted_sibling_preserves_width_of_paired_tuple_rebinds() {
+    let source = include_str!(
+        "fixtures/historical-paired-rebind-width-suppressed-by-omission.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-rebind-width-suppressed-by-omission.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        1,
+        "only the intentionally omitted required tuple should be rejected: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("omitted_sibling_keeps_paired_rebind_width")
+        })
+        .expect("paired omitted-sibling fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["omitted_sibling_keeps_paired_rebind_width"].ty
+    else {
+        panic!("paired width proof must export a function");
+    };
+    let Type::Record(checkpoints) = result.as_ref() else {
+        panic!("paired width proof must expose saved and rebound values");
+    };
+
+    let mut saved_width = None;
+    for name in ["saved", "rebound"] {
+        let value = checkpoints.get(name).expect("computed checkpoint list");
+        let Type::List(element) = value else {
+            panic!("{name} must remain a list of computed historical values: {value:?}");
+        };
+        let Type::Record(checkpoint) = element.as_ref() else {
+            panic!("{name} must retain its computed checkpoint record: {element:?}");
+        };
+        let Type::Applied { base, arguments } =
+            checkpoint.get("capture").expect("real historical capture")
+        else {
+            panic!("{name} capture must remain a historical callable: {checkpoint:?}");
+        };
+        assert_eq!(base, "sys.HistoricalCallable", "{name}");
+        let [_, Type::Function { result, .. }] = arguments.as_slice() else {
+            panic!("{name} must keep its real callable result: {arguments:?}");
+        };
+        let Type::Record(read_members) = result.as_ref() else {
+            panic!("{name} must preserve the computed database record: {result:?}");
+        };
+        assert!(
+            matches!(read_members.get("read"), Some(Type::Applied { base, .. }) if base == "sys.HistoricalCallable"),
+            "{name} must return the real database read callable: {read_members:?}"
+        );
+        assert_canonical_snapshot_context_maps(value);
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(value, &mut contexts);
+        if name == "rebound" {
+            let unresolved_paired_pins = contexts
+                .iter()
+                .filter(|context| context.starts_with("selector:dynamic-call:"))
+                .count();
+            assert_eq!(
+                unresolved_paired_pins, 4,
+                "the omitted sibling must leave each paired tuple slot symbolic: {contexts:?}"
+            );
+            assert!(
+                contexts.contains("selector:HEAD~870"),
+                "the later complete terminal binding must stay concrete: {contexts:?}"
+            );
+            assert_eq!(contexts.len(), 5, "paired rebind width changed: {contexts:?}");
+            assert_eq!(
+                Some(contexts.len()),
+                saved_width,
+                "suppression must leave paired rebind width unchanged"
+            );
+        } else {
+            assert_eq!(
+                contexts,
+                BTreeSet::from([
+                    "selector:HEAD~960".to_owned(),
+                    "selector:HEAD~950".to_owned(),
+                    "selector:HEAD~940".to_owned(),
+                    "selector:HEAD~930".to_owned(),
+                    "selector:HEAD~920".to_owned(),
+                ]),
+                "the complete paired rebind must retain all five concrete pins"
+            );
+            saved_width = Some(contexts.len());
+        }
+    }
+}
+
+#[test]
 fn missing_outer_tuple_keeps_sibling_pins_symbolic_across_later_depths() {
     let source =
         include_str!("fixtures/historical-missing-outer-tuple-preserves-sibling-pins.orna");

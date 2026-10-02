@@ -16733,6 +16733,43 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                 )),
             }
         },
+        // The reference leaves checkpoint-map recovery after a failed call
+        // unspecified. Rebind each stored selector as its original pin slot
+        // so an omitted sibling cannot collapse same-named paired binders.
+        Type::Applied {
+            base,
+            arguments: map_arguments,
+        }
+            if base == "semantic.SnapshotContextMap"
+                && is_snapshot_context_map_shape(ty) =>
+        {
+            let mut merged: Option<Type> = None;
+            for selector in map_arguments {
+                let Type::Named(selector) = selector else {
+                    return ty.clone();
+                };
+                let context = contextual_snapshot_ref(selector);
+                let context = specialize_dynamic_parameter_snapshot_contexts_scoped(
+                    &context,
+                    parameter_names,
+                    arguments,
+                    argument_types,
+                    local,
+                    call_span,
+                    historical_context,
+                    shadowed_parameters,
+                    binder_contexts,
+                );
+                merged = Some(match merged {
+                    Some(previous) => match merge_snapshot_context_map(&previous, &context) {
+                        Some(merged) => merged,
+                        None => return ty.clone(),
+                    },
+                    None => context,
+                });
+            }
+            merged.unwrap_or_else(|| ty.clone())
+        }
         Type::List(element) => Type::List(Box::new(
             specialize_dynamic_parameter_snapshot_contexts_scoped(
                 element,
