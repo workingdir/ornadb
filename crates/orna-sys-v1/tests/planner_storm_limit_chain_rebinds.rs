@@ -13,6 +13,8 @@ const SEQUENTIAL_BRANCH_CAP_FIXTURE: &str =
     include_str!("fixtures/planner_storm_sequential_rebind_caps.orna");
 const REBIND_STAGE_CAP_FIXTURE: &str =
     include_str!("fixtures/planner_storm_rebind_stage_caps.orna");
+const SEQUENTIAL_REBIND_POSITIONS_FIXTURE: &str =
+    include_str!("fixtures/planner_storm_sequential_rebind_positions.orna");
 
 fn branch(
     limits: &[u64],
@@ -499,6 +501,81 @@ fn successive_rebind_storms_preserve_caps_through_nested_branch_limit_chains() {
         Some(&PlanDetail::Text(
             "1@1:[1:[100]/1;2:[100]/1;3:[100]/1]>[1:[8,40]/1@1=[1:[100]/1;2:[100]/1;3:[100]/1];2:[8]/1]"
                 .to_owned()
+        ))
+    );
+}
+
+#[test]
+fn later_rebind_positions_consume_only_prior_bounded_branch_outputs() {
+    let parsed = orna_syntax_v1::parse_module(SEQUENTIAL_REBIND_POSITIONS_FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    let first_position_storm = storm(
+        "expr:first-position-rebind",
+        (0..3).map(|_| branch(&[100], 1, vec![])).collect(),
+    );
+    let nested_position_storm = storm(
+        "expr:nested-position-rebind",
+        (0..3).map(|_| branch(&[100], 1, vec![])).collect(),
+    );
+    let second_position_storm = storm(
+        "expr:second-position-rebind",
+        vec![
+            branch(&[5, 80], 1, vec![rebind(1, vec![nested_position_storm])]),
+            branch(&[4], 1, vec![]),
+        ],
+    );
+    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+        &query(Some(100), Some(1_000)),
+        &[storm(
+            "expr:positioned-rebind-outer",
+            vec![
+                branch(
+                    &[12, 40, 100],
+                    1,
+                    vec![
+                        rebind(1, vec![first_position_storm]),
+                        rebind(2, vec![second_position_storm]),
+                    ],
+                ),
+                branch(&[20], 1, vec![]),
+            ],
+        )],
+        &[],
+    )
+    .expect("later rebind positions receive the preceding branch-local result");
+
+    let filter = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Filter)
+        .expect("storm is represented by an aggregate filter");
+    assert_eq!(filter.estimated_rows(), Some(13));
+    assert_eq!(filter.estimated_bytes(), Some(123));
+    assert_eq!(filter.estimated_work(), Some(382));
+    assert_eq!(
+        filter.details().get("branch_limit_chains"),
+        Some(&PlanDetail::Text("1:[12,40,100];2:[20]".to_owned()))
+    );
+    assert_eq!(
+        filter
+            .details()
+            .get("limit_chain_rebind_position_input_scope"),
+        Some(&PlanDetail::Text(
+            "current_branch_rows_and_bytes_after_prior_limits_and_rebind_cascades".to_owned()
+        ))
+    );
+    assert_eq!(
+        filter.details().get("limit_chain_rebind_stage_input_scope"),
+        Some(&PlanDetail::Text(
+            "post_limit_branch_input_then_previous_rebind_stage_bounded_rows_and_bytes".to_owned()
+        ))
+    );
+    assert_eq!(
+        filter.details().get("limit_chain_rebind_shapes"),
+        Some(&PlanDetail::Text(
+            "1@1:[1:[100]/1;2:[100]/1;3:[100]/1];1@2:[1:[5,80]/1@1=[1:[100]/1;2:[100]/1;3:[100]/1];2:[4]/1]".to_owned()
         ))
     );
 }

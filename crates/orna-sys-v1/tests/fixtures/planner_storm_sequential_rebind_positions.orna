@@ -1,0 +1,36 @@
+pub table PlannerStormSequentialRebindPositions(id: Int) {
+    outer: Bool,
+    middle: Bool,
+    deep: Bool,
+    sibling: Bool,
+}
+pub fn sequential_rebind_positions() = PlannerStormSequentialRebindPositions
+    | union(
+        PlannerStormSequentialRebindPositions
+            | take(12)
+            | union(
+                PlannerStormSequentialRebindPositions | take(100) | filter(row => row.deep),
+                PlannerStormSequentialRebindPositions | take(100) | filter(row => row.deep),
+                PlannerStormSequentialRebindPositions | take(100) | filter(row => row.deep)
+            )
+            | take(40)
+            | union(
+                PlannerStormSequentialRebindPositions
+                    | take(5)
+                    | union(
+                        PlannerStormSequentialRebindPositions | take(100) | filter(row => row.deep),
+                        PlannerStormSequentialRebindPositions | take(100) | filter(row => row.deep),
+                        PlannerStormSequentialRebindPositions | take(100) | filter(row => row.deep)
+                    )
+                    | take(80)
+                    | filter(row => row.middle),
+                PlannerStormSequentialRebindPositions
+                    | take(4)
+                    | filter(row => row.middle)
+            )
+            | take(100)
+            | filter(row => row.outer),
+        PlannerStormSequentialRebindPositions
+            | take(20)
+            | filter(row => row.sibling)
+    );
