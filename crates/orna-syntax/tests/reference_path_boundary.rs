@@ -340,3 +340,13 @@ fn workspace_rust_sources_keep_test_inputs_inside_the_checkout() {
         violations.join("\n")
     );
 }
+
+#[test]
+fn checkout_has_no_top_level_reference_tree() {
+    let reference_tree = workspace_root().join("reference");
+    assert!(
+        !reference_tree.exists(),
+        "the repository checkout must not depend on a top-level reference tree: {}",
+        reference_tree.display()
+    );
+}
