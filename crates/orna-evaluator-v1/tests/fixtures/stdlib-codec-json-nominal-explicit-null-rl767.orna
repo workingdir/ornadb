@@ -1,0 +1,1 @@
+std.encoding.json.decode("\u{7b}\"answer\":42,\"label\":null\u{7d}", as: CodecRecord).label == null

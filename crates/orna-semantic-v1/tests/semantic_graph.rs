@@ -1424,6 +1424,28 @@ fn all_unique_accepts_structural_nullable_keys_and_rejects_float_components() {
 }
 
 #[test]
+fn all_unique_checks_float_components_behind_nominal_keys() {
+    let lawful = analyze(&[ModuleInput::new(
+        "nested-nominal-key.orna",
+        include_str!("fixtures/table-all-unique-nested-nominal-key.orna"),
+    )]);
+    assert!(lawful.is_ok(), "{:?}", lawful.diagnostics);
+
+    let unlawful = analyze(&[ModuleInput::new(
+        "nominal-float-key.orna",
+        include_str!("fixtures/table-all-unique-nominal-float-key.orna"),
+    )]);
+    assert!(has(&unlawful, DIAG_TYPE), "{:?}", unlawful.diagnostics);
+    assert!(
+        unlawful.diagnostics.iter().any(|diagnostic| diagnostic
+            .message()
+            .contains("all_unique selector must return a lawful equality key")),
+        "a nominal key containing Float must be rejected with the key-law explanation: {:?}",
+        unlawful.diagnostics
+    );
+}
+
+#[test]
 fn module_assertion_elaborates_the_reference_projects_nested_relation_predicate() {
     let result = analyze(&[ModuleInput::new(
         "library.orna",
@@ -5775,6 +5797,166 @@ fn omitted_sibling_preserves_width_of_paired_tuple_rebinds() {
             );
             saved_width = Some(contexts.len());
         }
+    }
+}
+
+#[test]
+fn omitted_rebind_preserves_each_sibling_pin_identity_label() {
+    let source = include_str!("fixtures/historical-omitted-rebind-sibling-pin-labels.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-omitted-rebind-sibling-pin-labels.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "only the call omitting its required right sibling should be rejected: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("omitted_rebind_keeps_sibling_labels_separate")
+        })
+        .expect("omitted sibling-label fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["omitted_rebind_keeps_sibling_labels_separate"].ty
+    else {
+        panic!("omitted sibling-label proof must export a function");
+    };
+    let Type::Record(stages) = result.as_ref() else {
+        panic!("omitted sibling-label proof must retain its stage record: {result:?}");
+    };
+
+    let stage = |name: &str| {
+        let Type::Record(fields) = stages.get(name).expect("computed stage") else {
+            panic!("{name} must remain a computed sibling record");
+        };
+        fields
+    };
+    let pin_contexts = |fields: &BTreeMap<String, Type>, name: &str| {
+        let value = fields.get(name).expect("sibling pin field");
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(value, &mut contexts);
+        assert_eq!(
+            contexts.len(),
+            1,
+            "{name} must keep one pin identity: {contexts:?}"
+        );
+        contexts.into_iter().next().expect("one sibling identity")
+    };
+
+    let complete = stage("complete");
+    for (pin, capture, selector) in [
+        ("left_pin", "left_capture", "selector:HEAD~100"),
+        ("right_pin", "right_capture", "selector:HEAD~99"),
+    ] {
+        let pin_identity = pin_contexts(complete, pin);
+        let capture_identity = pin_contexts(complete, capture);
+        assert_eq!(pin_identity, selector, "complete {pin}");
+        assert_eq!(capture_identity, pin_identity, "complete {capture}");
+    }
+
+    let omitted = stage("omitted");
+    for capture in ["left_capture", "right_capture"] {
+        assert!(
+            matches!(omitted.get(capture), Some(Type::Applied { base, .. }) if base == "sys.HistoricalCallable"),
+            "{capture} must retain its computed historical callable value"
+        );
+    }
+    let left_identity = pin_contexts(omitted, "left_pin");
+    let left_capture_identity = pin_contexts(omitted, "left_capture");
+    let right_identity = pin_contexts(omitted, "right_pin");
+    let right_capture_identity = pin_contexts(omitted, "right_capture");
+    assert_eq!(left_identity, left_capture_identity);
+    assert_eq!(right_identity, right_capture_identity);
+    assert_ne!(
+        left_identity, right_identity,
+        "omitting a sibling must not collapse distinct formal pin labels"
+    );
+    for identity in [&left_identity, &right_identity] {
+        assert!(
+            identity.contains("selector:dynamic-call:"),
+            "omitted sibling labels remain symbolic: {identity}"
+        );
+        assert!(
+            identity.contains(":formal-binder:"),
+            "each symbolic label retains its source binder: {identity}"
+        );
+    }
+}
+
+#[test]
+fn record_rebind_preserves_shared_sibling_pin_depth_labels() {
+    let source =
+        include_str!("fixtures/historical-record-sibling-pin-topology-rebind.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-record-sibling-pin-topology-rebind.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        1,
+        "splitting one shared depth pin across paired record siblings must reject the rebind: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("record_sibling_depth_rebind_keeps_labels")
+        })
+        .expect("record sibling pin topology fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["record_sibling_depth_rebind_keeps_labels"].ty
+    else {
+        panic!("valid record depth rebind must remain callable");
+    };
+    let Type::Record(fields) = result.as_ref() else {
+        panic!("valid record depth rebind must return both sibling values: {result:?}");
+    };
+    for (name, selector) in [("left", "HEAD~210"), ("right", "HEAD~209")] {
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(fields.get(name).expect("paired sibling"), &mut contexts);
+        assert_eq!(
+            contexts,
+            BTreeSet::from([format!("selector:{selector}")]),
+            "valid paired record rebind must retain the {name} depth label"
+        );
     }
 }
 
