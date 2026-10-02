@@ -326,7 +326,9 @@ enum BranchMergeTombstoneSubmissionMode {
 /// `submit` and fragment submission classify replays of accepted positions as
 /// stale and cross-mode retries as conflicts. `append` preserves its strict
 /// `OutOfOrder` result for same-mode or unoccupied position mismatches but
-/// checks known cross-mode conflicts first. Unrecorded stale order precedes
+/// checks known cross-mode conflicts first. Failed appends are atomic: a
+/// cross-position duplicate does not retain the retry-mode reservation that
+/// `submit` and fragment submission keep. Unrecorded stale order precedes
 /// buffered and retry-mode checks, and mixed-mode conflicts precede
 /// fragment-index or tombstone-content validation.
 /// Concurrent completions may arrive out of order; future deltas wait until
@@ -355,6 +357,8 @@ impl BranchMergeTombstoneHistory {
 
     /// Appends one plan emitted by [`BranchMergePlanSequencer`] at its next
     /// lineage position. Empty deltas still consume their paired plan order.
+    /// A rejected append leaves all history, including retry-mode state,
+    /// unchanged.
     pub fn append(
         &mut self,
         step: &SequencedBranchMergePlan,
@@ -373,7 +377,10 @@ impl BranchMergeTombstoneHistory {
             });
         }
 
-        self.submit(step).map(|_| ())
+        let mut candidate = self.clone();
+        candidate.submit(step)?;
+        *self = candidate;
+        Ok(())
     }
 
     /// Submits a completed paired plan, buffering future lineage positions
