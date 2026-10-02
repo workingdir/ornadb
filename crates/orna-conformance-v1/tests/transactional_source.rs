@@ -482,6 +482,23 @@ fn parsed_relation_filter_and_map_preserve_candidate_values() {
             .is_some()
     );
 }
+
+#[test]
+fn section9_relation_operators_return_documented_values() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let fixture = include_str!("fixtures/relation-core-section9-m9f62.orna");
+    let parsed = orna_syntax_v1::parse_module(fixture);
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    let outcome = runtime.execute_source(&fixture_source(fixture));
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    for id in [1, 2, 3] {
+        assert!(
+            runtime.committed_row("Reading", &Value::int(id.into())).is_some(),
+            "section 9 operations should publish the candidate row {id} after all value proofs pass"
+        );
+    }
+}
 #[test]
 fn parsed_map_window_count_preserves_order_before_late_failure_rolls_back() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
