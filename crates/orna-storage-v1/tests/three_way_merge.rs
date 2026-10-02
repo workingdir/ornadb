@@ -17199,6 +17199,98 @@ fn sustained_paired_depth_merges_keep_chain_order_isolated() {
 }
 
 #[test]
+fn recovery_storms_keep_paired_tombstone_chain_order() {
+    // MERGE-1 leaves concurrent retry scheduling for paired chain storms
+    // open. Fail after one table and part of the second table, then require a
+    // synchronized storm of fresh retries to recover complete local results.
+    let (base, left, right, source) = paired_tombstone_chain_load_inputs(true, true, false);
+    let mut interrupted = FailAfterRowsFixtureRows {
+        source,
+        fail_after_rows: 24,
+        rows_delivered: 0,
+        failed_at: None,
+    };
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: 30, max_conflicts: 0 },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed after a partial row prefix".into(),
+        }),
+    );
+    assert_eq!(interrupted.rows_delivered, 24);
+    assert_eq!(
+        interrupted.failed_at,
+        Some((id(2), MergeSide::Left, b"paired-chain-whole-left".to_vec())),
+        "the first table is complete before recovery stops partway through the paired chain",
+    );
+
+    const RECOVERY_RETRIES: usize = 8;
+    let start = Arc::new(Barrier::new(RECOVERY_RETRIES));
+    let mut workers = Vec::with_capacity(RECOVERY_RETRIES);
+    for retry in 0..RECOVERY_RETRIES {
+        let first_table_split = retry % 2 == 0;
+        let (base, left, right, mut source) = paired_tombstone_chain_load_inputs(
+            first_table_split,
+            retry % 3 == 0,
+            retry % 3 != 0,
+        );
+        if retry % 3 == 1 {
+            for rows in source.rows.values_mut() {
+                rows.reverse();
+            }
+        }
+        let gate = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+            let plan = merge_three_way_snapshots(
+                &base,
+                &left,
+                &right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 30, max_conflicts: 0 },
+            )
+            .expect("each concurrent retry fits its private exact budget");
+            (plan, first_table_split)
+        }));
+    }
+
+    let expected_tombstones = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .into_iter()
+    .map(string)
+    .collect::<Vec<_>>();
+    let expected_live_rows = vec![string("z")];
+    for worker in workers {
+        let (plan, first_table_split) = worker.join().expect("paired chain retry worker completes");
+        assert_eq!(plan.report.rows_examined, 30);
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        for table in [id(1), id(2)] {
+            assert_eq!(table_row_tombstones(&plan, table), expected_tombstones);
+            assert_eq!(table_live_row_keys(&plan, table), expected_live_rows);
+        }
+        assert_eq!(
+            plan.tables[&id(1)].segments.len(),
+            if first_table_split { 7 } else { 1 },
+        );
+        assert_eq!(
+            plan.tables[&id(2)].segments.len(),
+            if first_table_split { 1 } else { 7 },
+        );
+    }
+}
+
+#[test]
 fn paired_depth_chains_keep_identical_keys_table_local() {
     let (base, left, right, mut source) = paired_tombstone_chain_load_inputs(true, true, false);
     let plan = merge_three_way_snapshots(
