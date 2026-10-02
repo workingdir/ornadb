@@ -5170,6 +5170,39 @@ fn paired_reproductions_remain_stable_across_alternating_storm_orders() {
             .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
             .collect::<Vec<_>>()
     );
+
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_reproductions_remain_stable_across_chained_storm_orders")
+        })
+        .expect("paired reproduction verification module");
+    let function_ty = &module.symbols
+        ["paired_reproductions_remain_stable_across_chained_storm_orders"]
+        .ty;
+    let Type::Function { result, .. } = function_ty else {
+        panic!("paired reproduction proof must export a function");
+    };
+    let Type::Record(outputs) = result.as_ref() else {
+        panic!("paired reproduction proof must expose its verification record");
+    };
+    for lane in ["left_checkpoints", "right_checkpoints"] {
+        let Some(Type::Record(checkpoints)) = outputs.get(lane) else {
+            panic!("{lane} must expose depth checkpoints");
+        };
+        for depth in ["roots", "bridges", "leaves", "outputs"] {
+            let Some(Type::List(element)) = checkpoints.get(depth) else {
+                panic!("{lane}.{depth} must expose a homogeneous verification sequence");
+            };
+            assert!(
+                !matches!(element.as_ref(), Type::Error),
+                "{lane}.{depth} must retain a valid static type"
+            );
+        }
+    }
 }
 
 #[test]
