@@ -780,6 +780,41 @@ impl BranchMergeTombstoneHistory {
         Ok(())
     }
 
+    /// Atomically rebinds several complete pending depth waves through one
+    /// paired cascade. Positions are checked in lineage order, must be
+    /// unique, and must preserve each wave's tombstone projection. If any
+    /// position is missing, incomplete, released, or mismatched, no identity
+    /// or replay receipt changes. Empty and duplicate batches are rejected.
+    pub fn rebind_depth_fragment_retry_plans(
+        &mut self,
+        steps: &[SequencedBranchMergePlan],
+    ) -> Result<(), BranchMergeTombstoneHistoryError> {
+        if steps.is_empty() {
+            return Err(
+                BranchMergeTombstoneHistoryError::EmptyDepthFragmentRetryPlanBindingBatch,
+            );
+        }
+
+        let mut steps = steps.to_vec();
+        steps.sort_unstable_by_key(|step| step.order);
+        for pair in steps.windows(2) {
+            if pair[0].order == pair[1].order {
+                return Err(
+                    BranchMergeTombstoneHistoryError::DuplicateDepthFragmentRetryPlanBinding {
+                        order: pair[0].order,
+                    },
+                );
+            }
+        }
+
+        let mut candidate = self.clone();
+        for step in &steps {
+            candidate.rebind_depth_fragment_retry_plan(step)?;
+        }
+        *self = candidate;
+        Ok(())
+    }
+
     /// Atomically binds paired retry identities, applies fragment recoveries,
     /// and validates same-position paired retry appends as one transaction.
     /// Bindings run first so recovered appends are checked against full paired
