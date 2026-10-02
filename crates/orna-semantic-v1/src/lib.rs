@@ -9331,6 +9331,9 @@ fn infer_case_arm_body(
 }
 
 fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
+    if !checkpoint_snapshot_maps_are_valid(left) || !checkpoint_snapshot_maps_are_valid(right) {
+        return None;
+    }
     if left == right {
         return Some(left.clone());
     }
@@ -14307,11 +14310,10 @@ fn contains_type_error(ty: &Type) -> bool {
     }
 }
 
-/// `Bottom` is compatible during ordinary contextual checking, but a tuple
-/// containing a non-returning component is never produced as an argument.
-/// Reject that whole identity-binding wave while walking only value
-/// aggregates; a callback's Bottom result or an empty collection's element
-/// type does not make the callback/collection value itself incomplete.
+/// `Bottom` is compatible during ordinary contextual checking, but a value
+/// containing a non-returning tuple or record component is never produced as
+/// an argument. Walk only value aggregates: a callback's Bottom result or an
+/// empty collection's element type does not make that value incomplete.
 fn contains_nonreturning_aggregate_component(ty: &Type) -> bool {
     match ty {
         Type::Bottom => true,
@@ -16536,29 +16538,41 @@ fn specialize_dynamic_parameter_snapshot_contexts(
     historical_context: Option<&Type>,
 ) -> Type {
     let mut binder_contexts = BTreeMap::new();
-    for (parameter_index, formal) in formal_parameters.iter().enumerate() {
-        let Some(argument_index) = call_argument_index_for_position(
-            parameter_names,
-            parameter_index,
-            arguments,
-        ) else {
-            continue;
-        };
-        let Some(actual) = argument_types.get(argument_index) else {
-            continue;
-        };
-        // A destructured parameter is one callback argument. Do not partially
-        // bind earlier tuple pins if a later nested component is incompatible.
-        if matches!(formal, Type::Tuple(_))
-            && (contains_type_error(formal)
-                || contains_type_error(actual)
-                || contains_nonreturning_aggregate_component(actual)
-                || !types_match(formal, actual))
-        {
-            continue;
+    let nonreturning_argument = argument_types
+        .iter()
+        .any(contains_nonreturning_aggregate_component);
+    if !nonreturning_argument {
+        for (parameter_index, formal) in formal_parameters.iter().enumerate() {
+            let Some(argument_index) = call_argument_index_for_position(
+                parameter_names,
+                parameter_index,
+                arguments,
+            ) else {
+                continue;
+            };
+            let Some(actual) = argument_types.get(argument_index) else {
+                continue;
+            };
+            // A destructured parameter is one callback argument. Do not partially
+            // bind its pins if recovery or shape checking found an invalid leaf.
+            if matches!(formal, Type::Tuple(_))
+                && (contains_type_error(formal)
+                    || contains_type_error(actual)
+                    || !types_match(formal, actual))
+            {
+                continue;
+            }
+            collect_snapshot_binder_contexts(formal, actual, &mut binder_contexts);
         }
-        collect_snapshot_binder_contexts(formal, actual, &mut binder_contexts);
     }
+
+    // A call with any non-returning argument never reaches the callee. Keep its
+    // result symbolic instead of leaking a completed pin from a sibling arg.
+    let (parameter_names, arguments, argument_types) = if nonreturning_argument {
+        (None, &[][..], &[][..])
+    } else {
+        (parameter_names, arguments, argument_types)
+    };
     specialize_dynamic_parameter_snapshot_contexts_scoped(
         ty,
         parameter_names,
@@ -19208,10 +19222,13 @@ mod tests {
         assert!(!is_snapshot_context_map_shape(&singleton));
         assert!(!is_snapshot_context_map_shape(&unsorted));
         assert!(!is_snapshot_context_map_shape(&duplicate));
+        assert_eq!(merge_list_element_types(&first, &first), Some(first.clone()));
+        assert!(merge_list_element_types(&malformed, &malformed).is_none());
         assert!(merge_checkpoint_field_map(&malformed, &malformed).is_none());
         assert!(merge_checkpoint_field_map(&malformed, &first).is_none());
         assert!(!checkpoint_snapshot_maps_are_valid(&nested_malformed));
         assert!(!type_contains_pinned_snapshot_identity(&nested_malformed));
+        assert!(merge_list_element_types(&nested_malformed, &nested_malformed).is_none());
         assert!(merge_checkpoint_field_map(&nested_malformed, &nested_malformed).is_none());
         assert!(!pinned_snapshot_rebind_compatible(
             &nested_malformed,

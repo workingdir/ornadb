@@ -718,6 +718,27 @@ pub struct PlanByteCapHandoffRoute {
     pub output_bytes: Option<u64>,
 }
 
+impl PlanByteCapHandoffRoute {
+    /// Creates a handoff route whose display labels derive from its typed paths.
+    pub fn from_typed_paths(
+        depth: usize,
+        input_path: Vec<PlanByteCapScopeSegment>,
+        output_path: Vec<PlanByteCapScopeSegment>,
+        input_bytes: Option<u64>,
+        output_bytes: Option<u64>,
+    ) -> Self {
+        Self {
+            depth,
+            input_scope: byte_cap_scope_path_label(&input_path),
+            output_scope: byte_cap_scope_path_label(&output_path),
+            input_path,
+            output_path,
+            input_bytes,
+            output_bytes,
+        }
+    }
+}
+
 impl Serialize for PlanByteCapHandoffRoute {
     // The typed paths are authoritative; derive serialized labels instead of
     // trusting duplicated strings that may be stale on a manually built route.
@@ -2966,14 +2987,14 @@ fn rebind_byte_cap_handoff_route_records(
     estimates
         .iter()
         .flat_map(|(depth, handoffs)| {
-            handoffs.iter().map(|handoff| PlanByteCapHandoffRoute {
-                depth: *depth,
-                input_path: handoff.input_path.clone(),
-                output_path: handoff.output_path.clone(),
-                input_scope: byte_cap_scope_path_label(&handoff.input_path),
-                output_scope: byte_cap_scope_path_label(&handoff.output_path),
-                input_bytes: handoff.input_bytes,
-                output_bytes: handoff.output_bytes,
+            handoffs.iter().map(|handoff| {
+                PlanByteCapHandoffRoute::from_typed_paths(
+                    *depth,
+                    handoff.input_path.clone(),
+                    handoff.output_path.clone(),
+                    handoff.input_bytes,
+                    handoff.output_bytes,
+                )
             })
         })
         .collect()
