@@ -344,6 +344,12 @@ impl PackageResolver {
     /// manifest-selected route. Since the reference is silent on this
     /// reconvergent storm case, v1 keeps convergence based on exact pin
     /// identity while preserving each session's prior route snapshot.
+    /// Reopening the retained sibling middle pins after those storms starts
+    /// each closure again from its committed manifest. A later rebind wave on
+    /// the new closures remains local and may converge on the same exact
+    /// terminal pin; previously retained storm sessions keep their selections.
+    /// The reference does not define this post-storm reopen sequence, so v1
+    /// treats each newly expanded parent pin as a fresh route root.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
