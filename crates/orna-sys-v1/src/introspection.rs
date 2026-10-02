@@ -719,7 +719,7 @@ pub struct PlanByteCapHandoffRoute {
 /// One typed step in a nested storm byte-cap handoff route. A route path
 /// preserves every preceding handoff output in its ancestry, including when a
 /// later limit or cascade consumes that bounded result.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PlanByteCapScopeSegment {
     /// A one-based top-level storm stage.
@@ -2032,6 +2032,7 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             &storm_scope_path,
             &mut byte_cap_handoff_estimates_by_depth,
         );
+        stabilize_rebind_byte_cap_handoff_routes(&mut byte_cap_handoff_estimates_by_depth);
         let branch_limits = storm
             .branches
             .iter()
@@ -2947,6 +2948,20 @@ fn rebind_byte_cap_handoff_route_records(
             })
         })
         .collect()
+}
+
+fn stabilize_rebind_byte_cap_handoff_routes(
+    estimates: &mut RebindByteCapHandoffEstimatesByDepth,
+) {
+    for handoffs in estimates.values_mut() {
+        handoffs.sort_by(|left, right| {
+            left.input_path
+                .cmp(&right.input_path)
+                .then_with(|| left.output_path.cmp(&right.output_path))
+                .then_with(|| left.input_scope.cmp(&right.input_scope))
+                .then_with(|| left.scope.cmp(&right.scope))
+        });
+    }
 }
 
 fn disjunct_storm_cascade_cardinality_and_work(
