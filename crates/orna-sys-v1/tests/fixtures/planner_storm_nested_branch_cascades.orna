@@ -1,0 +1,53 @@
+pub table PlannerStormNestedBranchCascades(id: Int) {
+    first: Bool,
+    second: Bool,
+    third: Bool,
+    fourth: Bool,
+    fifth: Bool,
+    sixth: Bool,
+    seventh: Bool,
+    eighth: Bool,
+}
+pub fn nested_branch_storm() = PlannerStormNestedBranchCascades
+    | union(
+        PlannerStormNestedBranchCascades
+            | take(40)
+            | take(10)
+            | filter(row => row.first)
+            | union(
+                PlannerStormNestedBranchCascades
+                    | take(6)
+                    | filter(row => row.second)
+                    | union(
+                        PlannerStormNestedBranchCascades
+                            | take(12)
+                            | take(4)
+                            | filter(row => row.third && row.fourth)
+                    )
+            )
+    )
+    | union(
+        PlannerStormNestedBranchCascades
+            | take(30)
+            | filter(row => row.fifth && row.sixth)
+            | union(
+                PlannerStormNestedBranchCascades
+                    | take(10)
+                    | filter(row => row.seventh)
+                    | union(
+                        PlannerStormNestedBranchCascades
+                            | take(4)
+                            | take(2)
+                            | filter(row => row.eighth)
+                    )
+            )
+    );
+pub fn nested_limit_storm() = PlannerStormNestedBranchCascades
+    | take(5)
+    | filter(row => row.first)
+    | union(
+        PlannerStormNestedBranchCascades
+            | take(3)
+            | take(2)
+            | filter(row => row.second && row.third)
+    );
