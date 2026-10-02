@@ -1074,10 +1074,12 @@ pub fn explain_query_with_disjunct_storm_chain(
 /// This adapter applies each branch's limits and 50%-per-conjunct fallback
 /// independently, combines branch matches in declaration order without
 /// counting more rows or bytes than the stage input, and feeds that result to
-/// the next storm. Every cascade result is capped to its immediate input; at
-/// a rebind that means the current branch's bounded rows and bytes. An explicit
-/// rebind runs just after its one-based limit position and feeds its capped
-/// output to the following limit. Since
+/// the next storm. Every cascade result is capped to its immediate input at
+/// every nesting depth; a nested rebind therefore cannot escape an ancestor's
+/// already-bounded branch estimate. At a rebind, the immediate cap is the
+/// current branch's bounded rows and bytes. An explicit rebind runs just after
+/// its one-based limit position and feeds its capped output to the following
+/// limit. Since
 /// `sys.PlanNodeKind` has no union node, each storm is one aggregate filter
 /// node whose details retain the exact branch chains and rebind points; this
 /// avoids presenting sibling limits as a false serial pipeline. The
@@ -2062,12 +2064,15 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             (
                 "branch_local_storm_cap_scope".to_owned(),
                 PlanDetail::Text(
-                    "each_cascade_output_capped_to_immediate_input_rows_and_bytes".to_owned(),
+                    "each_cascade_output_capped_to_immediate_input_rows_and_bytes_at_every_nesting_depth"
+                        .to_owned(),
                 ),
             ),
             (
                 "limit_chain_rebind_cap_scope".to_owned(),
-                PlanDetail::Text("post_limit_branch_rows_and_bytes".to_owned()),
+                PlanDetail::Text(
+                    "post_limit_branch_rows_and_bytes_at_every_rebind_nesting_depth".to_owned(),
+                ),
             ),
             (
                 "expansion_work".to_owned(),
@@ -2607,6 +2612,9 @@ fn disjunct_storm_cascade_cardinality_and_work(
 }
 
 fn cap_cardinality_to_input(estimated: Cardinality, input: Cardinality) -> Cardinality {
+    // Apply the cap independently per dimension, retaining unknown estimates
+    // as unknown. Recursive callers pass their already bounded branch output
+    // as the next input, so these immediate caps compose through nested rebinds.
     let rows = match (estimated.rows, input.rows) {
         (Some(estimated), Some(cap)) => Some(estimated.min(cap)),
         _ => None,
