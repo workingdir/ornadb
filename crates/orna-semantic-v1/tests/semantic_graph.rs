@@ -4192,6 +4192,185 @@ fn paired_shadowed_callbacks_specialize_each_chained_inner_pin() {
 }
 
 #[test]
+fn paired_shadowed_callback_depth_rebinds_preserve_selected_pins() {
+    let source = include_str!("fixtures/historical-paired-shadowed-callback-depth.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-shadowed-callback-depth.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_shadowed_callback_depth_rebinds_preserve_selected_pins")
+        })
+        .expect("paired shadowed callback depth fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_shadowed_callback_depth_rebinds_preserve_selected_pins"]
+        .ty
+    else {
+        panic!("paired shadowed callback depth proof must be a function");
+    };
+    let Type::Record(streams) = result.as_ref() else {
+        panic!("paired shadowed callback depth proof must expose concurrent results");
+    };
+    let pin_type = |name: &str| {
+        let Type::Stream(element) = streams.get(name).expect("parallel result field") else {
+            panic!("{name} must be a stream");
+        };
+        element.as_ref()
+    };
+    assert_eq!(pin_type("left_first"), pin_type("left_second"));
+    assert_eq!(pin_type("right_first"), pin_type("right_second"));
+    assert_ne!(pin_type("left_first"), pin_type("right_first"));
+    assert_ne!(pin_type("left_first"), pin_type("rebound_left"));
+    assert_ne!(pin_type("right_first"), pin_type("rebound_right"));
+}
+
+#[test]
+fn paired_shadowed_callback_parameter_contracts_keep_depth_pin_scope() {
+    let source = include_str!("fixtures/historical-paired-shadowed-callback-contract.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+    let nested_callback = Type::Function {
+        parameters: Vec::new(),
+        parameter_names: Some(Vec::new()),
+        default_parameters: BTreeSet::new(),
+        result: Box::new(Type::Applied {
+            base: "sys.HistoricalCallable".into(),
+            arguments: vec![
+                Type::Applied {
+                    base: "sys.SnapshotRefContext".into(),
+                    arguments: vec![Type::Named("selector:parameter:pin".into())],
+                },
+                Type::Function {
+                    parameters: Vec::new(),
+                    parameter_names: Some(Vec::new()),
+                    default_parameters: BTreeSet::new(),
+                    result: Box::new(Type::Int),
+                },
+            ],
+        }),
+    };
+    let parameters = vec![Type::Named("sys.SnapshotRef".into()), nested_callback];
+    let maker = Symbol {
+        kind: SymbolKind::Function,
+        ty: Type::Function {
+            parameters: vec![Type::Named("sys.SnapshotRef".into())],
+            parameter_names: Some(vec!["pin".into()]),
+            default_parameters: BTreeSet::new(),
+            result: Box::new(Type::Function {
+                parameters,
+                parameter_names: Some(vec!["pin".into(), "callback".into()]),
+                default_parameters: BTreeSet::new(),
+                result: Box::new(Type::Text),
+            }),
+        },
+        public: true,
+        effects: EffectSummary::default(),
+        generic_parameters: Vec::new(),
+        enum_variants: BTreeSet::new(),
+        table_schema: None,
+    };
+    let symbols = BTreeMap::from([("maker".to_owned(), maker)]);
+    let catalogue = Catalogue::authoritative_fixture().with_historical_modules([ModuleHeader {
+        namespace: Namespace(vec!["energy".into()]),
+        exports: symbols.clone(),
+        symbols,
+        generic_functions: BTreeMap::new(),
+        prelude_exports: BTreeSet::new(),
+        implicit: true,
+    }]);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-shadowed-callback-contract.orna",
+            source,
+        )],
+        &catalogue,
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_shadowed_callback_contracts_keep_depth_pin_scope")
+        })
+        .expect("paired shadowed callback contract fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_shadowed_callback_contracts_keep_depth_pin_scope"]
+        .ty
+    else {
+        panic!("paired callback contract proof must be a function");
+    };
+    let Type::Tuple(lanes) = result.as_ref() else {
+        panic!("paired callback contract proof must expose its two lanes");
+    };
+    let [left, right] = lanes.as_slice() else {
+        panic!("paired callback contract proof must expose exactly two lanes");
+    };
+    fn callback_pin(maker: &Type) -> &Type {
+        let Type::Applied { base, arguments } = maker else {
+            panic!("historical maker must retain its context wrapper: {maker:?}");
+        };
+        assert_eq!(base, "sys.HistoricalCallable");
+        let [_, Type::Function { parameters, .. }] = arguments.as_slice() else {
+            panic!("historical maker must expose its returned callback: {maker:?}");
+        };
+        let Type::Function {
+            result: callback_result,
+            ..
+        } = &parameters[1]
+        else {
+            panic!("nested callback contract must be a function: {:?}", parameters[1]);
+        };
+        let Type::Applied { base, arguments } = callback_result.as_ref() else {
+            panic!("callback contract result must retain its historical pin");
+        };
+        assert_eq!(base, "sys.HistoricalCallable");
+        let [pin, _] = arguments.as_slice() else {
+            panic!("historical result must carry one pin");
+        };
+        pin
+    }
+    let left_pin = callback_pin(left);
+    let right_pin = callback_pin(right);
+    let expected_shadowed_pin = Type::Applied {
+        base: "sys.SnapshotRefContext".into(),
+        arguments: vec![Type::Named("selector:parameter:pin".into())],
+    };
+    assert_eq!(left_pin, &expected_shadowed_pin);
+    assert_eq!(right_pin, &expected_shadowed_pin);
+}
+
+#[test]
 fn concurrent_callback_tuples_reject_cross_lane_identity_mix_after_rebind() {
     let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
