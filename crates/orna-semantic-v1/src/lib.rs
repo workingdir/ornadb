@@ -2589,6 +2589,7 @@ fn primitive(name: &str) -> Option<Type> {
         "Instant" => Type::Instant,
         "Str" | "Text" | "String" => Type::Text,
         "Bool" => Type::Bool,
+        "Unit" => Type::Null,
         "Null" => Type::Null,
         "BOOLEAN" | "BOOL" => Type::Bool,
         "INTEGER" | "INT" | "BIGINT" => Type::Int,
