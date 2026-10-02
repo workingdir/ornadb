@@ -322,7 +322,8 @@ enum BranchMergeTombstoneSubmissionMode {
 /// otherwise an already accepted position keeps its mode after release.
 /// `submit` and fragment submission classify same-mode retries as stale and
 /// cross-mode retries as conflicts. `append` preserves its strict `OutOfOrder`
-/// result for same-mode replays but checks cross-mode conflicts first.
+/// result for same-mode or unoccupied position mismatches but checks known
+/// cross-mode conflicts first.
 /// Unrecorded stale order precedes pending-mode checks, and mixed-mode
 /// conflicts precede fragment-index or tombstone-content validation.
 /// Concurrent completions may arrive out of order; future deltas wait until
@@ -356,7 +357,7 @@ impl BranchMergeTombstoneHistory {
         let Some(expected) = self.next_order else {
             return Err(BranchMergeTombstoneHistoryError::OrderExhausted);
         };
-        self.classify_committed_mode_conflict(
+        self.classify_submission_mode_conflict(
             step.order,
             BranchMergeTombstoneSubmissionMode::WholePlan,
         )?;
@@ -489,16 +490,11 @@ impl BranchMergeTombstoneHistory {
                 break;
             }
             let delta = self.pending_deltas.remove(&order).expect("ready delta is buffered");
-            let (mut tombstones, mode) = match delta {
-                BufferedBranchMergeTombstoneDelta::WholePlan(tombstones) => (
-                    tombstones,
-                    BranchMergeTombstoneSubmissionMode::WholePlan,
-                ),
+            let mode = delta.submission_mode();
+            let mut tombstones = match delta {
+                BufferedBranchMergeTombstoneDelta::WholePlan(tombstones) => tombstones,
                 BufferedBranchMergeTombstoneDelta::DepthFragments { fragments, .. } => {
-                    (
-                        fragments.into_values().flatten().collect(),
-                        BranchMergeTombstoneSubmissionMode::DepthFragments,
-                    )
+                    fragments.into_values().flatten().collect()
                 }
             };
             self.committed_modes.insert(order, mode);
@@ -524,7 +520,7 @@ impl BranchMergeTombstoneHistory {
         let Some(expected) = self.next_order else {
             return Err(BranchMergeTombstoneHistoryError::OrderExhausted);
         };
-        self.classify_committed_mode_conflict(order, incoming_mode)?;
+        self.classify_submission_mode_conflict(order, incoming_mode)?;
         if let Some(committed_mode) = self.committed_modes.get(&order) {
             debug_assert_eq!(*committed_mode, incoming_mode);
             return Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order });
@@ -539,31 +535,31 @@ impl BranchMergeTombstoneHistory {
                 BranchMergeTombstoneSubmissionMode::WholePlan,
             ) => Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order }),
             (
-                Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)),
-                BranchMergeTombstoneSubmissionMode::DepthFragments,
-            )
-            | (
-                Some(BufferedBranchMergeTombstoneDelta::DepthFragments { .. }),
-                BranchMergeTombstoneSubmissionMode::WholePlan,
-            ) => Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order }),
-            (
                 Some(BufferedBranchMergeTombstoneDelta::DepthFragments { .. }),
                 BranchMergeTombstoneSubmissionMode::DepthFragments,
             )
             | (None, _) => Ok(()),
+            (Some(_), _) => unreachable!(
+                "mixed submission modes are rejected by the shared priority classifier"
+            ),
         }
     }
 
-    fn classify_committed_mode_conflict(
+    fn classify_submission_mode_conflict(
         &self,
         order: u64,
         incoming_mode: BranchMergeTombstoneSubmissionMode,
     ) -> Result<(), BranchMergeTombstoneHistoryError> {
-        if self
+        let existing_mode = self
             .committed_modes
             .get(&order)
-            .is_some_and(|committed_mode| *committed_mode != incoming_mode)
-        {
+            .copied()
+            .or_else(|| {
+                self.pending_deltas
+                    .get(&order)
+                    .map(BufferedBranchMergeTombstoneDelta::submission_mode)
+            });
+        if existing_mode.is_some_and(|mode| mode != incoming_mode) {
             Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order })
         } else {
             Ok(())
@@ -613,6 +609,13 @@ impl BranchMergeTombstoneHistory {
 }
 
 impl BufferedBranchMergeTombstoneDelta {
+    fn submission_mode(&self) -> BranchMergeTombstoneSubmissionMode {
+        match self {
+            Self::WholePlan(_) => BranchMergeTombstoneSubmissionMode::WholePlan,
+            Self::DepthFragments { .. } => BranchMergeTombstoneSubmissionMode::DepthFragments,
+        }
+    }
+
     fn contains_tombstone(&self, table: ObjectId, key: &CanonicalValue) -> bool {
         let contains = |candidate_table: &ObjectId, candidate_key: &CanonicalValue| {
             *candidate_table == table && same_primary_key(candidate_key, key)
