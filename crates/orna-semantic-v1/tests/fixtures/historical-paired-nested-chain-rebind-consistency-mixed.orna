@@ -1,0 +1,162 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn cascade_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+            };
+
+pub fn pair_at(left_root: sys.SnapshotRef, right_root: sys.SnapshotRef) =
+    (cascade_at(left_root), cascade_at(right_root));
+pub fn forwarded_pair(left_root: sys.SnapshotRef, right_root: sys.SnapshotRef) =
+    pair_at(left_root, right_root);
+pub fn chained_pair(left_root: sys.SnapshotRef, right_root: sys.SnapshotRef) =
+    forwarded_pair(left_root, right_root);
+
+// Compare direct, restored, and freshly rebuilt closures after differently ordered depth storms.
+pub fn paired_nested_chain_rebind_paths_remain_consistent() {
+    let roots_baseline = pair_at(sys.snapshot("HEAD~560"), sys.snapshot("HEAD~550"));
+    let (left_root_baseline, right_root_baseline) = roots_baseline;
+    let bridges_baseline = (
+        left_root_baseline(sys.snapshot("HEAD~520")),
+        right_root_baseline(sys.snapshot("HEAD~510")),
+    );
+    let (left_bridge_baseline, right_bridge_baseline) = bridges_baseline;
+    let leaves_baseline = (
+        left_bridge_baseline(sys.snapshot("HEAD~480")),
+        right_bridge_baseline(sys.snapshot("HEAD~470")),
+    );
+    let (left_leaf_baseline, right_leaf_baseline) = leaves_baseline;
+    let left_baseline = left_leaf_baseline(sys.snapshot("HEAD~440"));
+    let right_baseline = right_leaf_baseline(sys.snapshot("HEAD~430"));
+
+    let roots_saved = chained_pair(sys.snapshot("HEAD~560"), sys.snapshot("HEAD~550"));
+    let roots_replay_rolling = roots_saved;
+    roots_replay_rolling = pair_at(sys.snapshot("HEAD~559"), sys.snapshot("HEAD~549"));
+    roots_replay_rolling = pair_at(sys.snapshot("HEAD~558"), sys.snapshot("HEAD~548"));
+    roots_replay_rolling = pair_at(sys.snapshot("HEAD~557"), sys.snapshot("HEAD~547"));
+    roots_replay_rolling = roots_saved;
+    let roots_replayed = roots_replay_rolling;
+    let (left_root_replayed, right_root_replayed) = roots_replayed;
+
+    let bridges_saved = (
+        left_root_replayed(sys.snapshot("HEAD~520")),
+        right_root_replayed(sys.snapshot("HEAD~510")),
+    );
+    let bridges_replay_rolling = bridges_saved;
+    bridges_replay_rolling = (
+        left_root_replayed(sys.snapshot("HEAD~518")),
+        right_root_replayed(sys.snapshot("HEAD~508")),
+    );
+    bridges_replay_rolling = (
+        left_root_replayed(sys.snapshot("HEAD~519")),
+        right_root_replayed(sys.snapshot("HEAD~509")),
+    );
+    bridges_replay_rolling = (
+        left_root_replayed(sys.snapshot("HEAD~517")),
+        right_root_replayed(sys.snapshot("HEAD~507")),
+    );
+    bridges_replay_rolling = bridges_saved;
+    let bridges_replayed = bridges_replay_rolling;
+    let (left_bridge_replayed, right_bridge_replayed) = bridges_replayed;
+
+    let leaves_saved = (
+        left_bridge_replayed(sys.snapshot("HEAD~480")),
+        right_bridge_replayed(sys.snapshot("HEAD~470")),
+    );
+    let leaves_replay_rolling = leaves_saved;
+    leaves_replay_rolling = (
+        left_bridge_replayed(sys.snapshot("HEAD~478")),
+        right_bridge_replayed(sys.snapshot("HEAD~468")),
+    );
+    leaves_replay_rolling = (
+        left_bridge_replayed(sys.snapshot("HEAD~479")),
+        right_bridge_replayed(sys.snapshot("HEAD~469")),
+    );
+    leaves_replay_rolling = (
+        left_bridge_replayed(sys.snapshot("HEAD~477")),
+        right_bridge_replayed(sys.snapshot("HEAD~467")),
+    );
+    leaves_replay_rolling = leaves_saved;
+    let leaves_replayed = leaves_replay_rolling;
+    let (left_leaf_replayed, right_leaf_replayed) = leaves_replayed;
+    let left_replayed = left_leaf_replayed(sys.snapshot("HEAD~440"));
+    let right_replayed = right_leaf_replayed(sys.snapshot("HEAD~430"));
+
+    let roots_rebuild_rolling = pair_at(sys.snapshot("HEAD~560"), sys.snapshot("HEAD~550"));
+    roots_rebuild_rolling = chained_pair(sys.snapshot("HEAD~556"), sys.snapshot("HEAD~546"));
+    roots_rebuild_rolling = chained_pair(sys.snapshot("HEAD~555"), sys.snapshot("HEAD~545"));
+    roots_rebuild_rolling = chained_pair(sys.snapshot("HEAD~554"), sys.snapshot("HEAD~544"));
+    let roots_rebuilt = chained_pair(sys.snapshot("HEAD~560"), sys.snapshot("HEAD~550"));
+    let (left_root_rebuilt, right_root_rebuilt) = roots_rebuilt;
+
+    let bridges_rebuild_rolling = (
+        left_root_rebuilt(sys.snapshot("HEAD~520")),
+        right_root_rebuilt(sys.snapshot("HEAD~510")),
+    );
+    bridges_rebuild_rolling = (
+        left_root_rebuilt(sys.snapshot("HEAD~516")),
+        right_root_rebuilt(sys.snapshot("HEAD~506")),
+    );
+    bridges_rebuild_rolling = (
+        left_root_rebuilt(sys.snapshot("HEAD~515")),
+        right_root_rebuilt(sys.snapshot("HEAD~505")),
+    );
+    bridges_rebuild_rolling = (
+        left_root_rebuilt(sys.snapshot("HEAD~514")),
+        right_root_rebuilt(sys.snapshot("HEAD~504")),
+    );
+    let bridges_rebuilt = (
+        left_root_rebuilt(sys.snapshot("HEAD~520")),
+        right_root_rebuilt(sys.snapshot("HEAD~510")),
+    );
+    let (left_bridge_rebuilt, right_bridge_rebuilt) = bridges_rebuilt;
+
+    let leaves_rebuild_rolling = (
+        left_bridge_rebuilt(sys.snapshot("HEAD~480")),
+        right_bridge_rebuilt(sys.snapshot("HEAD~470")),
+    );
+    leaves_rebuild_rolling = (
+        left_bridge_rebuilt(sys.snapshot("HEAD~476")),
+        right_bridge_rebuilt(sys.snapshot("HEAD~466")),
+    );
+    leaves_rebuild_rolling = (
+        left_bridge_rebuilt(sys.snapshot("HEAD~475")),
+        right_bridge_rebuilt(sys.snapshot("HEAD~465")),
+    );
+    leaves_rebuild_rolling = (
+        left_bridge_rebuilt(sys.snapshot("HEAD~474")),
+        right_bridge_rebuilt(sys.snapshot("HEAD~464")),
+    );
+    let leaves_rebuilt = (
+        left_bridge_rebuilt(sys.snapshot("HEAD~480")),
+        right_bridge_rebuilt(sys.snapshot("HEAD~470")),
+    );
+    let (left_leaf_rebuilt, right_leaf_rebuilt) = leaves_rebuilt;
+    let left_rebuilt = left_leaf_rebuilt(sys.snapshot("HEAD~440"));
+    let right_rebuilt = right_leaf_rebuilt(sys.snapshot("HEAD~430"));
+
+    {
+        left: {
+            root: [left_baseline.root, left_replayed.root, left_rebuilt.root, chained_factory(sys.snapshot("HEAD~560"))],
+            bridge: [left_baseline.bridge, left_replayed.bridge, left_rebuilt.bridge, chained_factory(sys.snapshot("HEAD~520"))().read],
+            leaf: [left_baseline.leaf, left_replayed.leaf, left_rebuilt.leaf, chained_factory(sys.snapshot("HEAD~480"))().read],
+            terminal: [left_baseline.terminal, left_replayed.terminal, left_rebuilt.terminal, chained_factory(sys.snapshot("HEAD~440"))().read()],
+        },
+        right: {
+            root: [right_baseline.root, right_replayed.root, right_rebuilt.root, chained_factory(sys.snapshot("HEAD~550"))],
+            bridge: [right_baseline.bridge, right_replayed.bridge, right_rebuilt.bridge, chained_factory(sys.snapshot("HEAD~510"))().read],
+            leaf: [right_baseline.leaf, right_replayed.leaf, right_rebuilt.leaf, chained_factory(sys.snapshot("HEAD~470"))().read],
+            terminal: [right_baseline.terminal, right_replayed.terminal, right_rebuilt.terminal, chained_factory(sys.snapshot("HEAD~430"))().read()],
+        },
+        cross_reconstruction: [left_baseline.terminal, right_rebuilt.terminal],
+    }
+}
