@@ -5203,6 +5203,11 @@ fn paired_reproductions_remain_stable_across_alternating_storm_orders() {
             );
         }
     }
+    assert_ne!(
+        outputs.get("left_checkpoints"),
+        outputs.get("right_checkpoints"),
+        "paired storm orders must retain lane-specific snapshot identities"
+    );
 }
 
 #[test]
