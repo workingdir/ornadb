@@ -400,6 +400,19 @@ impl RelationPlan {
     pub(super) fn with_stage(mut self, stage: RelationStage) -> Self {
         match stage {
             RelationStage::Filter(mut predicates) => {
+                // A filter directly above a union is equivalent to applying
+                // that ordered predicate cascade to each child before their
+                // results are concatenated. Push only while no intervening
+                // outer stage changes the filter's input or demand boundary.
+                if self.stages.is_empty()
+                    && let Some((left, right)) = self.source_union.take()
+                {
+                    self.source_union = Some((
+                        Box::new((*left).with_stage(RelationStage::Filter(predicates.clone()))),
+                        Box::new((*right).with_stage(RelationStage::Filter(predicates))),
+                    ));
+                    return self;
+                }
                 if let Some(RelationStage::Filter(previous)) = self.stages.last_mut() {
                     previous.append(&mut predicates);
                 } else {
