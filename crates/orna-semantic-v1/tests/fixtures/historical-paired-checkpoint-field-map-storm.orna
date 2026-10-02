@@ -1,0 +1,69 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn nested_factory(root_pin: sys.SnapshotRef) =
+    (child_pin: sys.SnapshotRef) => {
+        root_pin: sys.snapshot(root_pin),
+        child_pin: sys.snapshot(child_pin),
+        root: factory_at(root_pin),
+        child: factory_at(child_pin),
+    };
+
+pub fn paired_checkpoint_field_maps_across_rebind_storms() {
+    let left_saved = nested_factory(sys.snapshot("HEAD~840"));
+    let left_rolling = left_saved;
+    left_rolling = nested_factory(sys.snapshot("HEAD~838"));
+    let left_after_first = left_rolling;
+    left_rolling = nested_factory(sys.snapshot("HEAD~837"));
+    let left_after_second = left_rolling;
+    left_rolling = left_saved;
+    let left_restored = left_rolling;
+
+    let right_saved = nested_factory(sys.snapshot("HEAD~830"));
+    let right_rolling = right_saved;
+    right_rolling = nested_factory(sys.snapshot("HEAD~828"));
+    let right_after_first = right_rolling;
+    right_rolling = nested_factory(sys.snapshot("HEAD~827"));
+    let right_after_second = right_rolling;
+    right_rolling = right_saved;
+    let right_restored = right_rolling;
+
+    let left_checkpoints_saved = [
+        left_saved(sys.snapshot("HEAD~740")),
+        left_after_first(sys.snapshot("HEAD~741")),
+    ];
+    let left_checkpoints_rolling = left_checkpoints_saved;
+    left_checkpoints_rolling = [
+        left_after_second(sys.snapshot("HEAD~742")),
+        left_restored(sys.snapshot("HEAD~743")),
+    ];
+    let left_checkpoints_after_storm = left_checkpoints_rolling;
+    left_checkpoints_rolling = left_checkpoints_saved;
+    let left_checkpoints_restored = left_checkpoints_rolling;
+
+    let right_checkpoints_saved = [
+        right_saved(sys.snapshot("HEAD~730")),
+        right_after_first(sys.snapshot("HEAD~731")),
+    ];
+    let right_checkpoints_rolling = right_checkpoints_saved;
+    right_checkpoints_rolling = [
+        right_after_second(sys.snapshot("HEAD~732")),
+        right_restored(sys.snapshot("HEAD~733")),
+    ];
+    let right_checkpoints_after_storm = right_checkpoints_rolling;
+    right_checkpoints_rolling = right_checkpoints_saved;
+    let right_checkpoints_restored = right_checkpoints_rolling;
+
+    {
+        left: {
+            saved: left_checkpoints_saved,
+            after_storm: left_checkpoints_after_storm,
+            restored: left_checkpoints_restored,
+        },
+        right: {
+            saved: right_checkpoints_saved,
+            after_storm: right_checkpoints_after_storm,
+            restored: right_checkpoints_restored,
+        },
+    }
+}

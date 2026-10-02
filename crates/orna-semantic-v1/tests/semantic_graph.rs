@@ -4501,6 +4501,122 @@ fn paired_shadowed_callback_depths_retain_each_lane() {
 }
 
 #[test]
+fn paired_shadowed_callback_depth_waves_preserve_capture_identity() {
+    let source = include_str!("fixtures/historical-paired-shadowed-callback-depth-wave.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-shadowed-callback-depth-wave.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired shadowed callback depth waves must keep every captured pin through save, rebind, and restore: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_shadowed_callback_depth_waves_preserve_capture_identity")
+        })
+        .expect("paired shadowed callback depth wave fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_shadowed_callback_depth_waves_preserve_capture_identity"]
+        .ty
+    else {
+        panic!("paired callback depth wave proof must be a function");
+    };
+    let Type::Record(streams) = result.as_ref() else {
+        panic!("paired callback depth wave proof must expose captured pins");
+    };
+    let pin_type = |name: &str| {
+        let Type::Stream(element) = streams.get(name).expect("parallel result field") else {
+            panic!("{name} must be a stream");
+        };
+        let Type::Applied { base, arguments } = element.as_ref() else {
+            panic!("{name} must retain its historical callable pin: {element:?}");
+        };
+        assert_eq!(base, "sys.HistoricalCallable");
+        let [pin, _] = arguments.as_slice() else {
+            panic!("historical callable must expose its captured pin: {arguments:?}");
+        };
+        pin
+    };
+    let expected = |selector: &str| Type::Applied {
+        base: "sys.SnapshotRefContext".into(),
+        arguments: vec![Type::Named(format!("selector:{selector}"))],
+    };
+    for (field, selector) in [
+        ("left_old_maker", "HEAD~500"),
+        ("left_old_first", "HEAD~450"),
+        ("left_old_second", "HEAD~400"),
+        ("left_old_third", "HEAD~350"),
+        ("left_restored_maker", "HEAD~500"),
+        ("left_restored_first", "HEAD~450"),
+        ("left_restored_second", "HEAD~400"),
+        ("left_restored_third", "HEAD~350"),
+        ("left_rebound_maker", "HEAD~500"),
+        ("left_rebound_first", "HEAD~449"),
+        ("left_rebound_second", "HEAD~399"),
+        ("left_rebound_third", "HEAD~349"),
+        ("right_old_maker", "HEAD~490"),
+        ("right_old_first", "HEAD~440"),
+        ("right_old_second", "HEAD~390"),
+        ("right_old_third", "HEAD~340"),
+        ("right_rebound_maker", "HEAD~490"),
+        ("right_rebound_first", "HEAD~439"),
+        ("right_rebound_second", "HEAD~389"),
+        ("right_rebound_third", "HEAD~339"),
+    ] {
+        assert_eq!(pin_type(field), &expected(selector), "{field}");
+    }
+    assert_eq!(pin_type("left_old_maker"), pin_type("left_rebound_maker"));
+    assert_ne!(pin_type("left_old_first"), pin_type("left_rebound_first"));
+    assert_ne!(pin_type("left_old_second"), pin_type("left_rebound_second"));
+    assert_ne!(pin_type("left_old_third"), pin_type("left_rebound_third"));
+    assert_ne!(pin_type("left_rebound_maker"), pin_type("right_rebound_maker"));
+    assert_ne!(pin_type("left_rebound_first"), pin_type("right_rebound_first"));
+    assert_ne!(pin_type("left_rebound_second"), pin_type("right_rebound_second"));
+    assert_ne!(pin_type("left_rebound_third"), pin_type("right_rebound_third"));
+}
+
+#[test]
+fn paired_shadowed_callback_depth_waves_reject_cross_lane_capture_mix() {
+    let source = include_str!("fixtures/historical-paired-shadowed-callback-depth-wave-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-shadowed-callback-depth-wave-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "captured pins from opposite shadowed callback waves must remain incompatible: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn concurrent_callback_tuples_reject_cross_lane_identity_mix_after_rebind() {
     let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
@@ -6049,6 +6165,110 @@ fn shadowed_paired_checkpoint_parameters_keep_their_innermost_pins() {
             BTreeSet::from([expected.to_owned()]),
             "{lane} output must use its innermost shadowed snapshot parameter"
         );
+    }
+}
+#[test]
+fn paired_checkpoint_lists_preserve_field_specific_pin_maps() {
+    let source = include_str!("fixtures/historical-paired-checkpoint-field-map-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-checkpoint-field-map-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_checkpoint_field_maps_across_rebind_storms")
+        })
+        .expect("paired checkpoint field-map module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_checkpoint_field_maps_across_rebind_storms"].ty
+    else {
+        panic!("paired checkpoint field map must be callable");
+    };
+    let Type::Record(lanes) = result.as_ref() else {
+        panic!("paired checkpoint field map must retain both lanes");
+    };
+
+    for (lane, expected_maps) in [
+        (
+            "left",
+            [
+                (
+                    "saved",
+                    &["selector:HEAD~840", "selector:HEAD~838"][..],
+                    &["selector:HEAD~740", "selector:HEAD~741"][..],
+                ),
+                (
+                    "after_storm",
+                    &["selector:HEAD~837", "selector:HEAD~840"][..],
+                    &["selector:HEAD~742", "selector:HEAD~743"][..],
+                ),
+                (
+                    "restored",
+                    &["selector:HEAD~840", "selector:HEAD~838"][..],
+                    &["selector:HEAD~740", "selector:HEAD~741"][..],
+                ),
+            ],
+        ),
+        (
+            "right",
+            [
+                (
+                    "saved",
+                    &["selector:HEAD~830", "selector:HEAD~828"][..],
+                    &["selector:HEAD~730", "selector:HEAD~731"][..],
+                ),
+                (
+                    "after_storm",
+                    &["selector:HEAD~827", "selector:HEAD~830"][..],
+                    &["selector:HEAD~732", "selector:HEAD~733"][..],
+                ),
+                (
+                    "restored",
+                    &["selector:HEAD~830", "selector:HEAD~828"][..],
+                    &["selector:HEAD~730", "selector:HEAD~731"][..],
+                ),
+            ],
+        ),
+    ] {
+        let Type::Record(checkpoint_maps) = lanes.get(lane).expect("paired checkpoint lane") else {
+            panic!("{lane} must retain its saved, storm, and restored checkpoint maps");
+        };
+        for (checkpoint_map, roots, children) in expected_maps {
+            let Type::List(element) = checkpoint_maps.get(checkpoint_map).expect("checkpoint map")
+            else {
+                panic!("{lane}.{checkpoint_map} must remain a list");
+            };
+            let Type::Record(checkpoint) = element.as_ref() else {
+                panic!("{lane}.{checkpoint_map} list elements must retain their field map");
+            };
+            for (field, expected) in [
+                ("root_pin", roots),
+                ("root", roots),
+                ("child_pin", children),
+                ("child", children),
+            ] {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(
+                    checkpoint.get(field).expect("checkpoint field"),
+                    &mut contexts,
+                );
+                assert_eq!(
+                    contexts,
+                    expected.iter().map(|context| (*context).to_owned()).collect(),
+                    "{lane}.{checkpoint_map}.{field} must keep its own snapshot map across rebind waves"
+                );
+            }
+        }
     }
 }
 #[test]
