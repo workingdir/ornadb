@@ -9391,6 +9391,11 @@ fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
         // cannot silently combine terminal values from separate lanes.
         return None;
     }
+    if let (Type::Tuple(left), Type::Tuple(right)) = (left, right)
+        && !tuple_checkpoint_promotion_matches(left, right)
+    {
+        return None;
+    }
     merge_checkpoint_field_map(left, right)
 }
 
@@ -9490,6 +9495,16 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
             })
         }
         (Type::List(left), Type::List(right)) => {
+            // Tuple shape is a list-element promotion contract: otherwise a
+            // later row with narrower checkpoint maps can widen the already
+            // inferred tuple slots. Keep this check at collection promotion
+            // so ordinary tuple rebinding (including Bottom recovery) retains
+            // its existing binder semantics.
+            if let (Type::Tuple(left), Type::Tuple(right)) = (left.as_ref(), right.as_ref())
+                && !tuple_checkpoint_promotion_matches(left, right)
+            {
+                return None;
+            }
             Some(Type::List(Box::new(merge_checkpoint_field_map(left, right)?)))
         }
         (Type::Range(left), Type::Range(right)) => {
@@ -9516,9 +9531,7 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
                     .collect::<Option<BTreeMap<_, _>>>()?,
             ))
         }
-        (Type::Tuple(left), Type::Tuple(right))
-            if tuple_checkpoint_shape_matches(left, right) =>
-        {
+        (Type::Tuple(left), Type::Tuple(right)) if left.len() == right.len() => {
             Some(Type::Tuple(
                 left.iter()
                     .zip(right)
@@ -17503,6 +17516,85 @@ fn tuple_checkpoint_shape_matches(expected: &[Type], actual: &[Type]) -> bool {
             .iter()
             .zip(actual)
             .all(|(expected, actual)| pinned_snapshot_shape_matches(expected, actual))
+}
+
+/// Preserve the first tuple row's checkpoint-map width during local list
+/// promotion. The history reference defines pin identity but not widening a
+/// tuple slot when a later row has a different map width, so this edge fails
+/// closed instead of silently unioning incompatible slot maps.
+fn tuple_checkpoint_promotion_matches(left: &[Type], right: &[Type]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| checkpoint_pin_map_widths_match(left, right))
+}
+
+fn checkpoint_pin_map_widths_match(left: &Type, right: &Type) -> bool {
+    if matches!(left, Type::Bottom)
+        || matches!(right, Type::Bottom)
+        || left == &Type::Named("sys.SnapshotRef".into())
+        || right == &Type::Named("sys.SnapshotRef".into())
+    {
+        return true;
+    }
+    if is_snapshot_context_type(left) || is_snapshot_context_type(right) {
+        return is_snapshot_context_map_shape(left)
+            && is_snapshot_context_map_shape(right)
+            && snapshot_context_map_cardinality(left) == snapshot_context_map_cardinality(right);
+    }
+
+    match (left, right) {
+        (Type::List(left), Type::List(right))
+        | (Type::Range(left), Type::Range(right))
+        | (Type::Relation(left), Type::Relation(right))
+        | (Type::Optional(left), Type::Optional(right)) => {
+            checkpoint_pin_map_widths_match(left, right)
+        }
+        // Stream element identities are scoped to their callback waves and
+        // are validated by stream inference; they are not checkpoint tuple
+        // data slots for this promotion guard.
+        (Type::Stream(_), Type::Stream(_)) => true,
+        (Type::Tuple(left), Type::Tuple(right)) if left.len() == right.len() => left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| checkpoint_pin_map_widths_match(left, right)),
+        (Type::Record(left), Type::Record(right)) if left.len() == right.len() => left
+            .iter()
+            .all(|(name, left)| right.get(name).is_some_and(|right| checkpoint_pin_map_widths_match(left, right))),
+        // Function parameter/result compatibility is checked by the function
+        // merge arm itself. Tuple promotion only needs to guard data slots;
+        // recursively treating callable binders as tuple data breaks
+        // transactional recovery for a Bottom call wave.
+        (Type::Function { .. }, Type::Function { .. }) => true,
+        (
+            Type::Applied {
+                base: left_base,
+                arguments: left_arguments,
+            },
+            Type::Applied {
+                base: right_base,
+                arguments: right_arguments,
+            },
+        ) if left_base == right_base && left_arguments.len() == right_arguments.len() => left_arguments
+            .iter()
+            .zip(right_arguments)
+            .all(|(left, right)| checkpoint_pin_map_widths_match(left, right)),
+        (
+            Type::MoneyPerUnit {
+                currency: left_currency,
+                unit: left_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: right_currency,
+                unit: right_unit,
+            },
+        ) => {
+            checkpoint_pin_map_widths_match(left_currency, right_currency)
+                && checkpoint_pin_map_widths_match(left_unit, right_unit)
+        }
+        _ => true,
+    }
 }
 
 /// A tuple rebind may rename snapshot selectors, but it must keep the
