@@ -753,6 +753,24 @@ impl PlanByteCapHandoffRoute {
     pub fn output_scope_label(&self) -> String {
         byte_cap_scope_path_label(&self.output_path)
     }
+
+    /// Returns both canonical labels from this route's typed paths.
+    ///
+    /// Keeping the input and output labels together is useful when presenting
+    /// a route across post-storm ancestry, where the source path may include
+    /// outputs from preceding stages.
+    pub fn scope_labels(&self) -> (String, String) {
+        (
+            byte_cap_scope_path_label(&self.input_path),
+            byte_cap_scope_path_label(&self.output_path),
+        )
+    }
+
+    /// Returns the canonical input-to-output scope label for this route.
+    pub fn paired_scope_label(&self) -> String {
+        let (input_scope, output_scope) = self.scope_labels();
+        format!("{input_scope}=>{output_scope}")
+    }
 }
 
 impl Serialize for PlanByteCapHandoffRoute {
@@ -766,8 +784,9 @@ impl Serialize for PlanByteCapHandoffRoute {
         route.serialize_field("depth", &self.depth)?;
         route.serialize_field("input_path", &self.input_path)?;
         route.serialize_field("output_path", &self.output_path)?;
-        route.serialize_field("input_scope", &self.input_scope_label())?;
-        route.serialize_field("output_scope", &self.output_scope_label())?;
+        let (input_scope, output_scope) = self.scope_labels();
+        route.serialize_field("input_scope", &input_scope)?;
+        route.serialize_field("output_scope", &output_scope)?;
         route.serialize_field("input_bytes", &self.input_bytes)?;
         route.serialize_field("output_bytes", &self.output_bytes)?;
         route.end()
@@ -2956,9 +2975,10 @@ fn rebind_byte_cap_handoff_scopes_by_depth_text(
         let output_bytes = route
             .output_bytes
             .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        let (_, output_scope) = route.scope_labels();
         by_depth.entry(route.depth).or_default().push(format!(
             "{}={input_bytes}>{output_bytes}",
-            route.output_scope_label()
+            output_scope
         ));
     }
     by_depth
@@ -2980,9 +3000,8 @@ fn rebind_byte_cap_handoff_routes_by_depth_text(
             .output_bytes
             .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
         by_depth.entry(route.depth).or_default().push(format!(
-            "{}=>{}={input_bytes}>{output_bytes}",
-            route.input_scope_label(),
-            route.output_scope_label()
+            "{}={input_bytes}>{output_bytes}",
+            route.paired_scope_label()
         ));
     }
     by_depth
@@ -3711,8 +3730,9 @@ fn hash_plan_detail(hash: &mut Sha256, detail: &PlanDetail) {
                 hash.update((route.depth as u64).to_be_bytes());
                 hash_byte_cap_scope_path(hash, &route.input_path);
                 hash_byte_cap_scope_path(hash, &route.output_path);
-                hash_part(hash, route.input_scope_label().as_bytes());
-                hash_part(hash, route.output_scope_label().as_bytes());
+                let (input_scope, output_scope) = route.scope_labels();
+                hash_part(hash, input_scope.as_bytes());
+                hash_part(hash, output_scope.as_bytes());
                 hash_optional_u64(hash, route.input_bytes);
                 hash_optional_u64(hash, route.output_bytes);
             }
@@ -3819,6 +3839,10 @@ mod byte_cap_handoff_route_scope_tests {
 
         let input_scope = "root/storm1/storm_stage_output1/storm2/branch1/limit1";
         let output_scope = format!("{input_scope}/rebind1/cascade1");
+        assert_eq!(
+            stale_route.paired_scope_label(),
+            format!("{input_scope}=>{output_scope}")
+        );
         assert_eq!(
             rebind_byte_cap_handoff_scopes_by_depth_text(&[stale_route.clone()]),
             format!("2:{output_scope}=?>?")
