@@ -5150,6 +5150,29 @@ fn paired_continuation_reproduction_storms_reject_mixed_repeated_lanes() {
 }
 
 #[test]
+fn paired_reproductions_remain_stable_across_alternating_storm_orders() {
+    let source = include_str!("fixtures/historical-paired-reproduction-stability-roundtrip.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-reproduction-stability-roundtrip.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired continuation outputs must remain stable when repeated chains alternate root-first and descendant-first storm restoration: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
