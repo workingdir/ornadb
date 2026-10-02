@@ -6,8 +6,10 @@ use num_integer::Integer;
 use num_traits::ToPrimitive;
 
 use super::{
-    timezone::{resolve_time_zone, Instant, LocalDateTime, LocalTimeResolution, TimeZone, TimeZoneError},
     Value,
+    timezone::{
+        Instant, LocalDateTime, LocalTimeResolution, TimeZone, TimeZoneError, resolve_time_zone,
+    },
 };
 
 /// The two boundary models admitted by `bucket_by`.
@@ -25,7 +27,6 @@ pub(super) struct BucketBySpec {
     pub(super) period: BucketPeriod,
     pub(super) zone: Option<String>,
 }
-
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RelationBucketError {
@@ -76,7 +77,7 @@ impl RelationBucketState {
                 Some(resolve_time_zone(name).map_err(RelationBucketError::TimeZone)?)
             }
             (BucketPeriod::CalendarDays { .. }, None) => {
-                return Err(RelationBucketError::MissingZone)
+                return Err(RelationBucketError::MissingZone);
             }
             (BucketPeriod::Elapsed { .. }, _) => None,
         };
@@ -123,7 +124,6 @@ impl RelationBucketState {
         self.current.take()
     }
 
-
     fn boundaries(&self, instant: Instant) -> Result<(Instant, Instant), RelationBucketError> {
         match &self.spec.period {
             BucketPeriod::Elapsed {
@@ -131,10 +131,7 @@ impl RelationBucketState {
                 nanosecond,
             } => elapsed_boundaries(instant, seconds, *nanosecond),
             BucketPeriod::CalendarDays { days } => {
-                let zone = self
-                    .zone
-                    .as_ref()
-                    .ok_or(RelationBucketError::MissingZone)?;
+                let zone = self.zone.as_ref().ok_or(RelationBucketError::MissingZone)?;
                 calendar_boundaries(instant, zone, *days)
             }
         }
@@ -170,9 +167,8 @@ fn elapsed_boundaries(
     if width <= BigInt::from(0u8) {
         return Err(RelationBucketError::InvalidPeriod);
     }
-    let instant_nanos =
-        BigInt::from(instant.unix_seconds) * BigInt::from(1_000_000_000u32)
-            + BigInt::from(instant.nanosecond);
+    let instant_nanos = BigInt::from(instant.unix_seconds) * BigInt::from(1_000_000_000u32)
+        + BigInt::from(instant.nanosecond);
     let start_nanos = instant_nanos.div_floor(&width) * &width;
     let end_nanos = &start_nanos + width;
     Ok((
@@ -407,12 +403,8 @@ impl RelationStage {
     fn filter_values_equal(left: &Self, right: &Self) -> Option<bool> {
         match (left, right) {
             (Self::Filter(left), Self::Filter(right)) => Some(left == right),
-            (Self::Filter(left), Self::SharedFilter(right)) => {
-                Some(left.iter().eq(right.values()))
-            }
-            (Self::SharedFilter(left), Self::Filter(right)) => {
-                Some(left.values().eq(right.iter()))
-            }
+            (Self::Filter(left), Self::SharedFilter(right)) => Some(left.iter().eq(right.values())),
+            (Self::SharedFilter(left), Self::Filter(right)) => Some(left.values().eq(right.iter())),
             (Self::SharedFilter(left), Self::SharedFilter(right)) => {
                 Some(Arc::ptr_eq(left, right) || left.values().eq(right.values()))
             }
@@ -554,25 +546,23 @@ impl RelationPlan {
                 // changing stages such as Take remain pushdown barriers.
                 return self;
             }
-            RelationStage::Filter(mut predicates) => {
-                match self.stages.pop() {
-                    Some(RelationStage::Filter(mut previous)) => {
-                        previous.append(&mut predicates);
-                        self.stages.push(RelationStage::Filter(previous));
-                    }
-                    Some(RelationStage::SharedFilter(previous)) => {
-                        let next = FilterBatch::from_values(predicates);
-                        self.stages.push(RelationStage::SharedFilter(
-                            FilterBatch::followed_by_shared_prefix(&previous, &next),
-                        ));
-                    }
-                    Some(previous) => {
-                        self.stages.push(previous);
-                        self.stages.push(RelationStage::Filter(predicates));
-                    }
-                    None => self.stages.push(RelationStage::Filter(predicates)),
+            RelationStage::Filter(mut predicates) => match self.stages.pop() {
+                Some(RelationStage::Filter(mut previous)) => {
+                    previous.append(&mut predicates);
+                    self.stages.push(RelationStage::Filter(previous));
                 }
-            }
+                Some(RelationStage::SharedFilter(previous)) => {
+                    let next = FilterBatch::from_values(predicates);
+                    self.stages.push(RelationStage::SharedFilter(
+                        FilterBatch::followed_by_shared_prefix(&previous, &next),
+                    ));
+                }
+                Some(previous) => {
+                    self.stages.push(previous);
+                    self.stages.push(RelationStage::Filter(predicates));
+                }
+                None => self.stages.push(RelationStage::Filter(predicates)),
+            },
             stage => {
                 self = self.flush_filter_cascade();
                 self.stages.push(stage);
@@ -639,9 +629,11 @@ impl RelationPlan {
         }
         match self.stages.pop() {
             Some(RelationStage::Filter(previous)) => {
-                self.stages.push(RelationStage::SharedFilter(
-                    FilterBatch::prefixed_by(previous, &predicates),
-                ));
+                self.stages
+                    .push(RelationStage::SharedFilter(FilterBatch::prefixed_by(
+                        previous,
+                        &predicates,
+                    )));
             }
             Some(RelationStage::SharedFilter(previous)) => {
                 self.stages.push(RelationStage::SharedFilter(
@@ -650,12 +642,9 @@ impl RelationPlan {
             }
             Some(previous) => {
                 self.stages.push(previous);
-                self.stages
-                    .push(RelationStage::SharedFilter(predicates));
+                self.stages.push(RelationStage::SharedFilter(predicates));
             }
-            None => self
-                .stages
-                .push(RelationStage::SharedFilter(predicates)),
+            None => self.stages.push(RelationStage::SharedFilter(predicates)),
         }
         self
     }
@@ -663,8 +652,9 @@ impl RelationPlan {
 
 #[cfg(test)]
 mod tests {
-    use super::FilterBatch;
+    use super::{FilterBatch, RelationPlan, RelationStage};
     use crate::Value;
+    use std::sync::Arc;
 
     #[test]
     fn shared_filter_join_cache_discards_expired_continuations() {
@@ -681,5 +671,49 @@ mod tests {
         assert_eq!(continuations.len(), 1);
         assert!(continuations.values().all(|join| join.upgrade().is_some()));
         assert_eq!(live_join.values().count(), 2);
+    }
+
+    #[test]
+    fn equal_compiled_prefixes_share_nested_union_suffixes() {
+        let first = Value::Bool(true);
+        let second = Value::Bool(false);
+        let outer = Value::String("outer".into());
+        let terminal = Value::String("terminal".into());
+        let first_prefix = FilterBatch::from_values(vec![first.clone(), second.clone()]);
+        let second_prefix = FilterBatch::followed_by(
+            &FilterBatch::from_values(vec![first.clone()]),
+            &FilterBatch::from_values(vec![second.clone()]),
+        );
+        let third_prefix = Arc::clone(&first_prefix);
+        let suffix = FilterBatch::from_values(vec![outer.clone(), terminal.clone()]);
+        let plan = RelationPlan::union(
+            RelationPlan::union(
+                RelationPlan::new("UnknownLeft".into())
+                    .with_stage(RelationStage::SharedFilter(first_prefix)),
+                RelationPlan::new("UnknownMiddle".into())
+                    .with_stage(RelationStage::SharedFilter(second_prefix)),
+            ),
+            RelationPlan::new("UnknownRight".into())
+                .with_stage(RelationStage::SharedFilter(third_prefix)),
+        )
+        .with_stage(RelationStage::SharedFilter(suffix))
+        .flush_filter_cascade();
+
+        let batch_for = |leaf: &RelationPlan| match leaf.stages.as_slice() {
+            [RelationStage::SharedFilter(batch)] => Arc::clone(batch),
+            stages => panic!("expected one shared batch, got {stages:?}"),
+        };
+        let (nested, right) = plan.source_union.as_ref().expect("outer union remains");
+        let (left, middle) = nested.source_union.as_ref().expect("nested union remains");
+        let left_batch = batch_for(left);
+        let middle_batch = batch_for(middle);
+        let right_batch = batch_for(right);
+
+        assert!(Arc::ptr_eq(&left_batch, &middle_batch));
+        assert!(Arc::ptr_eq(&left_batch, &right_batch));
+        assert_eq!(
+            left_batch.values().cloned().collect::<Vec<_>>(),
+            vec![first, second, outer, terminal]
+        );
     }
 }
