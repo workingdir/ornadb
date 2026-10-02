@@ -3903,6 +3903,68 @@ fn tuple_pin_cascade_paired_depths_preserve_each_side_through_storm_rebinds() {
 }
 
 #[test]
+fn concurrent_tuple_pin_callbacks_keep_paired_depth_identities_after_rebind() {
+    let source = include_str!("fixtures/historical-concurrent-paired-tuple-pin-rebind.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-concurrent-paired-tuple-pin-rebind.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "same-lane callbacks must retain their tuple pin through paired-depth rebind and restore: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("concurrent_paired_tuple_pins_survive_rebind")
+        })
+        .expect("concurrent paired tuple-pin fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["concurrent_paired_tuple_pins_survive_rebind"]
+        .ty
+    else {
+        panic!("paired callback proof must be a function");
+    };
+    let Type::Record(streams) = result.as_ref() else {
+        panic!("paired callback proof must expose its concurrent checkpoints");
+    };
+    let pin_type = |name: &str| {
+        let Type::Stream(element) = streams.get(name).expect("parallel result field") else {
+            panic!("{name} must be a parallel stream");
+        };
+        assert!(
+            matches!(element.as_ref(), Type::Applied { base, .. } if base == "sys.HistoricalCallable"),
+            "{name} must carry the captured historical callable identity: {element:?}"
+        );
+        element.as_ref()
+    };
+
+    // The reference requires one common callback result type, but does not
+    // define an identity merge for captured historical pins. Keep each lane
+    // and depth exact so a rebind cannot make unrelated concurrent callbacks
+    // type-compatible.
+    assert_ne!(pin_type("restored_left_root"), pin_type("restored_right_root"));
+    assert_ne!(pin_type("restored_left_leaf"), pin_type("restored_right_leaf"));
+    assert_ne!(pin_type("restored_left_root"), pin_type("restored_left_leaf"));
+    assert_ne!(pin_type("rebound_left_root"), pin_type("restored_left_root"));
+    assert_ne!(pin_type("rebound_right_leaf"), pin_type("restored_right_leaf"));
+}
+
+#[test]
 fn tuple_pin_cascade_paired_depths_reject_cross_pair_mixing_after_storm_rebinds() {
     let source = include_str!("fixtures/historical-tuple-pin-cascade-paired-depth-storm-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
