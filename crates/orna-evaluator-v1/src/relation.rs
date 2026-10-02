@@ -308,6 +308,10 @@ impl FilterBatch {
         if let Some(batch) = continuations.get(&key).and_then(Weak::upgrade) {
             return batch;
         }
+        // A shared prefix may outlive the compiled joins that once used it.
+        // Prune those expired weak entries when the prefix needs a new join
+        // so repeated unknown-union compilations do not grow a dead cache.
+        continuations.retain(|_, batch| batch.strong_count() > 0);
         let batch = Arc::new(Self {
             node: FilterBatchNode::Then(Arc::clone(previous), Arc::clone(next)),
             flattened: OnceLock::new(),
@@ -627,5 +631,28 @@ impl RelationPlan {
                 .push(RelationStage::SharedFilter(predicates)),
         }
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FilterBatch;
+    use crate::Value;
+
+    #[test]
+    fn shared_filter_join_cache_discards_expired_continuations() {
+        let prefix = FilterBatch::from_values(vec![Value::Bool(true)]);
+        let abandoned_suffix = FilterBatch::from_values(vec![Value::Bool(false)]);
+        let abandoned_join = FilterBatch::followed_by(&prefix, &abandoned_suffix);
+        assert_eq!(prefix.continuations.lock().unwrap().len(), 1);
+        drop(abandoned_join);
+
+        let live_suffix = FilterBatch::from_values(vec![Value::Bool(true)]);
+        let live_join = FilterBatch::followed_by(&prefix, &live_suffix);
+
+        let continuations = prefix.continuations.lock().unwrap();
+        assert_eq!(continuations.len(), 1);
+        assert!(continuations.values().all(|join| join.upgrade().is_some()));
+        assert_eq!(live_join.values().count(), 2);
     }
 }
