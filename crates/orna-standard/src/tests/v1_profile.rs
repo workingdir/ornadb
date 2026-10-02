@@ -24,7 +24,7 @@ use crate::{
     REFERENCE_STANDARD_CONCURRENT_PATH_V1, REFERENCE_STANDARD_ERROR_PATH_V1,
     REFERENCE_STANDARD_TEST_PATH_V1,
     REFERENCE_STANDARD_GENERICS_PATH_V1, REFERENCE_STANDARD_TYPE_UTILS_PATH_V1,
-    REFERENCE_STANDARD_PATTERN_PATH_V1,
+    REFERENCE_STANDARD_PATTERN_PATH_V1, REFERENCE_STANDARD_REGEX_PATH_V1,
     REFERENCE_STANDARD_ITERATOR_PATH_V1, REFERENCE_STANDARD_LAZY_PATH_V1,
     REFERENCE_STANDARD_VIEWS_PATH_V1,
     REFERENCE_STANDARD_INTROSPECTION_PATH_V1, REFERENCE_STANDARD_REFLECTION_PATH_V1,
@@ -46,6 +46,7 @@ fn pinned_std_entrypoint_imports_optional_content_modules() {
     assert!(entrypoint.lines().any(|line| line.trim() == "use generics;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use type_utils;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use pattern;"));
+    assert!(entrypoint.lines().any(|line| line.trim() == "use regex;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use iterator;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use lazy;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use views;"));
@@ -63,6 +64,86 @@ fn pinned_pattern_surface_typechecks_exhaustive_matches_and_destructuring() {
     let parsed = orna_syntax_v1::parse_module_with_file(&source, REFERENCE_STANDARD_PATTERN_PATH_V1);
     assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
     reference_standard_catalogue_v1().expect("the pinned pattern module checks with std sources");
+}
+
+#[test]
+fn pinned_regex_and_pattern_surfaces_are_versioned_and_snapshot_bound() {
+    let sources = reference_standard_sources_v1();
+    let (regex_index, (regex_path, regex_source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_REGEX_PATH_V1)
+        .expect("the regex package is included in the captured source bundle");
+    assert_eq!(regex_index, 46, "new source units append to preserve existing indexes");
+    assert_eq!(regex_path, REFERENCE_STANDARD_REGEX_PATH_V1);
+    for declaration in [
+        "pub enum Regex",
+        "pub enum Match",
+        "pub fn dialect_version(): Str",
+        "pub fn compile(pattern: Str): Regex",
+        "pub fn is_match(regex: Regex, text: Str): Bool",
+        "pub fn find(regex: Regex, text: Str): Match?",
+        "pub fn find_all(regex: Regex, text: Str): [Match]",
+        "pub fn matched_text(value: Match): Str",
+        "pub fn start(value: Match): Int",
+        "pub fn end(value: Match): Int",
+        "pub fn captures(value: Match): [Str?]",
+        "pub fn replace_all(regex: Regex, text: Str, replacement: Str): Str",
+        "pub fn split(regex: Regex, text: Str): [Str]",
+        "pub fn escape_literal(text: Str): Str",
+    ] {
+        assert!(regex_source.contains(declaration), "missing {declaration}");
+    }
+    for contract in [
+        "orna.regex/1",
+        "Unicode 16.0.0",
+        "Look-around, backreferences",
+        "earliest-starting match",
+        "zero-width matches",
+        "preserve empty fields",
+        "never silently truncated",
+    ] {
+        assert!(regex_source.contains(contract), "missing regex contract `{contract}`");
+    }
+
+    let profile = reference_standard_profile_v1();
+    profile
+        .verify_source(regex_path, regex_source)
+        .expect("the regex declarations are recorded by the standard snapshot");
+    let mut modified_regex = regex_source.clone();
+    modified_regex.push_str("\n// changed after capture\n");
+    assert!(profile.verify_source(regex_path, &modified_regex).is_err());
+
+    let (pattern_path, pattern_source) = sources
+        .iter()
+        .find(|(path, _)| path == REFERENCE_STANDARD_PATTERN_PATH_V1)
+        .expect("the pattern module is included in the captured source bundle");
+    for declaration in [
+        "pub fn fold<L, R, U>(",
+        "pub fn map_left<L, R, U>(",
+        "pub fn map_right<L, R, U>(",
+        "pub fn bimap<L, R, A, B>(",
+    ] {
+        assert!(pattern_source.contains(declaration), "missing {declaration}");
+    }
+    profile
+        .verify_source(pattern_path, pattern_source)
+        .expect("pattern combinators are captured in the same standard snapshot");
+
+    let parsed = orna_syntax_v1::parse_module_with_file(regex_source, regex_path);
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    let catalogue = reference_standard_catalogue_v1()
+        .expect("regex and pattern declarations resolve within the pinned std profile");
+    let consumer = include_str!("fixtures/v1_regex_pattern_consumer_g8rd3.orna");
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("regex_pattern_consumer.orna", consumer)],
+        &catalogue,
+    );
+    assert!(
+        analysis.is_ok(),
+        "{:#?}",
+        analysis.diagnostics
+    );
 }
 
 #[test]
