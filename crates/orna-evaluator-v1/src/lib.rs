@@ -3714,6 +3714,7 @@ impl Context<'_, '_> {
         let mut state = RelationBucketState::try_new(spec.clone()).map_err(bucket_error)?;
         let prefix = RelationPlan {
             source: plan.source.clone(),
+            source_identity: plan.source_identity,
             source_union: plan.source_union.clone(),
             stages: plan.stages[..bucket_index].to_vec(),
         };
@@ -3727,6 +3728,7 @@ impl Context<'_, '_> {
             };
             let group_plan = RelationPlan {
                 source: plan.source.clone(),
+                source_identity: plan.source_identity,
                 source_union: plan.source_union.clone(),
                 stages: plan.stages[..bucket_index + 1 + sort_pos].to_vec(),
             };
@@ -4388,6 +4390,7 @@ impl Context<'_, '_> {
         };
         let prefix = RelationPlan {
             source: plan.source.clone(),
+            source_identity: plan.source_identity,
             source_union: plan.source_union.clone(),
             stages: plan.stages[..sort_index].to_vec(),
         };
@@ -8330,6 +8333,9 @@ fn relation_call_candidate(
 }
 
 fn relation_expression_candidate(expression: &Expr, scope: &Scope) -> bool {
+    if system_relation_source(expression).is_some() {
+        return true;
+    }
     if let Expr::Name { text, .. } = expression {
         return matches!(scope.0.get(text), Some(Value::Relation(_)));
     }
