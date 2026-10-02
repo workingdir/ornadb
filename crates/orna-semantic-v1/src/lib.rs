@@ -6934,7 +6934,7 @@ fn infer_contextual_lambda(
             .map(type_of)
             .or_else(|| expected_parameters.get(index).cloned())
             .unwrap_or(Type::Error);
-        bind_pattern(
+        bind_parameter_pattern(
             &parameter.pattern,
             ty.clone(),
             scope,
@@ -7299,9 +7299,18 @@ fn infer(
                     // unresolved-name diagnostic.
                     if let Pattern::Name(name, _) = &parameter.pattern {
                         insert_local_binding(name, Type::Error, &mut locals, diagnostics);
+                        if let Some(symbol) = locals.get_mut(name) {
+                            symbol.kind = SymbolKind::Parameter;
+                        }
                     }
                 } else {
-                    bind_pattern(&parameter.pattern, ty.clone(), scope, &mut locals, diagnostics);
+                    bind_parameter_pattern(
+                        &parameter.pattern,
+                        ty.clone(),
+                        scope,
+                        &mut locals,
+                        diagnostics,
+                    );
                 }
                 types.push(ty);
             }
@@ -7577,6 +7586,7 @@ fn infer(
                             &values,
                             local,
                             span,
+                            historical_context.as_ref(),
                         )
                     });
                     Inferred {
@@ -16138,6 +16148,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
     argument_types: &[Type],
     local: &BTreeMap<String, Symbol>,
     call_span: &SyntaxSpan,
+    historical_context: Option<&Type>,
 ) -> Type {
     match ty {
         Type::Applied { base, arguments: values }
@@ -16157,12 +16168,21 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                     call_span,
                     local,
                 )
-            } else if argument_types
-                .iter()
-                .any(|actual| contains_snapshot_context_key(actual, selector))
+            } else if historical_context.is_some_and(|context| context == ty)
+                || argument_types
+                    .iter()
+                    .any(|actual| contains_snapshot_context_key(actual, selector))
+                || parameter_names.is_some_and(|names| names.iter().all(|name| name != parameter))
             {
-                // `database.as_of(pin)` forwards the context already carried
-                // by its argument instead of selecting a new dynamic pin.
+                // A closure's result may mention its captured selector even
+                // when the current zero-argument call has no parameter to
+                // substitute. Preserve that exact context instead of
+                // inventing a call-site identity. A selector name absent from
+                // this call's parameters belongs to a nested callable and
+                // stays symbolic until that callable is invoked. The reference
+                // requires exact SnapshotRef pinning but leaves this nested
+                // closure specialization detail unspecified. `database.as_of(pin)`
+                // also forwards the context already carried by its argument.
                 ty.clone()
             } else {
                 contextual_snapshot_ref(&format!(
@@ -16189,6 +16209,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                         argument_types,
                         local,
                         call_span,
+                        historical_context,
                     )
                 })
                 .collect(),
@@ -16201,6 +16222,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 argument_types,
                 local,
                 call_span,
+                historical_context,
             )),
         },
         Type::List(element) => Type::List(Box::new(
@@ -16211,6 +16233,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 argument_types,
                 local,
                 call_span,
+                historical_context,
             ),
         )),
         Type::Range(element) => Type::Range(Box::new(
@@ -16221,6 +16244,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 argument_types,
                 local,
                 call_span,
+                historical_context,
             ),
         )),
         Type::Relation(element) => Type::Relation(Box::new(
@@ -16231,6 +16255,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 argument_types,
                 local,
                 call_span,
+                historical_context,
             ),
         )),
         Type::Stream(element) => Type::Stream(Box::new(
@@ -16241,6 +16266,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 argument_types,
                 local,
                 call_span,
+                historical_context,
             ),
         )),
         Type::Optional(element) => Type::Optional(Box::new(
@@ -16251,6 +16277,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 argument_types,
                 local,
                 call_span,
+                historical_context,
             ),
         )),
         Type::Record(fields) => Type::Record(
@@ -16266,6 +16293,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                             argument_types,
                             local,
                             call_span,
+                            historical_context,
                         ),
                     )
                 })
@@ -16282,6 +16310,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                         argument_types,
                         local,
                         call_span,
+                        historical_context,
                     )
                 })
                 .collect(),
@@ -16298,6 +16327,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                         argument_types,
                         local,
                         call_span,
+                        historical_context,
                     )
                 })
                 .collect(),
@@ -16510,14 +16540,44 @@ fn callable_function_type(ty: &Type) -> Option<&Type> {
 }
 
 fn historical_callable_rebind_compatible(expected: &Type, actual: &Type) -> bool {
-    historical_callable_context(expected).is_some()
-        && historical_callable_context(actual).is_some()
+    type_contains_historical_callable(expected)
+        && type_contains_historical_callable(actual)
         && historical_callable_shape_matches(expected, actual)
 }
 
+fn type_contains_historical_callable(ty: &Type) -> bool {
+    match ty {
+        Type::Applied { base, .. } if base == "sys.HistoricalCallable" => {
+            historical_callable_context(ty).is_some()
+        }
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => type_contains_historical_callable(element),
+        Type::Record(fields) => fields.values().any(type_contains_historical_callable),
+        Type::Tuple(elements) => elements.iter().any(type_contains_historical_callable),
+        Type::Applied { arguments, .. } => {
+            arguments.iter().any(type_contains_historical_callable)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_historical_callable(currency) || type_contains_historical_callable(unit)
+        }
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters.iter().any(type_contains_historical_callable)
+                || type_contains_historical_callable(result)
+        }
+        _ => false,
+    }
+}
+
 /// Closure rebinding may change pinned snapshot identity while preserving the
-/// callable contract. Compare all nested structure and ignore only snapshot
-/// arguments owned by historical callable wrappers.
+/// value shape and callable contracts. The reference fixes `SnapshotRef` at
+/// historical reads but is silent about structured local rebinding; permit it
+/// when the only type differences are snapshot arguments of historical
+/// callable wrappers. Saved aliases retain their original types and pins.
 fn historical_callable_shape_matches(expected: &Type, actual: &Type) -> bool {
     if expected == actual {
         return true;

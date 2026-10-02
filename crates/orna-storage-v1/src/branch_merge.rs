@@ -236,7 +236,18 @@ pub struct BranchMergePlan {
 ///
 /// Paired chain storms run with per-invocation budgets and result buffers.
 /// Concurrent retries therefore preserve each table's complete tombstone
-/// sequence without sharing partial work or budget state.
+/// sequence without sharing partial work or budget state. Storm breadth across
+/// several prefix depths does not change table-local order or delete
+/// precedence, even when a later table's scan fails after earlier tables.
+///
+/// MERGE-1 does not specify how tombstone output accumulates across separately
+/// committed merge plans. This v1 policy treats each plan as a delta from its
+/// own common base: after a completed plan is committed, its live rows and
+/// manifest form the next base, and a later plan reports only exact keys newly
+/// deleted relative to that base. Earlier tombstones remain part of committed
+/// history but are not replayed as new deletions; deleting a descendant in a
+/// later wave remains an independent exact-key decision. A failed wave is
+/// retried from the same committed base without carrying forward partial facts.
 ///
 /// A read failure at any table or range aborts the whole invocation. Facts
 /// gathered from earlier tables or depth ranges remain private; after source
