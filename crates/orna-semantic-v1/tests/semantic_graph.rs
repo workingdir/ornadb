@@ -1411,6 +1411,16 @@ fn all_unique_accepts_structural_nullable_keys_and_rejects_float_components() {
         "the Float restriction should explain the rejected contract: {:?}",
         unlawful.diagnostics
     );
+
+    let nested_float_distinct = analyze(&[ModuleInput::new(
+        "relation-float-distinct.orna",
+        include_str!("fixtures/relation-distinct-float-tuple-key.orna"),
+    )]);
+    assert!(
+        has(&nested_float_distinct, DIAG_TYPE),
+        "relation distinct must reject a tuple key containing Float: {:?}",
+        nested_float_distinct.diagnostics
+    );
 }
 
 #[test]
