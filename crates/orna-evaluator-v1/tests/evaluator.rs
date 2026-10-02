@@ -2,12 +2,12 @@ use std::collections::BTreeMap;
 
 use num_bigint::BigInt;
 use orna_evaluator_v1::{
-    evaluate_expression, evaluate_expression_with_functions, evaluate_function, evaluate_parsed,
-    evaluate_parsed_with_nominals,
-    evaluate_repl, evaluate_with_functions_and_nominals, invoke_named, invoke_named_with_effects,
-    invoke_named_with_effects_and_budget, invoke_named_with_nominals, EffectHandler, Environment,
-    EvaluationError, Functions, Limits, NominalDefinition, NominalDefinitions, NominalField,
-    NominalVariant, PureFunction, RelationPage, StepBudget,
+    AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits,
+    NominalDefinition, NominalDefinitions, NominalField, NominalVariant, PureFunction,
+    RelationPage, StepBudget, evaluate_expression, evaluate_expression_with_functions,
+    evaluate_function, evaluate_parsed, evaluate_parsed_with_nominals, evaluate_repl,
+    SysHostBindingRegistry, evaluate_with_functions_and_nominals, invoke_named,
+    invoke_named_with_effects, invoke_named_with_effects_and_budget, invoke_named_with_nominals,
 };
 use orna_syntax_v1::{
     lex, AssignmentOperator, AssignmentTarget, Expr, NameSegment, Pattern, RecordField, Statement,
@@ -21,6 +21,41 @@ fn evaluate(source: &str) -> Value {
 }
 fn code(result: Result<Value, EvaluationError>) -> String {
     result.unwrap_err().code().to_owned()
+}
+
+#[test]
+fn std_environment_get_reads_current_and_absent_process_values() {
+    let expected = std::env::var("PATH").expect("test process exposes PATH");
+    let absent = "ORNA_TEST_MISSING_6TG7L_20261002";
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    let mut bindings = SysHostBindingRegistry::capture_environment([
+        String::from("PATH"),
+        absent.to_owned(),
+    ])
+    .expect("explicit process environment allowlist is valid");
+    assert_eq!(
+        session.submit(include_str!(
+            "fixtures/repl-inline-use-std-io-environment-6tg7l.orna"
+        )),
+        Ok(None)
+    );
+    let current = session
+        .submit_with_sys_host_bindings(
+            include_str!("fixtures/repl-inline-std-io-environment-get-path-6tg7l.orna"),
+            &mut bindings,
+        )
+        .unwrap_or_else(|error| panic!("environment get failed: {}", error.code()));
+    assert_eq!(
+        current,
+        Some(Value::option(Some(Value::new(Raw::Text(expected)).unwrap())).unwrap())
+    );
+    assert_eq!(
+        session.submit_with_sys_host_bindings(
+            include_str!("fixtures/repl-inline-std-io-environment-get-missing-6tg7l.orna"),
+            &mut bindings,
+        ),
+        Ok(Some(Value::option(None).unwrap()))
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -2421,6 +2456,10 @@ fn math_pipelines_and_mixed_named_calls_share_argument_positions() {
 
 #[test]
 fn std_bits_preserves_unbounded_signed_twos_complement_semantics() {
+    assert_eq!(
+        evaluate(include_str!("fixtures/evaluator_source_46ee2ded56c3f4e7.orna")),
+        Value::int(3.into())
+    );
     for (expression, expected) in [
         (
             include_str!("fixtures/evaluator_source_525122f16c2e379f.orna"),
@@ -2485,10 +2524,6 @@ fn std_bits_preserves_unbounded_signed_twos_complement_semantics() {
         (
             include_str!("fixtures/evaluator_source_ac55dad4bba9ad9c.orna"),
             "ORNA-EVAL-LIMIT",
-        ),
-        (
-            include_str!("fixtures/evaluator_source_46ee2ded56c3f4e7.orna"),
-            "ORNA-EVAL-UNSUPPORTED",
         ),
     ] {
         assert_eq!(
@@ -3332,6 +3367,10 @@ fn std_collection_first_returns_only_the_head_of_a_finite_list() {
 
 #[test]
 fn std_collection_first_is_callback_free_and_bounded() {
+    assert_eq!(
+        evaluate(include_str!("fixtures/evaluator_source_8149266b97333702.orna")),
+        Value::option(Some(Value::int(1.into()))).unwrap()
+    );
     for (expression, expected) in [
         (
             include_str!("fixtures/evaluator_source_d06f72238e332b7f.orna"),
@@ -3343,10 +3382,6 @@ fn std_collection_first_is_callback_free_and_bounded() {
         ),
         (
             include_str!("fixtures/evaluator_source_9008cedb3febd226.orna"),
-            "ORNA-EVAL-UNSUPPORTED",
-        ),
-        (
-            include_str!("fixtures/evaluator_source_8149266b97333702.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
         (
@@ -3374,7 +3409,7 @@ fn std_collection_first_is_callback_free_and_bounded() {
             },
         )
         .unwrap(),
-        Value::int(13.into())
+        Value::option(Some(Value::int(13.into()))).unwrap()
     );
     assert_eq!(
         code(evaluate_expression(
@@ -3437,6 +3472,10 @@ fn std_collection_last_returns_option_none_for_empty_finite_inputs() {
 
 #[test]
 fn std_collection_last_is_callback_free_and_respects_collection_bounds() {
+    assert_eq!(
+        evaluate(include_str!("fixtures/evaluator_source_895445bd33a0cfd0.orna")),
+        Value::option(Some(Value::int(1.into()))).unwrap()
+    );
     for (expression, expected) in [
         (
             include_str!("fixtures/evaluator_source_8f9ff585c3397bd3.orna"),
@@ -3448,10 +3487,6 @@ fn std_collection_last_is_callback_free_and_respects_collection_bounds() {
         ),
         (
             include_str!("fixtures/evaluator_source_d78ee9d2ec4a46f1.orna"),
-            "ORNA-EVAL-UNSUPPORTED",
-        ),
-        (
-            include_str!("fixtures/evaluator_source_895445bd33a0cfd0.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
         (
@@ -3932,9 +3967,12 @@ fn std_collection_decimal_sum_rejects_mixed_numeric_kinds() {
 
 #[test]
 fn std_collection_sum_rejects_unsupported_numeric_kinds_and_shapes() {
+    assert_eq!(
+        evaluate(include_str!("fixtures/evaluator_source_a92c58c6d0b15cfc.orna")),
+        Value::int(1.into())
+    );
     for expression in [
         include_str!("fixtures/evaluator_source_e1ba4fa7c3937d2c.orna"),
-        include_str!("fixtures/evaluator_source_a92c58c6d0b15cfc.orna"),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -4144,8 +4182,6 @@ fn std_collection_float_aggregates_reject_mixed_inputs_callbacks_and_limits() {
     for expression in [
         include_str!("fixtures/evaluator_source_cdab6ecfce425b19.orna"),
         include_str!("fixtures/evaluator_source_fe5013414b733c91.orna"),
-        include_str!("fixtures/evaluator_source_672569f1e425be8a.orna"),
-        include_str!("fixtures/evaluator_source_4636ea68fc901968.orna"),
         include_str!("fixtures/evaluator_source_21e98e42a38aa4ca.orna"),
         include_str!("fixtures/evaluator_source_f9bcdc1230a9faa4.orna"),
     ] {
@@ -4156,6 +4192,20 @@ fn std_collection_float_aggregates_reject_mixed_inputs_callbacks_and_limits() {
                 Limits::default(),
             )),
             "ORNA-EVAL-UNSUPPORTED",
+            "{expression}"
+        );
+    }
+    for expression in [
+        include_str!("fixtures/evaluator_source_672569f1e425be8a.orna"),
+        include_str!("fixtures/evaluator_source_4636ea68fc901968.orna"),
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default(),
+            )),
+            "ORNA-EVAL-TYPE",
             "{expression}"
         );
     }
@@ -4308,7 +4358,7 @@ fn std_collection_temporal_min_and_max_keep_empty_null_and_reject_mixed_types() 
                 &Environment::new(),
                 Limits::default()
             )),
-            "ORNA-EVAL-UNSUPPORTED",
+            "ORNA-EVAL-TYPE",
             "{expression}"
         );
     }
@@ -4437,6 +4487,10 @@ fn std_collection_min_and_max_optional_results_match_some_null_and_coalesce() {
 #[test]
 fn std_collection_min_and_max_fail_closed_for_unsupported_kinds_shapes_and_limits() {
     assert_eq!(
+        evaluate(include_str!("fixtures/evaluator_source_78bff71074810743.orna")),
+        Value::option(Some(Value::int(1.into()))).unwrap()
+    );
+    assert_eq!(
         evaluate(include_str!(
             "fixtures/evaluator_source_2dca5c2db4197987.orna"
         )),
@@ -4451,7 +4505,7 @@ fn std_collection_min_and_max_fail_closed_for_unsupported_kinds_shapes_and_limit
     for (expression, expected) in [
         (
             include_str!("fixtures/evaluator_source_525c395e4f9e73ad.orna"),
-            "ORNA-EVAL-UNSUPPORTED",
+            "ORNA-EVAL-TYPE",
         ),
         (
             include_str!("fixtures/evaluator_source_fe4ea82d41fb542a.orna"),
@@ -4463,10 +4517,6 @@ fn std_collection_min_and_max_fail_closed_for_unsupported_kinds_shapes_and_limit
         ),
         (
             include_str!("fixtures/evaluator_source_331bc5638c483c02.orna"),
-            "ORNA-EVAL-UNSUPPORTED",
-        ),
-        (
-            include_str!("fixtures/evaluator_source_78bff71074810743.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
         (
@@ -4778,6 +4828,10 @@ fn std_collection_one_evaluates_predicates_in_order_and_stops_after_second_match
 
 #[test]
 fn std_collection_one_rejects_invalid_inputs_propagates_callback_failures_and_keeps_limits() {
+    assert_eq!(
+        evaluate(include_str!("fixtures/evaluator_source_4c6049668a352465.orna")),
+        Value::int(1.into())
+    );
     for (expression, expected) in [
         (
             include_str!("fixtures/evaluator_source_1d1ee269ab24f5d6.orna"),
@@ -4801,10 +4855,6 @@ fn std_collection_one_rejects_invalid_inputs_propagates_callback_failures_and_ke
         ),
         (
             include_str!("fixtures/evaluator_source_3b12e77acdec5c03.orna"),
-            "ORNA-EVAL-UNSUPPORTED",
-        ),
-        (
-            include_str!("fixtures/evaluator_source_4c6049668a352465.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
         (
@@ -9221,6 +9271,10 @@ fn materialized_list_union_remains_left_to_right_with_duplicates() {
 
 #[test]
 fn std_stats_reject_mixed_or_unsupported_inputs_and_resource_overflow() {
+    assert_eq!(
+        evaluate(include_str!("fixtures/evaluator_source_0b99861bb1316192.orna")),
+        Value::decimal(15.into(), (-1).into()).unwrap()
+    );
     for (expression, expected) in [
         (
             include_str!("fixtures/evaluator_source_91637a611b83fef1.orna"),
@@ -9237,10 +9291,6 @@ fn std_stats_reject_mixed_or_unsupported_inputs_and_resource_overflow() {
         (
             include_str!("fixtures/evaluator_source_5ae40e0510743923.orna"),
             "ORNA-EVAL-TYPE",
-        ),
-        (
-            include_str!("fixtures/evaluator_source_0b99861bb1316192.orna"),
-            "ORNA-EVAL-UNSUPPORTED",
         ),
     ] {
         assert_eq!(
