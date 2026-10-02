@@ -842,10 +842,19 @@ impl BranchMergeTombstoneHistory {
             .or_else(|| self.duplicate_retry_modes.get(&step.order).copied());
         if existing_mode == Some(BranchMergeTombstoneSubmissionMode::DepthFragments) {
             let plan_tombstones = step.plan.ordered_row_tombstones();
+            let identity = self
+                .pending_plan_identities
+                .get(&step.order)
+                .or_else(|| self.committed_plan_identities.get(&step.order));
             if !replaces_same_order
                 && !has_duplicate_tombstones_in_wave(&step.ordered_row_tombstones)
-                && !has_duplicate_tombstones_in_wave(&plan_tombstones)
-                && same_tombstone_encoding_delta(&plan_tombstones, &step.ordered_row_tombstones)
+                && identity.is_none_or(|_| {
+                    !has_duplicate_tombstones_in_wave(&plan_tombstones)
+                        && same_tombstone_encoding_delta(
+                            &plan_tombstones,
+                            &step.ordered_row_tombstones,
+                        )
+                })
             {
                 let existing = match self.pending_deltas.get(&step.order) {
                     Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
@@ -863,10 +872,6 @@ impl BranchMergeTombstoneHistory {
                         ),
                     _ => None,
                 };
-                let identity = self
-                    .pending_plan_identities
-                    .get(&step.order)
-                    .or_else(|| self.committed_plan_identities.get(&step.order));
                 let tombstones_match = existing.as_ref().is_some_and(|existing| {
                     if identity.is_some() {
                         same_tombstone_encoding_delta(existing, &step.ordered_row_tombstones)
