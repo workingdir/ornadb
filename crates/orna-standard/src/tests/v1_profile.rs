@@ -436,7 +436,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn expect_none<T>(value: T?)",
         "pub fn expect_failure<T>(action: fn(): T, code: Str?)",
         "pub fn for_all<T>(",
-        "pub fn integer_range(lower_inclusive: Int, upper_exclusive: Int)",
+        "pub fn integer_range(",
         "pub fn elements<T>(values: [T])",
         "pub fn list_of<T>(element: fn(Int, Int): T, maximum_length: Int)",
         "pub fn run_fixture(",
@@ -451,6 +451,8 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "worktree-local CWD",
         "developer credentials, local",
         "live services are never implicit",
+        "lower-inclusive",
+        "upper-exclusive",
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
