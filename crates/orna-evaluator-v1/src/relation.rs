@@ -633,3 +633,26 @@ impl RelationPlan {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::FilterBatch;
+    use crate::Value;
+
+    #[test]
+    fn shared_filter_join_cache_discards_expired_continuations() {
+        let prefix = FilterBatch::from_values(vec![Value::Bool(true)]);
+        let abandoned_suffix = FilterBatch::from_values(vec![Value::Bool(false)]);
+        let abandoned_join = FilterBatch::followed_by(&prefix, &abandoned_suffix);
+        assert_eq!(prefix.continuations.lock().unwrap().len(), 1);
+        drop(abandoned_join);
+
+        let live_suffix = FilterBatch::from_values(vec![Value::Bool(true)]);
+        let live_join = FilterBatch::followed_by(&prefix, &live_suffix);
+
+        let continuations = prefix.continuations.lock().unwrap();
+        assert_eq!(continuations.len(), 1);
+        assert!(continuations.values().all(|join| join.upgrade().is_some()));
+        assert_eq!(live_join.values().count(), 2);
+    }
+}
