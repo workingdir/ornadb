@@ -1396,7 +1396,7 @@ fn unknown_row_byte_caps_report_scoped_handoff_routes_by_nested_depth() {
                 "1:root/storm1/branch1/limit1/rebind1/cascade1=2048>512,root/storm1/branch1/limit1/rebind1/cascade1/rebind_output1_1/rebind1/cascade2=512>128,root/storm1/branch1/limit1/rebind1/cascade1/rebind_output1_1/rebind1/cascade2/rebind_output1_2/limit2/rebind2/cascade1=128>32;2:root/storm1/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=2048>1024,root/storm1/branch1/limit1/rebind1/cascade1/rebind_output1_1/rebind1/cascade2/branch1/limit1/rebind1/cascade1=512>256,root/storm1/branch1/limit1/rebind1/cascade1/rebind_output1_1/rebind1/cascade2/rebind_output1_2/limit2/rebind2/cascade1/branch1/limit1/rebind1/cascade1=128>64".to_owned()
             )),
             Some(&PlanDetail::Text(
-                "1:root/storm1/storm_output1/storm2/branch1/limit1/rebind1/cascade1=1040>260;2:root/storm1/storm_output1/storm2/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=1040>520".to_owned()
+                "1:root/storm1/storm_stage_output1/storm2/branch1/limit1/rebind1/cascade1=1040>260;2:root/storm1/storm_stage_output1/storm2/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=1040>520".to_owned()
             )),
         ]
     );
@@ -1412,7 +1412,7 @@ fn unknown_row_byte_caps_report_scoped_handoff_routes_by_nested_depth() {
                 "1:root/storm1/branch1/limit1=>root/storm1/branch1/limit1/rebind1/cascade1=2048>512,root/storm1/branch1/limit1/rebind1/cascade1/rebind_output1_1=>root/storm1/branch1/limit1/rebind1/cascade1/rebind_output1_1/rebind1/cascade2=512>128,root/storm1/branch1/limit1/rebind1/cascade1/rebind_output1_1/rebind1/cascade2/rebind_output1_2/limit2=>root/storm1/branch1/limit1/rebind1/cascade1/rebind_output1_1/rebind1/cascade2/rebind_output1_2/limit2/rebind2/cascade1=128>32;2:root/storm1/branch1/limit1/rebind1/cascade1/branch1/limit1=>root/storm1/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=2048>1024,root/storm1/branch1/limit1/rebind1/cascade1/rebind_output1_1/rebind1/cascade2/branch1/limit1=>root/storm1/branch1/limit1/rebind1/cascade1/rebind_output1_1/rebind1/cascade2/branch1/limit1/rebind1/cascade1=512>256,root/storm1/branch1/limit1/rebind1/cascade1/rebind_output1_1/rebind1/cascade2/rebind_output1_2/limit2/rebind2/cascade1/branch1/limit1=>root/storm1/branch1/limit1/rebind1/cascade1/rebind_output1_1/rebind1/cascade2/rebind_output1_2/limit2/rebind2/cascade1/branch1/limit1/rebind1/cascade1=128>64".to_owned()
             )),
             Some(&PlanDetail::Text(
-                "1:root/storm1/storm_output1/storm2/branch1/limit1=>root/storm1/storm_output1/storm2/branch1/limit1/rebind1/cascade1=1040>260;2:root/storm1/storm_output1/storm2/branch1/limit1/rebind1/cascade1/branch1/limit1=>root/storm1/storm_output1/storm2/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=1040>520".to_owned()
+                "1:root/storm1/storm_stage_output1/storm2/branch1/limit1=>root/storm1/storm_stage_output1/storm2/branch1/limit1/rebind1/cascade1=1040>260;2:root/storm1/storm_stage_output1/storm2/branch1/limit1/rebind1/cascade1/branch1/limit1=>root/storm1/storm_stage_output1/storm2/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=1040>520".to_owned()
             )),
         ]
     );
@@ -1730,7 +1730,7 @@ fn typed_handoff_routes_preserve_prior_storm_stage_outputs() {
         let mut expected_input_scope = "root".to_owned();
         for prior_stage in 1..=stage_index {
             expected_input_scope.push_str(&format!(
-                "/storm{prior_stage}/storm_output{prior_stage}"
+                "/storm{prior_stage}/storm_stage_output{prior_stage}"
             ));
         }
         expected_input_scope.push_str(&format!(
@@ -1753,22 +1753,33 @@ fn typed_handoff_routes_preserve_prior_storm_stage_outputs() {
     }
 
     let serialized = serde_json::to_value(&explained).expect("explained plans serialize");
-    let third_stage = serialized["nodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|node| node["details"]["disjunct_storm"] == 3)
-        .expect("third storm stage is serialized");
-    assert_eq!(
-        third_stage["details"]["limit_chain_rebind_byte_cap_handoff_route_records"][0]
-            ["input_path"][3],
-        serde_json::json!({ "kind": "storm_stage_output", "index": 2 })
-    );
-    assert_eq!(
-        third_stage["details"]["limit_chain_rebind_byte_cap_handoff_route_records"][0]
-            ["input_scope"],
-        "root/storm1/storm_output1/storm2/storm_output2/storm3/branch1/limit1"
-    );
+    for stage in 1..=3 {
+        let serialized_stage = serialized["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["details"]["disjunct_storm"] == stage)
+            .expect("storm stage is serialized");
+        let serialized_route =
+            &serialized_stage["details"]["limit_chain_rebind_byte_cap_handoff_route_records"][0];
+
+        let mut expected_scope = "root".to_owned();
+        for prior_stage in 1..stage {
+            expected_scope.push_str(&format!(
+                "/storm{prior_stage}/storm_stage_output{prior_stage}"
+            ));
+            assert_eq!(
+                serialized_route["input_path"][(prior_stage as usize - 1) * 2 + 1],
+                serde_json::json!({ "kind": "storm_stage_output", "index": prior_stage })
+            );
+        }
+        expected_scope.push_str(&format!("/storm{stage}/branch1/limit1"));
+        assert_eq!(serialized_route["input_scope"], expected_scope);
+        assert_eq!(
+            serialized_route["output_scope"],
+            format!("{expected_scope}/rebind1/cascade1")
+        );
+    }
 }
 
 #[test]
