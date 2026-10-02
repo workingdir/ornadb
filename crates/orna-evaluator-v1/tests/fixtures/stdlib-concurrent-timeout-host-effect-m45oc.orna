@@ -1,0 +1,4 @@
+concurrent.timeout(
+    () => concurrent.sleep(2.s),
+    0.s,
+)
