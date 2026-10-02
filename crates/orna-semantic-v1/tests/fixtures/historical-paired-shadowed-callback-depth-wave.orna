@@ -1,0 +1,79 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+// Each nested callback shadows `pin`; every level keeps its own selected
+// snapshot alive until the terminal wave materializes the captured factories.
+pub fn callback_wave_at(pin: sys.SnapshotRef) {
+    let maker_capture = pin;
+    let selected = pin;
+    (selected: sys.SnapshotRef) => {
+        let first_capture = selected;
+        (selected: sys.SnapshotRef) => {
+            let second_capture = selected;
+            (selected: sys.SnapshotRef) => {
+                let third_capture = selected;
+                {
+                    maker: factory_at(maker_capture),
+                    first: factory_at(first_capture),
+                    second: factory_at(second_capture),
+                    third: factory_at(third_capture),
+                }
+            }
+        }
+    }
+}
+
+pub fn paired_shadowed_callback_depth_waves_preserve_capture_identity() {
+    let roots = (
+        callback_wave_at(sys.snapshot("HEAD~500")),
+        callback_wave_at(sys.snapshot("HEAD~490")),
+    );
+    let (left_root, right_root) = roots;
+
+    let first_wave_saved = (left_root(sys.snapshot("HEAD~450")), right_root(sys.snapshot("HEAD~440")));
+    let first_wave_rolling = first_wave_saved;
+    first_wave_rolling = (left_root(sys.snapshot("HEAD~449")), right_root(sys.snapshot("HEAD~439")));
+    let first_wave_rebound = first_wave_rolling;
+    first_wave_rolling = first_wave_saved;
+    let first_wave_restored = first_wave_rolling;
+
+    let (left_old_second, right_old_second) = first_wave_saved;
+    let (left_restored_second, right_restored_second) = first_wave_restored;
+    let (left_rebound_second, right_rebound_second) = first_wave_rebound;
+    let second_wave_saved = (left_old_second(sys.snapshot("HEAD~400")), right_old_second(sys.snapshot("HEAD~390")));
+    let second_wave_restored = (left_restored_second(sys.snapshot("HEAD~400")), right_restored_second(sys.snapshot("HEAD~390")));
+    let second_wave_rebound = (left_rebound_second(sys.snapshot("HEAD~399")), right_rebound_second(sys.snapshot("HEAD~389")));
+
+    let (left_old_third, right_old_third) = second_wave_saved;
+    let (left_restored_third, right_restored_third) = second_wave_restored;
+    let (left_rebound_third, right_rebound_third) = second_wave_rebound;
+    let left_old = left_old_third(sys.snapshot("HEAD~350"));
+    let right_old = right_old_third(sys.snapshot("HEAD~340"));
+    let left_restored = left_restored_third(sys.snapshot("HEAD~350"));
+    let right_restored = right_restored_third(sys.snapshot("HEAD~340"));
+    let left_rebound = left_rebound_third(sys.snapshot("HEAD~349"));
+    let right_rebound = right_rebound_third(sys.snapshot("HEAD~339"));
+
+    {
+        left_old_maker: std.concurrent.parallel([() => left_old.maker, () => left_old.maker]),
+        left_old_first: std.concurrent.parallel([() => left_old.first, () => left_old.first]),
+        left_old_second: std.concurrent.parallel([() => left_old.second, () => left_old.second]),
+        left_old_third: std.concurrent.parallel([() => left_old.third, () => left_old.third]),
+        left_restored_maker: std.concurrent.parallel([() => left_restored.maker, () => left_restored.maker]),
+        left_restored_first: std.concurrent.parallel([() => left_restored.first, () => left_restored.first]),
+        left_restored_second: std.concurrent.parallel([() => left_restored.second, () => left_restored.second]),
+        left_restored_third: std.concurrent.parallel([() => left_restored.third, () => left_restored.third]),
+        left_rebound_maker: std.concurrent.parallel([() => left_rebound.maker, () => left_rebound.maker]),
+        left_rebound_first: std.concurrent.parallel([() => left_rebound.first, () => left_rebound.first]),
+        left_rebound_second: std.concurrent.parallel([() => left_rebound.second, () => left_rebound.second]),
+        left_rebound_third: std.concurrent.parallel([() => left_rebound.third, () => left_rebound.third]),
+        right_old_maker: std.concurrent.parallel([() => right_old.maker, () => right_old.maker]),
+        right_old_first: std.concurrent.parallel([() => right_old.first, () => right_old.first]),
+        right_old_second: std.concurrent.parallel([() => right_old.second, () => right_old.second]),
+        right_old_third: std.concurrent.parallel([() => right_old.third, () => right_old.third]),
+        right_rebound_maker: std.concurrent.parallel([() => right_rebound.maker, () => right_rebound.maker]),
+        right_rebound_first: std.concurrent.parallel([() => right_rebound.first, () => right_rebound.first]),
+        right_rebound_second: std.concurrent.parallel([() => right_rebound.second, () => right_rebound.second]),
+        right_rebound_third: std.concurrent.parallel([() => right_rebound.third, () => right_rebound.third]),
+    }
+}

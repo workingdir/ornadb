@@ -4501,6 +4501,122 @@ fn paired_shadowed_callback_depths_retain_each_lane() {
 }
 
 #[test]
+fn paired_shadowed_callback_depth_waves_preserve_capture_identity() {
+    let source = include_str!("fixtures/historical-paired-shadowed-callback-depth-wave.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-shadowed-callback-depth-wave.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired shadowed callback depth waves must keep every captured pin through save, rebind, and restore: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_shadowed_callback_depth_waves_preserve_capture_identity")
+        })
+        .expect("paired shadowed callback depth wave fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_shadowed_callback_depth_waves_preserve_capture_identity"]
+        .ty
+    else {
+        panic!("paired callback depth wave proof must be a function");
+    };
+    let Type::Record(streams) = result.as_ref() else {
+        panic!("paired callback depth wave proof must expose captured pins");
+    };
+    let pin_type = |name: &str| {
+        let Type::Stream(element) = streams.get(name).expect("parallel result field") else {
+            panic!("{name} must be a stream");
+        };
+        let Type::Applied { base, arguments } = element.as_ref() else {
+            panic!("{name} must retain its historical callable pin: {element:?}");
+        };
+        assert_eq!(base, "sys.HistoricalCallable");
+        let [pin, _] = arguments.as_slice() else {
+            panic!("historical callable must expose its captured pin: {arguments:?}");
+        };
+        pin
+    };
+    let expected = |selector: &str| Type::Applied {
+        base: "sys.SnapshotRefContext".into(),
+        arguments: vec![Type::Named(format!("selector:{selector}"))],
+    };
+    for (field, selector) in [
+        ("left_old_maker", "HEAD~500"),
+        ("left_old_first", "HEAD~450"),
+        ("left_old_second", "HEAD~400"),
+        ("left_old_third", "HEAD~350"),
+        ("left_restored_maker", "HEAD~500"),
+        ("left_restored_first", "HEAD~450"),
+        ("left_restored_second", "HEAD~400"),
+        ("left_restored_third", "HEAD~350"),
+        ("left_rebound_maker", "HEAD~500"),
+        ("left_rebound_first", "HEAD~449"),
+        ("left_rebound_second", "HEAD~399"),
+        ("left_rebound_third", "HEAD~349"),
+        ("right_old_maker", "HEAD~490"),
+        ("right_old_first", "HEAD~440"),
+        ("right_old_second", "HEAD~390"),
+        ("right_old_third", "HEAD~340"),
+        ("right_rebound_maker", "HEAD~490"),
+        ("right_rebound_first", "HEAD~439"),
+        ("right_rebound_second", "HEAD~389"),
+        ("right_rebound_third", "HEAD~339"),
+    ] {
+        assert_eq!(pin_type(field), &expected(selector), "{field}");
+    }
+    assert_eq!(pin_type("left_old_maker"), pin_type("left_rebound_maker"));
+    assert_ne!(pin_type("left_old_first"), pin_type("left_rebound_first"));
+    assert_ne!(pin_type("left_old_second"), pin_type("left_rebound_second"));
+    assert_ne!(pin_type("left_old_third"), pin_type("left_rebound_third"));
+    assert_ne!(pin_type("left_rebound_maker"), pin_type("right_rebound_maker"));
+    assert_ne!(pin_type("left_rebound_first"), pin_type("right_rebound_first"));
+    assert_ne!(pin_type("left_rebound_second"), pin_type("right_rebound_second"));
+    assert_ne!(pin_type("left_rebound_third"), pin_type("right_rebound_third"));
+}
+
+#[test]
+fn paired_shadowed_callback_depth_waves_reject_cross_lane_capture_mix() {
+    let source = include_str!("fixtures/historical-paired-shadowed-callback-depth-wave-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-shadowed-callback-depth-wave-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "captured pins from opposite shadowed callback waves must remain incompatible: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn concurrent_callback_tuples_reject_cross_lane_identity_mix_after_rebind() {
     let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
