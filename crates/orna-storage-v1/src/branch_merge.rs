@@ -562,11 +562,11 @@ impl BranchMergeTombstoneHistory {
     /// For an existing wave, a changed fragment count is reported before an
     /// index that is invalid under the caller's changed count, preserving the
     /// wave's authoritative depth label in diagnostics. After a wave commits,
-    /// its count remains authoritative for stale retries too, so changed labels
-    /// report `FragmentCountMismatch` before the generic stale-position error.
-    /// MERGE-1 is silent on validating fragment labels after a fold; this v1
-    /// policy preserves the committed count to keep storm retry diagnostics
-    /// consistent across cascading folds.
+    /// its count and valid index range remain authoritative for stale retries
+    /// too, so changed labels report `FragmentCountMismatch` or `InvalidFragment`
+    /// before the generic stale-position error. MERGE-1 is silent on validating
+    /// fragment labels after a fold; this v1 policy preserves the committed
+    /// label pair to keep storm retry diagnostics consistent across cascades.
     pub fn submit_depth_merge_fragment(
         &mut self,
         order: u64,
@@ -585,6 +585,14 @@ impl BranchMergeTombstoneHistory {
                 order,
                 expected: expected_count,
                 actual: fragment_count,
+            });
+        }
+        if let Some(expected_count) = self.committed_fragment_counts.get(&order).copied()
+            && fragment >= expected_count
+        {
+            return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+                fragment,
+                fragment_count: expected_count,
             });
         }
         self.classify_submission_position(
