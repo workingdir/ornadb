@@ -308,6 +308,10 @@ impl PackageResolver {
     /// A middle pin retained before a sibling rebind is also an independent
     /// late-branch root: reopening it follows its own deep manifest and
     /// terminal route rather than inheriting the sibling's later selections.
+    /// Sibling manifests may converge on the same exact deep and terminal
+    /// pins; rebinding that terminal alias in one closure changes only that
+    /// closure's route, while another retained branch can still resolve the
+    /// shared manifest-selected terminal pin.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
