@@ -693,6 +693,8 @@ pub enum PlanDetail {
     Boolean(bool),
     Expressions(Vec<ExpressionRef>),
     Ordering(Vec<PlanOrdering>),
+    /// Routes are ordered by nesting depth, typed input path, then typed
+    /// output path.
     ByteCapHandoffRoutes(Vec<PlanByteCapHandoffRoute>),
 }
 
@@ -719,7 +721,7 @@ pub struct PlanByteCapHandoffRoute {
 /// One typed step in a nested storm byte-cap handoff route. A route path
 /// preserves every preceding handoff output in its ancestry, including when a
 /// later limit or cascade consumes that bounded result.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PlanByteCapScopeSegment {
     /// A one-based top-level storm stage.
@@ -730,6 +732,9 @@ pub enum PlanByteCapScopeSegment {
     Branch { index: usize },
     /// A one-based nested limit position within a branch.
     Limit { position: usize },
+    /// The bounded output of a one-based branch after its limits, rebinds,
+    /// and conjuncts, before that branch's nested storms.
+    BranchOutput { index: usize },
     /// A one-based rebind declaration position within a branch.
     Rebind { position: usize },
     /// A one-based cascade position within a rebind.
@@ -2029,6 +2034,7 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             &storm_scope_path,
             &mut byte_cap_handoff_estimates_by_depth,
         );
+        stabilize_rebind_byte_cap_handoff_routes(&mut byte_cap_handoff_estimates_by_depth);
         let branch_limits = storm
             .branches
             .iter()
@@ -2077,6 +2083,10 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             .iter()
             .flat_map(|branch| disjunct_storm_predicates(&branch.nested_storms))
             .collect::<Vec<_>>();
+        let has_nested_cascades = storm
+            .branches
+            .iter()
+            .any(|branch| !branch.nested_storms.is_empty());
         let limit_chain_rebind_shapes = storm
             .branches
             .iter()
@@ -2133,6 +2143,8 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             );
         let limit_chain_rebind_byte_cap_handoff_route_records =
             rebind_byte_cap_handoff_route_records(&byte_cap_handoff_estimates_by_depth);
+        let has_limit_chain_rebind_byte_cap_handoff_routes =
+            !limit_chain_rebind_byte_cap_handoff_route_records.is_empty();
         let limit_chain_rebind_predicates = storm
             .branches
             .iter()
@@ -2272,6 +2284,23 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
                 PlanDetail::Integer(storm_index),
             ),
         ]);
+        if has_nested_cascades {
+            details.insert(
+                "nested_storm_input_scope".to_owned(),
+                PlanDetail::Text(
+                    "bounded_branch_output_after_limits_rebinds_and_conjuncts_then_prior_nested_storm_outputs"
+                        .to_owned(),
+                ),
+            );
+        }
+        if has_limit_chain_rebind_byte_cap_handoff_routes {
+            details.insert(
+                "limit_chain_rebind_byte_cap_handoff_route_order".to_owned(),
+                PlanDetail::Text(
+                    "ascending_depth_then_typed_input_path_then_typed_output_path".to_owned(),
+                ),
+            );
+        }
         if overflowed {
             record_work_overflow(&mut details);
         }
@@ -2933,6 +2962,20 @@ fn rebind_byte_cap_handoff_route_records(
         .collect()
 }
 
+fn stabilize_rebind_byte_cap_handoff_routes(
+    estimates: &mut RebindByteCapHandoffEstimatesByDepth,
+) {
+    for handoffs in estimates.values_mut() {
+        handoffs.sort_by(|left, right| {
+            left.input_path
+                .cmp(&right.input_path)
+                .then_with(|| left.output_path.cmp(&right.output_path))
+                .then_with(|| left.input_scope.cmp(&right.input_scope))
+                .then_with(|| left.scope.cmp(&right.scope))
+        });
+    }
+}
+
 fn disjunct_storm_cascade_cardinality_and_work(
     input: Cardinality,
     storm: &DisjunctStormCascadeDescription,
@@ -3098,6 +3141,14 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
         }
 
         let mut prior_nested_storm_path = branch_byte_scope_path.clone();
+        if !branch.nested_storms.is_empty() {
+            // ORNA-PLAN does not name this intermediate scope. Keep a typed
+            // boundary so unknown estimates still preserve the bounded
+            // parent-branch output consumed by nested storms.
+            prior_nested_storm_path.push(PlanByteCapScopeSegment::BranchOutput {
+                index: branch_index + 1,
+            });
+        }
         for (nested_index, nested_storm) in branch.nested_storms.iter().enumerate() {
             let nested_scope = format!(
                 "{storm_path}/branch{}/nested{}",
@@ -3635,6 +3686,10 @@ fn hash_byte_cap_scope_path(hash: &mut Sha256, path: &[PlanByteCapScopeSegment])
             PlanByteCapScopeSegment::Limit { position } => {
                 hash.update([2]);
                 hash.update((*position as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::BranchOutput { index } => {
+                hash.update([9]);
+                hash.update((*index as u64).to_be_bytes());
             }
             PlanByteCapScopeSegment::Rebind { position } => {
                 hash.update([3]);

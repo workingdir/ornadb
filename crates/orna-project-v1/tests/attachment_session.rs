@@ -11043,6 +11043,495 @@ fn atomic_rebind_preserves_retained_routes_through_paired_depths() {
     assert_module_route(&parent, "archive.orna", "= 502");
 }
 
+#[test]
+fn paired_post_storm_rebinds_preserve_each_route_snapshot_atomically() {
+    let package_source = include_str!("fixtures/attach-package.orna");
+    let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
+    let aliases = ["archive", "archive_copy", "archive_copy_archive"];
+    let terminal_commits = ["700", "701", "702", "703", "704", "705"]
+        .map(|marker| {
+            write_package_snapshot(
+                shared_dir.path(),
+                package_source,
+                marker,
+                None,
+                &format!("terminal {marker}"),
+            )
+        });
+    let deep_commits = ["600", "601", "602", "603", "604"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, marker)| {
+            let manifest = format!("{} {}\n", aliases[2], terminal_commits[index]);
+            write_package_snapshot(
+                shared_dir.path(),
+                package_source,
+                marker,
+                Some(&manifest),
+                &format!("deep {marker}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let middle_commits = ["500", "501", "502", "503"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, marker)| {
+            let manifest = format!("{} {}\n", aliases[1], deep_commits[index]);
+            write_package_snapshot(
+                shared_dir.path(),
+                package_source,
+                marker,
+                Some(&manifest),
+                &format!("middle {marker}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let parent_manifest = format!("{} {}\n", aliases[0], middle_commits[0]);
+    let parent_commit = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "400",
+        Some(&parent_manifest),
+        "root before paired rebind storms",
+    );
+
+    let loader = ProjectLoader::default();
+    let resolve_pin = |name: &str, commit: &str| {
+        PinnedDatabase::resolve(
+            name.to_owned(),
+            shared_repository.clone(),
+            commit,
+            loader,
+        )
+        .unwrap()
+    };
+    let resolver = PackageResolver::new(
+        aliases
+            .iter()
+            .map(|alias| ((*alias).to_owned(), shared_repository.clone())),
+        loader,
+    )
+    .unwrap();
+    let assert_pin = |session: &AttachedDatabaseSession, alias: &str, commit: &str| {
+        assert_eq!(
+            session.database(alias).unwrap().pin().commit().as_str(),
+            commit
+        );
+    };
+
+    let mut post_storm_parent = resolver
+        .resolve_for_parent(resolve_pin("app", &parent_commit))
+        .unwrap();
+    post_storm_parent
+        .rebind_database(resolve_pin(aliases[0], &middle_commits[1]))
+        .unwrap();
+    post_storm_parent
+        .rebind_database(resolve_pin(aliases[0], &middle_commits[2]))
+        .unwrap();
+    let after_prior_storm = post_storm_parent.clone();
+
+    let first_wave = resolver
+        .resolve_nested_rebind_path(
+            &post_storm_parent,
+            &[
+                resolve_pin(aliases[0], &middle_commits[3]),
+                resolve_pin(aliases[1], &deep_commits[4]),
+            ],
+        )
+        .unwrap();
+    assert_eq!(first_wave.retained_sessions().len(), 2);
+    assert_pin(
+        &first_wave.retained_sessions()[0],
+        aliases[0],
+        &middle_commits[2],
+    );
+    assert_module_route(
+        &first_wave.retained_sessions()[0],
+        "archive.orna",
+        "= 502",
+    );
+    assert_pin(
+        &first_wave.retained_sessions()[1],
+        aliases[1],
+        &deep_commits[3],
+    );
+    assert_module_route(
+        &first_wave.retained_sessions()[1],
+        "main.orna",
+        "= 503",
+    );
+    assert_module_route(
+        &first_wave.retained_sessions()[1],
+        "archive_copy.orna",
+        "= 603",
+    );
+    assert_pin(
+        first_wave.final_session(),
+        aliases[2],
+        &terminal_commits[4],
+    );
+    assert_module_route(first_wave.final_session(), "main.orna", "= 604");
+    assert_module_route(
+        first_wave.final_session(),
+        "archive_copy_archive.orna",
+        "= 704",
+    );
+
+    let reopened_prior_route = resolver
+        .resolve_nested_path(&after_prior_storm, &aliases[..2])
+        .unwrap();
+    assert_pin(
+        &reopened_prior_route,
+        aliases[2],
+        &terminal_commits[2],
+    );
+    assert_module_route(&reopened_prior_route, "main.orna", "= 602");
+    assert_module_route(
+        &reopened_prior_route,
+        "archive_copy_archive.orna",
+        "= 702",
+    );
+    assert_pin(
+        &post_storm_parent,
+        aliases[0],
+        &middle_commits[2],
+    );
+
+    let extended = resolver
+        .extend_nested_rebind_path(
+            &first_wave,
+            &[resolve_pin(aliases[2], &terminal_commits[5])],
+        )
+        .unwrap();
+    assert_eq!(extended.retained_sessions().len(), 3);
+    assert_pin(
+        &extended.retained_sessions()[2],
+        aliases[2],
+        &terminal_commits[4],
+    );
+    assert_pin(
+        first_wave.final_session(),
+        aliases[2],
+        &terminal_commits[4],
+    );
+    assert_pin(extended.final_session(), aliases[2], &terminal_commits[5]);
+
+    let failed_extension = resolver.extend_nested_rebind_path(
+        &first_wave,
+        &[
+            resolve_pin(aliases[2], &terminal_commits[5]),
+            resolve_pin("unavailable", &terminal_commits[0]),
+        ],
+    );
+    assert!(matches!(
+        failed_extension,
+        Err(AttachmentError::AttachmentNotFound)
+    ));
+    assert_pin(
+        first_wave.final_session(),
+        aliases[2],
+        &terminal_commits[4],
+    );
+}
+
+#[test]
+fn sibling_terminal_routes_stabilize_across_repeated_post_storm_waves() {
+    let package_source = include_str!("fixtures/attach-package.orna");
+    let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
+    let aliases = [
+        "archive",
+        "archive_copy",
+        "archive_copy_archive",
+        "archive_copy_archive_archive",
+    ];
+    let leaf_commits = ["700", "701", "702", "703"]
+        .into_iter()
+        .map(|marker| {
+            write_package_snapshot(
+                shared_dir.path(),
+                package_source,
+                marker,
+                None,
+                &format!("leaf {marker}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let terminal_left_manifest = format!("{} {}\n", aliases[3], leaf_commits[0]);
+    let terminal_left = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "710",
+        Some(&terminal_left_manifest),
+        "left terminal route",
+    );
+    let terminal_right_manifest = format!("{} {}\n", aliases[3], leaf_commits[1]);
+    let terminal_right = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "711",
+        Some(&terminal_right_manifest),
+        "right terminal route",
+    );
+    let shared_terminal_manifest = format!("{} {}\n", aliases[3], leaf_commits[2]);
+    let shared_terminal = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "712",
+        Some(&shared_terminal_manifest),
+        "shared terminal route",
+    );
+    let deep_left_manifest = format!("{} {}\n", aliases[2], terminal_left);
+    let deep_left = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "602",
+        Some(&deep_left_manifest),
+        "left deep route",
+    );
+    let deep_right_manifest = format!("{} {}\n", aliases[2], terminal_right);
+    let deep_right = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "603",
+        Some(&deep_right_manifest),
+        "right deep route",
+    );
+    let deep_base_manifest = format!("{} {}\n", aliases[2], terminal_left);
+    let deep_base = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "600",
+        Some(&deep_base_manifest),
+        "shared middle closure base",
+    );
+    let middle_left_manifest = format!("{} {}\n", aliases[1], deep_base);
+    let middle_left = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "500",
+        Some(&middle_left_manifest),
+        "left initial middle route",
+    );
+    let middle_right_manifest = format!("{} {}\n", aliases[1], deep_base);
+    let middle_right = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "501",
+        Some(&middle_right_manifest),
+        "right initial middle route",
+    );
+    let middle_post_left_manifest = format!("{} {}\n", aliases[1], deep_base);
+    let middle_post_left = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "502",
+        Some(&middle_post_left_manifest),
+        "left post-storm middle route",
+    );
+    let middle_post_right_manifest = format!("{} {}\n", aliases[1], deep_base);
+    let middle_post_right = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "503",
+        Some(&middle_post_right_manifest),
+        "right post-storm middle route",
+    );
+    let middle_shared_manifest = format!("{} {}\n", aliases[1], deep_base);
+    let middle_shared = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "504",
+        Some(&middle_shared_manifest),
+        "shared rebind wave middle route",
+    );
+    let left_parent_manifest = format!("{} {}\n", aliases[0], middle_left);
+    let left_parent_commit = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "400",
+        Some(&left_parent_manifest),
+        "left sibling root",
+    );
+    let right_parent_manifest = format!("{} {}\n", aliases[0], middle_right);
+    let right_parent_commit = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "401",
+        Some(&right_parent_manifest),
+        "right sibling root",
+    );
+
+    let loader = ProjectLoader::default();
+    let resolve_pin = |name: &str, commit: &str| {
+        PinnedDatabase::resolve(
+            name.to_owned(),
+            shared_repository.clone(),
+            commit,
+            loader,
+        )
+        .unwrap()
+    };
+    let resolver = PackageResolver::new(
+        aliases
+            .iter()
+            .map(|alias| ((*alias).to_owned(), shared_repository.clone())),
+        loader,
+    )
+    .unwrap();
+    let assert_pin = |session: &AttachedDatabaseSession, alias: &str, commit: &str| {
+        assert_eq!(
+            session.database(alias).unwrap().pin().commit().as_str(),
+            commit
+        );
+    };
+
+    let mut parents = vec![
+        resolver
+            .resolve_for_parent(resolve_pin("app_left", &left_parent_commit))
+            .unwrap(),
+        resolver
+            .resolve_for_parent(resolve_pin("app_right", &right_parent_commit))
+            .unwrap(),
+    ];
+    let initial_parents = parents.clone();
+    parents[0]
+        .rebind_database(resolve_pin(aliases[0], &middle_post_left))
+        .unwrap();
+    parents[1]
+        .rebind_database(resolve_pin(aliases[0], &middle_post_right))
+        .unwrap();
+    let post_storm = resolver
+        .resolve_sibling_rebind_wave(&parents, &[resolve_pin(aliases[0], &middle_shared)])
+        .unwrap();
+
+    assert_eq!(post_storm.routes().len(), 2);
+    assert_pin(
+        &post_storm.routes()[0].retained_sessions()[0],
+        aliases[0],
+        &middle_post_left,
+    );
+    assert_pin(
+        &post_storm.routes()[1].retained_sessions()[0],
+        aliases[0],
+        &middle_post_right,
+    );
+    assert_pin(
+        &initial_parents[0],
+        aliases[0],
+        &middle_left,
+    );
+    assert_pin(
+        &initial_parents[1],
+        aliases[0],
+        &middle_right,
+    );
+
+    let left_deep_wave = [resolve_pin(aliases[1], &deep_left)];
+    let right_deep_wave = [resolve_pin(aliases[1], &deep_right)];
+    let diverged = resolver
+        .extend_sibling_rebind_paths(&[
+            (&post_storm.routes()[0], &left_deep_wave),
+            (&post_storm.routes()[1], &right_deep_wave),
+        ])
+        .unwrap();
+    assert_eq!(diverged.routes().len(), 2);
+    assert_pin(
+        diverged.routes()[0].final_session(),
+        aliases[2],
+        &terminal_left,
+    );
+    assert_pin(
+        diverged.routes()[1].final_session(),
+        aliases[2],
+        &terminal_right,
+    );
+
+    let shared_terminal_wave = [resolve_pin(aliases[2], &shared_terminal)];
+    let terminal_convergence = resolver
+        .extend_sibling_rebind_wave(&diverged, &shared_terminal_wave)
+        .unwrap();
+    assert_eq!(terminal_convergence.routes().len(), 2);
+    assert_pin(
+        terminal_convergence.routes()[0].final_session(),
+        aliases[3],
+        &leaf_commits[2],
+    );
+    assert_pin(
+        terminal_convergence.routes()[1].final_session(),
+        aliases[3],
+        &leaf_commits[2],
+    );
+    assert_eq!(terminal_convergence.routes()[0].retained_sessions().len(), 3);
+    assert_eq!(terminal_convergence.routes()[1].retained_sessions().len(), 3);
+    assert_pin(
+        &terminal_convergence.routes()[0].retained_sessions()[2],
+        aliases[2],
+        &terminal_left,
+    );
+    assert_pin(
+        &terminal_convergence.routes()[1].retained_sessions()[2],
+        aliases[2],
+        &terminal_right,
+    );
+    assert_module_route(
+        &terminal_convergence.routes()[0].retained_sessions()[2],
+        "archive_copy_archive.orna",
+        "= 710",
+    );
+    assert_module_route(
+        &terminal_convergence.routes()[1].retained_sessions()[2],
+        "archive_copy_archive.orna",
+        "= 711",
+    );
+
+    let shared_leaf_wave = [resolve_pin(aliases[3], &leaf_commits[3])];
+    let stabilized = resolver
+        .extend_sibling_rebind_wave(&terminal_convergence, &shared_leaf_wave)
+        .unwrap();
+    assert_eq!(stabilized.routes().len(), 2);
+    for route in stabilized.routes() {
+        assert_eq!(route.retained_sessions().len(), 4);
+        assert_pin(route.final_session(), aliases[3], &leaf_commits[3]);
+        assert_module_route(route.final_session(), "main.orna", "= 703");
+        assert_pin(
+            &route.retained_sessions()[3],
+            aliases[3],
+            &leaf_commits[2],
+        );
+        assert_module_route(
+            &route.retained_sessions()[3],
+            "archive_copy_archive_archive.orna",
+            "= 702",
+        );
+    }
+
+    let valid_plan = [resolve_pin(aliases[0], &middle_shared)];
+    let late_failure = [
+        resolve_pin(aliases[0], &middle_shared),
+        resolve_pin("unavailable", &leaf_commits[0]),
+    ];
+    let failed_batch = resolver.resolve_sibling_rebind_paths(&[
+        (&parents[0], &valid_plan),
+        (&parents[1], &late_failure),
+    ]);
+    assert!(matches!(
+        failed_batch,
+        Err(AttachmentError::AttachmentNotFound)
+    ));
+    assert_pin(&parents[0], aliases[0], &middle_post_left);
+    assert_pin(&parents[1], aliases[0], &middle_post_right);
+    assert_pin(
+        diverged.routes()[0].final_session(),
+        aliases[2],
+        &terminal_left,
+    );
+    assert_pin(
+        diverged.routes()[1].final_session(),
+        aliases[2],
+        &terminal_right,
+    );
+}
+
 fn assert_module_route(session: &AttachedDatabaseSession, path: &str, source_marker: &str) {
     assert!(
         session

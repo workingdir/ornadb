@@ -399,27 +399,79 @@ impl RelationPlan {
 
     pub(super) fn with_stage(mut self, stage: RelationStage) -> Self {
         match stage {
+            RelationStage::Drop(0) => {
+                // A zero-row drop is an identity. Remove it so a following
+                // filter cascade can still reach union leaves, while demand-
+                // changing stages such as Take remain pushdown barriers.
+                return self;
+            }
             RelationStage::Filter(mut predicates) => {
-                // A filter directly above a union is equivalent to applying
-                // that ordered predicate cascade to each child before their
-                // results are concatenated. Push only while no intervening
-                // outer stage changes the filter's input or demand boundary.
-                if self.stages.is_empty()
-                    && let Some((left, right)) = self.source_union.take()
-                {
-                    self.source_union = Some((
-                        Box::new((*left).with_stage(RelationStage::Filter(predicates.clone()))),
-                        Box::new((*right).with_stage(RelationStage::Filter(predicates))),
-                    ));
-                    return self;
-                }
                 if let Some(RelationStage::Filter(previous)) = self.stages.last_mut() {
                     previous.append(&mut predicates);
                 } else {
                     self.stages.push(RelationStage::Filter(predicates));
                 }
             }
-            stage => self.stages.push(stage),
+            stage => {
+                self = self.flush_filter_cascade();
+                self.stages.push(stage);
+            }
+        }
+        self
+    }
+
+    /// Pushes a pending root filter cascade into union leaves as one batch.
+    /// Adjacent filters remain together while a pipeline is assembled; a
+    /// demand-changing stage or terminal observer flushes the complete batch.
+    pub(super) fn flush_filter_cascade(mut self) -> Self {
+        if self.source_union.is_none()
+            || !matches!(self.stages.as_slice(), [RelationStage::Filter(_)])
+        {
+            return self;
+        }
+        let RelationStage::Filter(predicates) = self
+            .stages
+            .pop()
+            .expect("checked filter stage")
+        else {
+            unreachable!("checked filter stage")
+        };
+        let (left, right) = self.source_union.take().expect("checked union source");
+        self.source_union = Some((
+            Box::new(left.push_filter_cascade(predicates.clone())),
+            Box::new(right.push_filter_cascade(predicates)),
+        ));
+        self
+    }
+
+    fn push_filter_cascade(mut self, mut predicates: Vec<Value>) -> Self {
+        if let Some((left, right)) = self.source_union.take() {
+            if self.stages.is_empty() {
+                self.source_union = Some((
+                    Box::new(left.push_filter_cascade(predicates.clone())),
+                    Box::new(right.push_filter_cascade(predicates)),
+                ));
+                return self;
+            }
+            if self.stages.len() == 1
+                && matches!(self.stages.first(), Some(RelationStage::Filter(_)))
+            {
+                let Some(RelationStage::Filter(mut previous)) = self.stages.pop() else {
+                    unreachable!("checked filter stage")
+                };
+                previous.append(&mut predicates);
+                self.source_union = Some((
+                    Box::new(left.push_filter_cascade(previous.clone())),
+                    Box::new(right.push_filter_cascade(previous)),
+                ));
+                return self;
+            }
+            self.source_union = Some((left, right));
+        }
+        if let Some(RelationStage::Filter(previous)) = self.stages.last_mut() {
+            previous.append(&mut predicates);
+        } else {
+            self.stages.push(RelationStage::Filter(predicates));
         }
         self
     }
