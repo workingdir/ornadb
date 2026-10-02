@@ -772,6 +772,39 @@ fn module_upgrade_sessions_replay_with_their_captured_standard_snapshot() {
 }
 
 #[test]
+fn project_module_executes_a_real_function_from_its_gitlink_pinned_std_snapshot() {
+    let (
+        _directory,
+        project_v1,
+        _project_v2,
+        _project_v3,
+        _project_v4,
+        _project_v5,
+        project_v6,
+        snapshots,
+    ) = module_upgrade_projects();
+    assert_ne!(snapshots[0], snapshots[5]);
+
+    let mut historical = AdmittedReplSession::from_loaded_project(
+        &project_v1,
+        project_v1.standard_sources().iter().cloned(),
+        Limits::default(),
+    )
+    .expect("the historical project's exact std gitlink snapshot admits");
+    let mut current = AdmittedReplSession::from_loaded_project(
+        &project_v6,
+        project_v6.standard_sources().iter().cloned(),
+        Limits::default(),
+    )
+    .expect("the current project's exact std gitlink snapshot admits");
+
+    assert_eq!(project_v1.standard_profile().unwrap().snapshot(), snapshots[0]);
+    assert_eq!(project_v6.standard_profile().unwrap().snapshot(), snapshots[5]);
+    assert_eq!(historical.submit("main.run()"), Ok(Some(int(8))));
+    assert_eq!(current.submit("main.run()"), Ok(Some(int(100_007))));
+}
+
+#[test]
 fn stable_module_replays_across_distinct_snapshot_pins() {
     let (
         _directory,
