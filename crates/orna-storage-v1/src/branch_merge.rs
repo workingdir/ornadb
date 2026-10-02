@@ -277,6 +277,12 @@ pub enum BranchMergeTombstoneHistoryError {
     DuplicateFragment { order: u64, fragment: usize },
     /// Fragments for one position disagree about how many pieces it contains.
     FragmentCountMismatch { order: u64, expected: usize, actual: usize },
+    /// No incomplete buffered depth wave exists at this lineage position.
+    NoIncompleteDepthWave { order: u64 },
+    /// A batch wave-restart request must include at least one position.
+    EmptyDepthWaveRestartBatch,
+    /// A batch wave-restart request names one position more than once.
+    DuplicateDepthWaveRestart { order: u64 },
     /// Overlapping fragments attempted to record one table/key twice in a wave.
     DuplicateTombstone { order: u64 },
     /// Two concurrently buffered lineage positions record one table/key.
@@ -331,6 +337,12 @@ enum BranchMergeTombstoneSubmissionMode {
 /// position mismatches but checks known cross-mode conflicts first. Failed
 /// appends are atomic: a cross-position duplicate does not retain the
 /// retry-mode reservation that `submit` and fragment submission keep.
+/// An incomplete depth wave can be explicitly restarted after its split plan
+/// is recomputed; restart clears only that wave's buffered pieces and keeps
+/// its lineage position, submission mode, and later append queue.
+/// Multiple wave restarts can be applied as one transaction: the batch is
+/// normalized by lineage order, and any invalid member leaves every wave and
+/// queued append unchanged.
 /// Unrecorded stale order precedes
 /// buffered and retry-mode checks, and mixed-mode conflicts precede
 /// fragment-index or tombstone-content validation.
@@ -506,6 +518,76 @@ impl BranchMergeTombstoneHistory {
         };
         fragments.insert(fragment, tombstones.to_vec());
         Ok(self.release_contiguous())
+    }
+
+    /// Restarts an incomplete depth wave after its split plan has been
+    /// recomputed. Previously buffered pieces for this position are discarded,
+    /// and the new fragment count replaces the old one. Its paired lineage
+    /// position and depth-fragment submission mode remain reserved, while
+    /// later buffered plans stay queued. No tombstone events are emitted.
+    ///
+    /// Returns [`BranchMergeTombstoneHistoryError::NoIncompleteDepthWave`] if
+    /// this position has no incomplete buffered depth wave to recover.
+    pub fn restart_depth_merge_wave(
+        &mut self,
+        order: u64,
+        fragment_count: usize,
+    ) -> Result<(), BranchMergeTombstoneHistoryError> {
+        self.classify_submission_position(
+            order,
+            BranchMergeTombstoneSubmissionMode::DepthFragments,
+        )?;
+        if fragment_count == 0 {
+            return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+                fragment: 0,
+                fragment_count,
+            });
+        }
+
+        match self.pending_deltas.get_mut(&order) {
+            Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
+                fragment_count: previous_count,
+                fragments,
+            }) if fragments.len() < *previous_count => {
+                *previous_count = fragment_count;
+                fragments.clear();
+                Ok(())
+            }
+            _ => Err(BranchMergeTombstoneHistoryError::NoIncompleteDepthWave { order }),
+        }
+    }
+
+    /// Atomically restarts several incomplete depth waves as one recovery
+    /// transaction. Positions are processed in ascending lineage order so the
+    /// reported error is stable regardless of the caller's input order.
+    /// Every position must be unique and refer to an incomplete depth wave;
+    /// each replacement count must be nonzero. If validation of any member
+    /// fails, the original waves and all later queued appends remain intact.
+    /// An empty batch is rejected rather than treated as a successful recovery.
+    pub fn restart_depth_merge_waves(
+        &mut self,
+        restarts: &[(u64, usize)],
+    ) -> Result<(), BranchMergeTombstoneHistoryError> {
+        if restarts.is_empty() {
+            return Err(BranchMergeTombstoneHistoryError::EmptyDepthWaveRestartBatch);
+        }
+
+        let mut restarts = restarts.to_vec();
+        restarts.sort_unstable_by_key(|(order, _)| *order);
+        for pair in restarts.windows(2) {
+            if pair[0].0 == pair[1].0 {
+                return Err(BranchMergeTombstoneHistoryError::DuplicateDepthWaveRestart {
+                    order: pair[0].0,
+                });
+            }
+        }
+
+        let mut candidate = self.clone();
+        for (order, fragment_count) in restarts {
+            candidate.restart_depth_merge_wave(order, fragment_count)?;
+        }
+        *self = candidate;
+        Ok(())
     }
 
     fn release_contiguous(&mut self) -> Vec<BranchMergeTombstoneEvent> {
