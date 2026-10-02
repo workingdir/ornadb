@@ -1093,6 +1093,8 @@ pub fn explain_query_with_disjunct_storm_chain(
 /// estimate as its cap, so nested work cannot borrow a wider ancestor cap.
 /// The known byte cap therefore follows the immediate branch input at every
 /// rebind depth, even when every row-based work estimate is unknown.
+/// Plan details report the deepest cascade level that contains a rebind so the
+/// nested cap boundary is visible alongside the recursive branch shape.
 /// Since
 /// `sys.PlanNodeKind` has no union node, each storm is one aggregate filter
 /// node whose details retain the exact branch chains and rebind points; this
@@ -2035,6 +2037,7 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             })
             .collect::<Vec<_>>()
             .join(";");
+        let limit_chain_rebind_max_nested_depth = disjunct_storm_rebind_depth(storm);
         let limit_chain_rebind_predicates = storm
             .branches
             .iter()
@@ -2070,6 +2073,12 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             (
                 "limit_chain_rebind_shapes".to_owned(),
                 PlanDetail::Text(limit_chain_rebind_shapes),
+            ),
+            (
+                "limit_chain_rebind_max_nested_depth".to_owned(),
+                PlanDetail::Integer(
+                    u64::try_from(limit_chain_rebind_max_nested_depth).unwrap_or(u64::MAX),
+                ),
             ),
             (
                 "limit_chain_rebind_predicates".to_owned(),
@@ -2659,6 +2668,27 @@ fn disjunct_storm_predicates(storms: &[DisjunctStormCascadeDescription]) -> Vec<
         }
     }
     predicates
+}
+
+fn disjunct_storm_rebind_depth(storm: &DisjunctStormCascadeDescription) -> usize {
+    let mut pending = vec![(storm, 1usize)];
+    let mut max_rebind_depth = 0usize;
+    while let Some((storm, depth)) = pending.pop() {
+        for branch in &storm.branches {
+            if !branch.limit_rebinds.is_empty() {
+                max_rebind_depth = max_rebind_depth.max(depth);
+            }
+            pending.extend(
+                branch
+                    .limit_rebinds
+                    .iter()
+                    .flat_map(|rebind| rebind.storms.iter())
+                    .chain(branch.nested_storms.iter())
+                    .map(|nested| (nested, depth.saturating_add(1))),
+            );
+        }
+    }
+    max_rebind_depth
 }
 
 fn disjunct_storm_cascade_cardinality_and_work(
