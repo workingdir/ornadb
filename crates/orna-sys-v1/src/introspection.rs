@@ -2026,10 +2026,7 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
         storm_scope_path.push(PlanByteCapScopeSegment::StormStage {
             index: storm_stage_index,
         });
-        let storm_scope = disjunct_storm_stage_scope_label(
-            &prior_storm_stage_path,
-            storm_stage_index,
-        );
+        let storm_scope = byte_cap_scope_path_label(&storm_scope_path);
         let (cardinality, work, overflowed) = disjunct_storm_cascade_cardinality_and_work(
             current_cardinality,
             storm,
@@ -3003,26 +3000,6 @@ fn stabilize_rebind_byte_cap_handoff_routes(
                 .then_with(|| left.scope.cmp(&right.scope))
         });
     }
-}
-
-fn disjunct_storm_stage_scope_label(
-    prior_stage_path: &[PlanByteCapScopeSegment],
-    current_stage_index: usize,
-) -> String {
-    let mut scope = "root".to_owned();
-    for segment in prior_stage_path {
-        match segment {
-            PlanByteCapScopeSegment::StormStage { index } => {
-                scope = format!("{scope}/storm{index}");
-            }
-            PlanByteCapScopeSegment::StormStageOutput { .. } => scope.push_str("/output"),
-            _ => unreachable!("prior top-level stage paths contain only stage boundaries"),
-        }
-    }
-    if !prior_stage_path.is_empty() {
-        scope = format!("{scope}/storm{current_stage_index}");
-    }
-    scope
 }
 
 fn disjunct_storm_cascade_cardinality_and_work(
