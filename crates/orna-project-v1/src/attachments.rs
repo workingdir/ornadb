@@ -485,6 +485,37 @@ impl PackageResolver {
         }
         Ok(session)
     }
+
+    /// Resolves the next closure from an exact alias selected in `parent`.
+    /// This uses that session's current pin, so a retained sibling session
+    /// continues from its own route after another session is rebound.
+    pub fn resolve_nested_for_alias(
+        &self,
+        parent: &AttachedDatabaseSession,
+        alias: &str,
+    ) -> Result<AttachedDatabaseSession, AttachmentError> {
+        let alias = checked_name(alias.to_owned())?;
+        let selected = parent
+            .database(&alias)
+            .cloned()
+            .ok_or(AttachmentError::DatabaseUnavailable)?;
+        self.resolve_for_parent(selected)
+    }
+
+    /// Resolves a chain of exact aliases from a retained session snapshot.
+    /// Each edge is selected from the session opened at the preceding edge;
+    /// a failure leaves the caller's snapshot untouched.
+    pub fn resolve_nested_path(
+        &self,
+        parent: &AttachedDatabaseSession,
+        aliases: &[&str],
+    ) -> Result<AttachedDatabaseSession, AttachmentError> {
+        let mut current = parent.clone();
+        for alias in aliases {
+            current = self.resolve_nested_for_alias(&current, alias)?;
+        }
+        Ok(current)
+    }
 }
 
 /// A primary database and zero or more read-only, commit-pinned attachments.
@@ -528,6 +559,28 @@ impl AttachedDatabaseSession {
         }
         self.attached.insert(name, database);
         Ok(())
+    }
+
+    /// Atomically replaces one attached alias with a new immutable pin and
+    /// returns the previous pin for later use as a retained closure root.
+    /// Matching is by the new pin's exact alias; sibling aliases are unchanged.
+    /// The alias must already be attached, and failures leave the session as-is.
+    pub fn rebind_database(
+        &mut self,
+        database: PinnedDatabase,
+    ) -> Result<PinnedDatabase, AttachmentError> {
+        let name = checked_name(database.pin.name.clone())?;
+        if name == "sys" {
+            return Err(AttachmentError::SystemDatabaseCannotAttach);
+        }
+        if name == self.primary.pin.name {
+            return Err(AttachmentError::DuplicateAttachment);
+        }
+        let current = self
+            .attached
+            .get_mut(&name)
+            .ok_or(AttachmentError::AttachmentNotFound)?;
+        Ok(std::mem::replace(current, database))
     }
 
     /// Detaches an optional database alias from subsequent session lookups.
