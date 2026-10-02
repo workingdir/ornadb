@@ -1,0 +1,4 @@
+pub table Reading(id: Int) {
+    identity: (Float, Int),
+    assert all_unique(reading => reading.identity);
+}
