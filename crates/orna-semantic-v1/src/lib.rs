@@ -7295,7 +7295,7 @@ fn infer(
                     (Pattern::Name(name, span), ty)
                         if local
                             .get(name)
-                            .is_some_and(|symbol| symbol.kind == SymbolKind::Parameter)
+                            .is_some_and(|symbol| is_snapshot_ref_value(&symbol.ty))
                             && is_snapshot_ref_value(ty) =>
                     {
                         let source = span.file.as_deref().unwrap_or("<unknown>");
@@ -9335,43 +9335,200 @@ fn infer_case_arm_body(
 }
 
 fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
-    let (
-        Type::Function {
-            parameters: left_parameters,
-            parameter_names: left_names,
-            result: left_result,
-            default_parameters: left_defaults,
-        },
-        Type::Function {
-            parameters: right_parameters,
-            parameter_names: right_names,
-            result: right_result,
-            default_parameters: right_defaults,
-        },
-    ) = (left, right)
-    else {
-        return None;
-    };
-    if left_result != right_result
-        || left_parameters.len() != right_parameters.len()
-        || left_parameters
-            .iter()
-            .zip(right_parameters)
-            .any(|(left, right)| left != right)
-    {
+    if left == right {
+        return Some(left.clone());
+    }
+    if is_terminal_historical_callable(left) && is_terminal_historical_callable(right) {
+        // Completed zero-argument closures have no continuation boundary to
+        // keep paired lane identity. Preserve their exact pins so a list
+        // cannot silently combine terminal values from separate lanes.
         return None;
     }
-    Some(Type::Function {
-        parameters: left_parameters.clone(),
-        default_parameters: left_defaults
-            .intersection(right_defaults)
-            .copied()
-            .collect(),
-        parameter_names: (left_names == right_names)
-            .then(|| left_names.clone())
-            .flatten(),
-        result: left_result.clone(),
-    })
+    merge_checkpoint_field_map(left, right)
+}
+
+fn is_terminal_historical_callable(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Applied { base, arguments }
+            if base == "sys.HistoricalCallable"
+                && matches!(
+                    arguments.as_slice(),
+                    [_, Type::Function { parameters, .. }] if parameters.is_empty()
+                )
+    )
+}
+
+fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
+    if left == right {
+        return Some(left.clone());
+    }
+    if is_snapshot_context_map_shape(left) && is_snapshot_context_map_shape(right) {
+        return merge_snapshot_context_map(left, right);
+    }
+    match (left, right) {
+        (
+            Type::Applied {
+                base: left_base,
+                arguments: left_arguments,
+            },
+            Type::Applied {
+                base: right_base,
+                arguments: right_arguments,
+            },
+        ) if left_base == "sys.HistoricalCallable" && right_base == "sys.HistoricalCallable" => {
+            match (left_arguments.as_slice(), right_arguments.as_slice()) {
+                ([left_snapshot, left_callable], [right_snapshot, right_callable]) => Some(
+                    historical_callable_type(
+                        &merge_snapshot_context_map(left_snapshot, right_snapshot)?,
+                        &merge_checkpoint_field_map(left_callable, right_callable)?,
+                    ),
+                ),
+                _ => None,
+            }
+        }
+        (
+            Type::Function {
+                parameters: left_parameters,
+                parameter_names: left_names,
+                result: left_result,
+                default_parameters: left_defaults,
+            },
+            Type::Function {
+                parameters: right_parameters,
+                parameter_names: right_names,
+                result: right_result,
+                default_parameters: right_defaults,
+            },
+        ) => {
+            if left_parameters.len() != right_parameters.len()
+                || left_parameters
+                    .iter()
+                    .zip(right_parameters)
+                    .any(|(left, right)| left != right)
+            {
+                return None;
+            }
+            Some(Type::Function {
+                parameters: left_parameters.clone(),
+                default_parameters: left_defaults
+                    .intersection(right_defaults)
+                    .copied()
+                    .collect(),
+                parameter_names: (left_names == right_names)
+                    .then(|| left_names.clone())
+                    .flatten(),
+                result: Box::new(merge_checkpoint_field_map(left_result, right_result)?),
+            })
+        }
+        (Type::List(left), Type::List(right)) => {
+            Some(Type::List(Box::new(merge_checkpoint_field_map(left, right)?)))
+        }
+        (Type::Range(left), Type::Range(right)) => {
+            Some(Type::Range(Box::new(merge_checkpoint_field_map(left, right)?)))
+        }
+        (Type::Relation(left), Type::Relation(right)) => Some(Type::Relation(Box::new(
+            merge_checkpoint_field_map(left, right)?,
+        ))),
+        (Type::Stream(left), Type::Stream(right)) => Some(Type::Stream(Box::new(
+            merge_checkpoint_field_map(left, right)?,
+        ))),
+        (Type::Optional(left), Type::Optional(right)) => Some(Type::Optional(Box::new(
+            merge_checkpoint_field_map(left, right)?,
+        ))),
+        (Type::Record(left), Type::Record(right)) if left.len() == right.len() => {
+            Some(Type::Record(
+                left.iter()
+                    .map(|(name, left)| {
+                        Some((
+                            name.clone(),
+                            merge_checkpoint_field_map(left, right.get(name)?)?,
+                        ))
+                    })
+                    .collect::<Option<BTreeMap<_, _>>>()?,
+            ))
+        }
+        (Type::Tuple(left), Type::Tuple(right)) if left.len() == right.len() => {
+            Some(Type::Tuple(
+                left.iter()
+                    .zip(right)
+                    .map(|(left, right)| merge_checkpoint_field_map(left, right))
+                    .collect::<Option<Vec<_>>>()?,
+            ))
+        }
+        (
+            Type::Applied {
+                base: left_base,
+                arguments: left_arguments,
+            },
+            Type::Applied {
+                base: right_base,
+                arguments: right_arguments,
+            },
+        ) if left_base == right_base && left_arguments.len() == right_arguments.len() => {
+            Some(Type::Applied {
+                base: left_base.clone(),
+                arguments: left_arguments
+                    .iter()
+                    .zip(right_arguments)
+                    .map(|(left, right)| merge_checkpoint_field_map(left, right))
+                    .collect::<Option<Vec<_>>>()?,
+            })
+        }
+        (
+            Type::MoneyPerUnit {
+                currency: left_currency,
+                unit: left_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: right_currency,
+                unit: right_unit,
+            },
+        ) => Some(Type::MoneyPerUnit {
+            currency: Box::new(merge_checkpoint_field_map(left_currency, right_currency)?),
+            unit: Box::new(merge_checkpoint_field_map(left_unit, right_unit)?),
+        }),
+        _ => None,
+    }
+}
+
+/// Keep distinct pins in matching fields when homogeneous lists collect
+/// checkpoints from different snapshots. The reference defines pin identity
+/// for historical reads but is silent on local checkpoint collections.
+fn merge_snapshot_context_map(left: &Type, right: &Type) -> Option<Type> {
+    const CONTEXT_MAP: &str = "semantic.SnapshotContextMap";
+
+    fn collect_contexts(ty: &Type, contexts: &mut BTreeSet<String>) {
+        match ty {
+            Type::Applied { base, arguments } if base == "sys.SnapshotRefContext" => {
+                if let [Type::Named(selector)] = arguments.as_slice() {
+                    contexts.insert(selector.clone());
+                }
+            }
+            Type::Applied { base, arguments } if base == CONTEXT_MAP => {
+                contexts.extend(arguments.iter().filter_map(|argument| match argument {
+                    Type::Named(selector) => Some(selector.clone()),
+                    _ => None,
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    let mut contexts = BTreeSet::new();
+    collect_contexts(left, &mut contexts);
+    collect_contexts(right, &mut contexts);
+    match contexts.len() {
+        0 => None,
+        1 => contexts
+            .into_iter()
+            .next()
+            .map(|selector| contextual_snapshot_ref(&selector)),
+        _ => Some(Type::Applied {
+            base: CONTEXT_MAP.into(),
+            arguments: contexts.into_iter().map(Type::Named).collect(),
+        }),
+    }
 }
 
 fn infer_nominal(
@@ -16547,7 +16704,8 @@ fn call_argument_snapshot_context(
 /// A typed `SnapshotRef` parameter has no concrete identity while its body is
 /// summarized. Parameter references use a caller-specialized key; local aliases
 /// use capture keys so same-named nested parameters cannot retarget them, with
-/// a lexical binder identity for aliases of shadowing lambda parameters.
+/// a lexical binder identity for aliases of shadowing lambda parameters or
+/// local SnapshotRef bindings.
 /// Uncontextualized non-parameter references stay generic because this semantic
 /// pass cannot infer their runtime pin.
 fn specialize_snapshot_ref_parameter(
@@ -16716,6 +16874,9 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
     if expected == actual {
         return true;
     }
+    if is_snapshot_context_map_shape(expected) && is_snapshot_context_map_shape(actual) {
+        return true;
+    }
     match (expected, actual) {
         (
             Type::Applied {
@@ -16833,6 +16994,21 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
         ) => {
             pinned_snapshot_shape_matches(expected_currency, actual_currency)
                 && pinned_snapshot_shape_matches(expected_unit, actual_unit)
+        }
+        _ => false,
+    }
+}
+
+fn is_snapshot_context_map_shape(ty: &Type) -> bool {
+    match ty {
+        Type::Applied { base, arguments } if base == "sys.SnapshotRefContext" => {
+            matches!(arguments.as_slice(), [Type::Named(_)])
+        }
+        Type::Applied { base, arguments } if base == "semantic.SnapshotContextMap" => {
+            !arguments.is_empty()
+                && arguments
+                    .iter()
+                    .all(|argument| matches!(argument, Type::Named(_)))
         }
         _ => false,
     }
