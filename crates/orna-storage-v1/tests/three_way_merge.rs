@@ -22543,6 +22543,26 @@ fn paired_restore_fold_keeps_uneven_fragment_retry_labels() {
     assert_eq!(history, committed);
 
     assert_eq!(
+        history.submit_depth_merge_fragment(0, 2, 2, &[]),
+        Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+            fragment: 2,
+            fragment_count: 2,
+        }),
+        "the earlier folded wave rejects an out-of-range member of its retry-label pair",
+    );
+    assert_eq!(history, committed);
+
+    assert_eq!(
+        history.submit_depth_merge_fragment(1, 3, 3, &[]),
+        Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+            fragment: 3,
+            fragment_count: 3,
+        }),
+        "the later folded wave rejects an out-of-range member of its different retry-label pair",
+    );
+    assert_eq!(history, committed);
+
+    assert_eq!(
         history.submit_depth_merge_fragment(1, 0, 3, &[]),
         Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 1 }),
         "the original label still reaches the existing stale-position result",

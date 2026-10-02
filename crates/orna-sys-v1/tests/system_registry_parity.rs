@@ -158,7 +158,7 @@ fn copy_output_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
 }
 
 #[test]
-fn generated_sys_artifacts_regenerate_byte_for_byte_across_fresh_registry_builds() {
+fn generated_artifact_determinism_matrix_matches_embedded_and_build_outputs() {
     let regenerated = regenerate();
     let second_build = regenerate();
     assert_eq!(
@@ -169,8 +169,20 @@ fn generated_sys_artifacts_regenerate_byte_for_byte_across_fresh_registry_builds
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let host_registry_json = build_host::generate_host_registry(&source_root)
         .expect("annotated native host operations regenerate deterministically");
+    assert_eq!(
+        host_registry_json,
+        build_host::generate_host_registry(&source_root)
+            .expect("second native host operation registry projection"),
+        "host operation registry bytes are stable across independent source walks"
+    );
     let host_schema_json = build_host::generate_host_registry_schema()
         .expect("native host operation schema regenerates deterministically");
+    assert_eq!(
+        host_schema_json,
+        build_host::generate_host_registry_schema()
+            .expect("second native host operation schema projection"),
+        "host schema bytes are stable across independent generations"
+    );
     let provider_schema_json = build_provider::generate_provider_registry_schema()
         .expect("typed provider schema regenerates deterministically");
     assert_eq!(
@@ -180,73 +192,68 @@ fn generated_sys_artifacts_regenerate_byte_for_byte_across_fresh_registry_builds
         "dispatch schema generation is stable across independent runs"
     );
 
-    assert_eq!(regenerated.api_json, system_api_json());
     let api_hash = format!("{:x}", Sha256::digest(regenerated.api_json.as_bytes()));
     assert_eq!(
         api_hash, SYS_API_V1_SHA256,
         "on-demand API retains the frozen 1.0 bytes"
     );
-    assert_eq!(regenerated.schema_json, system_api_schema_json());
-    assert_eq!(
-        regenerated.provider_abi_json,
-        system_provider_abi_json(),
-        "embedded dispatch table JSON must match a fresh typed-registry projection"
-    );
-    assert_eq!(
-        system_provider_abi_schema_json(),
-        provider_schema_json,
-        "embedded dispatch schema matches a fresh deterministic schema projection"
-    );
-    assert_eq!(
-        regenerated.binding_bundle,
-        system_binding_stubs(),
-        "embedded Orna declaration bundle must match a fresh typed-registry projection"
-    );
-
-    assert_eq!(
-        fs::read_to_string(out_dir.join("api_sys.json")).expect("read build API artifact"),
-        regenerated.api_json
-    );
-    assert_eq!(
-        fs::read_to_string(out_dir.join("system_api_schema.json"))
-            .expect("read build schema artifact"),
-        regenerated.schema_json
-    );
-    assert_eq!(
-        fs::read_to_string(out_dir.join("system_provider_abi.json"))
-            .expect("read build dispatch artifact"),
-        regenerated.provider_abi_json
-    );
-    assert_eq!(
-        fs::read_to_string(out_dir.join("system_provider_abi.schema.json"))
-            .expect("read build dispatch schema artifact"),
-        provider_schema_json
-    );
-    assert_eq!(
-        fs::read_to_string(out_dir.join("system_bindings.orna"))
-            .expect("read build binding bundle"),
-        regenerated.binding_bundle
-    );
-    assert_eq!(
-        system_host_operation_registry_json(),
-        host_registry_json,
-        "embedded host dispatch metadata matches a fresh annotated-method projection"
-    );
-    assert_eq!(
-        system_host_operation_registry_schema_json(),
-        host_schema_json,
-        "embedded host dispatch schema matches a fresh generated schema"
-    );
-    assert_eq!(
-        fs::read_to_string(out_dir.join("system_host_operations.json"))
-            .expect("read build host operation artifact"),
-        host_registry_json
-    );
-    assert_eq!(
-        fs::read_to_string(out_dir.join("system_host_operations.schema.json"))
-            .expect("read build host operation schema artifact"),
-        host_schema_json
-    );
+    let embedded_api_json = system_api_json();
+    let artifact_matrix = [
+        (
+            "api/sys.json",
+            regenerated.api_json.as_str(),
+            embedded_api_json.as_str(),
+            "api_sys.json",
+        ),
+        (
+            "sys API schema",
+            regenerated.schema_json.as_str(),
+            system_api_schema_json(),
+            "system_api_schema.json",
+        ),
+        (
+            "typed provider dispatch registry",
+            regenerated.provider_abi_json.as_str(),
+            system_provider_abi_json(),
+            "system_provider_abi.json",
+        ),
+        (
+            "typed provider dispatch schema",
+            provider_schema_json.as_str(),
+            system_provider_abi_schema_json(),
+            "system_provider_abi.schema.json",
+        ),
+        (
+            "generated Orna stubs",
+            regenerated.binding_bundle.as_str(),
+            system_binding_stubs(),
+            "system_bindings.orna",
+        ),
+        (
+            "host operation registry",
+            host_registry_json.as_str(),
+            system_host_operation_registry_json(),
+            "system_host_operations.json",
+        ),
+        (
+            "host operation schema",
+            host_schema_json.as_str(),
+            system_host_operation_registry_schema_json(),
+            "system_host_operations.schema.json",
+        ),
+    ];
+    for (artifact, generated, embedded, build_output) in artifact_matrix {
+        assert_eq!(
+            generated, embedded,
+            "{artifact} embedded bytes match generation"
+        );
+        assert_eq!(
+            fs::read_to_string(out_dir.join(build_output))
+                .unwrap_or_else(|error| panic!("read {artifact} build output: {error}")),
+            generated,
+            "{artifact} build output bytes match fresh generation"
+        );
+    }
     verify_generated_output_tree(
         out_dir,
         &regenerated,
