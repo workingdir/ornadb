@@ -945,11 +945,12 @@ impl PackageResolver {
 
     /// Rebinds each terminal pair in a storm from one saved checkpoint.
     /// Every fold starts from the same exact nested pins and appends that
-    /// checkpoint route to the retained history, so repeated pairs cannot
-    /// widen the closure depth or lose their original wave/depth identity.
+    /// checkpoint route to retained history. Each emitted route receives its
+    /// own wave/depth label, and every earlier emitted label is checked after
+    /// each later fold so checkpoint history cannot be silently regrouped.
     /// The reference is silent on checkpoint-rooted storm folds; v1 preserves
-    /// the saved depth label on every fold and returns no partial route if a
-    /// replacement fails. An empty storm validates the checkpoint identity.
+    /// exact pins and ordering and returns no partial route if a replacement
+    /// fails. An empty storm validates the checkpoint identity.
     pub fn extend_nested_terminal_pair_storm_from_checkpoint(
         &self,
         previous: &ReboundPathResolution,
@@ -959,23 +960,17 @@ impl PackageResolver {
         checkpoint.validate_depth_identity()?;
 
         let mut route = previous.clone();
+        let mut retained_checkpoint_labels = Vec::new();
         for replacements in replacement_waves {
-            let prior_retained_len = route.retained_sessions.len();
-            let folded = self.extend_nested_terminal_pair_chain_from_checkpoint(
-                &route,
-                checkpoint,
-                std::slice::from_ref(replacements),
-            )?;
-            let checkpoint_index = prior_retained_len
-                .checked_add(1)
-                .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
-            let retained_checkpoint = folded
-                .retained_sessions
-                .get(checkpoint_index)
-                .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
-            if !checkpoint.depth_label.matches_session(retained_checkpoint) {
-                return Err(AttachmentError::RetainedSnapshotUnavailable);
-            }
+            let (folded, checkpoint_label) = self
+                .extend_nested_terminal_pair_chain_from_checkpoint_with_labels(
+                    &route,
+                    checkpoint,
+                    std::slice::from_ref(replacements),
+                    &retained_checkpoint_labels,
+                )?;
+            let label = checkpoint_label.ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+            retained_checkpoint_labels.push(label);
             route = folded;
         }
         Ok(route)
