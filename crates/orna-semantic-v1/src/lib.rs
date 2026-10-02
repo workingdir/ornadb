@@ -9338,6 +9338,34 @@ fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
     if left == right {
         return Some(left.clone());
     }
+    if is_terminal_historical_callable(left) && is_terminal_historical_callable(right) {
+        // Completed zero-argument closures have no continuation boundary to
+        // keep paired lane identity. Preserve their exact pins so a list
+        // cannot silently combine terminal values from separate lanes.
+        return None;
+    }
+    merge_checkpoint_field_map(left, right)
+}
+
+fn is_terminal_historical_callable(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Applied { base, arguments }
+            if base == "sys.HistoricalCallable"
+                && matches!(
+                    arguments.as_slice(),
+                    [_, Type::Function { parameters, .. }] if parameters.is_empty()
+                )
+    )
+}
+
+fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
+    if left == right {
+        return Some(left.clone());
+    }
+    if is_snapshot_context_map_shape(left) && is_snapshot_context_map_shape(right) {
+        return merge_snapshot_context_map(left, right);
+    }
     match (left, right) {
         (
             Type::Applied {
@@ -9353,23 +9381,11 @@ fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
                 ([left_snapshot, left_callable], [right_snapshot, right_callable]) => Some(
                     historical_callable_type(
                         &merge_snapshot_context_map(left_snapshot, right_snapshot)?,
-                        &merge_list_element_types(left_callable, right_callable)?,
+                        &merge_checkpoint_field_map(left_callable, right_callable)?,
                     ),
                 ),
                 _ => None,
             }
-        }
-        (
-            Type::Applied {
-                base: left_base, ..
-            },
-            Type::Applied {
-                base: right_base, ..
-            },
-        ) if left_base == "sys.SnapshotRefContext"
-            && right_base == "sys.SnapshotRefContext" =>
-        {
-            merge_snapshot_context_map(left, right)
         }
         (
             Type::Function {
@@ -9402,23 +9418,23 @@ fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
                 parameter_names: (left_names == right_names)
                     .then(|| left_names.clone())
                     .flatten(),
-                result: Box::new(merge_list_element_types(left_result, right_result)?),
+                result: Box::new(merge_checkpoint_field_map(left_result, right_result)?),
             })
         }
         (Type::List(left), Type::List(right)) => {
-            Some(Type::List(Box::new(merge_list_element_types(left, right)?)))
+            Some(Type::List(Box::new(merge_checkpoint_field_map(left, right)?)))
         }
         (Type::Range(left), Type::Range(right)) => {
-            Some(Type::Range(Box::new(merge_list_element_types(left, right)?)))
+            Some(Type::Range(Box::new(merge_checkpoint_field_map(left, right)?)))
         }
         (Type::Relation(left), Type::Relation(right)) => Some(Type::Relation(Box::new(
-            merge_list_element_types(left, right)?,
+            merge_checkpoint_field_map(left, right)?,
         ))),
         (Type::Stream(left), Type::Stream(right)) => Some(Type::Stream(Box::new(
-            merge_list_element_types(left, right)?,
+            merge_checkpoint_field_map(left, right)?,
         ))),
         (Type::Optional(left), Type::Optional(right)) => Some(Type::Optional(Box::new(
-            merge_list_element_types(left, right)?,
+            merge_checkpoint_field_map(left, right)?,
         ))),
         (Type::Record(left), Type::Record(right)) if left.len() == right.len() => {
             Some(Type::Record(
@@ -9426,7 +9442,7 @@ fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
                     .map(|(name, left)| {
                         Some((
                             name.clone(),
-                            merge_list_element_types(left, right.get(name)?)?,
+                            merge_checkpoint_field_map(left, right.get(name)?)?,
                         ))
                     })
                     .collect::<Option<BTreeMap<_, _>>>()?,
@@ -9436,7 +9452,7 @@ fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
             Some(Type::Tuple(
                 left.iter()
                     .zip(right)
-                    .map(|(left, right)| merge_list_element_types(left, right))
+                    .map(|(left, right)| merge_checkpoint_field_map(left, right))
                     .collect::<Option<Vec<_>>>()?,
             ))
         }
@@ -9455,7 +9471,7 @@ fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
                 arguments: left_arguments
                     .iter()
                     .zip(right_arguments)
-                    .map(|(left, right)| merge_list_element_types(left, right))
+                    .map(|(left, right)| merge_checkpoint_field_map(left, right))
                     .collect::<Option<Vec<_>>>()?,
             })
         }
@@ -9469,8 +9485,8 @@ fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
                 unit: right_unit,
             },
         ) => Some(Type::MoneyPerUnit {
-            currency: Box::new(merge_list_element_types(left_currency, right_currency)?),
-            unit: Box::new(merge_list_element_types(left_unit, right_unit)?),
+            currency: Box::new(merge_checkpoint_field_map(left_currency, right_currency)?),
+            unit: Box::new(merge_checkpoint_field_map(left_unit, right_unit)?),
         }),
         _ => None,
     }
