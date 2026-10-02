@@ -10,6 +10,7 @@ use crate::{
     REFERENCE_STANDARD_OPTION_PATH_V1, REFERENCE_STANDARD_RESULT_PATH_V1,
     REFERENCE_STANDARD_LIST_PATH_V1, REFERENCE_STANDARD_MAP_PATH_V1,
     REFERENCE_STANDARD_SET_PATH_V1,
+    REFERENCE_STANDARD_IO_PATH_V1, REFERENCE_STANDARD_FS_PATH_V1,
     reference_standard_catalogue_v1,
     reference_standard_profile_v1, reference_standard_sources_v1,
 };
@@ -75,6 +76,24 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     for name in ["from_list", "contains", "insert", "union", "intersection", "difference"] {
         assert!(sources[15].1.contains(&format!("pub fn {name}<")));
     }
+    assert_eq!(sources[16].0, REFERENCE_STANDARD_IO_PATH_V1);
+    assert!(sources[16].1.contains("use fs;"));
+    assert_eq!(sources[17].0, REFERENCE_STANDARD_FS_PATH_V1);
+    for name in [
+        "read_text", "write_text", "append_text", "exists", "is_directory", "list",
+        "create_dir", "remove_file", "copy_file", "move_file",
+    ] {
+        assert!(sources[17].1.contains(&format!("pub fn {name}(")));
+    }
+    assert!(sources[17]
+        .1
+        .contains("pub fn read_text(root: Str, path: Str): Str"));
+    assert!(sources[17]
+        .1
+        .contains("pub fn write_text(root: Str, path: Str, contents: Str, overwrite: Bool)"));
+    assert!(sources[17].1.contains("source_path: Str"));
+    assert!(sources[17].1.contains("destination_path: Str"));
+    assert!(sources[17].1.contains("overwrite: Bool"));
     let option_module_analysis = analyze_with_catalogue(
         &[ModuleInput::new("option.orna", &sources[11].1)],
         &orna_semantic_v1::Catalogue::authoritative_core(),
@@ -154,4 +173,36 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
             .collect::<Vec<_>>()
             .join("; ")
     );
+}
+
+#[test]
+fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions() {
+    let catalogue = reference_standard_catalogue_v1().expect("the standard module checks");
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "io_consumer.orna",
+            include_str!("fixtures/v1_io_fs_effect_consumer.orna"),
+        )],
+        &catalogue,
+    );
+    assert!(
+        analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message() == "declaration assertion uses forbidden filesystem effect"
+        }),
+        "{}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+    let consumer = analysis
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "io_consumer")
+        .expect("filesystem consumer module");
+    let reads = consumer.symbols.get("reads").expect("filesystem wrapper");
+    assert!(reads.effects.effects.contains("filesystem"));
+    assert!(reads.effects.may_fail);
 }
