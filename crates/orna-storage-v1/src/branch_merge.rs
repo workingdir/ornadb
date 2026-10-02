@@ -188,11 +188,11 @@ pub enum MergedSegment {
     Reuse { from: MergeSide, manifest: RowSegmentManifest },
     /// Materialized logical rows for a range where all three sides changed.
     /// `tombstones` are canonical keys present in the common base but absent
-    /// from the merged live rows. They describe this snapshot's versioned
-    /// deletions; they do not authorize removing older Git snapshots. Both
-    /// rows and tombstones are ordered by canonical primary key. A key that
-    /// spells a path prefix is still only that one key; deleting it does not
-    /// implicitly tombstone deeper keys.
+    /// from the merged live rows. They are this plan's versioned deletion
+    /// delta, not the accumulated tombstone history, and do not authorize
+    /// removing older Git snapshots. Both rows and tombstones are ordered by
+    /// canonical primary key. A key that spells a path prefix is still only
+    /// that one key; deleting it does not implicitly tombstone deeper keys.
     Rows {
         range: KeyRange,
         rows: Vec<KeyedRow>,
@@ -248,6 +248,12 @@ pub struct BranchMergePlan {
 /// history but are not replayed as new deletions; deleting a descendant in a
 /// later wave remains an independent exact-key decision. A failed wave is
 /// retried from the same committed base without carrying forward partial facts.
+/// A later wave may restore a key that an earlier wave deleted: that wave
+/// emits the row as an upsert and does not replay the old tombstone. If a
+/// committed later wave deletes the restored key again, its delta contains a
+/// new tombstone event for that exact key. Consumers that retain a history
+/// append only the selected committed plan's delta, in commit order; competing
+/// retries from one base are alternatives and must not append duplicate events.
 ///
 /// A read failure at any table or range aborts the whole invocation. Facts
 /// gathered from earlier tables or depth ranges remain private; after source
