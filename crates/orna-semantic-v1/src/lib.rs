@@ -17951,15 +17951,35 @@ fn record_pin_identity_topology_matches(
 fn snapshot_context_topology_matches(
     pin_maps: &[(BTreeSet<String>, BTreeSet<String>)],
 ) -> bool {
-    pin_maps.iter().enumerate().all(|(index, (expected, actual))| {
-        expected.len() == actual.len()
-            && pin_maps[index + 1..]
-                .iter()
-                .all(|(other_expected, other_actual)| {
-                    expected.intersection(other_expected).count()
-                        == actual.intersection(other_actual).count()
-                })
-    })
+    // Pairwise overlap counts do not fully describe a multi-slot identity
+    // topology: a three-way shared pin can be replaced by three pairwise
+    // pins while every pair still overlaps once. Compare each selector's
+    // complete set of depth slots instead. Equal signature multiplicities
+    // mean there is one global selector renaming that preserves every depth
+    // label relationship across the fold.
+    let signatures = |side: usize| {
+        let mut occurrences = BTreeMap::<String, Vec<usize>>::new();
+        for (depth, (expected, actual)) in pin_maps.iter().enumerate() {
+            let selectors = if side == 0 { expected } else { actual };
+            for selector in selectors {
+                occurrences
+                    .entry(selector.clone())
+                    .or_default()
+                    .push(depth);
+            }
+        }
+
+        let mut counts = BTreeMap::<Vec<usize>, usize>::new();
+        for depths in occurrences.into_values() {
+            *counts.entry(depths).or_default() += 1;
+        }
+        counts
+    };
+
+    pin_maps
+        .iter()
+        .all(|(expected, actual)| expected.len() == actual.len())
+        && signatures(0) == signatures(1)
 }
 
 fn collect_corresponding_snapshot_context_maps(
