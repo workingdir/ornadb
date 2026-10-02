@@ -5978,7 +5978,7 @@ fn std_collection_sort_by_accepts_all_call_forms_and_preserves_stable_ties() {
 }
 
 #[test]
-fn std_collection_asof_join_uses_nearest_match_and_last_source_row_for_ties() {
+fn std_collection_asof_join_uses_latest_prior_match_and_canonical_row_ties() {
     let collection_source = orna_standard::reference_standard_sources_v1()
         .into_iter()
         .find(|(path, _)| path == "std/collection.orna")
@@ -5999,8 +5999,8 @@ fn std_collection_asof_join_uses_nearest_match_and_last_source_row_for_ties() {
     .expect("the pinned public function reaches the evaluator binding");
     let expected = evaluate(
         r#"[
-            ({ group: "east", at: 10, label: "left-nearest" }, { group: "east", at: 11, label: "nearest-future" }),
-            ({ group: "east", at: 20, label: "left-tie" }, { group: "east", at: 18, label: "lower-tie-later-source" }),
+            ({ group: "east", at: 10, label: "left-nearest" }, Some({ group: "east", at: 8, label: "tie-later-source" })),
+            ({ group: "east", at: 20, label: "left-tie" }, Some({ group: "east", at: 18, label: "key-zzz" })),
             ({ group: "missing", at: 10, label: "left-no-match" }, null)
         ]"#,
     );
@@ -6008,12 +6008,10 @@ fn std_collection_asof_join_uses_nearest_match_and_last_source_row_for_ties() {
 }
 
 #[test]
-fn std_collection_asof_join_measures_instant_distance_to_the_nanosecond() {
+fn std_collection_asof_join_excludes_future_instants_to_the_nanosecond() {
     assert_eq!(
         evaluate(include_str!("fixtures/asof_join_instant_nearest.orna")),
-        evaluate(
-            r#"[({ group: "g", at: 1970-01-01T00:00:00Z, label: "left" }, { group: "g", at: 1970-01-01T00:00:00.000000001Z, label: "one-nanosecond" })]"#,
-        )
+        evaluate(r#"[({ group: "g", at: 1970-01-01T00:00:00Z, label: "left" }, null)]"#,)
     );
 }
 

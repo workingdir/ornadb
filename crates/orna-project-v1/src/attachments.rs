@@ -708,9 +708,10 @@ impl PackageResolver {
 
     /// Applies an ordered chain of terminal-depth pairs to one nested route.
     /// Each pair starts from the last snapshot in the latest retained wave,
-    /// carrying the preceding rebind forward by one closure depth. The
-    /// reference is silent on this continuation rule; v1 keeps the exact
-    /// retained-wave tail and returns no partial chain if a pair fails.
+    /// carrying the preceding rebind forward by one closure depth. With no
+    /// retained history, the first pair starts from the current final route.
+    /// The reference is silent on this continuation rule; v1 uses that
+    /// fallback and returns no partial chain if a pair fails.
     pub fn extend_nested_terminal_pair_chain(
         &self,
         previous: &ReboundPathResolution,
@@ -718,22 +719,73 @@ impl PackageResolver {
     ) -> Result<ReboundPathResolution, AttachmentError> {
         let mut route = previous.clone();
         for replacements in replacement_waves {
-            let latest_wave = route
-                .retained_wave_lengths
-                .len()
-                .checked_sub(1)
-                .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
-            let latest_snapshot = route.retained_wave_lengths[latest_wave]
-                .checked_sub(1)
-                .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
-            route = self.extend_nested_terminal_pair_from_wave(
-                &route,
-                latest_wave,
-                latest_snapshot,
-                replacements.clone(),
-            )?;
+            if let Some(latest_wave) = route.retained_wave_lengths.len().checked_sub(1) {
+                let latest_snapshot = route.retained_wave_lengths[latest_wave]
+                    .checked_sub(1)
+                    .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+                route = self.extend_nested_terminal_pair_from_wave(
+                    &route,
+                    latest_wave,
+                    latest_snapshot,
+                    replacements.clone(),
+                )?;
+            } else {
+                route = self.extend_nested_terminal_pair(&route, replacements.clone())?;
+            }
         }
         Ok(route)
+    }
+
+    /// Continues a terminal-pair chain from an exact retained session. The
+    /// first pair uses that session as its handoff root; later pairs continue
+    /// from the preceding pair's newest handoff. The reference does not define
+    /// selecting an older handoff for a chained pair; v1 keeps that explicit
+    /// depth and preserves the displaced terminal route with the new history.
+    /// An empty chain leaves the previous route unchanged.
+    pub fn extend_nested_terminal_pair_chain_from_retained(
+        &self,
+        previous: &ReboundPathResolution,
+        retained_session: usize,
+        replacement_waves: &[[PinnedDatabase; 2]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let Some((first, remaining)) = replacement_waves.split_first() else {
+            return Ok(previous.clone());
+        };
+        let route = self.extend_nested_terminal_pair_from_retained(
+            previous,
+            retained_session,
+            first.clone(),
+        )?;
+        self.extend_nested_terminal_pair_chain(&route, remaining)
+    }
+
+    /// Continues a terminal-pair chain from an exact snapshot in a retained
+    /// wave. The selected route determines the first pair's closure depth;
+    /// subsequent pairs preserve the normal one-depth handoff between waves.
+    /// Invalid wave or snapshot positions return no new route. The reference
+    /// is silent on this selection rule; v1 resolves from the exact snapshot.
+    pub fn extend_nested_terminal_pair_chain_from_wave(
+        &self,
+        previous: &ReboundPathResolution,
+        wave: usize,
+        snapshot: usize,
+        replacement_waves: &[[PinnedDatabase; 2]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let selected_wave = previous
+            .retained_wave(wave)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+        if snapshot >= selected_wave.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+        let retained_session = previous.retained_wave_lengths[..wave]
+            .iter()
+            .sum::<usize>()
+            + snapshot;
+        self.extend_nested_terminal_pair_chain_from_retained(
+            previous,
+            retained_session,
+            replacement_waves,
+        )
     }
 
     /// Resolves independently rebound paths for sibling parent snapshots.
