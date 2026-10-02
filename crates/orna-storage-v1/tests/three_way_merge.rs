@@ -22311,6 +22311,119 @@ fn paired_fragment_retry_identity_rebinds_across_pending_cascade() {
 }
 
 #[test]
+fn paired_retry_does_not_widen_uneven_restore_tombstones() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let paired_step = |order, plan_paths: &[&str], delta_paths: &[&str]| {
+        let plan_tombstones = plan_paths
+            .iter()
+            .map(|path| fixture_key(path))
+            .collect::<Vec<_>>();
+        let ordered_row_tombstones = delta_paths
+            .iter()
+            .map(|path| (id(1), fixture_key(path)))
+            .collect::<Vec<_>>();
+        SequencedBranchMergePlan {
+            order,
+            plan: BranchMergePlan {
+                schema: schema(true, FieldType::Str),
+                tables: BTreeMap::from([(
+                    id(1),
+                    orna_storage_v1::MergedTable {
+                        id: id(1),
+                        whole_table_reuse: None,
+                        segments: vec![MergedSegment::Rows {
+                            range: KeyRange::all(),
+                            rows: Vec::new(),
+                            tombstones: plan_tombstones,
+                        }],
+                    },
+                )]),
+                checkpoints: BTreeMap::new(),
+                report: Default::default(),
+            },
+            ordered_row_tombstones,
+        }
+    };
+    let fragment = |order, index, count, paths: &[&str]| BranchMergeDepthFragmentRecovery {
+        order,
+        fragment: index,
+        fragment_count: count,
+        tombstones: paths.iter().map(|path| (id(1), fixture_key(path))).collect(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history.submit_depth_merge_fragment(0, 0, 2, &[]).unwrap();
+    history
+        .submit_depth_merge_fragment(1, 0, 2, &[(id(1), fixture_key("root"))])
+        .unwrap();
+    history.submit_depth_merge_fragment(1, 1, 2, &[]).unwrap();
+    history
+        .submit_depth_merge_fragment(2, 0, 3, &[(id(1), fixture_key("z"))])
+        .unwrap();
+    history.submit_depth_merge_fragment(2, 1, 3, &[]).unwrap();
+    history.submit_depth_merge_fragment(2, 2, 3, &[]).unwrap();
+    history.submit_depth_merge_fragment(3, 0, 2, &[]).unwrap();
+
+    let first_retry = paired_step(1, &["root"], &["root"]);
+    let second_retry = paired_step(2, &["z"], &["z"]);
+    let accepted = history
+        .recover_depth_merge_fragments_with_appends(
+            &[fragment(3, 1, 2, &[])],
+            &[first_retry, second_retry.clone()],
+        )
+        .unwrap();
+    assert!(accepted.is_empty(), "exact paired retries remain suppressed behind the gap");
+    assert_eq!(history.next_order(), Some(0));
+
+    let before_widened_retry = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[fragment(3, 1, 2, &[])],
+            &[
+                paired_step(1, &["root", "root/child"], &["root"]),
+                second_retry,
+            ],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a paired plan cannot widen its tombstone set beyond its retry delta",
+    );
+    assert_eq!(history, before_widened_retry);
+
+    let released = history
+        .recover_depth_merge_fragments_with_appends(&[fragment(0, 1, 2, &[])], &[])
+        .unwrap();
+    assert_eq!(
+        released,
+        vec![
+            BranchMergeTombstoneEvent {
+                order: 1,
+                table: id(1),
+                key: fixture_key("root"),
+            },
+            BranchMergeTombstoneEvent {
+                order: 2,
+                table: id(1),
+                key: fixture_key("z"),
+            },
+        ],
+        "the pending uneven chain commits only the original fragment tombstones",
+    );
+    assert_eq!(history.events(), released);
+    assert_eq!(history.next_order(), Some(4));
+}
+
+#[test]
 fn paired_mixed_mode_priority_survives_interleaved_depth_wave_release() {
     let fixture_keys = TOMBSTONE_DEPTH_COMMIT_ORDER
         .split("\n\n")
