@@ -6031,6 +6031,98 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
         assert_eq!(intermediate_owner.owner_id, intermediate_owner_id);
         drop(recovery_runtime);
 
+        // Reconnect on the intermediate owner before the second takeover. This
+        // makes the next recovery carry snapshots pinned on both sides of a
+        // reconnect chain, rather than only snapshots from the original owner.
+        let mut bridge_host = durable_host_after_takeover(
+            open_durable_state(&repository),
+            intermediate_owner.owner_id,
+            RequestOwner::from(current_owner),
+        );
+        let mut bridge_issuer = Issuer(2 + handoff_pair * 2, None);
+        let bridge_credential = create_with_expiration(&mut bridge_host, &mut bridge_issuer, 10_000);
+        let bridge_attachment = [6 + handoff_pair * 2; 16];
+        block_on(bridge_host.resume(ResumeRequest {
+            id: session,
+            origin: &origin(),
+            credential: &bridge_credential,
+            attachment: bridge_attachment,
+            now: sequence,
+        }))
+        .unwrap();
+        let mut bridge_current_attachment = bridge_attachment;
+        for bridge_reconnect in 0..=1 {
+            if bridge_reconnect > 0 {
+                let next_attachment = [30 + handoff_pair * 2; 16];
+                let outcome = block_on(bridge_host.resume(ResumeRequest {
+                    id: session,
+                    origin: &origin(),
+                    credential: &bridge_credential,
+                    attachment: next_attachment,
+                    now: sequence,
+                }))
+                .unwrap();
+                assert!(matches!(
+                    outcome,
+                    orna_security_v1::AttachOutcome::Replaced(previous)
+                        if previous == orna_security_v1::AttachmentId::new(bridge_current_attachment)
+                ));
+                bridge_current_attachment = next_attachment;
+            }
+
+            replay_durable_status_snapshots(
+                &mut bridge_host,
+                bridge_current_attachment,
+                &snapshots,
+                &mut sequence,
+                &mut application,
+            );
+
+            let first_pair_request = 83 + handoff_pair * 24 + bridge_reconnect * 2;
+            let mut fresh_pair = Vec::with_capacity(2);
+            for request_id in [first_pair_request, first_pair_request + 1] {
+                let fresh_request = status_request([request_id; 16]);
+                let fresh = block_on(bridge_host.dispatch_frame(
+                    bridge_current_attachment,
+                    sequence,
+                    Frame::Binary(fresh_request.clone()),
+                    &mut application,
+                ))
+                .unwrap()
+                .response
+                .expect("the intermediate owner sees the completed target");
+                assert!(matches!(
+                    &fresh.message,
+                    Message::RequestStatusResult {
+                        target,
+                        state: orna_protocol_v1::RequestState::Terminal,
+                        fingerprint: Some(fingerprint),
+                        result: Some(result),
+                    } if *target == [81; 16]
+                        && *fingerprint == target_fingerprint
+                        && result == &expected_result
+                ));
+                snapshots.push((fresh_request, fresh.clone()));
+                fresh_pair.push((snapshots.last().unwrap().0.clone(), fresh));
+                sequence += 1;
+            }
+            replay_durable_status_snapshots_reverse(
+                &mut bridge_host,
+                bridge_current_attachment,
+                &fresh_pair,
+                &mut sequence,
+                &mut application,
+            );
+        }
+        replay_durable_status_snapshots_reverse(
+            &mut bridge_host,
+            bridge_current_attachment,
+            &snapshots,
+            &mut sequence,
+            &mut application,
+        );
+        drop(bridge_host);
+
         let replacement_id = [77 + handoff_pair * 2; 16];
         let recovery_runtime = open_durable_state(&repository);
         let replacement = block_on(
@@ -6045,15 +6137,15 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
             replacement.owner_id,
             RequestOwner::from(intermediate_owner),
         );
-        let mut issuer = Issuer(2 + handoff_pair, None);
+        let mut issuer = Issuer(3 + handoff_pair * 2, None);
         let credential = create_with_expiration(&mut host, &mut issuer, 10_000);
-        let attachment = [6 + handoff_pair; 16];
+        let attachment = [7 + handoff_pair * 2; 16];
         block_on(host.resume(ResumeRequest {
             id: session,
             origin: &origin(),
             credential: &credential,
             attachment,
-            now: 2 + u64::from(handoff_pair),
+            now: sequence,
         }))
         .unwrap();
 
@@ -6097,7 +6189,7 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
                 );
             }
 
-            let first_pair_request = 83 + handoff_pair * 12 + reconnect * 2;
+            let first_pair_request = 87 + handoff_pair * 24 + reconnect * 2;
             let mut fresh_pair = Vec::with_capacity(2);
             for request_id in [first_pair_request, first_pair_request + 1] {
                 let fresh_request = status_request([request_id; 16]);
