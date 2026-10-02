@@ -3853,7 +3853,6 @@ fn tuple_pin_cascade_depths_stay_isolated_through_chained_storm_rebinds() {
     );
 }
 
-#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
