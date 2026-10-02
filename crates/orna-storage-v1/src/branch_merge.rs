@@ -726,6 +726,60 @@ impl BranchMergeTombstoneHistory {
         Ok(())
     }
 
+    /// Rebinds the full paired identity for one complete, still-pending depth
+    /// fragment wave. The replacement plan must retain the exact tombstone
+    /// encoding already submitted by the fragments. Released waves cannot be
+    /// rebound because their committed event history is immutable.
+    ///
+    /// MERGE-1 is silent on revised paired plans during a blocked cascade.
+    /// This v1 policy permits identity changes only before release and only
+    /// when the tombstone projection is unchanged. Successful rebinding also
+    /// invalidates replay receipts that refer to the previous identity.
+    pub fn rebind_depth_fragment_retry_plan(
+        &mut self,
+        step: &SequencedBranchMergePlan,
+    ) -> Result<(), BranchMergeTombstoneHistoryError> {
+        let order = step.order;
+        let planned_tombstones = step.plan.ordered_row_tombstones();
+        if has_duplicate_tombstones_in_wave(&planned_tombstones)
+            || !same_tombstone_encoding_delta(&planned_tombstones, &step.ordered_row_tombstones)
+        {
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+        }
+
+        let existing = match self.pending_deltas.get(&order) {
+            Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
+                fragment_count,
+                fragments,
+            }) if fragments.len() == *fragment_count => {
+                Some(fragments.values().flatten().cloned().collect::<Vec<_>>())
+            }
+            _ => None,
+        };
+        let Some(existing) = existing else {
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+        };
+        if !same_tombstone_encoding_delta(&existing, &step.ordered_row_tombstones) {
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+        }
+
+        let Some(previous) = self.pending_plan_identities.get(&order).copied() else {
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+        };
+        let identity = paired_plan_retry_identity(&step.plan);
+        if previous != identity {
+            self.pending_plan_identities.insert(order, identity);
+            self.applied_fragment_retry_transactions.retain(|transaction| {
+                !transaction
+                    .bindings
+                    .iter()
+                    .chain(&transaction.appends)
+                    .any(|(transaction_order, _, _)| *transaction_order == order)
+            });
+        }
+        Ok(())
+    }
+
     /// Atomically binds paired retry identities, applies fragment recoveries,
     /// and validates same-position paired retry appends as one transaction.
     /// Bindings run first so recovered appends are checked against full paired
