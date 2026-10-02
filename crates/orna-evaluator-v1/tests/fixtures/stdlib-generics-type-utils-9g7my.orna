@@ -1,0 +1,4 @@
+types.first_of(types.pair(generic.identity(4), generic.constant("ok", false))) == 4
+    && types.second_of(types.pair(4, "ok")) == "ok"
+    && types.swap_pair(types.pair(4, "ok")) == ("ok", 4)
+    && types.some(4) == first([4])
