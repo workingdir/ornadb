@@ -10605,6 +10605,209 @@ fn paired_depth_storm_rebinds_keep_sibling_terminal_routes_consistent() {
         );
     }
 
+    let paired_depth_waves = [
+        [(0, 1, 1), (1, 0, 0), (0, 0, 0), (1, 1, 1)],
+        [(1, 0, 0), (0, 1, 1), (1, 1, 1), (0, 0, 0)],
+    ];
+    let mut post_storm_roots = roots.clone();
+    let mut selected_post_storm_middle = later_middle_variants.clone();
+    let mut selected_post_storm_deep = later_deep_variants.clone();
+    let mut latest_post_storm_terminals: Vec<Option<AttachedDatabaseSession>> =
+        vec![None; sibling_count];
+    let mut post_storm_depth_snapshots = Vec::new();
+    for (wave, events) in paired_depth_waves.into_iter().enumerate() {
+        for (sibling, middle_variant, deep_variant) in events {
+            rebind(
+                &mut post_storm_roots[sibling],
+                aliases[1],
+                &middle_pins[sibling][middle_variant],
+            );
+            selected_post_storm_middle[sibling] = middle_variant;
+            assert_pin(
+                &post_storm_roots[sibling],
+                aliases[1],
+                &middle_commits[sibling][middle_variant],
+            );
+            assert_route(
+                &post_storm_roots[sibling],
+                &format!("{}.orna", aliases[1]),
+                1,
+                sibling,
+                middle_variant,
+            );
+
+            let mut middle = resolver
+                .resolve_for_parent(
+                    post_storm_roots[sibling]
+                        .database(aliases[1])
+                        .unwrap()
+                        .clone(),
+                )
+                .unwrap();
+            assert_pin(
+                &middle,
+                aliases[2],
+                &deep_commits[sibling][middle_variant],
+            );
+            assert_route(&middle, "main.orna", 1, sibling, middle_variant);
+            assert_route(
+                &middle,
+                &format!("{}.orna", aliases[2]),
+                2,
+                sibling,
+                middle_variant,
+            );
+            let manifest_middle_snapshot = middle.clone();
+
+            rebind(
+                &mut middle,
+                aliases[2],
+                &deep_pins[sibling][deep_variant],
+            );
+            selected_post_storm_deep[sibling] = deep_variant;
+            assert_pin(
+                &middle,
+                aliases[2],
+                &deep_commits[sibling][deep_variant],
+            );
+            assert_route(&middle, "main.orna", 1, sibling, middle_variant);
+            assert_route(
+                &middle,
+                &format!("{}.orna", aliases[2]),
+                2,
+                sibling,
+                deep_variant,
+            );
+            let rebound_middle_snapshot = middle.clone();
+
+            let terminal = resolver
+                .resolve_for_parent(middle.database(aliases[2]).unwrap().clone())
+                .unwrap();
+            assert_pin(
+                &terminal,
+                aliases[3],
+                &terminal_commits[deep_variant],
+            );
+            assert_route(&terminal, "main.orna", 2, sibling, deep_variant);
+            assert_route(
+                &terminal,
+                &format!("{}.orna", aliases[3]),
+                3,
+                0,
+                deep_variant,
+            );
+            latest_post_storm_terminals[sibling] = Some(terminal.clone());
+            post_storm_depth_snapshots.push((
+                wave,
+                sibling,
+                middle_variant,
+                deep_variant,
+                post_storm_roots[sibling].clone(),
+                manifest_middle_snapshot,
+                rebound_middle_snapshot,
+                terminal,
+            ));
+
+            for branch in 0..sibling_count {
+                assert_pin(
+                    &post_storm_roots[branch],
+                    aliases[1],
+                    &middle_commits[branch][selected_post_storm_middle[branch]],
+                );
+                assert_route(
+                    &post_storm_roots[branch],
+                    &format!("{}.orna", aliases[1]),
+                    1,
+                    branch,
+                    selected_post_storm_middle[branch],
+                );
+            }
+        }
+        assert_eq!(selected_post_storm_middle, vec![0, 1]);
+        assert_eq!(selected_post_storm_deep, vec![0, 1]);
+    }
+    for (wave, sibling, middle_variant, deep_variant, root, manifest_middle, rebound_middle, terminal) in
+        post_storm_depth_snapshots
+    {
+        assert!(wave < paired_depth_waves.len());
+        assert_pin(
+            &root,
+            aliases[1],
+            &middle_commits[sibling][middle_variant],
+        );
+        assert_route(
+            &root,
+            &format!("{}.orna", aliases[1]),
+            1,
+            sibling,
+            middle_variant,
+        );
+        assert_pin(
+            &manifest_middle,
+            aliases[2],
+            &deep_commits[sibling][middle_variant],
+        );
+        assert_route(
+            &manifest_middle,
+            &format!("{}.orna", aliases[2]),
+            2,
+            sibling,
+            middle_variant,
+        );
+        assert_pin(
+            &rebound_middle,
+            aliases[2],
+            &deep_commits[sibling][deep_variant],
+        );
+        assert_route(
+            &rebound_middle,
+            &format!("{}.orna", aliases[2]),
+            2,
+            sibling,
+            deep_variant,
+        );
+        assert_pin(
+            &terminal,
+            aliases[3],
+            &terminal_commits[deep_variant],
+        );
+        assert_route(
+            &terminal,
+            &format!("{}.orna", aliases[3]),
+            3,
+            0,
+            deep_variant,
+        );
+        assert_route(&terminal, "main.orna", 2, sibling, deep_variant);
+    }
+    for sibling in 0..sibling_count {
+        let terminal = latest_post_storm_terminals[sibling].as_ref().unwrap();
+        assert_pin(
+            terminal,
+            aliases[3],
+            &terminal_commits[selected_post_storm_deep[sibling]],
+        );
+        assert_route(
+            terminal,
+            &format!("{}.orna", aliases[3]),
+            3,
+            0,
+            selected_post_storm_deep[sibling],
+        );
+        assert_pin(
+            &retained_post_storm_terminals[sibling],
+            aliases[3],
+            &terminal_commits[if sibling == 0 { 0 } else { 1 }],
+        );
+        assert_route(
+            &retained_post_storm_terminals[sibling],
+            &format!("{}.orna", aliases[3]),
+            3,
+            0,
+            if sibling == 0 { 0 } else { 1 },
+        );
+    }
+
     assert_pin(&parent, aliases[1], &middle_commits[0][0]);
     assert_route(&parent, &format!("{}.orna", aliases[1]), 1, 0, 0);
 }
