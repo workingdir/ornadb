@@ -9503,13 +9503,17 @@ fn merge_snapshot_context_map(left: &Type, right: &Type) -> Option<Type> {
     fn collect_contexts(ty: &Type, contexts: &mut BTreeSet<String>) {
         match ty {
             Type::Applied { base, arguments } if base == "sys.SnapshotRefContext" => {
-                if let [Type::Named(selector)] = arguments.as_slice() {
+                if let [Type::Named(selector)] = arguments.as_slice()
+                    && is_snapshot_selector_context(selector)
+                {
                     contexts.insert(selector.clone());
                 }
             }
             Type::Applied { base, arguments } if base == CONTEXT_MAP => {
                 contexts.extend(arguments.iter().filter_map(|argument| match argument {
-                    Type::Named(selector) => Some(selector.clone()),
+                    Type::Named(selector) if is_snapshot_selector_context(selector) => {
+                        Some(selector.clone())
+                    }
                     _ => None,
                 }));
             }
@@ -16297,6 +16301,12 @@ fn infer_nominal_conversion_call(
     })
 }
 
+fn is_snapshot_selector_context(selector: &str) -> bool {
+    selector
+        .strip_prefix("selector:")
+        .is_some_and(|identity| !identity.is_empty())
+}
+
 fn contextual_snapshot_ref(selector: &str) -> Type {
     Type::Applied {
         base: "sys.SnapshotRefContext".into(),
@@ -16308,7 +16318,8 @@ fn is_contextual_snapshot_ref(ty: &Type) -> bool {
     matches!(
         ty,
         Type::Applied { base, arguments }
-            if base == "sys.SnapshotRefContext" && arguments.len() == 1
+            if base == "sys.SnapshotRefContext"
+                && matches!(arguments.as_slice(), [Type::Named(selector)] if is_snapshot_selector_context(selector))
     )
 }
 
@@ -17224,13 +17235,15 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
 fn is_snapshot_context_map_shape(ty: &Type) -> bool {
     match ty {
         Type::Applied { base, arguments } if base == "sys.SnapshotRefContext" => {
-            matches!(arguments.as_slice(), [Type::Named(_)])
+            is_contextual_snapshot_ref(ty)
         }
         Type::Applied { base, arguments } if base == "semantic.SnapshotContextMap" => {
             !arguments.is_empty()
                 && arguments
                     .iter()
-                    .all(|argument| matches!(argument, Type::Named(_)))
+                    .all(|argument| {
+                        matches!(argument, Type::Named(selector) if is_snapshot_selector_context(selector))
+                    })
         }
         _ => false,
     }
@@ -19039,6 +19052,35 @@ fn diag(code: &'static str, message: impl Into<String>) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn checkpoint_rebinds_require_canonical_snapshot_selector_maps() {
+        let first = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:HEAD~5".into()),
+                Type::Named("selector:binder:first".into()),
+            ],
+        };
+        let second = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:HEAD~4".into()),
+                Type::Named("selector:binder:second".into()),
+            ],
+        };
+        let malformed = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![Type::Named("domain.Factory".into())],
+        };
+
+        assert!(is_snapshot_context_map_shape(&first));
+        assert!(type_contains_pinned_snapshot_identity(&first));
+        assert!(pinned_snapshot_rebind_compatible(&first, &second));
+        assert!(!is_snapshot_context_map_shape(&malformed));
+        assert!(!type_contains_pinned_snapshot_identity(&malformed));
+        assert!(!pinned_snapshot_rebind_compatible(&malformed, &second));
+    }
+
     fn checked(inputs: &[ModuleInput]) -> Analysis {
         analyze(inputs)
     }
