@@ -204,6 +204,22 @@ fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
             route_summary,
             &typed_route_summary(routes_for_stage(&explained, stage), true)
         );
+        for depth in route_summary.split(';') {
+            let (_, handoffs) = depth.split_once(':').expect("depth route entry");
+            for handoff in handoffs.split(',') {
+                let (input_scope, output) =
+                    handoff.split_once("=>").expect("handoff input/output scopes");
+                let (output_scope, _) = output.split_once('=').expect("handoff output scope");
+                assert!(
+                    input_scope.starts_with(prefix),
+                    "stage {stage} handoff input {input_scope:?} should retain {prefix:?}"
+                );
+                assert!(
+                    output_scope.starts_with(prefix),
+                    "stage {stage} handoff output {output_scope:?} should retain {prefix:?}"
+                );
+            }
+        }
         for depth in scope_summary.split(';') {
             let (_, scopes) = depth.split_once(':').expect("depth scope entry");
             for handoff in scopes.split(',') {
