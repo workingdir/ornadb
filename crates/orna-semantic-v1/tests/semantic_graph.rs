@@ -1392,6 +1392,38 @@ fn table_assertion_elaborates_reference_relation_predicates_without_an_evaluator
 }
 
 #[test]
+fn all_unique_accepts_structural_nullable_keys_and_rejects_float_components() {
+    let lawful = analyze(&[ModuleInput::new(
+        "nullable-key.orna",
+        include_str!("fixtures/table-all-unique-nullable-tuple-key.orna"),
+    )]);
+    assert!(lawful.is_ok(), "{:?}", lawful.diagnostics);
+
+    let unlawful = analyze(&[ModuleInput::new(
+        "float-key.orna",
+        include_str!("fixtures/table-all-unique-float-tuple-key.orna"),
+    )]);
+    assert!(has(&unlawful, DIAG_TYPE), "{:?}", unlawful.diagnostics);
+    assert!(
+        unlawful.diagnostics.iter().any(|diagnostic| diagnostic
+            .message()
+            .contains("all_unique selector must return a lawful equality key")),
+        "the Float restriction should explain the rejected contract: {:?}",
+        unlawful.diagnostics
+    );
+
+    let nested_float_distinct = analyze(&[ModuleInput::new(
+        "relation-float-distinct.orna",
+        include_str!("fixtures/relation-distinct-float-tuple-key.orna"),
+    )]);
+    assert!(
+        has(&nested_float_distinct, DIAG_TYPE),
+        "relation distinct must reject a tuple key containing Float: {:?}",
+        nested_float_distinct.diagnostics
+    );
+}
+
+#[test]
 fn module_assertion_elaborates_the_reference_projects_nested_relation_predicate() {
     let result = analyze(&[ModuleInput::new(
         "library.orna",
@@ -5930,6 +5962,86 @@ fn paired_pin_identities_survive_omissions_at_outer_and_middle_depths() {
 }
 
 #[test]
+fn unknown_direct_pair_sibling_suppresses_pin_promotion() {
+    let source = include_str!(
+        "fixtures/historical-direct-paired-pin-rebind-suppression.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-direct-paired-pin-rebind-suppression.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(result.diagnostics.len(), 1);
+    assert_eq!(
+        result.diagnostics[0].code(),
+        "ORNA-S012-UNRESOLVED",
+        "only the intentionally unknown sibling should be diagnosed: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("unknown_sibling_suppresses_direct_pair_rebind")
+        })
+        .expect("direct paired-rebind fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["unknown_sibling_suppresses_direct_pair_rebind"].ty
+    else {
+        panic!("direct paired-rebind proof must be a function");
+    };
+    let Type::Record(stages) = result.as_ref() else {
+        panic!("direct paired-rebind proof must retain its result record: {result:?}");
+    };
+    for (stage, expected_symbolic) in [("complete", 0), ("suppressed", 2)] {
+        let value = stages.get(stage).expect("computed pair value");
+        let Type::List(element) = value else {
+            panic!("{stage} must remain a computed historical list: {value:?}");
+        };
+        let Type::Record(row) = element.as_ref() else {
+            panic!("{stage} must retain computed checkpoint rows: {element:?}");
+        };
+        assert!(
+            matches!(row.get("capture"), Some(Type::Applied { base, .. }) if base == "sys.HistoricalCallable"),
+            "{stage} must keep real historical callable values: {row:?}"
+        );
+        assert_canonical_snapshot_context_maps(value);
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(value, &mut contexts);
+        assert_eq!(contexts.len(), 2, "{stage} lost a paired pin: {contexts:?}");
+        let symbolic = contexts
+            .iter()
+            .filter(|context| context.starts_with("selector:dynamic-call:"))
+            .count();
+        assert_eq!(
+            symbolic, expected_symbolic,
+            "{stage} must not promote only one sibling pin: {contexts:?}"
+        );
+        if stage == "complete" {
+            assert!(contexts.contains("selector:HEAD~60"));
+            assert!(contexts.contains("selector:HEAD~59"));
+        } else {
+            assert!(
+                contexts
+                    .iter()
+                    .all(|context| context.starts_with("selector:dynamic-call:")),
+                "an unknown sibling must leave both pair identities symbolic: {contexts:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn missing_outer_tuple_keeps_sibling_pins_symbolic_across_later_depths() {
     let source =
         include_str!("fixtures/historical-missing-outer-tuple-preserves-sibling-pins.orna");
@@ -8306,6 +8418,76 @@ fn tuple_checkpoint_map_promotion_stops_at_width_drift() {
             BTreeSet::from(["selector:HEAD~78".into()]),
         ],
         "candidate inference must stop at the first tuple width instead of promoting later pins"
+    );
+}
+
+#[test]
+fn tuple_checkpoint_compaction_fold_preserves_slot_pin_identity() {
+    let source = include_str!("fixtures/historical-tuple-checkpoint-cross-slot-fold.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-tuple-checkpoint-cross-slot-fold.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "compaction must reject a fold that invents cross-slot pin identities: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("tuple_checkpoint_cross_slot_compaction_fold"))
+        .expect("tuple checkpoint cross-slot fold fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["tuple_checkpoint_cross_slot_compaction_fold"].ty
+    else {
+        panic!("tuple checkpoint fold proof must return computed values");
+    };
+    let Type::Record(values) = result.as_ref() else {
+        panic!("tuple checkpoint fold proof must expose saved and folded values");
+    };
+
+    let slot_maps = |name: &str| {
+        let value = values.get(name).expect("computed checkpoint value");
+        assert_canonical_snapshot_context_maps(value);
+        let Type::List(element) = value else {
+            panic!("{name} must remain a checkpoint list: {value:?}");
+        };
+        let Type::Tuple(slots) = element.as_ref() else {
+            panic!("{name} must retain its tuple element: {element:?}");
+        };
+        slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                assert!(!contexts.is_empty(), "{name} must retain actual selector values");
+                contexts
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let expected = vec![
+        BTreeSet::from(["selector:HEAD~20".into()]),
+        BTreeSet::from(["selector:HEAD~21".into()]),
+    ];
+    assert_eq!(slot_maps("saved"), expected, "saved tuple pins stay slot-local");
+    assert_eq!(
+        slot_maps("folded"),
+        expected,
+        "a rejected width fold must not union opposite-slot pins"
     );
 }
 

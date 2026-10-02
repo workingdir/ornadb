@@ -557,6 +557,9 @@ impl BranchMergeTombstoneHistory {
     /// released only after all `fragment_count` pieces arrive; their tombstones
     /// are then normalized by table and canonical key, regardless of fragment
     /// completion order. An empty fragment still counts toward completeness.
+    /// For an existing wave, a changed fragment count is reported before an
+    /// index that is invalid under the caller's changed count, preserving the
+    /// wave's authoritative depth label in diagnostics.
     pub fn submit_depth_merge_fragment(
         &mut self,
         order: u64,
@@ -568,7 +571,7 @@ impl BranchMergeTombstoneHistory {
             order,
             BranchMergeTombstoneSubmissionMode::DepthFragments,
         )?;
-        if fragment_count == 0 || fragment >= fragment_count {
+        if fragment_count == 0 {
             return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
                 fragment,
                 fragment_count,
@@ -590,12 +593,24 @@ impl BranchMergeTombstoneHistory {
                         actual: fragment_count,
                     });
                 }
+                if fragment >= fragment_count {
+                    return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+                        fragment,
+                        fragment_count,
+                    });
+                }
                 if fragments.contains_key(&fragment) {
                     return Err(BranchMergeTombstoneHistoryError::DuplicateFragment {
                         order,
                         fragment,
                     });
                 }
+            }
+            None if fragment >= fragment_count => {
+                return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+                    fragment,
+                    fragment_count,
+                });
             }
             None => {}
         }
@@ -838,6 +853,10 @@ impl BranchMergeTombstoneHistory {
     /// callers that need separate transactions can use the constituent APIs.
     /// A successful equivalent request can be retried: it returns no new
     /// events and leaves the already-committed result unchanged.
+    /// Before changing paired identities, the batch checks fragment-count
+    /// labels against every buffered wave in lineage order. This lets a stale
+    /// label in an earlier wave remain visible even if a later binding would
+    /// also conflict; all paired changes still commit atomically afterward.
     pub fn bind_depth_fragment_retry_plans_with_recovery(
         &mut self,
         bindings: &[SequencedBranchMergePlan],
@@ -852,6 +871,7 @@ impl BranchMergeTombstoneHistory {
         {
             return Ok(Vec::new());
         }
+        self.validate_buffered_depth_fragment_labels(recoveries)?;
 
         let mut candidate = self.clone();
         candidate.bind_depth_fragment_retry_plans(bindings)?;
@@ -1043,6 +1063,7 @@ impl BranchMergeTombstoneHistory {
                 });
             }
         }
+        self.validate_buffered_depth_fragment_labels(&recoveries)?;
 
         let mut candidate = self.clone();
         let mut appends = appends.to_vec();
@@ -1186,7 +1207,7 @@ impl BranchMergeTombstoneHistory {
             recovery.order,
             BranchMergeTombstoneSubmissionMode::DepthFragments,
         )?;
-        if recovery.fragment_count == 0 || recovery.fragment >= recovery.fragment_count {
+        if recovery.fragment_count == 0 {
             return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
                 fragment: recovery.fragment,
                 fragment_count: recovery.fragment_count,
@@ -1205,12 +1226,24 @@ impl BranchMergeTombstoneHistory {
                         actual: recovery.fragment_count,
                     });
                 }
+                if recovery.fragment >= recovery.fragment_count {
+                    return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+                        fragment: recovery.fragment,
+                        fragment_count: recovery.fragment_count,
+                    });
+                }
                 fragments
             }
             Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => unreachable!(
                 "whole-plan mode conflicts are classified before fragment recovery"
             ),
             None => {
+                if recovery.fragment >= recovery.fragment_count {
+                    return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+                        fragment: recovery.fragment,
+                        fragment_count: recovery.fragment_count,
+                    });
+                }
                 return Err(BranchMergeTombstoneHistoryError::NoIncompleteDepthWave {
                     order: recovery.order,
                 });
@@ -1248,6 +1281,53 @@ impl BranchMergeTombstoneHistory {
         };
         fragments.insert(recovery.fragment, recovery.tombstones.clone());
         Ok(self.release_contiguous())
+    }
+
+    fn validate_buffered_depth_fragment_labels(
+        &self,
+        recoveries: &[BranchMergeDepthFragmentRecovery],
+    ) -> Result<(), BranchMergeTombstoneHistoryError> {
+        let mut recoveries = recoveries.iter().collect::<Vec<_>>();
+        recoveries.sort_unstable_by_key(|recovery| (recovery.order, recovery.fragment));
+        if recoveries.windows(2).any(|pair| {
+            pair[0].order == pair[1].order && pair[0].fragment == pair[1].fragment
+        }) {
+            // The public recovery API reports duplicate labels after paired
+            // bindings. Leave that established structural-error precedence
+            // intact instead of preflighting a partial label view.
+            return Ok(());
+        }
+
+        for recovery in recoveries {
+            let Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
+                fragment_count: expected_count,
+                ..
+            }) = self.pending_deltas.get(&recovery.order)
+            else {
+                continue;
+            };
+
+            if recovery.fragment_count == 0 {
+                return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+                    fragment: recovery.fragment,
+                    fragment_count: recovery.fragment_count,
+                });
+            }
+            if *expected_count != recovery.fragment_count {
+                return Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+                    order: recovery.order,
+                    expected: *expected_count,
+                    actual: recovery.fragment_count,
+                });
+            }
+            if recovery.fragment >= recovery.fragment_count {
+                return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+                    fragment: recovery.fragment,
+                    fragment_count: recovery.fragment_count,
+                });
+            }
+        }
+        Ok(())
     }
 
     fn release_contiguous(&mut self) -> Vec<BranchMergeTombstoneEvent> {

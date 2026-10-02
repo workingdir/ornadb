@@ -164,6 +164,16 @@ fn pinned_collection_predicate_callbacks_keep_captured_values() {
 }
 
 #[test]
+fn pinned_core_relation_exports_return_the_section_9_values() {
+    let mut session = pinned_collection_session();
+    assert_collection_proofs(
+        &mut session,
+        include_str!("fixtures/stdlib-relation-core-real-values-m9f62.orna"),
+        16,
+    );
+}
+
+#[test]
 fn pinned_collection_asof_selectors_keep_captured_values() {
     let mut session = pinned_collection_session();
     let source = include_str!("fixtures/stdlib-collection-captured-asof-selectors-yfifu.orna");
