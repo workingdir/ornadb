@@ -714,6 +714,28 @@ impl PackageResolver {
         Ok(SiblingRebindResolution { routes })
     }
 
+    /// Continues sibling routes from their own retained snapshots with one
+    /// terminal-depth pair per route. `retained_session` is each route's
+    /// flattened history index; results preserve input order and prior waves.
+    /// The batch is returned only if every selected snapshot and closure is
+    /// available.
+    pub fn extend_sibling_terminal_pair_paths_from_retained(
+        &self,
+        paths: &[(&ReboundPathResolution, usize, &[PinnedDatabase; 2])],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, retained_session, replacements)| {
+                self.extend_nested_terminal_pair_from_retained(
+                    previous,
+                    *retained_session,
+                    (**replacements).clone(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
     /// Repeats one identical rebind path across a completed sibling batch.
     /// Each branch extends from its own terminal session and keeps its earlier
     /// route snapshots; the returned batch preserves sibling order.
