@@ -586,6 +586,21 @@ impl PackageResolver {
         Ok(SiblingRebindResolution { routes })
     }
 
+    /// Applies one identical replacement path to every sibling parent while
+    /// retaining each parent's route snapshots independently. Results keep
+    /// parent order and are returned only when every sibling resolves.
+    pub fn resolve_sibling_rebind_wave(
+        &self,
+        parents: &[AttachedDatabaseSession],
+        replacements: &[PinnedDatabase],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let paths = parents
+            .iter()
+            .map(|parent| (parent, replacements))
+            .collect::<Vec<_>>();
+        self.resolve_sibling_rebind_paths(&paths)
+    }
+
     /// Resolves a chain of exact aliases from a retained session snapshot.
     /// Each edge is selected from the session opened at the preceding edge;
     /// a failure leaves the caller's snapshot untouched.
