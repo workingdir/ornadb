@@ -262,6 +262,10 @@ pub struct BranchMergePlan {
 /// precedence because of older history. Swapping left and right branch
 /// orientation likewise preserves the conflict key identities and their
 /// table/key order.
+/// If a storm attempt reads one table's conflict prefix and then fails while
+/// loading a later paired table, that prefix is discarded with the attempt.
+/// Recovered retries rebuild the full branch-symmetric conflict set from the
+/// same committed base; failed work cannot duplicate or bias a later delta.
 ///
 /// A read failure at any table or range aborts the whole invocation. Facts
 /// gathered from earlier tables or depth ranges remain private; after source
