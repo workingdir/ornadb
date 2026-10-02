@@ -17372,6 +17372,36 @@ fn recovery_storms_keep_paired_tombstone_chain_order() {
 }
 
 #[test]
+fn unequal_depth_paired_chain_read_failure_discards_partial_order() {
+    let (base, left, right, source) = paired_distinct_depth_chain_inputs(true, true, false);
+    let mut interrupted = FailAfterRowsFixtureRows {
+        source,
+        fail_after_rows: 24,
+        rows_delivered: 0,
+        failed_at: None,
+    };
+
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: 33, max_conflicts: 0 },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed after a partial row prefix".into(),
+        }),
+    );
+    assert_eq!(interrupted.rows_delivered, 24);
+    assert_eq!(
+        interrupted.failed_at,
+        Some((id(2), MergeSide::Left, b"paired-chain-whole-left".to_vec())),
+        "the complete deep table stays private when the shallower paired table fails",
+    );
+}
+
+#[test]
 fn paired_depth_chains_keep_identical_keys_table_local() {
     let (base, left, right, mut source) = paired_tombstone_chain_load_inputs(true, true, false);
     let plan = merge_three_way_snapshots(
