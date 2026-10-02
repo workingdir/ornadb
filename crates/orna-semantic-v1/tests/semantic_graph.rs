@@ -5203,6 +5203,59 @@ fn paired_reproductions_remain_stable_across_alternating_storm_orders() {
             );
         }
     }
+    assert_ne!(
+        outputs.get("left_checkpoints"),
+        outputs.get("right_checkpoints"),
+        "paired storm orders must retain lane-specific snapshot identities"
+    );
+}
+
+#[test]
+fn paired_reproduction_checkpoint_types_stay_stable_across_interleaved_analyses() {
+    const FUNCTION: &str =
+        "paired_reproductions_remain_stable_across_chained_storm_orders";
+    let paired = include_str!("fixtures/historical-paired-reproduction-stability-roundtrip.orna");
+    let mixed =
+        include_str!("fixtures/historical-paired-reproduction-stability-roundtrip-mixed.orna");
+    let catalogue = historical_nested_callable_catalogue();
+    let analyze_fixture = |path, source| {
+        analyze_with_catalogue(&[ModuleInput::new(path, source)], &catalogue)
+    };
+    let checkpoint_type = |analysis: &orna_semantic_v1::Analysis| {
+        analysis
+            .modules
+            .values()
+            .find_map(|module| module.symbols.get(FUNCTION))
+            .expect("paired reproduction function")
+            .ty
+            .clone()
+    };
+
+    let first = analyze_fixture("paired-reproduction.orna", paired);
+    assert!(first.is_ok(), "{:?}", first.diagnostics);
+    let first_checkpoint_type = checkpoint_type(&first);
+
+    let mixed_result = analyze_fixture("paired-reproduction-mixed.orna", mixed);
+    assert!(
+        mixed_result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "cross-lane checkpoint mixing must remain rejected: {:?}",
+        mixed_result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+
+    let repeated = analyze_fixture("paired-reproduction.orna", paired);
+    assert!(repeated.is_ok(), "{:?}", repeated.diagnostics);
+    assert_eq!(
+        first_checkpoint_type,
+        checkpoint_type(&repeated),
+        "rejected cross-lane analysis must not change either lane's checkpoint identity"
+    );
 }
 
 #[test]
