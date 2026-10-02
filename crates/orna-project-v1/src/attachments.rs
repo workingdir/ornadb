@@ -706,6 +706,36 @@ impl PackageResolver {
         self.extend_nested_rebind_path_from_wave(previous, wave, snapshot, &replacements)
     }
 
+    /// Applies an ordered chain of terminal-depth pairs to one nested route.
+    /// Each pair starts from the last snapshot in the latest retained wave,
+    /// carrying the preceding rebind forward by one closure depth. The
+    /// reference is silent on this continuation rule; v1 keeps the exact
+    /// retained-wave tail and returns no partial chain if a pair fails.
+    pub fn extend_nested_terminal_pair_chain(
+        &self,
+        previous: &ReboundPathResolution,
+        replacement_waves: &[[PinnedDatabase; 2]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let mut route = previous.clone();
+        for replacements in replacement_waves {
+            let latest_wave = route
+                .retained_wave_lengths
+                .len()
+                .checked_sub(1)
+                .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+            let latest_snapshot = route.retained_wave_lengths[latest_wave]
+                .checked_sub(1)
+                .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+            route = self.extend_nested_terminal_pair_from_wave(
+                &route,
+                latest_wave,
+                latest_snapshot,
+                replacements.clone(),
+            )?;
+        }
+        Ok(route)
+    }
+
     /// Resolves independently rebound paths for sibling parent snapshots.
     /// Each input plan is `(parent, replacements)`; results keep input order
     /// and each route retains its own pre-rebind sessions. No partial batch is
@@ -880,29 +910,11 @@ impl PackageResolver {
         previous: &SiblingRebindResolution,
         replacement_waves: &[[PinnedDatabase; 2]],
     ) -> Result<SiblingRebindResolution, AttachmentError> {
-        let mut routes = previous.routes.clone();
-        for replacements in replacement_waves {
-            let next_routes = routes
-                .iter()
-                .map(|route| {
-                    let latest_wave = route
-                        .retained_wave_lengths
-                        .len()
-                        .checked_sub(1)
-                        .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
-                    let latest_snapshot = route.retained_wave_lengths[latest_wave]
-                        .checked_sub(1)
-                        .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
-                    self.extend_nested_terminal_pair_from_wave(
-                        route,
-                        latest_wave,
-                        latest_snapshot,
-                        replacements.clone(),
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            routes = next_routes;
-        }
+        let routes = previous
+            .routes
+            .iter()
+            .map(|route| self.extend_nested_terminal_pair_chain(route, replacement_waves))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(SiblingRebindResolution { routes })
     }
 
