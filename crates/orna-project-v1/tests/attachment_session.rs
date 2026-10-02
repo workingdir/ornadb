@@ -11963,6 +11963,78 @@ fn paired_terminal_depth_waves_retain_pre_and_between_routes() {
         ]),
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
+
+    let shared_terminal_pair = [
+        resolve_pin(aliases[2], &terminal_left),
+        resolve_pin(aliases[3], &leaves[3]),
+    ];
+    let converged = resolver
+        .extend_sibling_terminal_pair_wave_from_waves(
+            &[
+                (&reopened.routes()[0], 2, 1),
+                (&reopened.routes()[1], 2, 1),
+            ],
+            shared_terminal_pair.clone(),
+        )
+        .unwrap();
+    assert_eq!(converged.routes().len(), 2);
+    for (route, prior_terminal, prior_leaf, terminal_marker, leaf_marker) in [
+        (
+            &converged.routes()[0],
+            &terminal_left,
+            &leaves[1],
+            "711",
+            "701",
+        ),
+        (
+            &converged.routes()[1],
+            &terminal_right,
+            &leaves[2],
+            "712",
+            "702",
+        ),
+    ] {
+        assert_eq!(route.retained_wave(0).unwrap().len(), 2);
+        assert_eq!(route.retained_wave(1).unwrap().len(), 1);
+        assert_eq!(route.retained_wave(2).unwrap().len(), 2);
+        let displaced_terminal = route.retained_wave(3).unwrap();
+        assert_eq!(displaced_terminal.len(), 1);
+        assert_pin(&displaced_terminal[0], aliases[2], prior_terminal);
+        assert_pin(&displaced_terminal[0], aliases[3], prior_leaf);
+        assert_module_route(
+            &displaced_terminal[0],
+            "main.orna",
+            &format!("= {terminal_marker}"),
+        );
+        assert_module_route(
+            &displaced_terminal[0],
+            "archive_copy_archive_archive.orna",
+            &format!("= {leaf_marker}"),
+        );
+        assert_eq!(route.retained_wave(4).unwrap().len(), 2);
+        assert_pin(route.final_session(), aliases[3], &leaves[3]);
+        assert_module_route(route.final_session(), "main.orna", "= 703");
+    }
+    assert_pin(
+        reopened.routes()[0].final_session(),
+        aliases[3],
+        &leaves[1],
+    );
+    assert_pin(
+        reopened.routes()[1].final_session(),
+        aliases[3],
+        &leaves[2],
+    );
+    assert!(matches!(
+        resolver.extend_sibling_terminal_pair_wave_from_waves(
+            &[
+                (&reopened.routes()[0], 2, 1),
+                (&reopened.routes()[1], usize::MAX, 0),
+            ],
+            shared_terminal_pair,
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
 }
 
 fn assert_module_route(session: &AttachedDatabaseSession, path: &str, source_marker: &str) {
