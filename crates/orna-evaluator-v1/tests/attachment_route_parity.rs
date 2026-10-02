@@ -834,8 +834,24 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         .unwrap(),
         PinnedDatabase::resolve(
             aliases[4],
-            package_repository,
+            package_repository.clone(),
             &leaf_final,
+            loader,
+        )
+        .unwrap(),
+    ];
+    let same_depth_second_pair = [
+        PinnedDatabase::resolve(
+            aliases[2],
+            package_repository.clone(),
+            &terminal_middle,
+            loader,
+        )
+        .unwrap(),
+        PinnedDatabase::resolve(
+            aliases[3],
+            package_repository,
+            &route_three_final,
             loader,
         )
         .unwrap(),
@@ -881,7 +897,7 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
             &first_stage,
             0,
             0,
-            &[first_pair, second_pair],
+            &[first_pair.clone(), second_pair],
         )
         .unwrap_or_else(|error| panic!("historical handoff chain failed: {error:?}"));
     let mut selected_root = AdmittedReplSession::from_attached_database_session(
@@ -917,6 +933,43 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
     assert_eq!(continued.submit(&format!("use {};", aliases[4])), Ok(None));
     assert_eq!(
         continued.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(96.into())))
+    );
+
+    let fixed_depth_storm = resolver
+        .extend_nested_terminal_pair_storm_from_wave(
+            &first_stage,
+            0,
+            0,
+            &[first_pair, same_depth_second_pair],
+        )
+        .unwrap_or_else(|error| panic!("fixed-depth pair storm failed: {error:?}"));
+    assert_eq!(
+        fixed_depth_storm.final_session().primary().pin().name(),
+        aliases[3]
+    );
+    assert_eq!(
+        fixed_depth_storm
+            .final_session()
+            .primary()
+            .pin()
+            .commit()
+            .as_str(),
+        route_three_final
+    );
+    assert_eq!(fixed_depth_storm.final_session().attached().count(), 1);
+    assert_eq!(chained.final_session().primary().pin().name(), aliases[4]);
+    let mut fixed_depth_evaluator = AdmittedReplSession::from_attached_database_session(
+        fixed_depth_storm.final_session(),
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        fixed_depth_evaluator.submit(&format!("use {};", aliases[4])),
+        Ok(None)
+    );
+    assert_eq!(
+        fixed_depth_evaluator.submit(&format!("{}.package_value()", aliases[4])),
         Ok(Some(Value::int(96.into())))
     );
 }
