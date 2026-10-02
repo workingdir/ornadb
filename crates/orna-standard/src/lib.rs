@@ -123,6 +123,7 @@ pub const REFERENCE_STANDARD_SET_PATH_V1: &str = "std/set.orna";
 pub const REFERENCE_STANDARD_IO_PATH_V1: &str = "std/io/main.orna";
 pub const REFERENCE_STANDARD_FS_PATH_V1: &str = "std/io/fs.orna";
 pub const REFERENCE_STANDARD_CONCURRENT_PATH_V1: &str = "std/concurrent/main.orna";
+pub const REFERENCE_STANDARD_TEST_PATH_V1: &str = "std/test.orna";
 
 const REFERENCE_STANDARD_MATH_SOURCE_V1: &str = include_str!("../../../stdlib/std/math.orna");
 const REFERENCE_STANDARD_COLLECTION_SOURCE_V1: &str =
@@ -171,13 +172,14 @@ const REFERENCE_STANDARD_IO_SOURCE_V1: &str = include_str!("../../../stdlib/std/
 const REFERENCE_STANDARD_FS_SOURCE_V1: &str = include_str!("../../../stdlib/std/io/fs.orna");
 const REFERENCE_STANDARD_CONCURRENT_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/concurrent/main.orna");
+const REFERENCE_STANDARD_TEST_SOURCE_V1: &str = include_str!("../../../stdlib/std/test.orna");
 
 /// Source units for the Orna 1.0.0 reference standard dependency.
 ///
 /// This is the current source-backed standard boundary. The retained `orna.std/1`–
 /// `orna.std/11` APIs below model older, explicitly versioned snapshots.
 #[must_use]
-pub fn reference_standard_sources_v1() -> [(String, String); 33] {
+pub fn reference_standard_sources_v1() -> [(String, String); 34] {
     [
         (
             REFERENCE_STANDARD_MATH_PATH_V1.into(),
@@ -310,6 +312,10 @@ pub fn reference_standard_sources_v1() -> [(String, String); 33] {
         (
             REFERENCE_STANDARD_NET_WEBSOCKET_PATH_V1.into(),
             REFERENCE_STANDARD_NET_WEBSOCKET_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_TEST_PATH_V1.into(),
+            REFERENCE_STANDARD_TEST_SOURCE_V1.into(),
         ),
     ]
 }
