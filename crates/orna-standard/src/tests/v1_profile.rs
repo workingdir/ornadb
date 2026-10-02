@@ -16,18 +16,28 @@ use crate::{
 fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     let sources = reference_standard_sources_v1();
     assert_eq!(sources[0].0, REFERENCE_STANDARD_MATH_PATH_V1);
-    assert!(sources[0].1.starts_with("pub fn increment(value: Int): Int"));
+    assert!(sources[0].1.contains("pub fn increment(value: Int): Int"));
     assert_eq!(sources[1].0, REFERENCE_STANDARD_COLLECTION_PATH_V1);
     assert!(sources[1].1.contains("pub fn asof_join<T, Time, Key>"));
     assert_eq!(sources[2].0, REFERENCE_STANDARD_QUERY_PATH_V1);
     assert!(sources[2].1.contains("pub fn filter<T>"));
     assert_eq!(sources[3].0, REFERENCE_STANDARD_TEXT_PATH_V1);
     assert!(sources[3].1.contains("pub fn normalise(value: Str, form: Str)"));
+    for name in [
+        "trim", "split", "join", "starts_with", "ends_with", "contains", "replace",
+        "normalise", "lower", "upper",
+    ] {
+        assert!(sources[3].1.contains(&format!("pub fn {name}(")));
+    }
     assert_eq!(sources[4].0, REFERENCE_STANDARD_BITS_PATH_V1);
     assert!(sources[4].1.contains("pub fn shift_right(value: Int, count: Int)"));
+    for name in ["bit_or", "bit_and", "bit_xor", "bit_not", "shift_left", "shift_right"] {
+        assert!(sources[4].1.contains(&format!("pub fn {name}(")));
+    }
     assert_eq!(sources[5].0, REFERENCE_STANDARD_STATS_PATH_V1);
     assert!(sources[5].1.contains("pub fn mean<T>"));
     assert!(sources[5].1.contains("pub fn percentile<T, P>"));
+    assert!(sources[5].1.contains("pub fn median<T>"));
     assert_eq!(sources[6].0, REFERENCE_STANDARD_TIME_PATH_V1);
     assert!(sources[6].1.contains("pub fn timezone_data_version()"));
     assert!(sources[6].1.contains("pub fn resolve_local("));
@@ -72,11 +82,13 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     let consumer = include_str!("fixtures/v1_collection_operations_consumer.orna");
     let asof_consumer = include_str!("fixtures/v1_standard_consumer.orna");
     let option_result_consumer = include_str!("fixtures/v1_option_result_consumer.orna");
+    let text_numeric_consumer = include_str!("fixtures/v1_text_numeric_consumer.orna");
     let analysis = analyze_with_catalogue(
         &[
             ModuleInput::new("asof_consumer.orna", asof_consumer),
             ModuleInput::new("collection_ops.orna", consumer),
             ModuleInput::new("option_result_consumer.orna", option_result_consumer),
+            ModuleInput::new("text_numeric_consumer.orna", text_numeric_consumer),
         ],
         &catalogue,
     );
