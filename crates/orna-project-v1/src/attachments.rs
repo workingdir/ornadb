@@ -285,6 +285,11 @@ impl PackageResolver {
     /// ancestor starts a fresh descendant chain, and the terminal route follows
     /// the final pin chosen at every edge. Pins retained from an earlier
     /// cascade continue to resolve their own terminal routes.
+    /// After expanding the terminal parent, rebinding its exact terminal alias
+    /// changes only that closure's route to the latest attached terminal pin.
+    /// Earlier terminal candidates and the manifest-selected snapshot remain
+    /// independently resolvable; v1 applies the same last-pin rule at this
+    /// final edge when the reference does not specify terminal rebind storms.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
