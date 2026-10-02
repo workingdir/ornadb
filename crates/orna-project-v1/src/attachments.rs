@@ -263,6 +263,11 @@ impl PackageResolver {
     /// selected parent's committed manifest authoritative at that depth. The
     /// reference requires exact pins for each historical parent but does not
     /// require flattening a recursive closure into one session.
+    /// Apply the same precedence independently at every edge of a longer
+    /// chain: rebinding a descendant affects only that descendant session, and
+    /// the next closure uses its final selected pin's manifest. Since the
+    /// reference is silent on repeated storms across nested chains, v1 does
+    /// not overlay manifests from earlier candidates or ancestor sessions.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
