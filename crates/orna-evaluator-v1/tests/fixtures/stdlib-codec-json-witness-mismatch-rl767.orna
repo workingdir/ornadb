@@ -1,0 +1,1 @@
+std.encoding.json.decode("not an integer", as: Int)

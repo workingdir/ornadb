@@ -1,0 +1,1 @@
+std.money.allocate(amount, [1, 1, 1, 1], 2)

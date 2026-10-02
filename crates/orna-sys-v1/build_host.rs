@@ -121,7 +121,15 @@ pub fn generate_host_registry_schema() -> Result<String, String> {
                     "parameters": {"type": "array", "items": {"type": "string"}},
                     "effects": {"type": "array", "minItems": 1, "items": {"enum": ["read", "invoke", "admin"]}},
                     "preconditions": {"type": "array", "items": {"type": "string", "minLength": 1}},
-                    "failures": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                    "failures": {
+                        "type": "array",
+                        "minItems": 1,
+                        "uniqueItems": true,
+                        "items": {
+                            "type": "string",
+                            "pattern": "^sys\\.[a-z0-9_]+(\\.[a-z0-9_]+)*$"
+                        }
+                    },
                     "role": {"type": "string", "minLength": 1},
                     "provider": {"type": "string", "minLength": 1},
                     "implementation": {"type": "string", "minLength": 1}
@@ -143,6 +151,181 @@ pub fn generate_host_registry_schema() -> Result<String, String> {
         }
     });
     serde_json::to_string_pretty(&schema).map_err(|error| error.to_string())
+}
+
+/// Validates the generated host-operation JSON against the generated schema's
+/// deliberately small JSON Schema subset. The same path runs in build.rs and
+/// parity tests, so malformed registry output cannot be embedded silently.
+pub fn validate_host_registry_json(registry_json: &str, schema_json: &str) -> Result<(), String> {
+    validate_json_against_schema(registry_json, schema_json)
+}
+
+/// Validates generated JSON against the schema subset used by sys build
+/// artifacts. Kept shared so typed dispatch and host-operation registries get
+/// identical fail-closed schema behavior.
+pub fn validate_json_against_schema(registry_json: &str, schema_json: &str) -> Result<(), String> {
+    let registry: Value = serde_json::from_str(registry_json)
+        .map_err(|error| format!("invalid registry JSON: {error}"))?;
+    let schema: Value = serde_json::from_str(schema_json)
+        .map_err(|error| format!("invalid registry schema JSON: {error}"))?;
+    validate_schema_value(&registry, &schema, &schema, "$")
+}
+
+fn validate_schema_value(
+    value: &Value,
+    schema: &Value,
+    root_schema: &Value,
+    path: &str,
+) -> Result<(), String> {
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        let target = resolve_schema_ref(root_schema, reference)
+            .ok_or_else(|| format!("{path}: unresolved schema reference `{reference}`"))?;
+        validate_schema_value(value, target, root_schema, path)?;
+    }
+
+    if let Some(allowed) = schema.get("enum").and_then(Value::as_array)
+        && !allowed.contains(value)
+    {
+        return Err(format!("{path}: value is outside the schema enum"));
+    }
+
+    let schema_type = match schema.get("type") {
+        Some(Value::String(kind)) => Some(kind.as_str()),
+        Some(Value::Array(kinds)) => Some(
+            kinds
+                .iter()
+                .filter_map(Value::as_str)
+                .find(|kind| matches_json_type(value, kind))
+                .ok_or_else(|| format!("{path}: value does not match any allowed schema type"))?,
+        ),
+        Some(_) => return Err(format!("{path}: schema `type` must be a string or array")),
+        None => None,
+    };
+    match schema_type {
+        Some("object") => {
+            let object = value
+                .as_object()
+                .ok_or_else(|| format!("{path}: expected object"))?;
+            if let Some(required) = schema.get("required").and_then(Value::as_array) {
+                for field in required.iter().filter_map(Value::as_str) {
+                    if !object.contains_key(field) {
+                        return Err(format!("{path}: missing required field `{field}`"));
+                    }
+                }
+            }
+            let properties = schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .ok_or_else(|| format!("{path}: object schema has no properties"))?;
+            for (field, child) in object {
+                match properties.get(field) {
+                    Some(child_schema) => validate_schema_value(
+                        child,
+                        child_schema,
+                        root_schema,
+                        &format!("{path}.{field}"),
+                    )?,
+                    None if schema.get("additionalProperties") == Some(&Value::Bool(false)) => {
+                        return Err(format!("{path}: unexpected field `{field}`"));
+                    }
+                    None => {}
+                }
+            }
+        }
+        Some("array") => {
+            let array = value
+                .as_array()
+                .ok_or_else(|| format!("{path}: expected array"))?;
+            if let Some(minimum) = schema.get("minItems").and_then(Value::as_u64)
+                && array.len() < minimum as usize
+            {
+                return Err(format!("{path}: array has fewer than {minimum} entries"));
+            }
+            if schema.get("uniqueItems") == Some(&Value::Bool(true)) {
+                for index in 0..array.len() {
+                    if array[..index].contains(&array[index]) {
+                        return Err(format!("{path}: array contains a duplicate entry"));
+                    }
+                }
+            }
+            let item_schema = schema
+                .get("items")
+                .ok_or_else(|| format!("{path}: array schema has no item schema"))?;
+            for (index, item) in array.iter().enumerate() {
+                validate_schema_value(item, item_schema, root_schema, &format!("{path}[{index}]"))?;
+            }
+        }
+        Some("string") => {
+            let string = value
+                .as_str()
+                .ok_or_else(|| format!("{path}: expected string"))?;
+            if let Some(minimum) = schema.get("minLength").and_then(Value::as_u64)
+                && string.chars().count() < minimum as usize
+            {
+                return Err(format!(
+                    "{path}: string is shorter than {minimum} characters"
+                ));
+            }
+            if schema.get("pattern").and_then(Value::as_str)
+                == Some("^sys\\.[a-z0-9_]+(\\.[a-z0-9_]+)*$")
+                && !valid_sys_failure_code(string)
+            {
+                return Err(format!("{path}: invalid sys failure code `{string}`"));
+            }
+        }
+        Some("integer") => {
+            let integer = value
+                .as_i64()
+                .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+                .ok_or_else(|| format!("{path}: expected integer"))?;
+            if let Some(minimum) = schema.get("minimum").and_then(Value::as_i64)
+                && integer < minimum
+            {
+                return Err(format!("{path}: integer is below {minimum}"));
+            }
+        }
+        Some("boolean") if !value.is_boolean() => {
+            return Err(format!("{path}: expected boolean"));
+        }
+        Some("null") if !value.is_null() => return Err(format!("{path}: expected null")),
+        Some("boolean") | Some("null") | None => {}
+        Some(kind) => return Err(format!("{path}: unsupported schema type `{kind}`")),
+    }
+    Ok(())
+}
+
+fn matches_json_type(value: &Value, kind: &str) -> bool {
+    match kind {
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "string" => value.is_string(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "number" => value.is_number(),
+        "boolean" => value.is_boolean(),
+        "null" => value.is_null(),
+        _ => false,
+    }
+}
+
+fn resolve_schema_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
+    let pointer = reference.strip_prefix('#')?;
+    pointer.split('/').skip(1).try_fold(root, |value, segment| {
+        let segment = segment.replace("~1", "/").replace("~0", "~");
+        value.get(segment.as_str())
+    })
+}
+
+fn valid_sys_failure_code(code: &str) -> bool {
+    let Some(namespace) = code.strip_prefix("sys.") else {
+        return false;
+    };
+    !namespace.is_empty()
+        && namespace.split('.').all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        })
 }
 
 impl<'ast> Visit<'ast> for Collector {
@@ -263,6 +446,13 @@ fn validate_operation(metadata: &Value, method: &syn::Signature) -> Result<(), S
         "std.net.http.send" => {
             "fn std.net.http.send(method: Str, url: Str, headers: [(Str, Str)], request_body: Blob?, timeout: Duration?, max_header_bytes: Int, max_body_bytes: Int): (Int, [(Str, Str)], Blob)"
         }
+        "std.net.http.start" => {
+            "fn std.net.http.start(method: Str, url: Str, headers: [(Str, Str)], request_body: Blob?, timeout: Duration?, max_header_bytes: Int, max_body_bytes: Int): Uuid"
+        }
+        "std.net.http.wait" => {
+            "fn std.net.http.wait(handle: Uuid, timeout: Duration?): (Int, [(Str, Str)], Blob)"
+        }
+        "std.net.http.cancel" => "fn std.net.http.cancel(handle: Uuid): Bool",
         _ => return Err("unsupported native host operation".to_owned()),
     };
     if signature != expected_signature {
@@ -458,6 +648,28 @@ fn validate_native_method_signature(
                 "HostHttpResponse",
                 "HttpProviderError",
             ),
+            "std.net.http.start" => (
+                &[
+                    ("method", "&str"),
+                    ("url", "&str"),
+                    ("headers", "&[(String, String)]"),
+                    ("request_body", "Option<&[u8]>"),
+                    ("timeout", "Option<Duration>"),
+                    ("max_header_bytes", "usize"),
+                    ("max_body_bytes", "usize"),
+                ],
+                "HostHttpHandle",
+                "HttpProviderError",
+            ),
+            "std.net.http.wait" => (
+                &[
+                    ("handle", "HostHttpHandle"),
+                    ("timeout", "Option<Duration>"),
+                ],
+                "HostHttpResponse",
+                "HttpProviderError",
+            ),
+            "std.net.http.cancel" => (&[("handle", "HostHttpHandle")], "bool", "HttpProviderError"),
             _ => return Err("unsupported native host operation".to_owned()),
         };
     let mut inputs = method.inputs.iter();

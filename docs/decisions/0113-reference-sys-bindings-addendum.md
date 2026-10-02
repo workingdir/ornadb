@@ -80,3 +80,25 @@ A matching in-crate fixture pins the erased `sys.invoke(Value)` and generic `sys
 ## Follow-on proof note: invoke keyword parameter and default parity (issue #5775)
 
 The invoke overload fixture proof now compares each parsed parameter name, type, and default with its typed registry entry. This pins the argument layout around the generic `as_` alias, including the `at`, transaction, and idempotency defaults for both overloads; generated artifacts remain unchanged.
+
+## Follow-on coverage audit and extension-boundary parity (issue #6869)
+
+The generated built-in host-binding registry currently contains 20 operations. The evaluator coverage audit maps every registry name to an in-crate `.orna` call fixture, its provider, and a native behavior proof with a concrete result assertion. It fails if an operation is added to or removed from the generated registry without updating that map. The behavior proofs cover:
+
+| Registry operations | Native behavior proof |
+|---|---|
+| `std.io.environment.get`, `std.io.environment.require` | `typed_sys_environment_bindings_execute_native_allowlisted_provider` returns the explicit snapshot values `fixture-home` and `fixture-path`. |
+| `std.io.process.run`, `std.concurrent.sleep` | `typed_sys_process_and_clock_bindings_execute_allowlisted_native_providers` returns the child output `host-bound` and observes the bounded clock wait. |
+| `std.io.fs.read_text`, `write_text`, `list`, `metadata` | `sys_filesystem_registry_dispatches_real_reads_writes_lists_and_denials` reads and writes host files and checks the returned listing and metadata. |
+| `std.io.fs.append_text`, `exists`, `is_directory`, `create_dir`, `copy_file`, `move_file`, `remove_file` | `all_registered_filesystem_dispatch_arms_execute_with_native_results` executes these fixtures and checks returned values and resulting filesystem state. |
+| `std.io.fs.symlink_metadata` | `sys_filesystem_symlink_metadata_is_non_following_and_reads_cannot_escape_root` returns symlink metadata without following the link. |
+| `std.net.http.send` | `sys_http_registry_dispatches_real_bounded_loopback_response` checks the loopback response status, header, and body. |
+| `std.net.http.start`, `std.net.http.wait`, `std.net.http.cancel` | `sys_http_start_wait_and_cancel_dispatch_real_native_behavior` checks the asynchronous response body and cancellation result. |
+
+This is coverage evidence for the built-in provider path, not a second descriptor inventory: operation identity, provider, role, signature, and failures still originate in the annotated Rust registry. The existing sys-crate proofs separately validate generated schema/artifact parity and parse/type/dispatch parity for generated declarations.
+
+The implementation boundary matches the non-normative reference addendum and ADR 0111: built-in `sys` declarations and host dispatch are generated from the typed Rust registry and execute trusted native provider logic. WIT and the WebAssembly Component Model remain the distinct portable third-party extension ABI under ORNA-EXT-001..003. They provide typed, capability-scoped imports and exports without raw Turso or Git handles; they are not the built-in binding format, provider loader, or source of built-in `sys` behavior. No WIT component loader or extension permission is implied by this coverage work. The normative 1.0.0 contract and `api/sys.json` requirements are unchanged.
+
+## Follow-on evaluator dispatch parity harness (issue #6883)
+
+The evaluator unit proof now walks every generated host-operation descriptor through `SysHostBindingRegistry` with the native provider families installed. It asserts that registered non-environment operations reach their typed handler and fail at argument arity, rather than being treated as unknown or unbound; environment operations return their concrete optional/required snapshot values. Paired with the fixture audit above, this guards the chain from generated call surface through registry metadata to evaluator dispatch. The sys-crate generated-stub tests continue to pin parser, type, and public sys-dispatch parity. This is regression evidence only: built-in calls stay native, and WIT/Wasm remains a separate third-party extension boundary.

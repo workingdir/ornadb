@@ -1,0 +1,12 @@
+std.money.format(1234.5, "GBP", 2, "half_even", "en-GB") == "£1,234.50"
+&& std.money.format(1234.5, "EUR", 2, "half_even", "fr-FR") == "1 234,50 €"
+&& std.money.format(1.005, "GBP", 2, "half_even", "en-GB") == "£1.00"
+&& std.money.format(1.005, "GBP", 2, "half_up", "en-GB") == "£1.01"
+&& std.money.format(-1234.5, "GBP", 2, "half_even", "en-GB") == "-£1,234.50"
+&& std.money.format(
+    1234.5,
+    currency_code: "GBP",
+    minor_digits: 2,
+    rounding: "half_even",
+    locale: "en-GB"
+) == "£1,234.50"
