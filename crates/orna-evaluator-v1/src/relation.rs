@@ -308,6 +308,10 @@ impl FilterBatch {
         if let Some(batch) = continuations.get(&key).and_then(Weak::upgrade) {
             return batch;
         }
+        // A shared prefix may outlive the compiled joins that once used it.
+        // Prune those expired weak entries when the prefix needs a new join
+        // so repeated unknown-union compilations do not grow a dead cache.
+        continuations.retain(|_, batch| batch.strong_count() > 0);
         let batch = Arc::new(Self {
             node: FilterBatchNode::Then(Arc::clone(previous), Arc::clone(next)),
             flattened: OnceLock::new(),
