@@ -16541,7 +16541,33 @@ fn specialize_dynamic_parameter_snapshot_contexts(
     let nonreturning_argument = argument_types
         .iter()
         .any(contains_nonreturning_aggregate_component);
-    if !nonreturning_argument {
+    let malformed_tuple_argument = formal_parameters
+        .iter()
+        .enumerate()
+        .any(|(parameter_index, formal)| {
+            if !matches!(formal, Type::Tuple(_)) {
+                return false;
+            }
+            let Some(argument_index) = call_argument_index_for_position(
+                parameter_names,
+                parameter_index,
+                arguments,
+            ) else {
+                return false;
+            };
+            let Some(actual) = argument_types.get(argument_index) else {
+                return true;
+            };
+            contains_type_error(formal)
+                || contains_type_error(actual)
+                || !types_match(formal, actual)
+        });
+    // The reference specifies pin identity but leaves recovery after a failed
+    // tuple call unspecified. Treat the call's binding wave transactionally:
+    // a malformed tuple must not rebind otherwise valid scalar or tuple
+    // siblings captured by the returned callable.
+    let suppress_rebinding = nonreturning_argument || malformed_tuple_argument;
+    if !suppress_rebinding {
         for (parameter_index, formal) in formal_parameters.iter().enumerate() {
             let Some(argument_index) = call_argument_index_for_position(
                 parameter_names,
@@ -16566,9 +16592,9 @@ fn specialize_dynamic_parameter_snapshot_contexts(
         }
     }
 
-    // A call with any non-returning argument never reaches the callee. Keep its
-    // result symbolic instead of leaking a completed pin from a sibling arg.
-    let (parameter_names, arguments, argument_types) = if nonreturning_argument {
+    // A call with a non-returning argument or malformed tuple never reaches the
+    // callee. Keep its result symbolic instead of leaking sibling pins.
+    let (parameter_names, arguments, argument_types) = if suppress_rebinding {
         (None, &[][..], &[][..])
     } else {
         (parameter_names, arguments, argument_types)
