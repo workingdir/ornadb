@@ -22,6 +22,7 @@ use crate::{
     REFERENCE_STANDARD_CONCURRENT_PATH_V1, REFERENCE_STANDARD_ERROR_PATH_V1,
     REFERENCE_STANDARD_TEST_PATH_V1,
     REFERENCE_STANDARD_GENERICS_PATH_V1, REFERENCE_STANDARD_TYPE_UTILS_PATH_V1,
+    REFERENCE_STANDARD_PATTERN_PATH_V1,
     reference_standard_catalogue_v1,
     reference_standard_profile_v1, reference_standard_sources_v1,
 };
@@ -39,6 +40,19 @@ fn pinned_std_entrypoint_imports_optional_content_modules() {
     assert!(entrypoint.lines().any(|line| line.trim() == "use test;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use generics;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use type_utils;"));
+    assert!(entrypoint.lines().any(|line| line.trim() == "use pattern;"));
+}
+
+#[test]
+fn pinned_pattern_surface_typechecks_exhaustive_matches_and_destructuring() {
+    let source = reference_standard_sources_v1()
+        .into_iter()
+        .find(|(path, _)| path == REFERENCE_STANDARD_PATTERN_PATH_V1)
+        .expect("the pinned source bundle includes std.pattern")
+        .1;
+    let parsed = orna_syntax_v1::parse_module_with_file(&source, REFERENCE_STANDARD_PATTERN_PATH_V1);
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    reference_standard_catalogue_v1().expect("the pinned pattern module checks with std sources");
 }
 
 #[test]
@@ -484,7 +498,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
-    assert_eq!(sources.len(), 36);
+    assert_eq!(sources.len(), 37);
     assert_eq!(sources[34].0, REFERENCE_STANDARD_GENERICS_PATH_V1);
     for declaration in [
         "pub fn identity<T>(value: T): T",
@@ -524,6 +538,27 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "Transform the first component before the second",
     ] {
         assert!(sources[35].1.contains(contract), "missing std.type_utils contract `{contract}`");
+    }
+    assert_eq!(sources[36].0, REFERENCE_STANDARD_PATTERN_PATH_V1);
+    for declaration in [
+        "pub enum Either<LeftValue, RightValue>",
+        "pub fn is_left<L, R>(value: Either<L, R>): Bool",
+        "pub fn is_right<L, R>(value: Either<L, R>): Bool",
+        "pub fn left_value<L, R>(value: Either<L, R>): L?",
+        "pub fn right_value<L, R>(value: Either<L, R>): R?",
+        "pub fn split<L, R>(value: Either<L, R>): (L?, R?)",
+        "pub fn left_or<L, R>(value: Either<L, R>, fallback: L): L",
+        "pub fn right_or<L, R>(value: Either<L, R>, fallback: R): R",
+        "pub fn swap<L, R>(value: Either<L, R>): Either<R, L>",
+    ] {
+        assert!(sources[36].1.contains(declaration), "missing std.pattern declaration `{declaration}`");
+    }
+    for contract in [
+        "Orna's `case` expression remains the matching syntax",
+        "Return null when the requested branch is inactive",
+        "Split into two optional projections",
+    ] {
+        assert!(sources[36].1.contains(contract), "missing std.pattern contract `{contract}`");
     }
     assert_eq!(sources[19].0, REFERENCE_STANDARD_ERROR_PATH_V1);
     assert!(sources[19].1.contains("pub fn make(code: Str, message: Str): Error"));
@@ -610,6 +645,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         (REFERENCE_STANDARD_TEST_PATH_V1, 33),
         (REFERENCE_STANDARD_GENERICS_PATH_V1, 34),
         (REFERENCE_STANDARD_TYPE_UTILS_PATH_V1, 35),
+        (REFERENCE_STANDARD_PATTERN_PATH_V1, 36),
     ] {
         let mut changed_source = sources[source_index].1.clone();
         changed_source.push_str("\n// changed after the captured snapshot\n");
