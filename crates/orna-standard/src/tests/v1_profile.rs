@@ -8,6 +8,8 @@ use crate::{
     REFERENCE_STANDARD_TIME_COMPACT_PATH_V1, REFERENCE_STANDARD_TIME_CLOCK_PATH_V1,
     REFERENCE_STANDARD_TIME_WORDS_PATH_V1, REFERENCE_STANDARD_TIME_ISO_PATH_V1,
     REFERENCE_STANDARD_OPTION_PATH_V1, REFERENCE_STANDARD_RESULT_PATH_V1,
+    REFERENCE_STANDARD_LIST_PATH_V1, REFERENCE_STANDARD_MAP_PATH_V1,
+    REFERENCE_STANDARD_SET_PATH_V1,
     reference_standard_catalogue_v1,
     reference_standard_profile_v1, reference_standard_sources_v1,
 };
@@ -55,6 +57,18 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     assert_eq!(sources[12].0, REFERENCE_STANDARD_RESULT_PATH_V1);
     assert!(sources[12].1.contains("pub enum Result<T, E>"));
     assert!(sources[12].1.contains("pub fn map_error<T, E, F>"));
+    assert_eq!(sources[13].0, REFERENCE_STANDARD_LIST_PATH_V1);
+    for name in ["append", "last", "reverse", "unique"] {
+        assert!(sources[13].1.contains(&format!("pub fn {name}<")));
+    }
+    assert_eq!(sources[14].0, REFERENCE_STANDARD_MAP_PATH_V1);
+    for name in ["get", "insert", "remove", "merge"] {
+        assert!(sources[14].1.contains(&format!("pub fn {name}<")));
+    }
+    assert_eq!(sources[15].0, REFERENCE_STANDARD_SET_PATH_V1);
+    for name in ["from_list", "contains", "insert", "union", "intersection", "difference"] {
+        assert!(sources[15].1.contains(&format!("pub fn {name}<")));
+    }
     let option_module_analysis = analyze_with_catalogue(
         &[ModuleInput::new("option.orna", &sources[11].1)],
         &orna_semantic_v1::Catalogue::authoritative_core(),
@@ -79,16 +93,49 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     }
 
     let catalogue = reference_standard_catalogue_v1().expect("the standard module checks");
+    for (path, source) in &sources[13..] {
+        let module_analysis = analyze_with_catalogue(
+            &[ModuleInput::new(path, source)],
+            &orna_semantic_v1::Catalogue::authoritative_core(),
+        );
+        let parse_diagnostics = module_analysis
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == "ORNA-S000-PARSE")
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>();
+        assert!(parse_diagnostics.is_empty(), "{path}: {parse_diagnostics:?}");
+    }
     let consumer = include_str!("fixtures/v1_collection_operations_consumer.orna");
     let asof_consumer = include_str!("fixtures/v1_standard_consumer.orna");
     let option_result_consumer = include_str!("fixtures/v1_option_result_consumer.orna");
     let text_numeric_consumer = include_str!("fixtures/v1_text_numeric_consumer.orna");
+    let collections_consumer = include_str!("fixtures/v1_collections_consumer.orna");
+    for (path, source) in [
+        ("list_consumer.orna", include_str!("fixtures/v1_list_consumer.orna")),
+        ("map_consumer.orna", include_str!("fixtures/v1_map_consumer.orna")),
+        ("set_consumer.orna", include_str!("fixtures/v1_set_consumer.orna")),
+    ] {
+        let module_analysis =
+            analyze_with_catalogue(&[ModuleInput::new(path, source)], &catalogue);
+        assert!(
+            module_analysis.is_ok(),
+            "{path}: {}",
+            module_analysis
+                .diagnostics
+                .iter()
+                .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
     let analysis = analyze_with_catalogue(
         &[
             ModuleInput::new("asof_consumer.orna", asof_consumer),
             ModuleInput::new("collection_ops.orna", consumer),
             ModuleInput::new("option_result_consumer.orna", option_result_consumer),
             ModuleInput::new("text_numeric_consumer.orna", text_numeric_consumer),
+            ModuleInput::new("collections_consumer.orna", collections_consumer),
         ],
         &catalogue,
     );
