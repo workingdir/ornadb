@@ -69,6 +69,23 @@ const DEFAULT_ITEMS: usize = 1_024;
 const DEFAULT_STRING_BYTES: usize = 16_384;
 const DEFAULT_INTEGER_DIGITS: usize = 1_024;
 
+fn unicode_16_white_space(value: char) -> bool {
+    matches!(
+        value,
+        '\u{0009}'..='\u{000D}'
+            | '\u{0020}'
+            | '\u{0085}'
+            | '\u{00A0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200A}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202F}'
+            | '\u{205F}'
+            | '\u{3000}'
+    )
+}
+
 /// Explicit resource bounds. All zero values reject evaluation immediately.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
@@ -5438,9 +5455,11 @@ impl Context<'_, '_> {
         let name = name.strip_prefix("__").unwrap_or(name);
         match (name, values.as_slice()) {
             ("trim", [Value::String(value)]) => {
-                // The bounded profile trims the Unicode White_Space set used
-                // by the runtime string implementation.
-                self.string(value.trim().to_owned()).map(Value::String)
+                // Keep the pinned standard profile independent of the Rust
+                // toolchain's Unicode tables. Unicode 16.0.0's White_Space
+                // property is stable and explicitly listed above.
+                self.string(value.trim_matches(unicode_16_white_space).to_owned())
+                    .map(Value::String)
             }
             ("split", [Value::String(value), Value::String(separator)]) => {
                 // This profile preserves leading/trailing empty fields. An
