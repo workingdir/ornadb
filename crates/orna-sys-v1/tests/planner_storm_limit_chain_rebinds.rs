@@ -1393,7 +1393,7 @@ fn unknown_row_byte_caps_report_scoped_handoff_routes_by_nested_depth() {
             .collect::<Vec<_>>(),
         vec![
             Some(&PlanDetail::Text(
-                "1:root/branch1/limit1/rebind1/cascade1=2048>512,root/branch1/limit1/rebind1/cascade2=512>128,root/branch1/limit2/rebind2/cascade1=128>32;2:root/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=2048>1024,root/branch1/limit1/rebind1/cascade2/branch1/limit1/rebind1/cascade1=512>256,root/branch1/limit2/rebind2/cascade1/branch1/limit1/rebind1/cascade1=128>64".to_owned()
+                "1:root/storm1/branch1/limit1/rebind1/cascade1=2048>512,root/storm1/branch1/limit1/rebind1/cascade2=512>128,root/storm1/branch1/limit2/rebind2/cascade1=128>32;2:root/storm1/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=2048>1024,root/storm1/branch1/limit1/rebind1/cascade2/branch1/limit1/rebind1/cascade1=512>256,root/storm1/branch1/limit2/rebind2/cascade1/branch1/limit1/rebind1/cascade1=128>64".to_owned()
             )),
             Some(&PlanDetail::Text(
                 "1:root/storm1/output/storm2/branch1/limit1/rebind1/cascade1=1040>260;2:root/storm1/output/storm2/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=1040>520".to_owned()
@@ -1409,7 +1409,7 @@ fn unknown_row_byte_caps_report_scoped_handoff_routes_by_nested_depth() {
             .collect::<Vec<_>>(),
         vec![
             Some(&PlanDetail::Text(
-                "1:root/branch1/limit1=>root/branch1/limit1/rebind1/cascade1=2048>512,root/branch1/limit1/rebind1/cascade1=>root/branch1/limit1/rebind1/cascade2=512>128,root/branch1/limit1/rebind1/cascade2/limit2=>root/branch1/limit2/rebind2/cascade1=128>32;2:root/branch1/limit1/rebind1/cascade1/branch1/limit1=>root/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=2048>1024,root/branch1/limit1/rebind1/cascade2/branch1/limit1=>root/branch1/limit1/rebind1/cascade2/branch1/limit1/rebind1/cascade1=512>256,root/branch1/limit2/rebind2/cascade1/branch1/limit1=>root/branch1/limit2/rebind2/cascade1/branch1/limit1/rebind1/cascade1=128>64".to_owned()
+                "1:root/storm1/branch1/limit1=>root/storm1/branch1/limit1/rebind1/cascade1=2048>512,root/storm1/branch1/limit1/rebind1/cascade1=>root/storm1/branch1/limit1/rebind1/cascade2=512>128,root/storm1/branch1/limit1/rebind1/cascade2/limit2=>root/storm1/branch1/limit2/rebind2/cascade1=128>32;2:root/storm1/branch1/limit1/rebind1/cascade1/branch1/limit1=>root/storm1/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=2048>1024,root/storm1/branch1/limit1/rebind1/cascade2/branch1/limit1=>root/storm1/branch1/limit1/rebind1/cascade2/branch1/limit1/rebind1/cascade1=512>256,root/storm1/branch1/limit2/rebind2/cascade1/branch1/limit1=>root/storm1/branch1/limit2/rebind2/cascade1/branch1/limit1/rebind1/cascade1=128>64".to_owned()
             )),
             Some(&PlanDetail::Text(
                 "1:root/storm1/output/storm2/branch1/limit1=>root/storm1/output/storm2/branch1/limit1/rebind1/cascade1=1040>260;2:root/storm1/output/storm2/branch1/limit1/rebind1/cascade1/branch1/limit1=>root/storm1/output/storm2/branch1/limit1/rebind1/cascade1/branch1/limit1/rebind1/cascade1=1040>520".to_owned()
