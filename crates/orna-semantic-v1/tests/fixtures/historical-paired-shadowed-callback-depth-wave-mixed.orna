@@ -1,0 +1,28 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn callback_wave_at(pin: sys.SnapshotRef) {
+    let selected = pin;
+    (selected: sys.SnapshotRef) => {
+        let first_capture = selected;
+        (selected: sys.SnapshotRef) => {
+            let second_capture = selected;
+            (selected: sys.SnapshotRef) => {
+                let third_capture = selected;
+                factory_at(third_capture)
+            }
+        }
+    }
+}
+
+pub fn reject_cross_lane_wave_capture_mix() {
+    let left_root = callback_wave_at(sys.snapshot("HEAD~700"));
+    let right_root = callback_wave_at(sys.snapshot("HEAD~690"));
+    let left_first = left_root(sys.snapshot("HEAD~650"));
+    let right_first = right_root(sys.snapshot("HEAD~640"));
+    let left_second = left_first(sys.snapshot("HEAD~600"));
+    let right_second = right_first(sys.snapshot("HEAD~590"));
+    let left_capture = left_second(sys.snapshot("HEAD~550"));
+    let right_capture = right_second(sys.snapshot("HEAD~540"));
+    std.concurrent.parallel([() => left_capture, () => right_capture])
+}
