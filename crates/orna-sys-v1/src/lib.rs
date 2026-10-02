@@ -59,6 +59,12 @@ pub use provider::*;
 mod host_environment;
 pub use host_environment::*;
 
+mod host_process;
+pub use host_process::*;
+
+mod host_clock;
+pub use host_clock::*;
+
 pub const CANONICAL_VALUE_CODEC_V1: &str = "OVB-1";
 
 macro_rules! identity {

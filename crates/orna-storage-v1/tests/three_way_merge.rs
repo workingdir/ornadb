@@ -22008,6 +22008,117 @@ fn paired_fragment_retry_bindings_are_atomic_across_uneven_chains() {
 }
 
 #[test]
+fn paired_fragment_retry_binding_and_recovery_commit_as_one_transaction() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let make_step = |order, generation, split_rows| {
+        let rows = fixture_rows[..fixture_rows.len() - 1].to_vec();
+        let tombstone = fixture_key("z");
+        let segments = if split_rows {
+            let boundary = fixture_rows[4].key.encode().unwrap();
+            vec![
+                MergedSegment::Rows {
+                    range: KeyRange::new(None, Some(boundary.clone())).unwrap(),
+                    rows: rows[..4].to_vec(),
+                    tombstones: Vec::new(),
+                },
+                MergedSegment::Rows {
+                    range: KeyRange::new(Some(boundary), None).unwrap(),
+                    rows: rows[4..].to_vec(),
+                    tombstones: vec![tombstone.clone()],
+                },
+            ]
+        } else {
+            vec![MergedSegment::Rows {
+                range: KeyRange::all(),
+                rows,
+                tombstones: vec![tombstone.clone()],
+            }]
+        };
+        SequencedBranchMergePlan {
+            order,
+            plan: BranchMergePlan {
+                schema: schema(true, FieldType::Str),
+                tables: BTreeMap::from([(
+                    id(1),
+                    orna_storage_v1::MergedTable {
+                        id: id(1),
+                        whole_table_reuse: None,
+                        segments,
+                    },
+                )]),
+                checkpoints: BTreeMap::from([(
+                    b"stream".to_vec(),
+                    CheckpointGeneration {
+                        generation,
+                        position: Some(b"position-1".to_vec()),
+                    },
+                )]),
+                report: Default::default(),
+            },
+            ordered_row_tombstones: vec![(id(1), tombstone)],
+        }
+    };
+    let repair = |order, fragment, fragment_count| BranchMergeDepthFragmentRecovery {
+        order,
+        fragment,
+        fragment_count,
+        tombstones: Vec::new(),
+    };
+    let tombstone = (id(1), fixture_key("z"));
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history.submit_depth_merge_fragment(0, 0, 2, &[]).unwrap();
+    history
+        .submit_depth_merge_fragment(1, 0, 2, std::slice::from_ref(&tombstone))
+        .unwrap();
+    history.submit_depth_merge_fragment(1, 1, 2, &[]).unwrap();
+    history.submit_depth_merge_fragment(2, 0, 3, &[]).unwrap();
+
+    let before_late_recovery_failure = history.clone();
+    assert_eq!(
+        history.bind_depth_fragment_retry_plans_with_recovery(
+            &[make_step(1, 7, false)],
+            &[repair(0, 1, 2), repair(2, 1, 2)],
+            &[make_step(1, 7, true)],
+        ),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 2,
+            expected: 3,
+            actual: 2,
+        }),
+        "a late recovery error rolls back both earlier releases and paired retry binding",
+    );
+    assert_eq!(history, before_late_recovery_failure);
+
+    let released = history
+        .bind_depth_fragment_retry_plans_with_recovery(
+            &[make_step(1, 8, false)],
+            &[repair(0, 1, 2), repair(2, 1, 3), repair(2, 2, 3)],
+            &[make_step(1, 8, true)],
+        )
+        .unwrap();
+    assert_eq!(
+        released.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [1],
+        "the paired retry append deduplicates against the bound wave in the same transaction",
+    );
+    assert_eq!(released[0].key, fixture_key("z"));
+    assert_eq!(history.events(), released);
+    assert_eq!(history.next_order(), Some(3));
+}
+
+#[test]
 fn paired_mixed_mode_priority_survives_interleaved_depth_wave_release() {
     let fixture_keys = TOMBSTONE_DEPTH_COMMIT_ORDER
         .split("\n\n")
