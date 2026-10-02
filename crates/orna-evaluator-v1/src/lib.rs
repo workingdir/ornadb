@@ -30,6 +30,7 @@ mod cancellation;
 mod relation;
 mod timezone;
 mod repl;
+mod sys_bindings;
 
 pub use admitted_repl::{AdmittedReplSession, ReplError};
 pub use cancellation::CancellationToken;
@@ -42,6 +43,7 @@ pub use timezone::{
     TIMEZONE_DATASET_VERSION, ZonedLocalDateTime, resolve_time_zone,
 };
 pub use repl::{ReplSession, parse_admitted_repl};
+pub use sys_bindings::SysHostBindingRegistry;
 
 /// The verified standard-source bundle used by the bounded local and remote
 /// REPL boundaries. `orna-standard` owns the canonical module source; this
@@ -580,6 +582,19 @@ pub trait EffectHandler {
         _budget: &mut StepBudget,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         self.handle(callee, arguments)
+    }
+
+    /// Handle a call resolved to its canonical admitted function name. The
+    /// default preserves existing handlers; registry-backed bindings can use
+    /// the resolved name so source aliases do not bypass native dispatch.
+    fn handle_registered_with_budget(
+        &mut self,
+        _operation: &str,
+        callee: &Expr,
+        arguments: &[CanonicalValue],
+        budget: &mut StepBudget,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        self.handle_with_budget(callee, arguments, budget)
     }
 
     /// Resolve a stored row reference at the reference's snapshot pin.
@@ -4741,6 +4756,42 @@ impl Context<'_, '_> {
         let root_collection =
             root_collection_name(callee).filter(|name| !scope.0.contains_key(*name));
         let resolved_function = self.resolve_function_name(callee, scope);
+        if let Some(operation) = resolved_function
+            .as_deref()
+            .filter(|name| {
+                orna_sys_v1::system_host_operation_registry()
+                    .operation(name)
+                    .is_some()
+            })
+            && self.effects.is_some()
+        {
+            if input.is_some()
+                || arguments.len() != 1
+                || arguments[0]
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name != "name")
+            {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            }
+            let value = self.evaluate(&arguments[0].value, scope, depth + 1)?;
+            let values = [value.canonical()?];
+            let remaining = self.limits.max_steps.saturating_sub(self.steps);
+            let mut budget = StepBudget::new(remaining);
+            let result = self
+                .effects
+                .as_deref_mut()
+                .expect("checked host effect handler")
+                .handle_registered_with_budget(operation, callee, &values, &mut budget);
+            let debited = remaining - budget.remaining();
+            self.steps = self
+                .steps
+                .checked_add(debited)
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            if let Some(value) = result? {
+                return self.effect_value(&value);
+            }
+        }
         let native_math = native_standard_module_operation(
             callee,
             resolved_function.as_deref(),
