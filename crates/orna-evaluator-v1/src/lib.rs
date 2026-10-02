@@ -3620,6 +3620,9 @@ impl Context<'_, '_> {
                     Ok(Value::Relation(plan))
                 }
                 "count" | "first" | "last" | "one" | "every" | "exists" | "sum" | "min" | "max" => {
+                    // Keep adjacent filters compiled as one cascade until
+                    // terminal demand begins, then push the batch once.
+                    let plan = plan.flush_filter_cascade();
                     self.observe_relation(&plan, name, &ordered[1..], depth)
                 }
                 _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
@@ -9363,6 +9366,77 @@ mod tests {
                 outer_first,
                 outer_second,
             ])]
+        );
+    }
+
+    #[test]
+    fn relation_plan_batches_adjacent_filters_before_unknown_union_storm_flush() {
+        let existing = Value::Bool(true);
+        let transform = Value::Int(7.into());
+        let first = Value::Bool(false);
+        let second = Value::Bool(true);
+        let third = Value::Int(3.into());
+        let plan = RelationPlan::union(
+            RelationPlan::new("Known".into())
+                .with_stage(RelationStage::Filter(vec![existing.clone()])),
+            RelationPlan::union(
+                RelationPlan::new("UnknownMapped".into())
+                    .with_stage(RelationStage::Map(transform.clone())),
+                RelationPlan::union(
+                    RelationPlan::new("UnknownLeft".into())
+                        .with_stage(RelationStage::Filter(vec![existing.clone()])),
+                    RelationPlan::new("UnknownRight".into()),
+                ),
+            ),
+        )
+        .with_stage(RelationStage::Drop(0))
+        .with_stage(RelationStage::Filter(vec![first.clone()]))
+        .with_stage(RelationStage::Filter(vec![second.clone()]))
+        .with_stage(RelationStage::Filter(vec![third.clone()]));
+
+        assert_eq!(
+            plan.stages,
+            vec![RelationStage::Filter(vec![
+                first.clone(),
+                second.clone(),
+                third.clone(),
+            ])],
+            "adjacent filters compile into one pending cascade before tree traversal"
+        );
+        let flushed = plan.flush_filter_cascade();
+        assert!(flushed.stages.is_empty());
+        let (known, storm) = flushed.source_union.as_ref().unwrap();
+        assert_eq!(
+            known.stages,
+            vec![RelationStage::Filter(vec![
+                existing.clone(),
+                first.clone(),
+                second.clone(),
+                third.clone(),
+            ])]
+        );
+        let (mapped, nested) = storm.source_union.as_ref().unwrap();
+        assert_eq!(
+            mapped.stages,
+            vec![
+                RelationStage::Map(transform),
+                RelationStage::Filter(vec![first.clone(), second.clone(), third.clone()]),
+            ],
+            "an intervening map remains before the pending cascade"
+        );
+        let (unknown_left, unknown_right) = nested.source_union.as_ref().unwrap();
+        assert_eq!(
+            unknown_left.stages,
+            vec![RelationStage::Filter(vec![
+                existing,
+                first.clone(),
+                second.clone(),
+                third.clone(),
+            ])]
+        );
+        assert_eq!(
+            unknown_right.stages,
+            vec![RelationStage::Filter(vec![first, second, third])]
         );
     }
 
