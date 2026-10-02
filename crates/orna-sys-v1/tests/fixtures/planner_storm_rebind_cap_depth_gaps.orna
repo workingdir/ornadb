@@ -1,0 +1,26 @@
+pub table PlannerStormRebindCapDepthGaps(id: Int) {
+    outer: Bool,
+    branch: Bool,
+    middle: Bool,
+    deep: Bool,
+    leaf: Bool,
+}
+pub fn rebind_cap_depth_gaps() = PlannerStormRebindCapDepthGaps
+    | take(100)
+    | union(
+        PlannerStormRebindCapDepthGaps
+            | take(100)
+            | union(
+                PlannerStormRebindCapDepthGaps
+                    | take(100)
+                    | filter(row => row.deep)
+                    | union(
+                        PlannerStormRebindCapDepthGaps | take(80) | filter(row => row.leaf),
+                        PlannerStormRebindCapDepthGaps | take(80) | filter(row => row.leaf)
+                    ),
+                PlannerStormRebindCapDepthGaps | take(40) | filter(row => row.middle)
+            )
+            | filter(row => row.branch),
+        PlannerStormRebindCapDepthGaps | take(20) | filter(row => row.outer)
+    )
+    | filter(row => row.outer);
