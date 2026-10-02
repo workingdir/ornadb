@@ -31,6 +31,7 @@ pub use introspection::{
     Dependency, DependencyConfidence, DependencyGraph, DependencyGraphError, DependencyInput,
     DependencyKind,
     DefinitionRef, DisjunctStormBranchDescription, DisjunctStormCascadeDescription,
+    DisjunctStormLimitRebindDescription,
     DisjunctStormDescription, ExplainedPlan, ExplainError, ExpressionRef, FileRef,
     FunctionPlanDescription, FunctionRef, MutableBranchSnapshot, QueryJoinDescription, QueryMutationDescription,
     QueryMutationKind, QuerySourceStatistics,
