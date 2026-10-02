@@ -319,8 +319,10 @@ enum BranchMergeTombstoneSubmissionMode {
 /// separates a later re-delete. Once an earlier position has been released,
 /// a later position may record the key again as a separate event.
 /// Submission positions are classified centrally. Exhaustion takes priority;
-/// otherwise an already accepted position keeps its mode classification after
-/// release, so same-mode retries are stale and cross-mode retries conflict.
+/// otherwise an already accepted position keeps its mode after release.
+/// `submit` and fragment submission classify same-mode retries as stale and
+/// cross-mode retries as conflicts. `append` preserves its strict `OutOfOrder`
+/// result for same-mode replays but checks cross-mode conflicts first.
 /// Unrecorded stale order precedes pending-mode checks, and mixed-mode
 /// conflicts precede fragment-index or tombstone-content validation.
 /// Concurrent completions may arrive out of order; future deltas wait until
@@ -354,6 +356,10 @@ impl BranchMergeTombstoneHistory {
         let Some(expected) = self.next_order else {
             return Err(BranchMergeTombstoneHistoryError::OrderExhausted);
         };
+        self.classify_committed_mode_conflict(
+            step.order,
+            BranchMergeTombstoneSubmissionMode::WholePlan,
+        )?;
         if step.order != expected {
             return Err(BranchMergeTombstoneHistoryError::OutOfOrder {
                 expected,
@@ -518,12 +524,10 @@ impl BranchMergeTombstoneHistory {
         let Some(expected) = self.next_order else {
             return Err(BranchMergeTombstoneHistoryError::OrderExhausted);
         };
+        self.classify_committed_mode_conflict(order, incoming_mode)?;
         if let Some(committed_mode) = self.committed_modes.get(&order) {
-            return if *committed_mode == incoming_mode {
-                Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order })
-            } else {
-                Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order })
-            };
+            debug_assert_eq!(*committed_mode, incoming_mode);
+            return Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order });
         }
         if order < expected {
             return Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order });
@@ -547,6 +551,22 @@ impl BranchMergeTombstoneHistory {
                 BranchMergeTombstoneSubmissionMode::DepthFragments,
             )
             | (None, _) => Ok(()),
+        }
+    }
+
+    fn classify_committed_mode_conflict(
+        &self,
+        order: u64,
+        incoming_mode: BranchMergeTombstoneSubmissionMode,
+    ) -> Result<(), BranchMergeTombstoneHistoryError> {
+        if self
+            .committed_modes
+            .get(&order)
+            .is_some_and(|committed_mode| *committed_mode != incoming_mode)
+        {
+            Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order })
+        } else {
+            Ok(())
         }
     }
 
