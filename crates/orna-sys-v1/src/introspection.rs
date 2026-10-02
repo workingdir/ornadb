@@ -2968,9 +2968,10 @@ fn byte_cap_scope_path_label(path: &[PlanByteCapScopeSegment]) -> String {
     for segment in path {
         let label = match segment {
             PlanByteCapScopeSegment::StormStage { index } => format!("storm{index}"),
-            // Keep both the stage-output kind and producer index in display labels.
+            // ORNA-PLAN does not prescribe labels; preserve the complete typed
+            // segment name and producer index so it cannot read as a nested output.
             PlanByteCapScopeSegment::StormStageOutput { index } => {
-                format!("storm_output{index}")
+                format!("storm_stage_output{index}")
             }
             PlanByteCapScopeSegment::Branch { index } => format!("branch{index}"),
             PlanByteCapScopeSegment::Limit { position } => format!("limit{position}"),
