@@ -1,0 +1,7 @@
+pub table Note(id: Int) {
+    text: Str,
+}
+
+pub fn main() {
+    Note.insert({ id: 1, text: "replacement" })
+}
