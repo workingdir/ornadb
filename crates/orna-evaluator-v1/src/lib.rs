@@ -3603,10 +3603,11 @@ impl Context<'_, '_> {
             return None;
         }
         let pipeline_relation = matches!(input, Some(Value::Relation(_)));
-        if input.is_some() && !pipeline_relation {
+        let relation_argument = relation_call_candidate(name, arguments, scope);
+        if input.is_some() && !pipeline_relation && !relation_argument {
             return None;
         }
-        if input.is_none() && !relation_call_candidate(name, arguments, scope) {
+        if input.is_none() && !relation_argument {
             return None;
         }
 
@@ -3620,12 +3621,28 @@ impl Context<'_, '_> {
             let ordered = relation_named_arguments(name, arguments, values, implicit)?;
             if name == "union" {
                 let mut union_operands = ordered.into_iter();
-                let (Some(Value::Relation(left)), Some(Value::Relation(right))) =
-                    (union_operands.next(), union_operands.next())
+                let (Some(left), Some(right)) = (union_operands.next(), union_operands.next())
                 else {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                };
+                let (Value::Relation(left), Value::Relation(right)) = (left, right) else {
                     return Err(error("ORNA-EVAL-TYPE"));
                 };
                 return Ok(Value::Relation(RelationPlan::union(left, right)));
+            }
+            if matches!(
+                name,
+                "chunk"
+                    | "flatten"
+                    | "partition"
+                    | "zip"
+                    | "zip_exact"
+                    | "group_by"
+                    | "split_when"
+                    | "rank"
+                    | "asof_join"
+            ) {
+                return self.collection_relation_operation(name, ordered, depth);
             }
             if name == "filter" {
                 let mut filter_arguments = ordered.into_iter();
@@ -3680,6 +3697,10 @@ impl Context<'_, '_> {
                     plan = plan.with_stage(RelationStage::Distinct);
                     Ok(Value::Relation(plan))
                 }
+                "unique" => {
+                    plan = plan.with_stage(RelationStage::Distinct);
+                    Ok(Value::Relation(plan))
+                }
                 "pairs" => {
                     plan = plan.with_stage(RelationStage::Pairs);
                     Ok(Value::Relation(plan))
@@ -3710,6 +3731,67 @@ impl Context<'_, '_> {
         })())
     }
 
+    fn collection_relation_operation(
+        &mut self,
+        name: &str,
+        mut values: Vec<Value>,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        let collection_count = match name {
+            "zip" | "zip_exact" | "asof_join" => 2,
+            _ => 1,
+        };
+        if values.len() < collection_count {
+            return Err(error("ORNA-EVAL-ARGUMENT"));
+        }
+
+        let mut relation_kinds = Vec::with_capacity(collection_count);
+        for value in values.iter_mut().take(collection_count) {
+            match value {
+                Value::List(_) => relation_kinds.push(false),
+                Value::Relation(plan) => {
+                    relation_kinds.push(true);
+                    *value = Value::List(self.collect_relation_values(plan, depth + 1)?);
+                }
+                _ => return Err(error("ORNA-EVAL-TYPE")),
+            }
+        }
+
+        let relation_result = match name {
+            "zip" | "zip_exact" => {
+                if relation_kinds[0] != relation_kinds[1] {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                }
+                relation_kinds[0]
+            }
+            // The result follows the left operand's container kind; the right
+            // side only supplies candidate rows to the as-of selector.
+            "asof_join" => relation_kinds[0],
+            _ => relation_kinds[0],
+        };
+
+        let result = self.collection(name, values, depth)?;
+        if !relation_result {
+            return Ok(result);
+        }
+        match result {
+            Value::List(rows) => Ok(Value::Relation(RelationPlan::from_values(rows))),
+            // `partition` has a scalar tuple result whose two components each
+            // preserve the source container kind.
+            Value::Tuple(parts) if name == "partition" && parts.len() == 2 => {
+                let mut relations = Vec::with_capacity(2);
+                for part in parts {
+                    let Value::List(rows) = part else {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    };
+                    relations.push(Value::Relation(RelationPlan::from_values(rows)));
+                }
+                Ok(Value::Tuple(relations))
+            }
+            _ => Err(error("ORNA-EVAL-VALUE")),
+        }
+    }
+
     fn for_each_bucket_group(
         &mut self,
         plan: &RelationPlan,
@@ -3735,6 +3817,7 @@ impl Context<'_, '_> {
             source: plan.source.clone(),
             source_identity: plan.source_identity,
             source_union: plan.source_union.clone(),
+            source_values: plan.source_values.clone(),
             stages: plan.stages[..bucket_index].to_vec(),
         };
         let suffix = &plan.stages[bucket_index + 1..];
@@ -3749,6 +3832,7 @@ impl Context<'_, '_> {
                 source: plan.source.clone(),
                 source_identity: plan.source_identity,
                 source_union: plan.source_union.clone(),
+                source_values: plan.source_values.clone(),
                 stages: plan.stages[..bucket_index + 1 + sort_pos].to_vec(),
             };
             let mut groups = Vec::new();
@@ -4195,6 +4279,16 @@ impl Context<'_, '_> {
             return Ok(());
         }
 
+        if let Some(values) = &plan.source_values {
+            for value in values.iter().cloned() {
+                self.step()?;
+                if !visit(self, value)? {
+                    return Ok(());
+                }
+            }
+            return Ok(());
+        }
+
         let mut after = None;
         loop {
             // Relation work has its own cancellation checkpoints. A plan
@@ -4411,6 +4505,7 @@ impl Context<'_, '_> {
             source: plan.source.clone(),
             source_identity: plan.source_identity,
             source_union: plan.source_union.clone(),
+            source_values: plan.source_values.clone(),
             stages: plan.stages[..sort_index].to_vec(),
         };
         let RelationStage::SortBy(key) = &plan.stages[sort_index] else {
@@ -4586,6 +4681,8 @@ impl Context<'_, '_> {
         if let Some((left, right)) = &plan.source_union {
             self.validate_relation_plan_sources(left)?;
             self.validate_relation_plan_sources(right)
+        } else if plan.source_values.is_some() {
+            Ok(())
         } else {
             self.effects
                 .as_deref_mut()
@@ -8460,13 +8557,28 @@ fn is_relation_source(expression: &Expr) -> bool {
 }
 
 fn relation_call_candidate(
-    _name: &str,
+    name: &str,
     arguments: &[orna_syntax_v1::Argument],
     scope: &Scope,
 ) -> bool {
+    if matches!(name, "union" | "zip" | "zip_exact" | "asof_join") {
+        return arguments
+            .iter()
+            .filter(|argument| {
+                argument.name.as_deref().is_none_or(|name| {
+                    matches!(name, "left" | "right") || (name == "rows" && arguments.len() == 1)
+                })
+            })
+            .any(|argument| relation_expression_candidate(&argument.value, scope));
+    }
     let relation_argument = arguments
         .iter()
         .find(|argument| argument.name.as_deref() == Some("rows"))
+        .or_else(|| {
+            arguments
+                .iter()
+                .find(|argument| argument.name.as_deref() == Some("values"))
+        })
         .or_else(|| arguments.first());
     let Some(argument) = relation_argument else {
         return false;
@@ -8489,11 +8601,24 @@ fn relation_expression_candidate(expression: &Expr, scope: &Scope) -> bool {
         Expr::Call {
             callee, arguments, ..
         } if root_collection_name(callee).is_some()
-            || portable_collection_name(callee).is_some() => arguments
-            .iter()
-            .find(|argument| argument.name.as_deref() == Some("rows"))
-            .or_else(|| arguments.first())
-            .is_some_and(|argument| relation_expression_candidate(&argument.value, scope)),
+            || portable_collection_name(callee).is_some() =>
+        {
+            arguments
+                .iter()
+                .find(|argument| argument.name.as_deref() == Some("rows"))
+                .or_else(|| {
+                    arguments
+                        .iter()
+                        .find(|argument| argument.name.as_deref() == Some("values"))
+                })
+                .or_else(|| {
+                    arguments
+                        .iter()
+                        .find(|argument| argument.name.as_deref() == Some("left"))
+                })
+                .or_else(|| arguments.first())
+                .is_some_and(|argument| relation_expression_candidate(&argument.value, scope))
+        }
         _ => false,
     }
 }
@@ -8508,12 +8633,18 @@ fn relation_named_arguments(
         "filter" => &["rows", "predicate"],
         "map" | "project" | "flat_map" => &["rows", "transform"],
         "sort_by" => &["rows", "key"],
+        "chunk" => &["values", "size"],
+        "flatten" => &["values"],
+        "partition" | "split_when" => &["values", "predicate"],
+        "group_by" | "rank" => &["values", "key"],
+        "zip" | "zip_exact" => &["left", "right"],
+        "asof_join" => &["left", "right", "time", "by"],
         "bucket_by" => match values.len() {
             2 => &["rows", "period"],
             3 => &["rows", "period", "zone"],
             _ => return Err(error("ORNA-EVAL-ARGUMENT")),
         },
-        "distinct" | "pairs" => &["rows"],
+        "distinct" | "unique" | "pairs" => &["rows"],
         "union" => &["left", "right"],
         "take" | "drop" => &["rows", "count"],
         "window" => match values.len() {
