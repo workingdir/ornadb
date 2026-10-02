@@ -235,3 +235,37 @@ fn sys_filesystem_host_operation_fails_closed_without_provider() {
         "ORNA-EVAL-UNSUPPORTED"
     );
 }
+
+#[test]
+fn sys_filesystem_provider_enforces_host_selected_text_and_entry_limits() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("a.txt"), "123456789").unwrap();
+    std::fs::write(root.path().join("b.txt"), "b").unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(8, 1).unwrap();
+    filesystem.allow_root(root.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem);
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    session
+        .submit(include_str!("fixtures/stdlib-use-io-fs-mpk0d.orna"))
+        .unwrap();
+
+    for source in [
+        fixture_root(
+            include_str!("fixtures/stdlib-io-fs-read-mpk0d.orna"),
+            root.path(),
+        ),
+        fixture_root(
+            include_str!("fixtures/stdlib-io-fs-list-mpk0d.orna"),
+            root.path(),
+        ),
+    ] {
+        assert_eq!(
+            session
+                .submit_with_sys_host_bindings(&source, &mut bindings)
+                .unwrap_err()
+                .code(),
+            "ORNA-EVAL-ERROR"
+        );
+    }
+}

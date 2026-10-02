@@ -1,12 +1,18 @@
 //! Allowlisted native filesystem operations collected into the sys host ABI.
+//!
+//! The default provider caps UTF-8 file reads/writes at 8 MiB and directory
+//! listings at 4096 entries; hosts can choose tighter limits with `with_limits`.
 
 use std::{
     collections::BTreeSet,
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
     time::SystemTime,
 };
+
+const DEFAULT_MAX_TEXT_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_MAX_DIRECTORY_ENTRIES: usize = 4096;
 
 use orna_sys_macros::sys_host_operation;
 
@@ -20,6 +26,7 @@ pub enum FilesystemProviderError {
     NotDirectory,
     InvalidUtf8,
     Unavailable,
+    OutputLimit,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,6 +48,7 @@ impl FilesystemProviderError {
             Self::NotDirectory => "sys.host.filesystem.not_directory",
             Self::InvalidUtf8 => "sys.host.filesystem.invalid_utf8",
             Self::Unavailable => "sys.host.filesystem.unavailable",
+            Self::OutputLimit => "sys.host.filesystem.output_limit",
         }
     }
 }
@@ -49,15 +57,42 @@ impl FilesystemProviderError {
 /// Relative paths are checked before and after resolution; absolute paths and
 /// parent traversal are rejected. Hosts should provide roots that are not
 /// concurrently mutated by untrusted processes.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FilesystemProvider {
     roots: BTreeSet<PathBuf>,
+    max_text_bytes: usize,
+    max_directory_entries: usize,
+}
+
+impl Default for FilesystemProvider {
+    fn default() -> Self {
+        Self {
+            roots: BTreeSet::new(),
+            max_text_bytes: DEFAULT_MAX_TEXT_BYTES,
+            max_directory_entries: DEFAULT_MAX_DIRECTORY_ENTRIES,
+        }
+    }
 }
 
 impl FilesystemProvider {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a provider with host-selected file and listing bounds.
+    pub fn with_limits(
+        max_text_bytes: usize,
+        max_directory_entries: usize,
+    ) -> Result<Self, FilesystemProviderError> {
+        if max_text_bytes == 0 || max_directory_entries == 0 {
+            return Err(FilesystemProviderError::InvalidRequest);
+        }
+        Ok(Self {
+            roots: BTreeSet::new(),
+            max_text_bytes,
+            max_directory_entries,
+        })
     }
 
     /// Adds one existing directory as an explicit filesystem capability.
@@ -83,7 +118,7 @@ impl FilesystemProvider {
     }
 
     #[sys_host_operation(
-        r###"{"name":"std.io.fs.read_text","version":{"major":1,"minor":0},"signature":"fn std.io.fs.read_text(root: Str, path: Str): Str","effects":["read"],"preconditions":["root is explicitly allowlisted by the host","path is relative and resolves beneath root","file contents are valid UTF-8"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.not_found","sys.host.filesystem.not_file","sys.host.filesystem.invalid_utf8","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.read@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"read_text"}"###
+        r###"{"name":"std.io.fs.read_text","version":{"major":1,"minor":0},"signature":"fn std.io.fs.read_text(root: Str, path: Str): Str","effects":["read"],"preconditions":["root is explicitly allowlisted by the host","path is relative and resolves beneath root","file contents are valid UTF-8 and within the provider byte limit"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.not_found","sys.host.filesystem.not_file","sys.host.filesystem.invalid_utf8","sys.host.filesystem.output_limit","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.read@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"read_text"}"###
     )]
     pub fn read_text(&self, root: &str, path: &str) -> Result<String, FilesystemProviderError> {
         let root = self.authorized_root(root)?;
@@ -91,11 +126,20 @@ impl FilesystemProvider {
         if !path.is_file() {
             return Err(FilesystemProviderError::NotFile);
         }
-        fs::read_to_string(path).map_err(map_io_error)
+        let mut bytes = Vec::new();
+        fs::File::open(path)
+            .map_err(map_io_error)?
+            .take(self.max_text_bytes.saturating_add(1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(map_io_error)?;
+        if bytes.len() > self.max_text_bytes {
+            return Err(FilesystemProviderError::OutputLimit);
+        }
+        String::from_utf8(bytes).map_err(|_| FilesystemProviderError::InvalidUtf8)
     }
 
     #[sys_host_operation(
-        r###"{"name":"std.io.fs.write_text","version":{"major":1,"minor":0},"signature":"fn std.io.fs.write_text(root: Str, path: Str, contents: Str, overwrite: Bool): Unit","effects":["invoke"],"preconditions":["root is explicitly allowlisted by the host","path is relative and resolves beneath root","parent directory exists","overwrite is true only for an existing regular file"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.already_exists","sys.host.filesystem.not_file","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.write@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"write_text"}"###
+        r###"{"name":"std.io.fs.write_text","version":{"major":1,"minor":0},"signature":"fn std.io.fs.write_text(root: Str, path: Str, contents: Str, overwrite: Bool): Unit","effects":["invoke"],"preconditions":["root is explicitly allowlisted by the host","path is relative and resolves beneath root","parent directory exists","contents are within the provider byte limit","overwrite is true only for an existing regular file"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.already_exists","sys.host.filesystem.not_file","sys.host.filesystem.output_limit","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.write@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"write_text"}"###
     )]
     pub fn write_text(
         &self,
@@ -105,6 +149,9 @@ impl FilesystemProvider {
         overwrite: bool,
     ) -> Result<(), FilesystemProviderError> {
         let root = self.authorized_root(root)?;
+        if contents.len() > self.max_text_bytes {
+            return Err(FilesystemProviderError::OutputLimit);
+        }
         let destination = self.destination(&root, path, overwrite)?;
         OpenOptions::new()
             .write(true)
@@ -116,7 +163,7 @@ impl FilesystemProvider {
     }
 
     #[sys_host_operation(
-        r###"{"name":"std.io.fs.append_text","version":{"major":1,"minor":0},"signature":"fn std.io.fs.append_text(root: Str, path: Str, contents: Str): Unit","effects":["invoke"],"preconditions":["root is explicitly allowlisted by the host","path is relative and resolves beneath root","parent directory exists"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.not_file","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.write@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"append_text"}"###
+        r###"{"name":"std.io.fs.append_text","version":{"major":1,"minor":0},"signature":"fn std.io.fs.append_text(root: Str, path: Str, contents: Str): Unit","effects":["invoke"],"preconditions":["root is explicitly allowlisted by the host","path is relative and resolves beneath root","parent directory exists","resulting file is within the provider byte limit"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.not_file","sys.host.filesystem.output_limit","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.write@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"append_text"}"###
     )]
     pub fn append_text(
         &self,
@@ -125,7 +172,21 @@ impl FilesystemProvider {
         contents: &str,
     ) -> Result<(), FilesystemProviderError> {
         let root = self.authorized_root(root)?;
+        if contents.len() > self.max_text_bytes {
+            return Err(FilesystemProviderError::OutputLimit);
+        }
         let destination = self.destination(&root, path, true)?;
+        match fs::metadata(&destination) {
+            Ok(metadata)
+                if metadata.len().saturating_add(contents.len() as u64)
+                    > self.max_text_bytes as u64 =>
+            {
+                return Err(FilesystemProviderError::OutputLimit);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(map_io_error(error)),
+        }
         OpenOptions::new()
             .append(true)
             .create(true)
@@ -174,7 +235,7 @@ impl FilesystemProvider {
     }
 
     #[sys_host_operation(
-        r###"{"name":"std.io.fs.list","version":{"major":1,"minor":0},"signature":"fn std.io.fs.list(root: Str, path: Str): [Str]","effects":["read"],"preconditions":["root is explicitly allowlisted by the host","path is relative and resolves to a directory beneath root","all child names are Unicode"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.not_directory","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.read@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"list"}"###
+        r###"{"name":"std.io.fs.list","version":{"major":1,"minor":0},"signature":"fn std.io.fs.list(root: Str, path: Str): [Str]","effects":["read"],"preconditions":["root is explicitly allowlisted by the host","path is relative and resolves to a directory beneath root","all child names are Unicode and within the provider entry limit"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.not_directory","sys.host.filesystem.output_limit","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.read@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"list"}"###
     )]
     pub fn list(&self, root: &str, path: &str) -> Result<Vec<String>, FilesystemProviderError> {
         let root = self.authorized_root(root)?;
@@ -182,16 +243,19 @@ impl FilesystemProvider {
         if !path.is_dir() {
             return Err(FilesystemProviderError::NotDirectory);
         }
-        let mut names = fs::read_dir(path)
-            .map_err(map_io_error)?
-            .map(|entry| {
+        let mut names = Vec::new();
+        for entry in fs::read_dir(path).map_err(map_io_error)? {
+            if names.len() == self.max_directory_entries {
+                return Err(FilesystemProviderError::OutputLimit);
+            }
+            names.push(
                 entry
                     .map_err(map_io_error)?
                     .file_name()
                     .into_string()
-                    .map_err(|_| FilesystemProviderError::InvalidRequest)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+                    .map_err(|_| FilesystemProviderError::InvalidRequest)?,
+            );
+        }
         names.sort();
         Ok(names)
     }
@@ -274,7 +338,7 @@ impl FilesystemProvider {
     }
 
     #[sys_host_operation(
-        r###"{"name":"std.io.fs.copy_file","version":{"major":1,"minor":0},"signature":"fn std.io.fs.copy_file(root: Str, source_path: Str, destination_path: Str, overwrite: Bool): Unit","effects":["invoke"],"preconditions":["root is explicitly allowlisted by the host","source and destination are relative and remain beneath root","overwrite is true only for an existing regular-file destination"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.already_exists","sys.host.filesystem.not_file","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.write@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"copy_file"}"###
+        r###"{"name":"std.io.fs.copy_file","version":{"major":1,"minor":0},"signature":"fn std.io.fs.copy_file(root: Str, source_path: Str, destination_path: Str, overwrite: Bool): Unit","effects":["invoke"],"preconditions":["root is explicitly allowlisted by the host","source and destination are relative and remain beneath root","source size is within the provider byte limit","overwrite is true only for an existing regular-file destination"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.already_exists","sys.host.filesystem.not_file","sys.host.filesystem.output_limit","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.write@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"copy_file"}"###
     )]
     pub fn copy_file(
         &self,
@@ -287,6 +351,9 @@ impl FilesystemProvider {
         let source = self.resolve_existing(&root, source_path)?;
         if !source.is_file() {
             return Err(FilesystemProviderError::NotFile);
+        }
+        if fs::metadata(&source).map_err(map_io_error)?.len() > self.max_text_bytes as u64 {
+            return Err(FilesystemProviderError::OutputLimit);
         }
         let destination = self.destination(&root, destination_path, overwrite)?;
         fs::copy(source, destination).map_err(map_io_error)?;
