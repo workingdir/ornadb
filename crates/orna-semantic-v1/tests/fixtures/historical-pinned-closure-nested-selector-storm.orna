@@ -1,0 +1,172 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn nested_factory(anchor: sys.SnapshotRef) =
+    (intermediate_pin: sys.SnapshotRef) =>
+        (next_pin: sys.SnapshotRef) => {
+            anchor: factory_at(anchor),
+            intermediate: factory_at(intermediate_pin),
+            selected: factory_at(next_pin),
+        };
+
+pub fn nested_selector_rebind_storm(
+    anchor_0: sys.SnapshotRef,
+    anchor_1: sys.SnapshotRef,
+    anchor_2: sys.SnapshotRef,
+    anchor_3: sys.SnapshotRef,
+    anchor_4: sys.SnapshotRef,
+    anchor_5: sys.SnapshotRef,
+    anchor_6: sys.SnapshotRef,
+    anchor_7: sys.SnapshotRef,
+) {
+    let rolling = nested_factory(anchor_0);
+    let stage_0 = rolling;
+    rolling = nested_factory(anchor_1);
+    let stage_1 = rolling;
+    rolling = nested_factory(anchor_2);
+    let stage_2 = rolling;
+    rolling = nested_factory(anchor_3);
+    let stage_3 = rolling;
+    rolling = nested_factory(anchor_4);
+    let stage_4 = rolling;
+    rolling = nested_factory(anchor_5);
+    let stage_5 = rolling;
+    rolling = nested_factory(anchor_6);
+    let stage_6 = rolling;
+    rolling = nested_factory(anchor_7);
+    let stage_7 = rolling;
+    rolling = stage_0;
+    let returned_to_first = rolling;
+    {
+        stage_0: {
+            anchor: [
+                stage_0(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).anchor,
+                factory_at(anchor_0),
+            ],
+            intermediate: [
+                stage_0(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).intermediate,
+                factory_at(sys.snapshot("HEAD~10")),
+            ],
+            selected_11: [
+                stage_0(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).selected,
+                factory_at(sys.snapshot("HEAD~11")),
+            ],
+            selected_12: [
+                stage_0(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~12")).selected,
+                factory_at(sys.snapshot("HEAD~12")),
+            ],
+        },
+        stage_1: {
+            anchor: [
+                stage_1(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).anchor,
+                factory_at(anchor_1),
+            ],
+            intermediate: [
+                stage_1(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).intermediate,
+                factory_at(sys.snapshot("HEAD~10")),
+            ],
+            selected: [
+                stage_1(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).selected,
+                factory_at(sys.snapshot("HEAD~11")),
+            ],
+        },
+        stage_2: {
+            anchor: [
+                stage_2(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).anchor,
+                factory_at(anchor_2),
+            ],
+            intermediate: [
+                stage_2(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).intermediate,
+                factory_at(sys.snapshot("HEAD~10")),
+            ],
+            selected: [
+                stage_2(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).selected,
+                factory_at(sys.snapshot("HEAD~11")),
+            ],
+        },
+        stage_3: {
+            anchor: [
+                stage_3(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).anchor,
+                factory_at(anchor_3),
+            ],
+            intermediate: [
+                stage_3(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).intermediate,
+                factory_at(sys.snapshot("HEAD~10")),
+            ],
+            selected: [
+                stage_3(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).selected,
+                factory_at(sys.snapshot("HEAD~11")),
+            ],
+        },
+        stage_4: {
+            anchor: [
+                stage_4(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).anchor,
+                factory_at(anchor_4),
+            ],
+            intermediate: [
+                stage_4(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).intermediate,
+                factory_at(sys.snapshot("HEAD~10")),
+            ],
+            selected: [
+                stage_4(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).selected,
+                factory_at(sys.snapshot("HEAD~11")),
+            ],
+        },
+        stage_5: {
+            anchor: [
+                stage_5(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).anchor,
+                factory_at(anchor_5),
+            ],
+            intermediate: [
+                stage_5(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).intermediate,
+                factory_at(sys.snapshot("HEAD~10")),
+            ],
+            selected: [
+                stage_5(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).selected,
+                factory_at(sys.snapshot("HEAD~11")),
+            ],
+        },
+        stage_6: {
+            anchor: [
+                stage_6(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).anchor,
+                factory_at(anchor_6),
+            ],
+            intermediate: [
+                stage_6(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).intermediate,
+                factory_at(sys.snapshot("HEAD~10")),
+            ],
+            selected: [
+                stage_6(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).selected,
+                factory_at(sys.snapshot("HEAD~11")),
+            ],
+        },
+        stage_7: {
+            anchor: [
+                stage_7(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).anchor,
+                factory_at(anchor_7),
+            ],
+            intermediate: [
+                stage_7(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).intermediate,
+                factory_at(sys.snapshot("HEAD~10")),
+            ],
+            selected: [
+                stage_7(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).selected,
+                factory_at(sys.snapshot("HEAD~11")),
+            ],
+        },
+        returned_to_first: {
+            anchor: [
+                returned_to_first(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).anchor,
+                factory_at(anchor_0),
+            ],
+            intermediate: [
+                returned_to_first(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).intermediate,
+                factory_at(sys.snapshot("HEAD~10")),
+            ],
+            selected: [
+                returned_to_first(sys.snapshot("HEAD~10"))(sys.snapshot("HEAD~11")).selected,
+                factory_at(sys.snapshot("HEAD~11")),
+            ],
+        },
+    }
+}
