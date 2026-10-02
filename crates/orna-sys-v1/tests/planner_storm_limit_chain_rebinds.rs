@@ -1853,6 +1853,73 @@ fn typed_handoff_routes_preserve_nested_storm_outputs_across_rebinds() {
 }
 
 #[test]
+fn typed_handoff_routes_keep_nested_ancestry_when_byte_estimates_are_unknown() {
+    let parsed = orna_syntax_v1::parse_module(REBIND_CAP_HANDOFF_ROUTES_FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let nested_storms = (1..=2)
+        .map(|nested_index| {
+            let leaf = storm(
+                &format!("expr:unknown-byte-nested-leaf-{nested_index}"),
+                vec![branch(&[20], 1, vec![])],
+            );
+            storm(
+                &format!("expr:unknown-byte-nested-rebind-{nested_index}"),
+                vec![branch(&[40], 1, vec![rebind(1, vec![leaf])])],
+            )
+        })
+        .collect::<Vec<_>>();
+    let prior_rebind = storm(
+        "expr:unknown-byte-prior-rebind",
+        vec![branch(&[60], 1, vec![])],
+    );
+    let mut outer_branch = branch(&[80], 1, vec![rebind(1, vec![prior_rebind])]);
+    outer_branch.nested_storms = nested_storms;
+    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+        &query(None, None),
+        &[storm("expr:unknown-byte-output-ancestry", vec![outer_branch])],
+        &[],
+    )
+    .expect("unknown byte estimates do not erase typed nested ancestry");
+    let filter = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Filter && node.details().contains_key("disjunct_storm"))
+        .expect("outer storm is visible");
+    let routes = match filter
+        .details()
+        .get("limit_chain_rebind_byte_cap_handoff_route_records")
+    {
+        Some(PlanDetail::ByteCapHandoffRoutes(routes)) => routes,
+        other => panic!("expected typed byte-cap handoff routes, got {other:?}"),
+    };
+    assert_eq!(routes.len(), 3);
+    assert_eq!(routes[0].depth, 1);
+    assert_eq!(routes[1].depth, 2);
+    assert_eq!(routes[2].depth, 2);
+    assert!(routes
+        .iter()
+        .all(|route| route.input_bytes.is_none() && route.output_bytes.is_none()));
+    assert!(routes.iter().all(|route| {
+        route.output_path.len() == route.input_path.len() + 2
+            && route.output_path[..route.input_path.len()] == route.input_path
+    }));
+    assert!(routes[2].input_path.contains(&PlanByteCapScopeSegment::NestedStormOutput {
+        index: 1,
+    }));
+
+    let serialized = serde_json::to_value(&explained).expect("explained plans serialize");
+    let serialized_routes = &serialized["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["details"]["disjunct_storm"] == 1)
+        .unwrap()["details"]["limit_chain_rebind_byte_cap_handoff_route_records"];
+    assert_eq!(serialized_routes[2]["input_bytes"], serde_json::Value::Null);
+    assert_eq!(serialized_routes[2]["output_bytes"], serde_json::Value::Null);
+}
+
+#[test]
 fn overflowing_rebind_work_keeps_the_parent_branch_cap() {
     let source_rows = u64::MAX / 4;
     let overflowing_rebind = storm(
