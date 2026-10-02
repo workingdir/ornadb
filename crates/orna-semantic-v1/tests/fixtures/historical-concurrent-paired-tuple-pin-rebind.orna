@@ -1,0 +1,55 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+// Rebinding the paired tuple must leave each captured lane/depth pin stable
+// for callbacks that the semantic checker sends through concurrent execution.
+pub fn concurrent_paired_tuple_pins_survive_rebind() {
+    let rolling = (
+        (sys.snapshot("HEAD~80"), sys.snapshot("HEAD~60")),
+        (sys.snapshot("HEAD~40"), sys.snapshot("HEAD~20")),
+    );
+    let saved = rolling;
+    rolling = (
+        (sys.snapshot("HEAD~79"), sys.snapshot("HEAD~59")),
+        (sys.snapshot("HEAD~39"), sys.snapshot("HEAD~19")),
+    );
+    let rebound = rolling;
+    rolling = saved;
+
+    let ((left_root, left_leaf), (right_root, right_leaf)) = rolling;
+    let ((rebound_left_root, rebound_left_leaf), (rebound_right_root, rebound_right_leaf)) = rebound;
+    {
+        restored_left_root: std.concurrent.parallel([
+            () => factory_at(left_root),
+            () => factory_at(left_root),
+        ]),
+        restored_left_leaf: std.concurrent.parallel([
+            () => factory_at(left_leaf),
+            () => factory_at(left_leaf),
+        ]),
+        restored_right_root: std.concurrent.parallel([
+            () => factory_at(right_root),
+            () => factory_at(right_root),
+        ]),
+        restored_right_leaf: std.concurrent.parallel([
+            () => factory_at(right_leaf),
+            () => factory_at(right_leaf),
+        ]),
+        rebound_left_root: std.concurrent.parallel([
+            () => factory_at(rebound_left_root),
+            () => factory_at(rebound_left_root),
+        ]),
+        rebound_left_leaf: std.concurrent.parallel([
+            () => factory_at(rebound_left_leaf),
+            () => factory_at(rebound_left_leaf),
+        ]),
+        rebound_right_root: std.concurrent.parallel([
+            () => factory_at(rebound_right_root),
+            () => factory_at(rebound_right_root),
+        ]),
+        rebound_right_leaf: std.concurrent.parallel([
+            () => factory_at(rebound_right_leaf),
+            () => factory_at(rebound_right_leaf),
+        ]),
+    }
+}
