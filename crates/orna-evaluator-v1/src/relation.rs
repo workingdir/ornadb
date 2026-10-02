@@ -338,7 +338,12 @@ impl FilterBatch {
             let FilterBatchNode::Then(existing_prefix, suffix) = &batch.node else {
                 continue;
             };
-            if Arc::ptr_eq(suffix, next) && existing_prefix.values().eq(prefix.values()) {
+            // Cloned plans retain prefix identity; use that hot path before
+            // flattening independently compiled batches for value equality.
+            if Arc::ptr_eq(suffix, next)
+                && (Arc::ptr_eq(existing_prefix, prefix)
+                    || existing_prefix.values().eq(prefix.values()))
+            {
                 return batch;
             }
         }
