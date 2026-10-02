@@ -296,7 +296,7 @@ enum BufferedBranchMergeTombstoneDelta {
     },
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BranchMergeTombstoneSubmissionMode {
     WholePlan,
     DepthFragments,
@@ -316,9 +316,11 @@ enum BranchMergeTombstoneSubmissionMode {
 /// position delays that decision; an intervening position that omits the key
 /// separates a later re-delete. Once an earlier position has been released,
 /// a later position may record the key again as a separate event.
-/// Submission positions are classified centrally: exhaustion precedes stale
-/// order, stale order precedes pending-mode checks, and a mixed-mode conflict
-/// at a live position precedes fragment-index or tombstone-content validation.
+/// Submission positions are classified centrally. Exhaustion takes priority;
+/// otherwise an already accepted position keeps its mode classification after
+/// release, so same-mode retries are stale and cross-mode retries conflict.
+/// Unrecorded stale order precedes pending-mode checks, and mixed-mode
+/// conflicts precede fragment-index or tombstone-content validation.
 /// Concurrent completions may arrive out of order; future deltas wait until
 /// every earlier paired position is present. Split waves wait until every
 /// fragment arrives, then flatten in canonical table/key order atomically.
@@ -327,6 +329,7 @@ pub struct BranchMergeTombstoneHistory {
     next_order: Option<u64>,
     events: Vec<BranchMergeTombstoneEvent>,
     pending_deltas: BTreeMap<u64, BufferedBranchMergeTombstoneDelta>,
+    committed_modes: BTreeMap<u64, BranchMergeTombstoneSubmissionMode>,
 }
 
 impl BranchMergeTombstoneHistory {
@@ -336,6 +339,7 @@ impl BranchMergeTombstoneHistory {
             next_order: Some(first_order),
             events: Vec::new(),
             pending_deltas: BTreeMap::new(),
+            committed_modes: BTreeMap::new(),
         }
     }
 
@@ -477,12 +481,19 @@ impl BranchMergeTombstoneHistory {
                 break;
             }
             let delta = self.pending_deltas.remove(&order).expect("ready delta is buffered");
-            let mut tombstones = match delta {
-                BufferedBranchMergeTombstoneDelta::WholePlan(tombstones) => tombstones,
+            let (mut tombstones, mode) = match delta {
+                BufferedBranchMergeTombstoneDelta::WholePlan(tombstones) => (
+                    tombstones,
+                    BranchMergeTombstoneSubmissionMode::WholePlan,
+                ),
                 BufferedBranchMergeTombstoneDelta::DepthFragments { fragments, .. } => {
-                    fragments.into_values().flatten().collect()
+                    (
+                        fragments.into_values().flatten().collect(),
+                        BranchMergeTombstoneSubmissionMode::DepthFragments,
+                    )
                 }
             };
+            self.committed_modes.insert(order, mode);
             tombstones.sort_by(|(left_table, left_key), (right_table, right_key)| {
                 left_table.cmp(right_table).then_with(|| {
                     compare_primary_keys(left_key, right_key).unwrap_or(Ordering::Equal)
@@ -505,6 +516,13 @@ impl BranchMergeTombstoneHistory {
         let Some(expected) = self.next_order else {
             return Err(BranchMergeTombstoneHistoryError::OrderExhausted);
         };
+        if let Some(committed_mode) = self.committed_modes.get(&order) {
+            return if *committed_mode == incoming_mode {
+                Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order })
+            } else {
+                Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order })
+            };
+        }
         if order < expected {
             return Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order });
         }
