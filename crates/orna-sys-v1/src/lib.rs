@@ -30,8 +30,8 @@ mod introspection;
 pub use introspection::{
     Dependency, DependencyConfidence, DependencyGraph, DependencyGraphError, DependencyInput,
     DependencyKind,
-    DefinitionRef, ExplainedPlan, ExplainError, ExpressionRef, FileRef, FunctionPlanDescription,
-    FunctionRef, MutableBranchSnapshot, QueryJoinDescription, QueryMutationDescription,
+    DefinitionRef, DisjunctStormDescription, ExplainedPlan, ExplainError, ExpressionRef, FileRef,
+    FunctionPlanDescription, FunctionRef, MutableBranchSnapshot, QueryJoinDescription, QueryMutationDescription,
     QueryMutationKind, QuerySourceStatistics,
     MAX_DEPENDENCY_EDGES, MAX_DEPENDENCY_OBJECTS, MAX_PLAN_EXPRESSIONS,
     MAX_PLAN_NODES, MAX_REFERENCE_BYTES, Plan, PlanDetail, PlanNode, PlanNodeKind, PlanNodeRef,
@@ -46,6 +46,7 @@ pub use introspection::{
     explain_query_with_input_limit_conjunct_disjunct_limit_conjunct_chain,
     explain_query_with_input_limit_disjunct_conjunct_chain, explain_query_with_limit_chain,
     explain_query_with_disjunct_branch_limit_conjunct_cascade,
+    explain_query_with_disjunct_storm_chain,
 };
 
 mod provider;
