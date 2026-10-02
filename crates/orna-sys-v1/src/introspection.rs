@@ -693,6 +693,23 @@ pub enum PlanDetail {
     Boolean(bool),
     Expressions(Vec<ExpressionRef>),
     Ordering(Vec<PlanOrdering>),
+    ByteCapHandoffRoutes(Vec<PlanByteCapHandoffRoute>),
+}
+
+/// One typed source-to-destination byte-cap handoff reported by a planner
+/// storm rebind. Unknown byte estimates remain `None`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PlanByteCapHandoffRoute {
+    /// One-based nesting depth of the rebind cascade receiving this handoff.
+    pub depth: usize,
+    /// The branch or preceding rebind scope supplying the byte estimate.
+    pub input_scope: String,
+    /// The nested cascade scope receiving the byte estimate.
+    pub output_scope: String,
+    /// Known input byte estimate; `None` means the estimate is unknown.
+    pub input_bytes: Option<u64>,
+    /// Known capped output byte estimate; `None` means the estimate is unknown.
+    pub output_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -2076,6 +2093,8 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             rebind_byte_cap_handoff_routes_by_depth_text(
                 &byte_cap_handoff_estimates_by_depth,
             );
+        let limit_chain_rebind_byte_cap_handoff_route_records =
+            rebind_byte_cap_handoff_route_records(&byte_cap_handoff_estimates_by_depth);
         let limit_chain_rebind_predicates = storm
             .branches
             .iter()
@@ -2137,6 +2156,12 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             (
                 "limit_chain_rebind_byte_cap_handoff_routes_by_depth".to_owned(),
                 PlanDetail::Text(limit_chain_rebind_byte_cap_handoff_routes_by_depth_text),
+            ),
+            (
+                "limit_chain_rebind_byte_cap_handoff_route_records".to_owned(),
+                PlanDetail::ByteCapHandoffRoutes(
+                    limit_chain_rebind_byte_cap_handoff_route_records,
+                ),
             ),
             (
                 "limit_chain_rebind_predicates".to_owned(),
@@ -2845,6 +2870,23 @@ fn rebind_byte_cap_handoff_routes_by_depth_text(
         .join(";")
 }
 
+fn rebind_byte_cap_handoff_route_records(
+    estimates: &RebindByteCapHandoffEstimatesByDepth,
+) -> Vec<PlanByteCapHandoffRoute> {
+    estimates
+        .iter()
+        .flat_map(|(depth, handoffs)| {
+            handoffs.iter().map(|handoff| PlanByteCapHandoffRoute {
+                depth: *depth,
+                input_scope: handoff.input_scope.clone(),
+                output_scope: handoff.scope.clone(),
+                input_bytes: handoff.input_bytes,
+                output_bytes: handoff.output_bytes,
+            })
+        })
+        .collect()
+}
+
 fn disjunct_storm_cascade_cardinality_and_work(
     input: Cardinality,
     storm: &DisjunctStormCascadeDescription,
@@ -3467,6 +3509,17 @@ fn hash_plan_detail(hash: &mut Sha256, detail: &PlanDetail) {
                 hash_part(hash, item.expression.as_str().as_bytes());
                 hash_part(hash, item.direction.as_ref_str().as_bytes());
                 hash_part(hash, item.null_order.as_ref_str().as_bytes());
+            }
+        }
+        PlanDetail::ByteCapHandoffRoutes(routes) => {
+            hash.update([5]);
+            hash.update((routes.len() as u64).to_be_bytes());
+            for route in routes {
+                hash.update((route.depth as u64).to_be_bytes());
+                hash_part(hash, route.input_scope.as_bytes());
+                hash_part(hash, route.output_scope.as_bytes());
+                hash_optional_u64(hash, route.input_bytes);
+                hash_optional_u64(hash, route.output_bytes);
             }
         }
     }
