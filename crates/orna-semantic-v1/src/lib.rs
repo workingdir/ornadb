@@ -8664,6 +8664,15 @@ fn infer_assignment(
                     }
                 }
                 Some(expected)
+                    if !checkpoint_snapshot_maps_are_valid(&expected)
+                        || !checkpoint_snapshot_maps_are_valid(&value.ty) =>
+                {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "snapshot context maps must contain canonical selector sets",
+                    ));
+                }
+                Some(expected)
                     if pinned_snapshot_rebind_compatible(&expected, &value.ty) =>
                 {
                     // A local pin aggregate or historical closure now refers
