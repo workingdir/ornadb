@@ -1,0 +1,519 @@
+use std::collections::BTreeMap;
+
+use orna_sys_v1::{
+    DisjunctStormBranchDescription, DisjunctStormCascadeDescription,
+    DisjunctStormLimitRebindDescription, ExpressionRef, ObjectRef, PlanByteCapScopeSegment,
+    PlanByteCapHandoffRoute, PlanDetail, PlanNodeKind, QueryPlanDescription,
+    QuerySourceStatistics, SnapshotRef,
+    explain_query_with_disjunct_storm_branch_limit_chains,
+};
+
+const FIXTURE: &str = include_str!("fixtures/planner_paired_depth_post_storm_route_stability.orna");
+const UNKNOWN_STAGE_OUTPUT_HANDOFF_FIXTURE: &str =
+    include_str!("fixtures/planner_unknown_stage_output_handoff.orna");
+
+fn branch(
+    limits: &[u64],
+    rebinds: Vec<DisjunctStormLimitRebindDescription>,
+    nested_storms: Vec<DisjunctStormCascadeDescription>,
+) -> DisjunctStormBranchDescription {
+    DisjunctStormBranchDescription {
+        nested_limits: limits.to_vec(),
+        conjunct_count: 1,
+        limit_rebinds: rebinds,
+        nested_storms,
+    }
+}
+
+fn storm(
+    predicate: &str,
+    branches: Vec<DisjunctStormBranchDescription>,
+) -> DisjunctStormCascadeDescription {
+    DisjunctStormCascadeDescription {
+        predicate: ExpressionRef::descriptive(predicate),
+        branches,
+    }
+}
+
+fn rebind(after_limit: usize, label: &str, cap: u64) -> DisjunctStormLimitRebindDescription {
+    DisjunctStormLimitRebindDescription {
+        after_limit,
+        storms: vec![storm(
+            &format!("expr:{label}"),
+            vec![branch(&[cap], Vec::new(), Vec::new())],
+        )],
+    }
+}
+
+fn nested_stage(label: &str, limits: &[u64], leaf_cap: u64) -> DisjunctStormCascadeDescription {
+    storm(
+        &format!("expr:{label}"),
+        vec![branch(
+            limits,
+            vec![rebind(limits.len(), &format!("{label}-rebind"), leaf_cap)],
+            Vec::new(),
+        )],
+    )
+}
+
+fn top_level_stage(
+    label: &str,
+    limits: &[u64],
+    nested_caps: [u64; 2],
+) -> DisjunctStormCascadeDescription {
+    // The route order contract is independent of the nesting depth where a
+    // route was discovered: paths at depth one and two are grouped together
+    // by depth, then ordered by typed ancestry.
+    let rebinds = vec![
+        rebind(1, &format!("{label}-first-limit"), nested_caps[1]),
+        rebind(2, &format!("{label}-second-limit"), nested_caps[0]),
+    ];
+    let nested_storms = vec![
+        nested_stage(&format!("{label}-nested-first"), &[16, 8], 4),
+        nested_stage(&format!("{label}-nested-second"), &[12, 6], 3),
+    ];
+    storm(
+        &format!("expr:{label}"),
+        vec![branch(limits, rebinds, nested_storms)],
+    )
+}
+
+fn query() -> QueryPlanDescription {
+    QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:planner-paired-depth-route-stability"),
+        source: ObjectRef::descriptive("table:PlannerPairedDepthPostStormRouteStability"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(1_000),
+            estimated_bytes: Some(8_192),
+            mutable_branch: None,
+        }),
+        joins: Vec::new(),
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: Vec::new(),
+        materialize_into: None,
+    }
+}
+
+fn routes_for_stage<'a>(
+    explained: &'a orna_sys_v1::ExplainedPlan,
+    stage: u64,
+) -> &'a [orna_sys_v1::PlanByteCapHandoffRoute] {
+    let filter = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Filter
+                && node.details().get("disjunct_storm") == Some(&PlanDetail::Integer(stage))
+        })
+        .expect("storm stage is visible");
+    match filter
+        .details()
+        .get("limit_chain_rebind_byte_cap_handoff_route_records")
+    {
+        Some(PlanDetail::ByteCapHandoffRoutes(routes)) => routes,
+        other => panic!("expected typed byte-cap route records, got {other:?}"),
+    }
+}
+
+fn typed_route_summary(
+    routes: &[PlanByteCapHandoffRoute],
+    include_input_scope: bool,
+) -> String {
+    let mut by_depth = BTreeMap::<usize, Vec<String>>::new();
+    for route in routes {
+        let input_bytes = route
+            .input_bytes
+            .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        let output_bytes = route
+            .output_bytes
+            .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        let scope = if include_input_scope {
+            format!("{}=>{}", route.input_scope, route.output_scope)
+        } else {
+            route.output_scope.clone()
+        };
+        by_depth.entry(route.depth).or_default().push(format!(
+            "{scope}={input_bytes}>{output_bytes}"
+        ));
+    }
+    by_depth
+        .iter()
+        .map(|(depth, routes)| format!("{depth}:{}", routes.join(",")))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+#[test]
+fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
+    let parsed = orna_syntax_v1::parse_module(FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    let stages = vec![
+        top_level_stage("first-stage", &[120, 60], [20, 40]),
+        top_level_stage("post-storm-stage", &[96, 48], [16, 32]),
+        top_level_stage("third-stage", &[72, 36], [12, 24]),
+    ];
+    let explained = explain_query_with_disjunct_storm_branch_limit_chains(&query(), &stages, &[])
+        .expect("paired-depth routes are emitted across both storm stages");
+    let repeated = explain_query_with_disjunct_storm_branch_limit_chains(&query(), &stages, &[])
+        .expect("repeated planning keeps the same route order");
+    let serialized = serde_json::to_value(&explained).expect("plan serializes");
+    assert_eq!(
+        serialized,
+        serde_json::to_value(&repeated).expect("repeated plan serializes")
+    );
+
+    let first_routes = routes_for_stage(&explained, 1);
+    let post_storm_routes = routes_for_stage(&explained, 2);
+    let third_stage_routes = routes_for_stage(&explained, 3);
+    for (stage, prefix) in [
+        (1, "root/storm1/"),
+        (2, "root/storm1/storm_stage_output1/storm2/"),
+        (3, "root/storm1/storm_stage_output1/storm2/storm_stage_output2/storm3/"),
+    ] {
+        let filter = explained
+            .nodes()
+            .iter()
+            .find(|node| {
+                node.kind() == PlanNodeKind::Filter
+                    && node.details().get("disjunct_storm") == Some(&PlanDetail::Integer(stage))
+            })
+            .expect("storm stage is visible");
+        let scope_summary = match filter
+            .details()
+            .get("limit_chain_rebind_byte_cap_handoff_scopes_by_depth")
+        {
+            Some(PlanDetail::Text(scopes)) => scopes,
+            other => panic!("expected handoff scopes by depth, got {other:?}"),
+        };
+        assert_eq!(
+            scope_summary,
+            &typed_route_summary(routes_for_stage(&explained, stage), false)
+        );
+        let route_summary = match filter
+            .details()
+            .get("limit_chain_rebind_byte_cap_handoff_routes_by_depth")
+        {
+            Some(PlanDetail::Text(routes)) => routes,
+            other => panic!("expected routes by depth, got {other:?}"),
+        };
+        assert_eq!(
+            route_summary,
+            &typed_route_summary(routes_for_stage(&explained, stage), true)
+        );
+        for depth in route_summary.split(';') {
+            let (_, handoffs) = depth.split_once(':').expect("depth route entry");
+            for handoff in handoffs.split(',') {
+                let (input_scope, output) =
+                    handoff.split_once("=>").expect("handoff input/output scopes");
+                let (output_scope, _) = output.split_once('=').expect("handoff output scope");
+                assert!(
+                    input_scope.starts_with(prefix),
+                    "stage {stage} handoff input {input_scope:?} should retain {prefix:?}"
+                );
+                assert!(
+                    output_scope.starts_with(prefix),
+                    "stage {stage} handoff output {output_scope:?} should retain {prefix:?}"
+                );
+            }
+        }
+        for depth in scope_summary.split(';') {
+            let (_, scopes) = depth.split_once(':').expect("depth scope entry");
+            for handoff in scopes.split(',') {
+                let (scope, _) = handoff.split_once('=').expect("handoff scope entry");
+                assert!(
+                    scope.starts_with(prefix),
+                    "stage {stage} scope {scope:?} should retain typed ancestry prefix {prefix:?}"
+                );
+            }
+        }
+    }
+    assert!(first_routes.iter().all(|route| {
+        route.input_scope.starts_with("root/storm1/")
+            && route.output_scope.starts_with("root/storm1/")
+    }));
+    for routes in [first_routes, post_storm_routes, third_stage_routes] {
+        assert_eq!(
+            routes.iter().map(|route| route.depth).collect::<Vec<_>>(),
+            vec![1, 1, 2, 2]
+        );
+        assert!(routes.windows(2).all(|pair| {
+            (
+                pair[0].depth,
+                pair[0].input_path.as_slice(),
+                pair[0].output_path.as_slice(),
+                pair[0].input_scope.as_str(),
+                pair[0].output_scope.as_str(),
+            ) <= (
+                pair[1].depth,
+                pair[1].input_path.as_slice(),
+                pair[1].output_path.as_slice(),
+                pair[1].input_scope.as_str(),
+                pair[1].output_scope.as_str(),
+            )
+        }));
+        assert!(routes.iter().all(|route| route.input_bytes.is_some()));
+        assert!(routes.iter().all(|route| route.output_bytes.is_some()));
+    }
+
+    let first_route = &first_routes[0];
+    assert_eq!(
+        first_route.input_path,
+        vec![
+            PlanByteCapScopeSegment::StormStage { index: 1 },
+            PlanByteCapScopeSegment::Branch { index: 1 },
+            PlanByteCapScopeSegment::Limit { position: 1 },
+        ]
+    );
+    let mut branch_output = first_routes[1].output_path.clone();
+    branch_output.extend([
+        PlanByteCapScopeSegment::RebindCascadeOutput {
+            position: 2,
+            index: 1,
+        },
+        PlanByteCapScopeSegment::BranchOutput { index: 1 },
+    ]);
+    let mut first_nested_input = branch_output.clone();
+    first_nested_input.extend([
+        PlanByteCapScopeSegment::NestedStorm { index: 1 },
+        PlanByteCapScopeSegment::Branch { index: 1 },
+        PlanByteCapScopeSegment::Limit { position: 1 },
+        PlanByteCapScopeSegment::Limit { position: 2 },
+    ]);
+    assert_eq!(first_routes[2].input_path, first_nested_input);
+    let mut second_nested_input = branch_output;
+    second_nested_input.extend([
+        PlanByteCapScopeSegment::NestedStorm { index: 1 },
+        PlanByteCapScopeSegment::NestedStormOutput { index: 1 },
+        PlanByteCapScopeSegment::NestedStorm { index: 2 },
+        PlanByteCapScopeSegment::Branch { index: 1 },
+        PlanByteCapScopeSegment::Limit { position: 1 },
+        PlanByteCapScopeSegment::Limit { position: 2 },
+    ]);
+    assert_eq!(first_routes[3].input_path, second_nested_input);
+
+    let post_storm_prefix = [
+        PlanByteCapScopeSegment::StormStage { index: 1 },
+        PlanByteCapScopeSegment::StormStageOutput { index: 1 },
+        PlanByteCapScopeSegment::StormStage { index: 2 },
+    ];
+    for route in post_storm_routes {
+        assert_eq!(
+            &route.input_path[..post_storm_prefix.len()],
+            post_storm_prefix
+        );
+        assert!(route.input_scope.starts_with("root/storm1/storm_stage_output1/storm2/"));
+        assert!(route.output_scope.starts_with("root/storm1/storm_stage_output1/storm2/"));
+    }
+    assert_eq!(
+        post_storm_routes[2].input_scope,
+        "root/storm1/storm_stage_output1/storm2/branch1/limit1/rebind1/cascade1/rebind_output1_1/limit2/rebind2/cascade1/rebind_output2_1/branch_output1/nested1/branch1/limit1/limit2"
+    );
+    assert_eq!(
+        post_storm_routes[3].input_scope,
+        "root/storm1/storm_stage_output1/storm2/branch1/limit1/rebind1/cascade1/rebind_output1_1/limit2/rebind2/cascade1/rebind_output2_1/branch_output1/nested1/nested_output1/nested2/branch1/limit1/limit2"
+    );
+    let third_stage_prefix = [
+        PlanByteCapScopeSegment::StormStage { index: 1 },
+        PlanByteCapScopeSegment::StormStageOutput { index: 1 },
+        PlanByteCapScopeSegment::StormStage { index: 2 },
+        PlanByteCapScopeSegment::StormStageOutput { index: 2 },
+        PlanByteCapScopeSegment::StormStage { index: 3 },
+    ];
+    for route in third_stage_routes {
+        assert_eq!(
+            &route.input_path[..third_stage_prefix.len()],
+            third_stage_prefix
+        );
+        assert_eq!(
+            &route.output_path[..third_stage_prefix.len()],
+            third_stage_prefix
+        );
+        assert!(route
+            .input_scope
+            .starts_with("root/storm1/storm_stage_output1/storm2/storm_stage_output2/storm3/"));
+        assert!(route
+            .output_scope
+            .starts_with("root/storm1/storm_stage_output1/storm2/storm_stage_output2/storm3/"));
+    }
+    assert_eq!(
+        third_stage_routes[2].input_scope,
+        "root/storm1/storm_stage_output1/storm2/storm_stage_output2/storm3/branch1/limit1/rebind1/cascade1/rebind_output1_1/limit2/rebind2/cascade1/rebind_output2_1/branch_output1/nested1/branch1/limit1/limit2"
+    );
+    assert_eq!(
+        third_stage_routes[3].input_scope,
+        "root/storm1/storm_stage_output1/storm2/storm_stage_output2/storm3/branch1/limit1/rebind1/cascade1/rebind_output1_1/limit2/rebind2/cascade1/rebind_output2_1/branch_output1/nested1/nested_output1/nested2/branch1/limit1/limit2"
+    );
+    assert!(
+        post_storm_routes[2]
+            .input_path
+            .contains(&PlanByteCapScopeSegment::BranchOutput { index: 1 })
+    );
+    assert!(
+        post_storm_routes[3]
+            .input_path
+            .contains(&PlanByteCapScopeSegment::NestedStormOutput { index: 1 })
+    );
+
+    for stage in 1..=3 {
+        let serialized_filter = serialized["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["details"]["disjunct_storm"] == stage)
+            .expect("storm stage serializes");
+        assert_eq!(
+            serialized_filter["details"]["limit_chain_rebind_byte_cap_handoff_route_order"],
+            "ascending_depth_then_typed_input_path_then_typed_output_path"
+        );
+        assert_eq!(
+            serialized_filter["details"]["limit_chain_rebind_byte_cap_handoff_route_records"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
+    }
+}
+
+#[test]
+fn unknown_byte_handoffs_retain_prior_stage_output_paths() {
+    let parsed = orna_syntax_v1::parse_module(UNKNOWN_STAGE_OUTPUT_HANDOFF_FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let stages = (1..=3)
+        .map(|stage| {
+            storm(
+                &format!("expr:unknown-stage-{stage}"),
+                vec![branch(
+                    &[64],
+                    vec![rebind(1, &format!("unknown-stage-{stage}-cascade"), 32)],
+                    Vec::new(),
+                )],
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut query = query();
+    query.source_statistics = None;
+    let explained = explain_query_with_disjunct_storm_branch_limit_chains(&query, &stages, &[])
+        .expect("unknown byte estimates keep typed stage handoff routes");
+
+    for stage in 1..=3 {
+        let routes = routes_for_stage(&explained, stage);
+        assert_eq!(routes.len(), 1);
+        assert!(routes[0].input_bytes.is_none());
+        assert!(routes[0].output_bytes.is_none());
+
+        let mut expected_input_scope = "root".to_owned();
+        for prior_stage in 1..stage {
+            expected_input_scope.push_str(&format!(
+                "/storm{prior_stage}/storm_stage_output{prior_stage}"
+            ));
+        }
+        expected_input_scope.push_str(&format!("/storm{stage}/branch1/limit1"));
+        assert_eq!(routes[0].input_scope, expected_input_scope);
+        assert_eq!(
+            routes[0].output_scope,
+            format!("{expected_input_scope}/rebind1/cascade1")
+        );
+
+        let mut expected_prior_outputs = Vec::new();
+        for prior_stage in 1..stage {
+            expected_prior_outputs.extend([
+                PlanByteCapScopeSegment::StormStage {
+                    index: prior_stage as usize,
+                },
+                PlanByteCapScopeSegment::StormStageOutput {
+                    index: prior_stage as usize,
+                },
+            ]);
+        }
+        assert_eq!(
+            &routes[0].input_path[..expected_prior_outputs.len()],
+            expected_prior_outputs
+        );
+
+        let filter = explained
+            .nodes()
+            .iter()
+            .find(|node| {
+                node.kind() == PlanNodeKind::Filter
+                    && node.details().get("disjunct_storm") == Some(&PlanDetail::Integer(stage))
+            })
+            .expect("unknown-byte storm stage is visible");
+        let scope_summary = match filter
+            .details()
+            .get("limit_chain_rebind_byte_cap_handoff_scopes_by_depth")
+        {
+            Some(PlanDetail::Text(scopes)) => scopes,
+            other => panic!("expected typed handoff scopes, got {other:?}"),
+        };
+        assert_eq!(
+            scope_summary,
+            &format!("1:{}=?>?", routes[0].output_scope)
+        );
+        let route_summary = match filter
+            .details()
+            .get("limit_chain_rebind_byte_cap_handoff_routes_by_depth")
+        {
+            Some(PlanDetail::Text(routes)) => routes,
+            other => panic!("expected typed handoff routes, got {other:?}"),
+        };
+        assert_eq!(
+            route_summary,
+            &format!(
+                "1:{}=>{}=?>?",
+                routes[0].input_scope, routes[0].output_scope
+            )
+        );
+    }
+}
+
+#[test]
+fn unknown_byte_route_serialization_derives_labels_from_typed_paths() {
+    let parsed = orna_syntax_v1::parse_module(UNKNOWN_STAGE_OUTPUT_HANDOFF_FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let input_path = vec![
+        PlanByteCapScopeSegment::StormStage { index: 1 },
+        PlanByteCapScopeSegment::StormStageOutput { index: 1 },
+        PlanByteCapScopeSegment::StormStage { index: 2 },
+        PlanByteCapScopeSegment::Branch { index: 1 },
+        PlanByteCapScopeSegment::Limit { position: 1 },
+    ];
+    let mut output_path = input_path.clone();
+    output_path.extend([
+        PlanByteCapScopeSegment::Rebind { position: 1 },
+        PlanByteCapScopeSegment::Cascade { index: 1 },
+    ]);
+    let route = PlanByteCapHandoffRoute {
+        depth: 1,
+        input_path,
+        output_path,
+        input_scope: "stale input label".to_owned(),
+        output_scope: "stale output label".to_owned(),
+        input_bytes: None,
+        output_bytes: None,
+    };
+
+    let serialized = serde_json::to_value(route).expect("unknown-byte route serializes");
+    assert_eq!(
+        serialized["input_scope"],
+        "root/storm1/storm_stage_output1/storm2/branch1/limit1"
+    );
+    assert_eq!(
+        serialized["output_scope"],
+        "root/storm1/storm_stage_output1/storm2/branch1/limit1/rebind1/cascade1"
+    );
+    assert_eq!(
+        serialized["input_path"][1],
+        serde_json::json!({ "kind": "storm_stage_output", "index": 1 })
+    );
+    assert_eq!(serialized["input_bytes"], serde_json::Value::Null);
+    assert_eq!(serialized["output_bytes"], serde_json::Value::Null);
+}

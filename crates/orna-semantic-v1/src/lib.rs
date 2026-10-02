@@ -7291,21 +7291,7 @@ fn infer(
                             Type::Error
                         }
                     });
-                let ty = match (&parameter.pattern, &ty) {
-                    (Pattern::Name(name, span), ty)
-                        if local
-                            .get(name)
-                            .is_some_and(|symbol| symbol.kind == SymbolKind::Parameter)
-                            && is_snapshot_ref_value(ty) =>
-                    {
-                        let source = span.file.as_deref().unwrap_or("<unknown>");
-                        contextual_snapshot_ref(&format!(
-                            "selector:binder:{source}@{}..{}:parameter:{name}",
-                            span.start, span.end
-                        ))
-                    }
-                    (_, ty) => ty.clone(),
-                };
+                let ty = scope_snapshot_ref_parameter_pattern(&parameter.pattern, &ty);
                 if ty == Type::Error {
                     // Keep an underconstrained lambda parameter in scope as
                     // an error-typed local. This lets the annotation
@@ -7596,6 +7582,7 @@ fn infer(
                     let result = historical_database.unwrap_or_else(|| {
                         specialize_dynamic_parameter_snapshot_contexts(
                             &result,
+                            &parameters,
                             parameter_names.as_deref(),
                             arguments,
                             &values,
@@ -8677,6 +8664,15 @@ fn infer_assignment(
                     }
                 }
                 Some(expected)
+                    if !checkpoint_snapshot_maps_are_valid(&expected)
+                        || !checkpoint_snapshot_maps_are_valid(&value.ty) =>
+                {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "snapshot context maps must contain canonical selector sets",
+                    ));
+                }
+                Some(expected)
                     if pinned_snapshot_rebind_compatible(&expected, &value.ty) =>
                 {
                     // A local pin aggregate or historical closure now refers
@@ -9335,43 +9331,273 @@ fn infer_case_arm_body(
 }
 
 fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
-    let (
-        Type::Function {
-            parameters: left_parameters,
-            parameter_names: left_names,
-            result: left_result,
-            default_parameters: left_defaults,
-        },
-        Type::Function {
-            parameters: right_parameters,
-            parameter_names: right_names,
-            result: right_result,
-            default_parameters: right_defaults,
-        },
-    ) = (left, right)
-    else {
-        return None;
-    };
-    if left_result != right_result
-        || left_parameters.len() != right_parameters.len()
-        || left_parameters
-            .iter()
-            .zip(right_parameters)
-            .any(|(left, right)| left != right)
-    {
+    if left == right {
+        return Some(left.clone());
+    }
+    if is_terminal_historical_callable(left) && is_terminal_historical_callable(right) {
+        // Completed zero-argument closures have no continuation boundary to
+        // keep paired lane identity. Preserve their exact pins so a list
+        // cannot silently combine terminal values from separate lanes.
         return None;
     }
-    Some(Type::Function {
-        parameters: left_parameters.clone(),
-        default_parameters: left_defaults
-            .intersection(right_defaults)
-            .copied()
-            .collect(),
-        parameter_names: (left_names == right_names)
-            .then(|| left_names.clone())
-            .flatten(),
-        result: left_result.clone(),
-    })
+    merge_checkpoint_field_map(left, right)
+}
+
+fn is_terminal_historical_callable(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Applied { base, arguments }
+            if base == "sys.HistoricalCallable"
+                && matches!(
+                    arguments.as_slice(),
+                    [_, Type::Function { parameters, .. }] if parameters.is_empty()
+                )
+    )
+}
+
+fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
+    if !checkpoint_snapshot_maps_are_valid(left) || !checkpoint_snapshot_maps_are_valid(right) {
+        return None;
+    }
+    if is_snapshot_context_type(left) || is_snapshot_context_type(right) {
+        if !is_snapshot_context_map_shape(left) || !is_snapshot_context_map_shape(right) {
+            return None;
+        }
+        return merge_snapshot_context_map(left, right);
+    }
+    if left == right {
+        return Some(left.clone());
+    }
+    match (left, right) {
+        (
+            Type::Applied {
+                base: left_base,
+                arguments: left_arguments,
+            },
+            Type::Applied {
+                base: right_base,
+                arguments: right_arguments,
+            },
+        ) if left_base == "sys.HistoricalCallable" && right_base == "sys.HistoricalCallable" => {
+            match (left_arguments.as_slice(), right_arguments.as_slice()) {
+                ([left_snapshot, left_callable], [right_snapshot, right_callable]) => Some(
+                    historical_callable_type(
+                        &merge_snapshot_context_map(left_snapshot, right_snapshot)?,
+                        &merge_checkpoint_field_map(left_callable, right_callable)?,
+                    ),
+                ),
+                _ => None,
+            }
+        }
+        (
+            Type::Function {
+                parameters: left_parameters,
+                parameter_names: left_names,
+                result: left_result,
+                default_parameters: left_defaults,
+            },
+            Type::Function {
+                parameters: right_parameters,
+                parameter_names: right_names,
+                result: right_result,
+                default_parameters: right_defaults,
+            },
+        ) => {
+            if left_parameters.len() != right_parameters.len() {
+                return None;
+            }
+            // Distinct checkpoint closures can have the same callable shape
+            // while their SnapshotRef parameters carry different lexical
+            // binder IDs. Merge only those pinned parameter shapes, retaining
+            // their context map; keep all other parameter contracts exact.
+            let parameters = left_parameters
+                .iter()
+                .zip(right_parameters)
+                .map(|(left, right)| {
+                    if left == right {
+                        Some(left.clone())
+                    } else if type_contains_pinned_snapshot_identity(left)
+                        && type_contains_pinned_snapshot_identity(right)
+                        && pinned_snapshot_shape_matches(left, right)
+                    {
+                        merge_checkpoint_field_map(left, right)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some(Type::Function {
+                parameters,
+                default_parameters: left_defaults
+                    .intersection(right_defaults)
+                    .copied()
+                    .collect(),
+                parameter_names: (left_names == right_names)
+                    .then(|| left_names.clone())
+                    .flatten(),
+                result: Box::new(merge_checkpoint_field_map(left_result, right_result)?),
+            })
+        }
+        (Type::List(left), Type::List(right)) => {
+            Some(Type::List(Box::new(merge_checkpoint_field_map(left, right)?)))
+        }
+        (Type::Range(left), Type::Range(right)) => {
+            Some(Type::Range(Box::new(merge_checkpoint_field_map(left, right)?)))
+        }
+        (Type::Relation(left), Type::Relation(right)) => Some(Type::Relation(Box::new(
+            merge_checkpoint_field_map(left, right)?,
+        ))),
+        (Type::Stream(left), Type::Stream(right)) => Some(Type::Stream(Box::new(
+            merge_checkpoint_field_map(left, right)?,
+        ))),
+        (Type::Optional(left), Type::Optional(right)) => Some(Type::Optional(Box::new(
+            merge_checkpoint_field_map(left, right)?,
+        ))),
+        (Type::Record(left), Type::Record(right)) if left.len() == right.len() => {
+            Some(Type::Record(
+                left.iter()
+                    .map(|(name, left)| {
+                        Some((
+                            name.clone(),
+                            merge_checkpoint_field_map(left, right.get(name)?)?,
+                        ))
+                    })
+                    .collect::<Option<BTreeMap<_, _>>>()?,
+            ))
+        }
+        (Type::Tuple(left), Type::Tuple(right)) if left.len() == right.len() => {
+            Some(Type::Tuple(
+                left.iter()
+                    .zip(right)
+                    .map(|(left, right)| merge_checkpoint_field_map(left, right))
+                    .collect::<Option<Vec<_>>>()?,
+            ))
+        }
+        (
+            Type::Applied {
+                base: left_base,
+                arguments: left_arguments,
+            },
+            Type::Applied {
+                base: right_base,
+                arguments: right_arguments,
+            },
+        ) if left_base == right_base && left_arguments.len() == right_arguments.len() => {
+            Some(Type::Applied {
+                base: left_base.clone(),
+                arguments: left_arguments
+                    .iter()
+                    .zip(right_arguments)
+                    .map(|(left, right)| merge_checkpoint_field_map(left, right))
+                    .collect::<Option<Vec<_>>>()?,
+            })
+        }
+        (
+            Type::MoneyPerUnit {
+                currency: left_currency,
+                unit: left_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: right_currency,
+                unit: right_unit,
+            },
+        ) => Some(Type::MoneyPerUnit {
+            currency: Box::new(merge_checkpoint_field_map(left_currency, right_currency)?),
+            unit: Box::new(merge_checkpoint_field_map(left_unit, right_unit)?),
+        }),
+        _ => None,
+    }
+}
+
+/// Keep distinct pins in matching fields when homogeneous lists collect
+/// checkpoints from different snapshots. The reference defines pin identity
+/// for historical reads but is silent on local checkpoint collections.
+fn merge_snapshot_context_map(left: &Type, right: &Type) -> Option<Type> {
+    const CONTEXT_MAP: &str = "semantic.SnapshotContextMap";
+
+    if !is_snapshot_context_map_shape(left) || !is_snapshot_context_map_shape(right) {
+        return None;
+    }
+
+    fn collect_contexts(ty: &Type, contexts: &mut BTreeSet<String>) {
+        match ty {
+            Type::Applied { base, arguments } if base == "sys.SnapshotRefContext" => {
+                if let [Type::Named(selector)] = arguments.as_slice()
+                    && is_snapshot_selector_context(selector)
+                {
+                    contexts.insert(selector.clone());
+                }
+            }
+            Type::Applied { base, arguments } if base == CONTEXT_MAP => {
+                contexts.extend(arguments.iter().filter_map(|argument| match argument {
+                    Type::Named(selector) if is_snapshot_selector_context(selector) => {
+                        Some(selector.clone())
+                    }
+                    _ => None,
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    let mut contexts = BTreeSet::new();
+    collect_contexts(left, &mut contexts);
+    collect_contexts(right, &mut contexts);
+    match contexts.len() {
+        0 => None,
+        1 => contexts
+            .into_iter()
+            .next()
+            .map(|selector| contextual_snapshot_ref(&selector)),
+        _ => Some(Type::Applied {
+            base: CONTEXT_MAP.into(),
+            arguments: contexts.into_iter().map(Type::Named).collect(),
+        }),
+    }
+}
+
+fn is_snapshot_context_type(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Applied { base, .. }
+            if base == "sys.SnapshotRefContext" || base == "semantic.SnapshotContextMap"
+    )
+}
+
+/// Synthetic checkpoint maps only represent canonical snapshot selectors.
+/// The reference does not specify local checkpoint-map merging, so reject
+/// malformed map identities instead of letting equality or an enclosing
+/// product hide them during a rebind storm.
+fn checkpoint_snapshot_maps_are_valid(ty: &Type) -> bool {
+    match ty {
+        Type::Applied { base, .. } if base == "sys.SnapshotRefContext" => {
+            is_contextual_snapshot_ref(ty)
+        }
+        Type::Applied { base, .. } if base == "semantic.SnapshotContextMap" => {
+            is_snapshot_context_map_shape(ty)
+        }
+        Type::Applied { arguments, .. } => {
+            arguments.iter().all(checkpoint_snapshot_maps_are_valid)
+        }
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => checkpoint_snapshot_maps_are_valid(element),
+        Type::Record(fields) => fields.values().all(checkpoint_snapshot_maps_are_valid),
+        Type::Tuple(elements) => elements.iter().all(checkpoint_snapshot_maps_are_valid),
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters.iter().all(checkpoint_snapshot_maps_are_valid)
+                && checkpoint_snapshot_maps_are_valid(result)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            checkpoint_snapshot_maps_are_valid(currency)
+                && checkpoint_snapshot_maps_are_valid(unit)
+        }
+        _ => true,
+    }
 }
 
 fn infer_nominal(
@@ -13997,6 +14223,15 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
         // Optional parameters accept their non-null payload directly; callers
         // do not need to wrap ordinary values in a nullable constructor.
         (Type::Optional(expected), actual) => types_match(expected, actual),
+        // Tuple parameters bind their component types recursively, including
+        // contextual SnapshotRef leaves.
+        (Type::Tuple(expected), Type::Tuple(actual)) => {
+            expected.len() == actual.len()
+                && expected
+                    .iter()
+                    .zip(actual)
+                    .all(|(expected, actual)| types_match(expected, actual))
+        }
         (
             Type::Applied {
                 base: expected_base,
@@ -14034,6 +14269,57 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
                         && actual_unit.rsplit('.').next() == Some("kWh")
             )
         }
+        _ => false,
+    }
+}
+
+/// `types_match` intentionally treats `Error` as compatible to avoid
+/// cascading diagnostics. Tuple pin specialization must instead fail closed
+/// when recovery left an invalid component, or valid siblings could leak a
+/// partial set of capture identities into a later wave.
+fn contains_type_error(ty: &Type) -> bool {
+    match ty {
+        Type::Error => true,
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => contains_type_error(element),
+        Type::Record(fields) => fields.values().any(contains_type_error),
+        Type::Tuple(elements) => elements.iter().any(contains_type_error),
+        Type::Applied { arguments, .. } => arguments.iter().any(contains_type_error),
+        Type::MoneyPerUnit { currency, unit } => {
+            contains_type_error(currency) || contains_type_error(unit)
+        }
+        Type::Function {
+            parameters, result, ..
+        } => parameters.iter().any(contains_type_error) || contains_type_error(result),
+        Type::Int
+        | Type::Decimal
+        | Type::Float
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null
+        | Type::Named(_)
+        | Type::Bottom => false,
+    }
+}
+
+/// `Bottom` is compatible during ordinary contextual checking, but a value
+/// containing a non-returning tuple or record component is never produced as
+/// an argument. Walk only value aggregates: a callback's Bottom result or an
+/// empty collection's element type does not make that value incomplete.
+fn contains_nonreturning_aggregate_component(ty: &Type) -> bool {
+    match ty {
+        Type::Bottom => true,
+        Type::Record(fields) => fields
+            .values()
+            .any(contains_nonreturning_aggregate_component),
+        Type::Tuple(elements) => elements
+            .iter()
+            .any(contains_nonreturning_aggregate_component),
         _ => false,
     }
 }
@@ -16095,6 +16381,12 @@ fn infer_nominal_conversion_call(
     })
 }
 
+fn is_snapshot_selector_context(selector: &str) -> bool {
+    selector
+        .strip_prefix("selector:")
+        .is_some_and(|identity| !identity.is_empty())
+}
+
 fn contextual_snapshot_ref(selector: &str) -> Type {
     Type::Applied {
         base: "sys.SnapshotRefContext".into(),
@@ -16106,12 +16398,39 @@ fn is_contextual_snapshot_ref(ty: &Type) -> bool {
     matches!(
         ty,
         Type::Applied { base, arguments }
-            if base == "sys.SnapshotRefContext" && arguments.len() == 1
+            if base == "sys.SnapshotRefContext"
+                && matches!(arguments.as_slice(), [Type::Named(selector)] if is_snapshot_selector_context(selector))
     )
 }
 
 fn is_snapshot_ref_value(ty: &Type) -> bool {
     ty == &Type::Named("sys.SnapshotRef".into()) || is_contextual_snapshot_ref(ty)
+}
+
+/// Give every SnapshotRef lambda parameter a lexical identity, including each
+/// component of a tuple pattern. This preserves the direct-binder scope used by
+/// current main and extends it to destructured pins, whose identity mechanics
+/// are unspecified by the reference.
+fn scope_snapshot_ref_parameter_pattern(pattern: &Pattern, ty: &Type) -> Type {
+    match (pattern, ty) {
+        (Pattern::Name(name, span), ty) if is_snapshot_ref_value(ty) => {
+            let source = span.file.as_deref().unwrap_or("<unknown>");
+            contextual_snapshot_ref(&format!(
+                "selector:binder:{source}@{}..{}:parameter:{name}",
+                span.start, span.end
+            ))
+        }
+        (Pattern::Tuple { elements, .. }, Type::Tuple(types)) if elements.len() == types.len() => {
+            Type::Tuple(
+                elements
+                    .iter()
+                    .zip(types)
+                    .map(|(pattern, ty)| scope_snapshot_ref_parameter_pattern(pattern, ty))
+                    .collect(),
+            )
+        }
+        _ => ty.clone(),
+    }
 }
 
 fn snapshot_ref_context_key(ty: &Type) -> Option<&str> {
@@ -16207,6 +16526,7 @@ fn snapshot_selector_context(
 /// captured alias is specialized at the depth where it was introduced.
 fn specialize_dynamic_parameter_snapshot_contexts(
     ty: &Type,
+    formal_parameters: &[Type],
     parameter_names: Option<&[String]>,
     arguments: &[orna_syntax_v1::Argument],
     argument_types: &[Type],
@@ -16214,6 +16534,42 @@ fn specialize_dynamic_parameter_snapshot_contexts(
     call_span: &SyntaxSpan,
     historical_context: Option<&Type>,
 ) -> Type {
+    let mut binder_contexts = BTreeMap::new();
+    let nonreturning_argument = argument_types
+        .iter()
+        .any(contains_nonreturning_aggregate_component);
+    if !nonreturning_argument {
+        for (parameter_index, formal) in formal_parameters.iter().enumerate() {
+            let Some(argument_index) = call_argument_index_for_position(
+                parameter_names,
+                parameter_index,
+                arguments,
+            ) else {
+                continue;
+            };
+            let Some(actual) = argument_types.get(argument_index) else {
+                continue;
+            };
+            // A destructured parameter is one callback argument. Do not partially
+            // bind its pins if recovery or shape checking found an invalid leaf.
+            if matches!(formal, Type::Tuple(_))
+                && (contains_type_error(formal)
+                    || contains_type_error(actual)
+                    || !types_match(formal, actual))
+            {
+                continue;
+            }
+            collect_snapshot_binder_contexts(formal, actual, &mut binder_contexts);
+        }
+    }
+
+    // A call with any non-returning argument never reaches the callee. Keep its
+    // result symbolic instead of leaking a completed pin from a sibling arg.
+    let (parameter_names, arguments, argument_types) = if nonreturning_argument {
+        (None, &[][..], &[][..])
+    } else {
+        (parameter_names, arguments, argument_types)
+    };
     specialize_dynamic_parameter_snapshot_contexts_scoped(
         ty,
         parameter_names,
@@ -16223,6 +16579,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
         call_span,
         historical_context,
         &BTreeSet::new(),
+        &binder_contexts,
     )
 }
 
@@ -16235,6 +16592,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
     call_span: &SyntaxSpan,
     historical_context: Option<&Type>,
     shadowed_parameters: &BTreeSet<String>,
+    binder_contexts: &BTreeMap<String, Type>,
 ) -> Type {
     match ty {
         Type::Applied { base, arguments: values }
@@ -16248,41 +16606,49 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                     None => captured || !shadowed_parameters.contains(parameter),
                 } =>
         {
-            let argument_index = parameter_names
-                .and_then(|names| names.iter().position(|name| name == parameter))
-                .and_then(|index| call_argument_index_for_parameter(parameter_names, index, arguments));
-            if let Some(argument_index) = argument_index
-                && let Some(argument) = arguments.get(argument_index)
+            if let Some(binder) = binder
+                && let Some(actual) = binder_contexts.get(binder)
             {
-                call_argument_snapshot_context(
-                    &argument.value,
-                    argument_types.get(argument_index),
-                    call_span,
-                    local,
-                )
-            } else if historical_context.is_some_and(|context| context == ty)
-                || argument_types
-                    .iter()
-                    .any(|actual| contains_snapshot_context_key(actual, selector))
-                || parameter_names.is_some_and(|names| names.iter().all(|name| name != parameter))
-            {
-                // A closure's result may mention its captured selector even
-                // when the current zero-argument call has no parameter to
-                // substitute. Preserve that exact context instead of
-                // inventing a call-site identity. A selector name absent from
-                // this call's parameters belongs to a nested callable and
-                // stays symbolic until that callable is invoked. The reference
-                // requires exact SnapshotRef pinning but leaves this nested
-                // closure specialization detail unspecified. `database.as_of(pin)`
-                // also forwards the context already carried by its argument.
-                ty.clone()
+                actual.clone()
             } else {
-                contextual_snapshot_ref(&format!(
-                    "selector:dynamic-call:{}:{}..{}:parameter:{parameter}",
-                    call_span.file.as_deref().unwrap_or("<unknown>"),
-                    call_span.start,
-                    call_span.end,
-                ))
+                let argument_index = parameter_names
+                    .and_then(|names| names.iter().position(|name| name == parameter))
+                    .and_then(|index| {
+                        call_argument_index_for_parameter(parameter_names, index, arguments)
+                    });
+                if let Some(argument_index) = argument_index
+                    && let Some(argument) = arguments.get(argument_index)
+                {
+                    call_argument_snapshot_context(
+                        &argument.value,
+                        argument_types.get(argument_index),
+                        call_span,
+                        local,
+                    )
+                } else if historical_context.is_some_and(|context| context == ty)
+                    || argument_types
+                        .iter()
+                        .any(|actual| contains_snapshot_context_key(actual, selector))
+                    || parameter_names.is_some_and(|names| names.iter().all(|name| name != parameter))
+                {
+                    // A closure's result may mention its captured selector even
+                    // when the current zero-argument call has no parameter to
+                    // substitute. Preserve that exact context instead of
+                    // inventing a call-site identity. A selector name absent from
+                    // this call's parameters belongs to a nested callable and
+                    // stays symbolic until that callable is invoked. The reference
+                    // requires exact SnapshotRef pinning but leaves this nested
+                    // closure specialization detail unspecified. `database.as_of(pin)`
+                    // also forwards the context already carried by its argument.
+                    ty.clone()
+                } else {
+                    contextual_snapshot_ref(&format!(
+                        "selector:dynamic-call:{}:{}..{}:parameter:{parameter}",
+                        call_span.file.as_deref().unwrap_or("<unknown>"),
+                        call_span.start,
+                        call_span.end,
+                    ))
+                }
             }
         }
         Type::Function {
@@ -16296,11 +16662,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                 nested_shadowed_parameters.extend(names.iter().cloned());
             }
             for parameter in parameters {
-                if let Some(selector) = snapshot_ref_context_key(parameter)
-                    && let Some(binder) = snapshot_ref_binder_id(selector)
-                {
-                    nested_shadowed_parameters.insert(format!("binder:{binder}"));
-                }
+                collect_snapshot_ref_binder_ids(parameter, &mut nested_shadowed_parameters);
             }
             Type::Function {
                 parameters: parameters
@@ -16315,6 +16677,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                             call_span,
                             historical_context,
                             &nested_shadowed_parameters,
+                            binder_contexts,
                         )
                     })
                     .collect(),
@@ -16329,6 +16692,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                     call_span,
                     historical_context,
                     &nested_shadowed_parameters,
+                    binder_contexts,
                 )),
             }
         },
@@ -16342,6 +16706,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                 call_span,
                 historical_context,
                 shadowed_parameters,
+                binder_contexts,
             ),
         )),
         Type::Range(element) => Type::Range(Box::new(
@@ -16354,6 +16719,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                 call_span,
                 historical_context,
                 shadowed_parameters,
+                binder_contexts,
             ),
         )),
         Type::Relation(element) => Type::Relation(Box::new(
@@ -16366,6 +16732,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                 call_span,
                 historical_context,
                 shadowed_parameters,
+                binder_contexts,
             ),
         )),
         Type::Stream(element) => Type::Stream(Box::new(
@@ -16378,6 +16745,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                 call_span,
                 historical_context,
                 shadowed_parameters,
+                binder_contexts,
             ),
         )),
         Type::Optional(element) => Type::Optional(Box::new(
@@ -16390,6 +16758,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                 call_span,
                 historical_context,
                 shadowed_parameters,
+                binder_contexts,
             ),
         )),
         Type::Record(fields) => Type::Record(
@@ -16407,6 +16776,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                             call_span,
                             historical_context,
                             shadowed_parameters,
+                            binder_contexts,
                         ),
                     )
                 })
@@ -16425,6 +16795,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                         call_span,
                         historical_context,
                         shadowed_parameters,
+                        binder_contexts,
                     )
                 })
                 .collect(),
@@ -16443,11 +16814,120 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                         call_span,
                         historical_context,
                         shadowed_parameters,
+                        binder_contexts,
                     )
                 })
                 .collect(),
         },
         _ => ty.clone(),
+    }
+}
+
+fn call_argument_index_for_position(
+    parameter_names: Option<&[String]>,
+    parameter_index: usize,
+    arguments: &[orna_syntax_v1::Argument],
+) -> Option<usize> {
+    if parameter_names.is_some() {
+        return call_argument_index_for_parameter(parameter_names, parameter_index, arguments);
+    }
+    arguments
+        .iter()
+        .enumerate()
+        .filter(|(_, argument)| argument.name.is_none())
+        .nth(parameter_index)
+        .map(|(argument_index, _)| argument_index)
+}
+
+/// Pair binder-scoped SnapshotRef leaves in a callable's formal argument
+/// shape with the exact contextual values supplied at this call site.
+fn collect_snapshot_binder_contexts(
+    formal: &Type,
+    actual: &Type,
+    into: &mut BTreeMap<String, Type>,
+) {
+    if is_contextual_snapshot_ref(formal) && is_contextual_snapshot_ref(actual) {
+        if let Some(binder) = snapshot_ref_context_key(formal).and_then(snapshot_ref_binder_id) {
+            into.insert(binder.to_owned(), actual.clone());
+        }
+        return;
+    }
+    match (formal, actual) {
+        (Type::List(formal), Type::List(actual))
+        | (Type::Range(formal), Type::Range(actual))
+        | (Type::Relation(formal), Type::Relation(actual))
+        | (Type::Stream(formal), Type::Stream(actual))
+        | (Type::Optional(formal), Type::Optional(actual)) => {
+            collect_snapshot_binder_contexts(formal, actual, into);
+        }
+        (Type::Record(formal), Type::Record(actual)) => {
+            for (name, formal) in formal {
+                if let Some(actual) = actual.get(name) {
+                    collect_snapshot_binder_contexts(formal, actual, into);
+                }
+            }
+        }
+        (Type::Tuple(formal), Type::Tuple(actual)) => {
+            for (formal, actual) in formal.iter().zip(actual) {
+                collect_snapshot_binder_contexts(formal, actual, into);
+            }
+        }
+        (
+            Type::Applied {
+                base: formal_base,
+                arguments: formal,
+            },
+            Type::Applied {
+                base: actual_base,
+                arguments: actual,
+            },
+        ) if formal_base == actual_base => {
+            for (formal, actual) in formal.iter().zip(actual) {
+                collect_snapshot_binder_contexts(formal, actual, into);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Nested callable parameters shadow matching binder identities through their
+/// result type. Walk aggregate patterns as well as direct SnapshotRef values.
+fn collect_snapshot_ref_binder_ids(ty: &Type, into: &mut BTreeSet<String>) {
+    if is_contextual_snapshot_ref(ty) {
+        if let Some((Some(binder), _, _)) = snapshot_ref_context_key(ty)
+            .and_then(snapshot_parameter_context)
+        {
+            into.insert(format!("binder:{binder}"));
+        }
+        return;
+    }
+    match ty {
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => collect_snapshot_ref_binder_ids(element, into),
+        Type::Record(fields) => {
+            for value in fields.values() {
+                collect_snapshot_ref_binder_ids(value, into);
+            }
+        }
+        Type::Tuple(elements) => {
+            for element in elements {
+                collect_snapshot_ref_binder_ids(element, into);
+            }
+        }
+        Type::Applied { arguments, .. } => {
+            for argument in arguments {
+                collect_snapshot_ref_binder_ids(argument, into);
+            }
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            collect_snapshot_ref_binder_ids(currency, into);
+            collect_snapshot_ref_binder_ids(unit, into);
+        }
+        // A callable nested inside a parameter has its own lexical scope.
+        _ => {}
     }
 }
 
@@ -16547,7 +17027,8 @@ fn call_argument_snapshot_context(
 /// A typed `SnapshotRef` parameter has no concrete identity while its body is
 /// summarized. Parameter references use a caller-specialized key; local aliases
 /// use capture keys so same-named nested parameters cannot retarget them, with
-/// a lexical binder identity for aliases of shadowing lambda parameters.
+/// a lexical binder identity for aliases of shadowing lambda parameters or
+/// local SnapshotRef bindings.
 /// Uncontextualized non-parameter references stay generic because this semantic
 /// pass cannot infer their runtime pin.
 fn specialize_snapshot_ref_parameter(
@@ -16670,12 +17151,18 @@ fn callable_function_type(ty: &Type) -> Option<&Type> {
 }
 
 fn pinned_snapshot_rebind_compatible(expected: &Type, actual: &Type) -> bool {
-    type_contains_pinned_snapshot_identity(expected)
+    checkpoint_snapshot_maps_are_valid(expected)
+        && checkpoint_snapshot_maps_are_valid(actual)
+        && type_contains_pinned_snapshot_identity(expected)
         && type_contains_pinned_snapshot_identity(actual)
         && pinned_snapshot_shape_matches(expected, actual)
 }
 
 fn type_contains_pinned_snapshot_identity(ty: &Type) -> bool {
+    checkpoint_snapshot_maps_are_valid(ty) && type_contains_valid_pinned_snapshot_identity(ty)
+}
+
+fn type_contains_valid_pinned_snapshot_identity(ty: &Type) -> bool {
     match ty {
         Type::Applied { base, .. } if base == "sys.SnapshotRefContext" => {
             is_contextual_snapshot_ref(ty)
@@ -16683,25 +17170,34 @@ fn type_contains_pinned_snapshot_identity(ty: &Type) -> bool {
         Type::Applied { base, .. } if base == "sys.HistoricalCallable" => {
             historical_callable_context(ty).is_some()
         }
+        Type::Applied { base, .. } if base == "semantic.SnapshotContextMap" => {
+            is_snapshot_context_map_shape(ty)
+        }
         Type::List(element)
         | Type::Range(element)
         | Type::Relation(element)
         | Type::Stream(element)
-        | Type::Optional(element) => type_contains_pinned_snapshot_identity(element),
-        Type::Record(fields) => fields.values().any(type_contains_pinned_snapshot_identity),
-        Type::Tuple(elements) => elements.iter().any(type_contains_pinned_snapshot_identity),
+        | Type::Optional(element) => type_contains_valid_pinned_snapshot_identity(element),
+        Type::Record(fields) => fields.values().any(type_contains_valid_pinned_snapshot_identity),
+        Type::Tuple(elements) => elements
+            .iter()
+            .any(type_contains_valid_pinned_snapshot_identity),
         Type::Applied { arguments, .. } => {
-            arguments.iter().any(type_contains_pinned_snapshot_identity)
+            arguments
+                .iter()
+                .any(type_contains_valid_pinned_snapshot_identity)
         }
         Type::MoneyPerUnit { currency, unit } => {
-            type_contains_pinned_snapshot_identity(currency)
-                || type_contains_pinned_snapshot_identity(unit)
+            type_contains_valid_pinned_snapshot_identity(currency)
+                || type_contains_valid_pinned_snapshot_identity(unit)
         }
         Type::Function {
             parameters, result, ..
         } => {
-            parameters.iter().any(type_contains_pinned_snapshot_identity)
-                || type_contains_pinned_snapshot_identity(result)
+            parameters
+                .iter()
+                .any(type_contains_valid_pinned_snapshot_identity)
+                || type_contains_valid_pinned_snapshot_identity(result)
         }
         _ => false,
     }
@@ -16714,6 +17210,9 @@ fn type_contains_pinned_snapshot_identity(ty: &Type) -> bool {
 /// on pinned snapshot values. Saved aliases retain their original identities.
 fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
     if expected == actual {
+        return true;
+    }
+    if is_snapshot_context_map_shape(expected) && is_snapshot_context_map_shape(actual) {
         return true;
     }
     match (expected, actual) {
@@ -16833,6 +17332,30 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
         ) => {
             pinned_snapshot_shape_matches(expected_currency, actual_currency)
                 && pinned_snapshot_shape_matches(expected_unit, actual_unit)
+        }
+        _ => false,
+    }
+}
+
+fn is_snapshot_context_map_shape(ty: &Type) -> bool {
+    match ty {
+        Type::Applied { base, arguments } if base == "sys.SnapshotRefContext" => {
+            is_contextual_snapshot_ref(ty)
+        }
+        Type::Applied { base, arguments } if base == "semantic.SnapshotContextMap" => {
+            // SnapshotContextMap is the canonical encoding of a set with at
+            // least two selectors; singleton sets use SnapshotRefContext.
+            // Require sorted unique entries so repeated pairwise merges do
+            // not hide a non-canonical map behind equality.
+            arguments.len() > 1
+                && arguments
+                    .iter()
+                    .all(|argument| {
+                        matches!(argument, Type::Named(selector) if is_snapshot_selector_context(selector))
+                    })
+                && arguments.windows(2).all(|pair| {
+                    matches!(pair, [Type::Named(left), Type::Named(right)] if left < right)
+                })
         }
         _ => false,
     }
@@ -18641,6 +19164,72 @@ fn diag(code: &'static str, message: impl Into<String>) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn checkpoint_rebinds_require_canonical_snapshot_selector_maps() {
+        let first = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:HEAD~5".into()),
+                Type::Named("selector:binder:first".into()),
+            ],
+        };
+        let second = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:HEAD~4".into()),
+                Type::Named("selector:binder:second".into()),
+            ],
+        };
+        let malformed = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![Type::Named("domain.Factory".into())],
+        };
+        let singleton = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![Type::Named("selector:HEAD~3".into())],
+        };
+        let unsorted = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:binder:z".into()),
+                Type::Named("selector:binder:a".into()),
+            ],
+        };
+        let duplicate = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:HEAD~3".into()),
+                Type::Named("selector:HEAD~3".into()),
+            ],
+        };
+        let nested_malformed = Type::Record(BTreeMap::from([
+            (
+                "pin".into(),
+                contextual_snapshot_ref("selector:HEAD~3"),
+            ),
+            ("map".into(), malformed.clone()),
+        ]));
+
+        assert!(is_snapshot_context_map_shape(&first));
+        assert!(type_contains_pinned_snapshot_identity(&first));
+        assert!(pinned_snapshot_rebind_compatible(&first, &second));
+        assert!(!is_snapshot_context_map_shape(&malformed));
+        assert!(!type_contains_pinned_snapshot_identity(&malformed));
+        assert!(!pinned_snapshot_rebind_compatible(&malformed, &second));
+        assert!(!is_snapshot_context_map_shape(&singleton));
+        assert!(!is_snapshot_context_map_shape(&unsorted));
+        assert!(!is_snapshot_context_map_shape(&duplicate));
+        assert!(merge_checkpoint_field_map(&malformed, &malformed).is_none());
+        assert!(merge_checkpoint_field_map(&malformed, &first).is_none());
+        assert!(!checkpoint_snapshot_maps_are_valid(&nested_malformed));
+        assert!(!type_contains_pinned_snapshot_identity(&nested_malformed));
+        assert!(merge_checkpoint_field_map(&nested_malformed, &nested_malformed).is_none());
+        assert!(!pinned_snapshot_rebind_compatible(
+            &nested_malformed,
+            &nested_malformed
+        ));
+    }
+
     fn checked(inputs: &[ModuleInput]) -> Analysis {
         analyze(inputs)
     }

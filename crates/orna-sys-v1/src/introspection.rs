@@ -9,7 +9,7 @@ use std::{
     fmt,
 };
 
-use serde::Serialize;
+use serde::{Serialize, ser::SerializeStruct};
 use sha2::{Digest, Sha256};
 
 use super::{Diagnostic, ObjectRef, PlanRef};
@@ -693,12 +693,14 @@ pub enum PlanDetail {
     Boolean(bool),
     Expressions(Vec<ExpressionRef>),
     Ordering(Vec<PlanOrdering>),
+    /// Routes are ordered by nesting depth, typed input path, then typed
+    /// output path.
     ByteCapHandoffRoutes(Vec<PlanByteCapHandoffRoute>),
 }
 
 /// One typed source-to-destination byte-cap handoff reported by a planner
 /// storm rebind. Unknown byte estimates remain `None`.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlanByteCapHandoffRoute {
     /// One-based nesting depth of the storm scope containing the rebind.
     pub depth: usize,
@@ -706,9 +708,9 @@ pub struct PlanByteCapHandoffRoute {
     pub input_path: Vec<PlanByteCapScopeSegment>,
     /// Typed path to the nested cascade receiving the byte estimate.
     pub output_path: Vec<PlanByteCapScopeSegment>,
-    /// The branch or preceding rebind scope supplying the byte estimate.
+    /// Human-readable label derived from the complete typed input ancestry.
     pub input_scope: String,
-    /// The nested cascade scope receiving the byte estimate.
+    /// Human-readable label derived from the complete typed output ancestry.
     pub output_scope: String,
     /// Known input byte estimate; `None` means the estimate is unknown.
     pub input_bytes: Option<u64>,
@@ -716,10 +718,35 @@ pub struct PlanByteCapHandoffRoute {
     pub output_bytes: Option<u64>,
 }
 
+impl Serialize for PlanByteCapHandoffRoute {
+    // The typed paths are authoritative; derive serialized labels instead of
+    // trusting duplicated strings that may be stale on a manually built route.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut route = serializer.serialize_struct("PlanByteCapHandoffRoute", 7)?;
+        route.serialize_field("depth", &self.depth)?;
+        route.serialize_field("input_path", &self.input_path)?;
+        route.serialize_field("output_path", &self.output_path)?;
+        route.serialize_field(
+            "input_scope",
+            &byte_cap_scope_path_label(&self.input_path),
+        )?;
+        route.serialize_field(
+            "output_scope",
+            &byte_cap_scope_path_label(&self.output_path),
+        )?;
+        route.serialize_field("input_bytes", &self.input_bytes)?;
+        route.serialize_field("output_bytes", &self.output_bytes)?;
+        route.end()
+    }
+}
+
 /// One typed step in a nested storm byte-cap handoff route. A route path
 /// preserves every preceding handoff output in its ancestry, including when a
 /// later limit or cascade consumes that bounded result.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PlanByteCapScopeSegment {
     /// A one-based top-level storm stage.
@@ -2028,10 +2055,10 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             current_cardinality,
             storm,
             1,
-            "root",
             &storm_scope_path,
             &mut byte_cap_handoff_estimates_by_depth,
         );
+        stabilize_rebind_byte_cap_handoff_routes(&mut byte_cap_handoff_estimates_by_depth);
         let branch_limits = storm
             .branches
             .iter()
@@ -2130,16 +2157,20 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             rebind_byte_cap_handoff_estimates_by_depth_text(
                 &byte_cap_handoff_estimates_by_depth,
             );
+        let limit_chain_rebind_byte_cap_handoff_route_records =
+            rebind_byte_cap_handoff_route_records(&byte_cap_handoff_estimates_by_depth);
+        // Derive both scoped handoff summaries from the serialized typed routes
+        // so their stage-output labels cannot diverge from route ancestry.
         let limit_chain_rebind_byte_cap_handoff_scopes_by_depth_text =
             rebind_byte_cap_handoff_scopes_by_depth_text(
-                &byte_cap_handoff_estimates_by_depth,
+                &limit_chain_rebind_byte_cap_handoff_route_records,
             );
         let limit_chain_rebind_byte_cap_handoff_routes_by_depth_text =
             rebind_byte_cap_handoff_routes_by_depth_text(
-                &byte_cap_handoff_estimates_by_depth,
+                &limit_chain_rebind_byte_cap_handoff_route_records,
             );
-        let limit_chain_rebind_byte_cap_handoff_route_records =
-            rebind_byte_cap_handoff_route_records(&byte_cap_handoff_estimates_by_depth);
+        let has_limit_chain_rebind_byte_cap_handoff_routes =
+            !limit_chain_rebind_byte_cap_handoff_route_records.is_empty();
         let limit_chain_rebind_predicates = storm
             .branches
             .iter()
@@ -2285,6 +2316,14 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
                 PlanDetail::Text(
                     "bounded_branch_output_after_limits_rebinds_and_conjuncts_then_prior_nested_storm_outputs"
                         .to_owned(),
+                ),
+            );
+        }
+        if has_limit_chain_rebind_byte_cap_handoff_routes {
+            details.insert(
+                "limit_chain_rebind_byte_cap_handoff_route_order".to_owned(),
+                PlanDetail::Text(
+                    "ascending_depth_then_typed_input_path_then_typed_output_path".to_owned(),
                 ),
             );
         }
@@ -2507,8 +2546,6 @@ struct Cardinality {
 }
 
 struct RebindByteCapHandoffEstimate {
-    input_scope: String,
-    scope: String,
     input_path: Vec<PlanByteCapScopeSegment>,
     output_path: Vec<PlanByteCapScopeSegment>,
     input_bytes: Option<u64>,
@@ -2878,54 +2915,47 @@ fn rebind_byte_cap_handoff_estimates_by_depth_text(
 }
 
 fn rebind_byte_cap_handoff_scopes_by_depth_text(
-    estimates: &RebindByteCapHandoffEstimatesByDepth,
+    routes: &[PlanByteCapHandoffRoute],
 ) -> String {
-    estimates
-        .iter()
-        .map(|(depth, handoffs)| {
-            let handoffs = handoffs
-                .iter()
-                .map(|handoff| {
-                    let input_bytes = handoff
-                        .input_bytes
-                        .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
-                    let output_bytes = handoff
-                        .output_bytes
-                        .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
-                    format!("{}={input_bytes}>{output_bytes}", handoff.scope)
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("{depth}:{handoffs}")
-        })
+    let mut by_depth = BTreeMap::<usize, Vec<String>>::new();
+    for route in routes {
+        let input_bytes = route
+            .input_bytes
+            .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        let output_bytes = route
+            .output_bytes
+            .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        by_depth.entry(route.depth).or_default().push(format!(
+            "{}={input_bytes}>{output_bytes}",
+            route.output_scope
+        ));
+    }
+    by_depth
+        .into_iter()
+        .map(|(depth, handoffs)| format!("{depth}:{}", handoffs.join(",")))
         .collect::<Vec<_>>()
         .join(";")
 }
 
 fn rebind_byte_cap_handoff_routes_by_depth_text(
-    estimates: &RebindByteCapHandoffEstimatesByDepth,
+    routes: &[PlanByteCapHandoffRoute],
 ) -> String {
-    estimates
-        .iter()
-        .map(|(depth, handoffs)| {
-            let handoffs = handoffs
-                .iter()
-                .map(|handoff| {
-                    let input_bytes = handoff
-                        .input_bytes
-                        .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
-                    let output_bytes = handoff
-                        .output_bytes
-                        .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
-                    format!(
-                        "{}=>{}={input_bytes}>{output_bytes}",
-                        handoff.input_scope, handoff.scope
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("{depth}:{handoffs}")
-        })
+    let mut by_depth = BTreeMap::<usize, Vec<String>>::new();
+    for route in routes {
+        let input_bytes = route
+            .input_bytes
+            .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        let output_bytes = route
+            .output_bytes
+            .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        by_depth.entry(route.depth).or_default().push(format!(
+            "{}=>{}={input_bytes}>{output_bytes}",
+            route.input_scope, route.output_scope
+        ));
+    }
+    by_depth
+        .into_iter()
+        .map(|(depth, handoffs)| format!("{depth}:{}", handoffs.join(",")))
         .collect::<Vec<_>>()
         .join(";")
 }
@@ -2940,8 +2970,8 @@ fn rebind_byte_cap_handoff_route_records(
                 depth: *depth,
                 input_path: handoff.input_path.clone(),
                 output_path: handoff.output_path.clone(),
-                input_scope: handoff.input_scope.clone(),
-                output_scope: handoff.scope.clone(),
+                input_scope: byte_cap_scope_path_label(&handoff.input_path),
+                output_scope: byte_cap_scope_path_label(&handoff.output_path),
                 input_bytes: handoff.input_bytes,
                 output_bytes: handoff.output_bytes,
             })
@@ -2949,11 +2979,51 @@ fn rebind_byte_cap_handoff_route_records(
         .collect()
 }
 
+fn byte_cap_scope_path_label(path: &[PlanByteCapScopeSegment]) -> String {
+    let mut scope = "root".to_owned();
+    for segment in path {
+        let label = match segment {
+            PlanByteCapScopeSegment::StormStage { index } => format!("storm{index}"),
+            // ORNA-PLAN does not prescribe labels; preserve the complete typed
+            // segment name and producer index so it cannot read as a nested output.
+            PlanByteCapScopeSegment::StormStageOutput { index } => {
+                format!("storm_stage_output{index}")
+            }
+            PlanByteCapScopeSegment::Branch { index } => format!("branch{index}"),
+            PlanByteCapScopeSegment::Limit { position } => format!("limit{position}"),
+            PlanByteCapScopeSegment::BranchOutput { index } => format!("branch_output{index}"),
+            PlanByteCapScopeSegment::Rebind { position } => format!("rebind{position}"),
+            PlanByteCapScopeSegment::Cascade { index } => format!("cascade{index}"),
+            PlanByteCapScopeSegment::RebindCascadeOutput { position, index } => {
+                format!("rebind_output{position}_{index}")
+            }
+            PlanByteCapScopeSegment::NestedStorm { index } => format!("nested{index}"),
+            PlanByteCapScopeSegment::NestedStormOutput { index } => {
+                format!("nested_output{index}")
+            }
+        };
+        scope.push('/');
+        scope.push_str(&label);
+    }
+    scope
+}
+
+fn stabilize_rebind_byte_cap_handoff_routes(
+    estimates: &mut RebindByteCapHandoffEstimatesByDepth,
+) {
+    for handoffs in estimates.values_mut() {
+        handoffs.sort_by(|left, right| {
+            left.input_path
+                .cmp(&right.input_path)
+                .then_with(|| left.output_path.cmp(&right.output_path))
+        });
+    }
+}
+
 fn disjunct_storm_cascade_cardinality_and_work(
     input: Cardinality,
     storm: &DisjunctStormCascadeDescription,
     storm_depth: usize,
-    storm_path: &str,
     storm_scope_path: &[PlanByteCapScopeSegment],
     byte_cap_handoff_estimates_by_depth: &mut RebindByteCapHandoffEstimatesByDepth,
 ) -> (Cardinality, Option<u64>, bool) {
@@ -2961,7 +3031,6 @@ fn disjunct_storm_cascade_cardinality_and_work(
         input,
         &storm.branches,
         storm_depth,
-        storm_path,
         storm_scope_path,
         byte_cap_handoff_estimates_by_depth,
     );
@@ -2987,7 +3056,6 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
     input: Cardinality,
     branches: &[DisjunctStormBranchDescription],
     storm_depth: usize,
-    storm_path: &str,
     storm_scope_path: &[PlanByteCapScopeSegment],
     byte_cap_handoff_estimates_by_depth: &mut RebindByteCapHandoffEstimatesByDepth,
 ) -> (Cardinality, Option<u64>, bool) {
@@ -3000,7 +3068,6 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
 
     for (branch_index, branch) in branches.iter().enumerate() {
         let mut branch_cardinality = input;
-        let mut branch_byte_scope = format!("{storm_path}/branch{}", branch_index + 1);
         let mut branch_byte_scope_path = storm_scope_path.to_vec();
         branch_byte_scope_path.push(PlanByteCapScopeSegment::Branch {
             index: branch_index + 1,
@@ -3018,7 +3085,6 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
                 (None, _) => {}
             }
             branch_cardinality = limit_cardinality(branch_cardinality, *limit);
-            branch_byte_scope = format!("{branch_byte_scope}/limit{}", limit_index + 1);
             branch_byte_scope_path.push(PlanByteCapScopeSegment::Limit {
                 position: limit_index + 1,
             });
@@ -3030,15 +3096,7 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
             {
                 for (cascade_index, rebind_storm) in rebind.storms.iter().enumerate() {
                     let handoff_input_bytes = branch_cardinality.bytes;
-                    let handoff_input_scope = branch_byte_scope.clone();
                     let handoff_input_path = branch_byte_scope_path.clone();
-                    let handoff_scope = format!(
-                        "{storm_path}/branch{}/limit{}/rebind{}/cascade{}",
-                        branch_index + 1,
-                        rebind.after_limit,
-                        rebind_index + 1,
-                        cascade_index + 1
-                    );
                     // The typed destination path extends the actual bounded
                     // source path. This carries earlier cascade outputs
                     // through later cascades and limit positions.
@@ -3054,7 +3112,6 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
                             branch_cardinality,
                             rebind_storm,
                             storm_depth.saturating_add(1),
-                            &handoff_scope,
                             &handoff_scope_path,
                             byte_cap_handoff_estimates_by_depth,
                         );
@@ -3062,8 +3119,6 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
                         .entry(storm_depth)
                         .or_default()
                         .push(RebindByteCapHandoffEstimate {
-                            input_scope: handoff_input_scope,
-                            scope: handoff_scope.clone(),
                             input_path: handoff_input_path,
                             output_path: handoff_scope_path.clone(),
                             input_bytes: handoff_input_bytes,
@@ -3082,7 +3137,6 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
                         (None, _) => {}
                     }
                     branch_cardinality = rebound;
-                    branch_byte_scope = handoff_scope;
                     branch_byte_scope_path = handoff_scope_path;
                     // Keep produced outputs distinct from cascade targets so later handoffs
                     // retain provenance even when their estimates are unknown.
@@ -3123,11 +3177,6 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
             });
         }
         for (nested_index, nested_storm) in branch.nested_storms.iter().enumerate() {
-            let nested_scope = format!(
-                "{storm_path}/branch{}/nested{}",
-                branch_index + 1,
-                nested_index + 1
-            );
             let mut nested_scope_path = prior_nested_storm_path.clone();
             nested_scope_path.push(PlanByteCapScopeSegment::NestedStorm {
                 index: nested_index + 1,
@@ -3137,7 +3186,6 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
                     branch_output,
                     nested_storm,
                     storm_depth.saturating_add(1),
-                    &nested_scope,
                     &nested_scope_path,
                     byte_cap_handoff_estimates_by_depth,
                 );

@@ -520,6 +520,7 @@ impl PackageResolver {
         Ok(ReboundPathResolution {
             final_session,
             retained_sessions: retained,
+            retained_wave_lengths: vec![1],
         })
     }
 
@@ -542,10 +543,27 @@ impl PackageResolver {
             retained_sessions.append(&mut retained);
             current = next;
         }
+        let retained_wave_lengths = if retained_sessions.is_empty() {
+            Vec::new()
+        } else {
+            vec![retained_sessions.len()]
+        };
         Ok(ReboundPathResolution {
             final_session: current,
             retained_sessions,
+            retained_wave_lengths,
         })
+    }
+
+    /// Resolves two ordered terminal-depth replacements as one atomic wave.
+    /// The two prior sessions remain together in `retained_wave(0)`, so the
+    /// pre-pair and between-depth routes can both be reopened independently.
+    pub fn resolve_nested_terminal_pair(
+        &self,
+        parent: &AttachedDatabaseSession,
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        self.resolve_nested_rebind_path(parent, &replacements)
     }
 
     /// Continues a resolved rebind path with another wave of replacements.
@@ -559,13 +577,312 @@ impl PackageResolver {
     ) -> Result<ReboundPathResolution, AttachmentError> {
         let extension =
             self.resolve_nested_rebind_path(previous.final_session(), replacements)?;
-        let (final_session, mut retained_sessions) = extension.into_parts();
+        Ok(Self::append_rebound_extension(previous, extension))
+    }
+
+    /// Continues a route from one of its retained snapshots rather than its
+    /// deepest resolved closure. `retained_session` indexes the flattened
+    /// history returned by `retained_sessions()`. This keeps post-storm
+    /// closure work rooted in the exact intermediate pins captured earlier.
+    /// The reference is silent on reopening these historical routes; v1 uses
+    /// the flattened index to select the exact snapshot and retains the
+    /// superseded final route as its own wave. Any snapshots produced by the
+    /// new call form another retained wave. A missing index or failed closure
+    /// returns no new route.
+    pub fn extend_nested_rebind_path_from_retained(
+        &self,
+        previous: &ReboundPathResolution,
+        retained_session: usize,
+        replacements: &[PinnedDatabase],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let parent = previous
+            .retained_sessions()
+            .get(retained_session)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+        let extension = self.resolve_nested_rebind_path(parent, replacements)?;
+        Ok(Self::append_retained_rebound_extension(previous, extension))
+    }
+
+    /// Continues a route from a snapshot selected by retained wave and
+    /// position within that wave. The reference does not define reopening
+    /// between waves; v1 resolves from the exact selected pins and appends the
+    /// superseded final route as its own wave before appending the new
+    /// snapshots as another wave. Invalid wave or snapshot positions and
+    /// failed closures return no new route.
+    pub fn extend_nested_rebind_path_from_wave(
+        &self,
+        previous: &ReboundPathResolution,
+        wave: usize,
+        snapshot: usize,
+        replacements: &[PinnedDatabase],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let parent = previous
+            .retained_wave(wave)
+            .and_then(|sessions| sessions.get(snapshot))
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+        let extension = self.resolve_nested_rebind_path(parent, replacements)?;
+        Ok(Self::append_retained_rebound_extension(previous, extension))
+    }
+
+    fn append_rebound_extension(
+        previous: &ReboundPathResolution,
+        extension: ReboundPathResolution,
+    ) -> ReboundPathResolution {
+        let ReboundPathResolution {
+            final_session,
+            mut retained_sessions,
+            retained_wave_lengths: extension_wave_lengths,
+        } = extension;
         let mut all_retained = previous.retained_sessions.clone();
         all_retained.append(&mut retained_sessions);
-        Ok(ReboundPathResolution {
+        let mut retained_wave_lengths = previous.retained_wave_lengths.clone();
+        retained_wave_lengths.extend(extension_wave_lengths);
+        ReboundPathResolution {
             final_session,
             retained_sessions: all_retained,
+            retained_wave_lengths,
+        }
+    }
+
+    fn append_retained_rebound_extension(
+        previous: &ReboundPathResolution,
+        extension: ReboundPathResolution,
+    ) -> ReboundPathResolution {
+        let ReboundPathResolution {
+            final_session,
+            mut retained_sessions,
+            retained_wave_lengths: extension_wave_lengths,
+        } = extension;
+        let mut all_retained = previous.retained_sessions.clone();
+        all_retained.push(previous.final_session.clone());
+        all_retained.append(&mut retained_sessions);
+        let mut retained_wave_lengths = previous.retained_wave_lengths.clone();
+        retained_wave_lengths.push(1);
+        retained_wave_lengths.extend(extension_wave_lengths);
+        ReboundPathResolution {
+            final_session,
+            retained_sessions: all_retained,
+            retained_wave_lengths,
+        }
+    }
+
+    /// Extends a post-storm route with two ordered terminal-depth rebinds.
+    /// The prior history stays intact and the new pair is exposed together in
+    /// the last retained wave. A failure leaves `previous` unchanged.
+    pub fn extend_nested_terminal_pair(
+        &self,
+        previous: &ReboundPathResolution,
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        self.extend_nested_rebind_path(previous, &replacements)
+    }
+
+    /// Extends a route with a terminal-depth pair from one of its retained
+    /// snapshots. This is useful after a rebind storm has resolved a deeper
+    /// closure and callers need to continue from an earlier exact route.
+    /// Prior snapshots stay in order; the previous final route is then
+    /// retained as its own wave, followed by the selected root and
+    /// intermediate route captured by the new pair. The input route remains
+    /// unchanged if either replacement or closure fails.
+    pub fn extend_nested_terminal_pair_from_retained(
+        &self,
+        previous: &ReboundPathResolution,
+        retained_session: usize,
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        self.extend_nested_rebind_path_from_retained(previous, retained_session, &replacements)
+    }
+
+    /// Extends a terminal-depth pair from one snapshot in a retained wave.
+    /// This keeps repeated post-storm continuations attached to their explicit
+    /// wave and snapshot positions while preserving every prior route.
+    pub fn extend_nested_terminal_pair_from_wave(
+        &self,
+        previous: &ReboundPathResolution,
+        wave: usize,
+        snapshot: usize,
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        self.extend_nested_rebind_path_from_wave(previous, wave, snapshot, &replacements)
+    }
+
+    /// Resolves independently rebound paths for sibling parent snapshots.
+    /// Each input plan is `(parent, replacements)`; results keep input order
+    /// and each route retains its own pre-rebind sessions. No partial batch is
+    /// returned if any sibling path fails. Where sibling event ordering is
+    /// unspecified, v1 resolves every path from its own exact pins.
+    pub fn resolve_sibling_rebind_paths(
+        &self,
+        paths: &[(&AttachedDatabaseSession, &[PinnedDatabase])],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(parent, replacements)| {
+                self.resolve_nested_rebind_path(parent, replacements)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Applies one identical replacement path to every sibling parent while
+    /// retaining each parent's route snapshots independently. Results keep
+    /// parent order and are returned only when every sibling resolves.
+    pub fn resolve_sibling_rebind_wave(
+        &self,
+        parents: &[AttachedDatabaseSession],
+        replacements: &[PinnedDatabase],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let paths = parents
+            .iter()
+            .map(|parent| (parent, replacements))
+            .collect::<Vec<_>>();
+        self.resolve_sibling_rebind_paths(&paths)
+    }
+
+    /// Extends independently selected sibling routes with another wave.
+    /// Every earlier snapshot remains in its route's history, and input order
+    /// is retained. A failed sibling extension returns no partial batch and
+    /// leaves all supplied results unchanged.
+    pub fn extend_sibling_rebind_paths(
+        &self,
+        paths: &[(&ReboundPathResolution, &[PinnedDatabase])],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, replacements)| {
+                self.extend_nested_rebind_path(previous, replacements)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Applies one ordered terminal-depth pair to each sibling route. Every
+    /// branch retains its own two pre-rebind snapshots, input order is stable,
+    /// and no partial sibling batch is returned on failure.
+    pub fn extend_sibling_terminal_pair_paths(
+        &self,
+        paths: &[(&ReboundPathResolution, &[PinnedDatabase; 2])],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, replacements)| {
+                self.extend_nested_terminal_pair(previous, (**replacements).clone())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Continues sibling routes from their own retained snapshots with one
+    /// terminal-depth pair per route. `retained_session` is each route's
+    /// flattened history index; results preserve input order and prior waves.
+    /// The batch is returned only if every selected snapshot and closure is
+    /// available.
+    pub fn extend_sibling_terminal_pair_paths_from_retained(
+        &self,
+        paths: &[(&ReboundPathResolution, usize, &[PinnedDatabase; 2])],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, retained_session, replacements)| {
+                self.extend_nested_terminal_pair_from_retained(
+                    previous,
+                    *retained_session,
+                    (**replacements).clone(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Continues sibling routes from explicit retained-wave snapshots with
+    /// one terminal-depth pair per route. Results preserve sibling order and
+    /// each route's prior waves; the batch is atomic when any wave, snapshot,
+    /// replacement or closure is unavailable.
+    pub fn extend_sibling_terminal_pair_paths_from_waves(
+        &self,
+        paths: &[(&ReboundPathResolution, usize, usize, &[PinnedDatabase; 2])],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, wave, snapshot, replacements)| {
+                self.extend_nested_terminal_pair_from_wave(
+                    previous,
+                    *wave,
+                    *snapshot,
+                    (**replacements).clone(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Applies one identical terminal-depth pair to sibling routes selected
+    /// from retained waves. Each route resolves from its own exact snapshot,
+    /// keeps its displaced final endpoint and earlier waves, and preserves
+    /// input order. No partial sibling batch is returned on failure.
+    pub fn extend_sibling_terminal_pair_wave_from_waves(
+        &self,
+        paths: &[(&ReboundPathResolution, usize, usize)],
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, wave, snapshot)| {
+                self.extend_nested_terminal_pair_from_wave(
+                    previous,
+                    *wave,
+                    *snapshot,
+                    replacements.clone(),
+                )
         })
+        .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Applies one identical terminal-depth pair to the latest retained-wave
+    /// root of every sibling route. The reference is silent on continuing a
+    /// convergent post-storm pair; v1 uses the first snapshot in each latest
+    /// wave as that route's root, retains the displaced final session as its
+    /// own wave, and returns no partial batch if any branch fails.
+    pub fn extend_sibling_terminal_pair_wave(
+        &self,
+        previous: &SiblingRebindResolution,
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = previous
+            .routes
+            .iter()
+            .map(|route| {
+                let latest_wave = route
+                    .retained_wave_lengths
+                    .len()
+                    .checked_sub(1)
+                    .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+                self.extend_nested_terminal_pair_from_wave(
+                    route,
+                    latest_wave,
+                    0,
+                    replacements.clone(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Repeats one identical rebind path across a completed sibling batch.
+    /// Each branch extends from its own terminal session and keeps its earlier
+    /// route snapshots; the returned batch preserves sibling order.
+    pub fn extend_sibling_rebind_wave(
+        &self,
+        previous: &SiblingRebindResolution,
+        replacements: &[PinnedDatabase],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let paths = previous
+            .routes
+            .iter()
+            .map(|route| (route, replacements))
+            .collect::<Vec<_>>();
+        self.extend_sibling_rebind_paths(&paths)
     }
 
     /// Resolves a chain of exact aliases from a retained session snapshot.
@@ -594,6 +911,7 @@ impl PackageResolver {
 pub struct ReboundPathResolution {
     final_session: AttachedDatabaseSession,
     retained_sessions: Vec<AttachedDatabaseSession>,
+    retained_wave_lengths: Vec<usize>,
 }
 
 impl ReboundPathResolution {
@@ -607,9 +925,36 @@ impl ReboundPathResolution {
         &self.retained_sessions
     }
 
+    /// Snapshots retained by one resolution wave, in the order they were
+    /// captured. The reference fixes exact historical pins but does not define
+    /// how paired rebind snapshots are grouped; v1 keeps each call's boundary.
+    pub fn retained_wave(&self, wave: usize) -> Option<&[AttachedDatabaseSession]> {
+        let length = *self.retained_wave_lengths.get(wave)?;
+        let start = self.retained_wave_lengths[..wave].iter().sum::<usize>();
+        self.retained_sessions.get(start..start + length)
+    }
+
     /// Takes ownership of the final closure and every retained route snapshot.
     pub fn into_parts(self) -> (AttachedDatabaseSession, Vec<AttachedDatabaseSession>) {
         (self.final_session, self.retained_sessions)
+    }
+}
+
+/// Independently resolved sibling paths, kept in input order.
+#[derive(Clone, Debug, Default)]
+pub struct SiblingRebindResolution {
+    routes: Vec<ReboundPathResolution>,
+}
+
+impl SiblingRebindResolution {
+    /// The sibling results in the same order as their input plans.
+    pub fn routes(&self) -> &[ReboundPathResolution] {
+        &self.routes
+    }
+
+    /// Takes ownership of the sibling results in input order.
+    pub fn into_routes(self) -> Vec<ReboundPathResolution> {
+        self.routes
     }
 }
 
@@ -972,6 +1317,7 @@ pub enum AttachmentError {
     PrimaryDatabaseCannotDetach,
     SystemDatabaseCannotDetach,
     AttachmentNotFound,
+    RetainedSnapshotUnavailable,
     Repository(RepositoryError),
     Project(ProjectLoadError),
 }
@@ -995,6 +1341,7 @@ impl fmt::Display for AttachmentError {
             Self::PrimaryDatabaseCannotDetach => "the primary database cannot be detached",
             Self::SystemDatabaseCannotDetach => "the system database cannot be detached",
             Self::AttachmentNotFound => "database attachment does not exist",
+            Self::RetainedSnapshotUnavailable => "retained route snapshot does not exist",
             Self::Repository(_) => "repository snapshot could not be read",
             Self::Project(_) => "pinned database source could not be loaded",
         })
