@@ -5835,6 +5835,101 @@ fn unknown_paired_width_suppresses_sibling_pin_promotion() {
 }
 
 #[test]
+fn paired_pin_identities_survive_omissions_at_outer_and_middle_depths() {
+    let source = include_str!(
+        "fixtures/historical-paired-omission-depth-identity-preservation.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-omission-depth-identity-preservation.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .count();
+    assert_eq!(
+        type_diagnostics, 2,
+        "only the two calls with intentionally omitted required siblings should fail: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("omitted_sibling_waves_keep_pair_identities")
+        })
+        .expect("paired omission-depth fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["omitted_sibling_waves_keep_pair_identities"].ty
+    else {
+        panic!("omission-depth proof must be a function");
+    };
+    let Type::Record(stages) = result.as_ref() else {
+        panic!("omission-depth proof must retain its computed stage record: {result:?}");
+    };
+    for (stage, concrete_selectors) in [
+        (
+            "complete",
+            vec![
+                "HEAD~120", "HEAD~119", "HEAD~118", "HEAD~117", "HEAD~116", "HEAD~115",
+                "HEAD~114", "HEAD~113", "HEAD~112",
+            ],
+        ),
+        (
+            "outer_suppressed",
+            vec!["HEAD~90", "HEAD~89", "HEAD~88", "HEAD~87", "HEAD~86"],
+        ),
+        (
+            "middle_suppressed",
+            vec!["HEAD~120", "HEAD~119", "HEAD~118", "HEAD~117", "HEAD~76"],
+        ),
+    ] {
+        let value = stages.get(stage).expect("computed stage value");
+        let Type::List(element) = value else {
+            panic!("{stage} must remain a computed historical list: {value:?}");
+        };
+        let Type::Record(checkpoint) = element.as_ref() else {
+            panic!("{stage} must retain its computed checkpoint record: {element:?}");
+        };
+        assert!(
+            matches!(checkpoint.get("capture"), Some(Type::Applied { base, .. }) if base == "sys.HistoricalCallable"),
+            "{stage} must keep a real historical callable result: {checkpoint:?}"
+        );
+        assert_canonical_snapshot_context_maps(value);
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(value, &mut contexts);
+        assert_eq!(contexts.len(), 9, "{stage} collapsed paired slots: {contexts:?}");
+        let symbolic = contexts
+            .iter()
+            .filter(|context| context.starts_with("selector:dynamic-call:"))
+            .count();
+        assert_eq!(
+            symbolic,
+            if stage == "complete" { 0 } else { 4 },
+            "only the omitted depth's four tuple pins should remain symbolic: {contexts:?}"
+        );
+        for selector in concrete_selectors {
+            assert!(
+                contexts.contains(&format!("selector:{selector}")),
+                "{stage} lost independent concrete selector {selector}: {contexts:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn missing_outer_tuple_keeps_sibling_pins_symbolic_across_later_depths() {
     let source =
         include_str!("fixtures/historical-missing-outer-tuple-preserves-sibling-pins.orna");
@@ -8117,6 +8212,100 @@ fn tuple_checkpoint_rebind_rejects_pin_identity_collapse() {
             .iter()
             .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
             .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn tuple_checkpoint_map_promotion_stops_at_width_drift() {
+    let source = include_str!("fixtures/historical-tuple-checkpoint-map-width-drift.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-tuple-checkpoint-map-width-drift.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "width-drifted checkpoint tuples must not be promoted or rebound: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("tuple_checkpoint_promotion_is_suppressed_on_width_drift")
+        })
+        .expect("tuple checkpoint width-drift fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["tuple_checkpoint_promotion_is_suppressed_on_width_drift"]
+        .ty
+    else {
+        panic!("tuple width-drift proof must return computed values");
+    };
+    let Type::Record(values) = result.as_ref() else {
+        panic!("tuple width-drift proof must expose saved, retained and candidate values");
+    };
+
+    let slot_maps = |name: &str| {
+        let value = values.get(name).expect("computed checkpoint value");
+        assert_canonical_snapshot_context_maps(value);
+        let Type::List(element) = value else {
+            panic!("{name} must remain a checkpoint list: {value:?}");
+        };
+        let Type::Tuple(slots) = element.as_ref() else {
+            panic!("{name} must retain its tuple element: {element:?}");
+        };
+        assert_eq!(slots.len(), 2, "{name} must preserve both tuple positions");
+        slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                assert!(!contexts.is_empty(), "{name} must retain actual selector values");
+                contexts
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let saved = slot_maps("saved");
+    let retained = slot_maps("checkpoint");
+    let candidate = slot_maps("candidate");
+    assert_eq!(
+        saved,
+        vec![
+            BTreeSet::from([
+                "selector:HEAD~86".into(),
+                "selector:HEAD~87".into(),
+                "selector:HEAD~89".into(),
+                "selector:HEAD~90".into(),
+            ]),
+            BTreeSet::from(["selector:HEAD~85".into(), "selector:HEAD~88".into()]),
+        ],
+        "saved checkpoint must retain only its computed selector maps"
+    );
+    assert_eq!(
+        retained, saved,
+        "a failed width-drift rebind must leave the old map intact"
+    );
+    assert_eq!(
+        candidate,
+        vec![
+            BTreeSet::from(["selector:HEAD~79".into(), "selector:HEAD~80".into()]),
+            BTreeSet::from(["selector:HEAD~78".into()]),
+        ],
+        "candidate inference must stop at the first tuple width instead of promoting later pins"
     );
 }
 
