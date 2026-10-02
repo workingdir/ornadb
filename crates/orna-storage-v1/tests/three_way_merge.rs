@@ -20249,11 +20249,17 @@ fn paired_tombstone_position_priority_is_shared_by_both_submission_modes() {
         Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 0 }),
         "stale position classification precedes whole-plan content validation",
     );
+    let mut stale_fragment_history = BranchMergeTombstoneHistory::new(0);
+    stale_fragment_history
+        .submit_depth_merge_fragment(0, 0, 1, &[(id(1), fixture_key.clone())])
+        .unwrap();
+    let before_stale_fragment = stale_fragment_history.clone();
     assert_eq!(
-        stale_history.submit_depth_merge_fragment(0, 0, 0, &[(id(1), fixture_key.clone())]),
+        stale_fragment_history.submit_depth_merge_fragment(0, 0, 0, &[(id(1), fixture_key.clone())]),
         Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 0 }),
-        "stale position classification precedes fragment metadata validation",
+        "same-mode stale classification precedes fragment metadata validation",
     );
+    assert_eq!(stale_fragment_history, before_stale_fragment);
     assert_eq!(stale_history, before_stale);
 
     let mut exhausted_history = BranchMergeTombstoneHistory::new(u64::MAX);
@@ -20748,7 +20754,12 @@ fn paired_depth_storm_tombstone_history_stabilizes_across_restore_waves() {
             }
         }
     }
-    assert_eq!(reverse_fragment_history, history);
+    assert_eq!(
+        reverse_fragment_history.events(),
+        history.events(),
+        "whole-plan and reverse-fragment delivery produce the same tombstone events",
+    );
+    assert_eq!(reverse_fragment_history.next_order(), history.next_order());
 
     let mut interleaved_fragment_history = BranchMergeTombstoneHistory::new(0);
     let max_fragments = depth_fragments.iter().map(Vec::len).max().unwrap_or_default();
@@ -20766,7 +20777,12 @@ fn paired_depth_storm_tombstone_history_stabilizes_across_restore_waves() {
             }
         }
     }
-    assert_eq!(interleaved_fragment_history, history);
+    assert_eq!(
+        interleaved_fragment_history.events(),
+        history.events(),
+        "whole-plan and interleaved-fragment delivery produce the same tombstone events",
+    );
+    assert_eq!(interleaved_fragment_history.next_order(), history.next_order());
 
     let mut fragment_guards = BranchMergeTombstoneHistory::new(0);
     let guarded_fragments = &depth_fragments[2];
