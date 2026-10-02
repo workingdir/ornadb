@@ -8664,6 +8664,15 @@ fn infer_assignment(
                     }
                 }
                 Some(expected)
+                    if !checkpoint_snapshot_maps_are_valid(&expected)
+                        || !checkpoint_snapshot_maps_are_valid(&value.ty) =>
+                {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "snapshot context maps must contain canonical selector sets",
+                    ));
+                }
+                Some(expected)
                     if pinned_snapshot_rebind_compatible(&expected, &value.ty) =>
                 {
                     // A local pin aggregate or historical closure now refers
@@ -9347,11 +9356,17 @@ fn is_terminal_historical_callable(ty: &Type) -> bool {
 }
 
 fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
+    if !checkpoint_snapshot_maps_are_valid(left) || !checkpoint_snapshot_maps_are_valid(right) {
+        return None;
+    }
+    if is_snapshot_context_type(left) || is_snapshot_context_type(right) {
+        if !is_snapshot_context_map_shape(left) || !is_snapshot_context_map_shape(right) {
+            return None;
+        }
+        return merge_snapshot_context_map(left, right);
+    }
     if left == right {
         return Some(left.clone());
-    }
-    if is_snapshot_context_map_shape(left) && is_snapshot_context_map_shape(right) {
-        return merge_snapshot_context_map(left, right);
     }
     match (left, right) {
         (
@@ -9500,6 +9515,10 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
 fn merge_snapshot_context_map(left: &Type, right: &Type) -> Option<Type> {
     const CONTEXT_MAP: &str = "semantic.SnapshotContextMap";
 
+    if !is_snapshot_context_map_shape(left) || !is_snapshot_context_map_shape(right) {
+        return None;
+    }
+
     fn collect_contexts(ty: &Type, contexts: &mut BTreeSet<String>) {
         match ty {
             Type::Applied { base, arguments } if base == "sys.SnapshotRefContext" => {
@@ -9534,6 +9553,50 @@ fn merge_snapshot_context_map(left: &Type, right: &Type) -> Option<Type> {
             base: CONTEXT_MAP.into(),
             arguments: contexts.into_iter().map(Type::Named).collect(),
         }),
+    }
+}
+
+fn is_snapshot_context_type(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Applied { base, .. }
+            if base == "sys.SnapshotRefContext" || base == "semantic.SnapshotContextMap"
+    )
+}
+
+/// Synthetic checkpoint maps only represent canonical snapshot selectors.
+/// The reference does not specify local checkpoint-map merging, so reject
+/// malformed map identities instead of letting equality or an enclosing
+/// product hide them during a rebind storm.
+fn checkpoint_snapshot_maps_are_valid(ty: &Type) -> bool {
+    match ty {
+        Type::Applied { base, .. } if base == "sys.SnapshotRefContext" => {
+            is_contextual_snapshot_ref(ty)
+        }
+        Type::Applied { base, .. } if base == "semantic.SnapshotContextMap" => {
+            is_snapshot_context_map_shape(ty)
+        }
+        Type::Applied { arguments, .. } => {
+            arguments.iter().all(checkpoint_snapshot_maps_are_valid)
+        }
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => checkpoint_snapshot_maps_are_valid(element),
+        Type::Record(fields) => fields.values().all(checkpoint_snapshot_maps_are_valid),
+        Type::Tuple(elements) => elements.iter().all(checkpoint_snapshot_maps_are_valid),
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters.iter().all(checkpoint_snapshot_maps_are_valid)
+                && checkpoint_snapshot_maps_are_valid(result)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            checkpoint_snapshot_maps_are_valid(currency)
+                && checkpoint_snapshot_maps_are_valid(unit)
+        }
+        _ => true,
     }
 }
 
@@ -17088,12 +17151,18 @@ fn callable_function_type(ty: &Type) -> Option<&Type> {
 }
 
 fn pinned_snapshot_rebind_compatible(expected: &Type, actual: &Type) -> bool {
-    type_contains_pinned_snapshot_identity(expected)
+    checkpoint_snapshot_maps_are_valid(expected)
+        && checkpoint_snapshot_maps_are_valid(actual)
+        && type_contains_pinned_snapshot_identity(expected)
         && type_contains_pinned_snapshot_identity(actual)
         && pinned_snapshot_shape_matches(expected, actual)
 }
 
 fn type_contains_pinned_snapshot_identity(ty: &Type) -> bool {
+    checkpoint_snapshot_maps_are_valid(ty) && type_contains_valid_pinned_snapshot_identity(ty)
+}
+
+fn type_contains_valid_pinned_snapshot_identity(ty: &Type) -> bool {
     match ty {
         Type::Applied { base, .. } if base == "sys.SnapshotRefContext" => {
             is_contextual_snapshot_ref(ty)
@@ -17108,21 +17177,27 @@ fn type_contains_pinned_snapshot_identity(ty: &Type) -> bool {
         | Type::Range(element)
         | Type::Relation(element)
         | Type::Stream(element)
-        | Type::Optional(element) => type_contains_pinned_snapshot_identity(element),
-        Type::Record(fields) => fields.values().any(type_contains_pinned_snapshot_identity),
-        Type::Tuple(elements) => elements.iter().any(type_contains_pinned_snapshot_identity),
+        | Type::Optional(element) => type_contains_valid_pinned_snapshot_identity(element),
+        Type::Record(fields) => fields.values().any(type_contains_valid_pinned_snapshot_identity),
+        Type::Tuple(elements) => elements
+            .iter()
+            .any(type_contains_valid_pinned_snapshot_identity),
         Type::Applied { arguments, .. } => {
-            arguments.iter().any(type_contains_pinned_snapshot_identity)
+            arguments
+                .iter()
+                .any(type_contains_valid_pinned_snapshot_identity)
         }
         Type::MoneyPerUnit { currency, unit } => {
-            type_contains_pinned_snapshot_identity(currency)
-                || type_contains_pinned_snapshot_identity(unit)
+            type_contains_valid_pinned_snapshot_identity(currency)
+                || type_contains_valid_pinned_snapshot_identity(unit)
         }
         Type::Function {
             parameters, result, ..
         } => {
-            parameters.iter().any(type_contains_pinned_snapshot_identity)
-                || type_contains_pinned_snapshot_identity(result)
+            parameters
+                .iter()
+                .any(type_contains_valid_pinned_snapshot_identity)
+                || type_contains_valid_pinned_snapshot_identity(result)
         }
         _ => false,
     }
@@ -17268,12 +17343,19 @@ fn is_snapshot_context_map_shape(ty: &Type) -> bool {
             is_contextual_snapshot_ref(ty)
         }
         Type::Applied { base, arguments } if base == "semantic.SnapshotContextMap" => {
-            !arguments.is_empty()
+            // SnapshotContextMap is the canonical encoding of a set with at
+            // least two selectors; singleton sets use SnapshotRefContext.
+            // Require sorted unique entries so repeated pairwise merges do
+            // not hide a non-canonical map behind equality.
+            arguments.len() > 1
                 && arguments
                     .iter()
                     .all(|argument| {
                         matches!(argument, Type::Named(selector) if is_snapshot_selector_context(selector))
                     })
+                && arguments.windows(2).all(|pair| {
+                    matches!(pair, [Type::Named(left), Type::Named(right)] if left < right)
+                })
         }
         _ => false,
     }
@@ -19102,6 +19184,31 @@ mod tests {
             base: "semantic.SnapshotContextMap".into(),
             arguments: vec![Type::Named("domain.Factory".into())],
         };
+        let singleton = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![Type::Named("selector:HEAD~3".into())],
+        };
+        let unsorted = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:binder:z".into()),
+                Type::Named("selector:binder:a".into()),
+            ],
+        };
+        let duplicate = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:HEAD~3".into()),
+                Type::Named("selector:HEAD~3".into()),
+            ],
+        };
+        let nested_malformed = Type::Record(BTreeMap::from([
+            (
+                "pin".into(),
+                contextual_snapshot_ref("selector:HEAD~3"),
+            ),
+            ("map".into(), malformed.clone()),
+        ]));
 
         assert!(is_snapshot_context_map_shape(&first));
         assert!(type_contains_pinned_snapshot_identity(&first));
@@ -19109,6 +19216,18 @@ mod tests {
         assert!(!is_snapshot_context_map_shape(&malformed));
         assert!(!type_contains_pinned_snapshot_identity(&malformed));
         assert!(!pinned_snapshot_rebind_compatible(&malformed, &second));
+        assert!(!is_snapshot_context_map_shape(&singleton));
+        assert!(!is_snapshot_context_map_shape(&unsorted));
+        assert!(!is_snapshot_context_map_shape(&duplicate));
+        assert!(merge_checkpoint_field_map(&malformed, &malformed).is_none());
+        assert!(merge_checkpoint_field_map(&malformed, &first).is_none());
+        assert!(!checkpoint_snapshot_maps_are_valid(&nested_malformed));
+        assert!(!type_contains_pinned_snapshot_identity(&nested_malformed));
+        assert!(merge_checkpoint_field_map(&nested_malformed, &nested_malformed).is_none());
+        assert!(!pinned_snapshot_rebind_compatible(
+            &nested_malformed,
+            &nested_malformed
+        ));
     }
 
     fn checked(inputs: &[ModuleInput]) -> Analysis {

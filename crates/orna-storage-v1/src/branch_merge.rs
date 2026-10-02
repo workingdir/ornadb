@@ -12,10 +12,12 @@ use orna_evolution_v1::{
     merge_checkpoint_generation, merge_keyed_row_states, merge_schema_bounded,
 };
 use orna_foundation_v1::compare_primary_keys;
+use sha2::{Digest, Sha256};
 use std::{
     cell::Cell,
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
+    fmt::{self, Write as _},
 };
 
 pub type CheckpointId = Vec<u8>;
@@ -313,7 +315,7 @@ pub enum BranchMergeTombstoneHistoryError {
     ConcurrentDuplicateTombstone { first_order: u64, second_order: u64 },
     /// A whole paired plan and split depth fragments were both submitted for one position.
     ConflictingSubmission { order: u64 },
-    /// A recovery append reused an accepted whole-plan position with different tombstones.
+    /// A recovery append reused an accepted whole-plan position with a different paired result.
     AppendRetryMismatch { order: u64 },
     /// The history already consumed the final representable lineage position.
     OrderExhausted,
@@ -375,16 +377,18 @@ enum BranchMergeTombstoneSubmissionMode {
 /// fragment submissions commit together, with released events returned only
 /// after the entire transaction succeeds. MERGE-1 does not specify retries for
 /// these tombstone appends. This v1 policy treats a repeated same-order
-/// whole-plan tombstone delta as an idempotent retry only when its table/key
-/// set matches the already queued or committed delta; table/key order within
-/// that delta does not matter. A changed delta at an accepted order returns
-/// `AppendRetryMismatch`. A recovery append may also match a complete depth
-/// fragment delta at that same order, independent of fragment count or
-/// boundaries, provided the batch does not replace fragments at that order.
-/// Incomplete or changed cross-mode deltas still return
-/// `ConflictingSubmission`; ordinary submission APIs remain mode-strict. The
-/// history retains only tombstone deltas, so callers remain responsible for
-/// checking full paired-plan identity.
+/// whole-plan delta as an idempotent retry only when its schema, checkpoint
+/// state, materialized table result, and tombstone set match the accepted
+/// paired plan. Materialized row and tombstone partitions are normalized, so
+/// equivalent plans with uneven depth boundaries still match. A changed
+/// paired result at an accepted order returns `AppendRetryMismatch`. A
+/// recovery append may also match a complete depth-fragment delta at that
+/// same order, independent of fragment count or boundaries, provided the
+/// batch does not replace fragments at that order. Because fragment
+/// submissions carry no schema, checkpoint, or row state, this cross-mode
+/// case can compare only the tombstone projection. Incomplete or changed
+/// cross-mode deltas still return `ConflictingSubmission`; ordinary
+/// submission APIs remain mode-strict.
 /// Unrecorded stale order precedes
 /// buffered and retry-mode checks, and mixed-mode conflicts precede
 /// fragment-index or tombstone-content validation.
@@ -396,7 +400,9 @@ pub struct BranchMergeTombstoneHistory {
     next_order: Option<u64>,
     events: Vec<BranchMergeTombstoneEvent>,
     pending_deltas: BTreeMap<u64, BufferedBranchMergeTombstoneDelta>,
+    pending_plan_identities: BTreeMap<u64, [u8; 32]>,
     committed_modes: BTreeMap<u64, BranchMergeTombstoneSubmissionMode>,
+    committed_plan_identities: BTreeMap<u64, [u8; 32]>,
     duplicate_retry_modes: BTreeMap<u64, BranchMergeTombstoneSubmissionMode>,
 }
 
@@ -407,7 +413,9 @@ impl BranchMergeTombstoneHistory {
             next_order: Some(first_order),
             events: Vec::new(),
             pending_deltas: BTreeMap::new(),
+            pending_plan_identities: BTreeMap::new(),
             committed_modes: BTreeMap::new(),
+            committed_plan_identities: BTreeMap::new(),
             duplicate_retry_modes: BTreeMap::new(),
         }
     }
@@ -476,6 +484,8 @@ impl BranchMergeTombstoneHistory {
         }
 
         self.duplicate_retry_modes.remove(&step.order);
+        self.pending_plan_identities
+            .insert(step.order, paired_plan_retry_identity(&step.plan));
         self.pending_deltas.insert(
             step.order,
             BufferedBranchMergeTombstoneDelta::WholePlan(step.ordered_row_tombstones.clone()),
@@ -704,12 +714,12 @@ impl BranchMergeTombstoneHistory {
     /// its buffered value or fills a missing slot. Appends are queued first,
     /// then fragment updates run in lineage and index order. Any failure leaves
     /// the original wave contents, queue, and released events unchanged. An
-    /// exact same-order retry of an already queued or committed tombstone delta
-    /// is skipped, including a whole-plan retry of a complete depth-fragment
-    /// delta when that order is not also being replaced in this batch. Thus
-    /// equivalent deltas deduplicate across uneven fragment boundaries while
-    /// incomplete or changing waves remain conflicts.
-    /// A changed delta at that order fails with
+    /// exact same-order retry of an already queued or committed paired plan is
+    /// skipped when its semantic result matches, including across different
+    /// row-fragment boundaries. A retry of a complete depth-fragment delta is
+    /// also skipped when its tombstone projection matches and that order is
+    /// not being replaced in this batch. Incomplete or changed waves remain
+    /// conflicts. A changed paired result at that order fails with
     /// [`BranchMergeTombstoneHistoryError::AppendRetryMismatch`]. Standalone
     /// [`Self::append`] remains strict and rejects reused positions.
     pub fn recover_depth_merge_fragments_with_appends(
@@ -806,7 +816,11 @@ impl BranchMergeTombstoneHistory {
         if let Some(BufferedBranchMergeTombstoneDelta::WholePlan(existing)) =
             self.pending_deltas.get(&step.order)
         {
-            return if same_tombstone_delta(existing, &step.ordered_row_tombstones) {
+            let same_plan = self
+                .pending_plan_identities
+                .get(&step.order)
+                .is_some_and(|identity| *identity == paired_plan_retry_identity(&step.plan));
+            return if same_plan && same_tombstone_delta(existing, &step.ordered_row_tombstones) {
                 Ok(())
             } else {
                 Err(BranchMergeTombstoneHistoryError::AppendRetryMismatch {
@@ -818,11 +832,15 @@ impl BranchMergeTombstoneHistory {
         if self.committed_modes.get(&step.order)
             == Some(&BranchMergeTombstoneSubmissionMode::WholePlan)
         {
+            let same_plan = self
+                .committed_plan_identities
+                .get(&step.order)
+                .is_some_and(|identity| *identity == paired_plan_retry_identity(&step.plan));
             let committed = self.events.iter()
                 .filter(|event| event.order == step.order)
                 .map(|event| (event.table, event.key.clone()))
                 .collect::<Vec<_>>();
-            return if same_tombstone_delta(&committed, &step.ordered_row_tombstones) {
+            return if same_plan && same_tombstone_delta(&committed, &step.ordered_row_tombstones) {
                 Ok(())
             } else {
                 Err(BranchMergeTombstoneHistoryError::AppendRetryMismatch {
@@ -915,6 +933,13 @@ impl BranchMergeTombstoneHistory {
             let delta = self.pending_deltas.remove(&order).expect("ready delta is buffered");
             let mode = delta.submission_mode();
             self.duplicate_retry_modes.remove(&order);
+            if mode == BranchMergeTombstoneSubmissionMode::WholePlan {
+                let identity = self
+                    .pending_plan_identities
+                    .remove(&order)
+                    .expect("whole-plan identity is buffered with its tombstone delta");
+                self.committed_plan_identities.insert(order, identity);
+            }
             let mut tombstones = match delta {
                 BufferedBranchMergeTombstoneDelta::WholePlan(tombstones) => tombstones,
                 BufferedBranchMergeTombstoneDelta::DepthFragments { fragments, .. } => {
@@ -1105,6 +1130,113 @@ fn same_tombstone_delta(
                 table == other_table && same_primary_key(key, other_key)
             })
         })
+}
+
+struct RetryIdentityFormatter<'a>(&'a mut Sha256);
+
+impl fmt::Write for RetryIdentityFormatter<'_> {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        self.0.update(value.as_bytes());
+        Ok(())
+    }
+}
+
+fn update_retry_identity_debug(hash: &mut Sha256, value: &impl fmt::Debug) {
+    hash.update([0xf0]);
+    {
+        let mut formatter = RetryIdentityFormatter(hash);
+        write!(&mut formatter, "{value:?}").expect("writing to the retry identity hash cannot fail");
+    }
+    hash.update([0]);
+}
+
+fn update_retry_identity_count(hash: &mut Sha256, count: usize) {
+    hash.update(u64::try_from(count).unwrap_or(u64::MAX).to_be_bytes());
+}
+
+fn update_retry_identity_value(hash: &mut Sha256, value: &CanonicalValue) {
+    let encoded = value
+        .encode()
+        .expect("validated canonical values remain encodable");
+    update_retry_identity_count(hash, encoded.len());
+    hash.update(encoded);
+}
+
+/// Fingerprints the logical paired plan output without retaining its row
+/// payloads in the history. Row and tombstone segment boundaries are omitted;
+/// schema/checkpoint state and reused immutable segments remain part of the
+/// retry identity.
+fn paired_plan_retry_identity(plan: &BranchMergePlan) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"orna-storage-paired-plan-retry-v1");
+    update_retry_identity_debug(&mut hash, &plan.schema);
+    update_retry_identity_debug(&mut hash, &plan.checkpoints);
+    update_retry_identity_count(&mut hash, plan.tables.len());
+
+    for (table_id, table) in &plan.tables {
+        hash.update(table_id.bytes());
+        hash.update(table.id.bytes());
+        update_retry_identity_debug(&mut hash, &table.whole_table_reuse);
+
+        let reused_segments = table
+            .segments
+            .iter()
+            .filter_map(|segment| match segment {
+                MergedSegment::Reuse { from, manifest } => Some((from, manifest)),
+                MergedSegment::Rows { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        update_retry_identity_count(&mut hash, reused_segments.len());
+        for reuse in reused_segments {
+            update_retry_identity_debug(&mut hash, &reuse);
+        }
+
+        let mut rows = Vec::<&KeyedRow>::new();
+        let mut tombstones = Vec::<(ObjectId, &CanonicalValue)>::new();
+        for segment in &table.segments {
+            if let MergedSegment::Rows {
+                rows: segment_rows,
+                tombstones: segment_tombstones,
+                ..
+            } = segment
+            {
+                rows.extend(segment_rows.iter());
+                tombstones.extend(segment_tombstones.iter().map(|key| (table.id, key)));
+            }
+        }
+        rows.sort_by(|left, right| {
+            left.table.cmp(&right.table).then_with(|| {
+                compare_primary_keys(&left.key, &right.key).unwrap_or(Ordering::Equal)
+            })
+        });
+        update_retry_identity_count(&mut hash, rows.len());
+        for row in rows {
+            hash.update(row.table.bytes());
+            hash.update([match row.key_kind {
+                orna_evolution_v1::RowKeyKind::Explicit => 0,
+                orna_evolution_v1::RowKeyKind::Automatic => 1,
+            }]);
+            update_retry_identity_value(&mut hash, &row.key);
+            update_retry_identity_count(&mut hash, row.fields.len());
+            for (field, value) in &row.fields {
+                hash.update(field.bytes());
+                update_retry_identity_value(&mut hash, value);
+            }
+        }
+
+        tombstones.sort_by(|(left_table, left_key), (right_table, right_key)| {
+            left_table.cmp(right_table).then_with(|| {
+                compare_primary_keys(left_key, right_key).unwrap_or(Ordering::Equal)
+            })
+        });
+        update_retry_identity_count(&mut hash, tombstones.len());
+        for (table, key) in tombstones {
+            hash.update(table.bytes());
+            update_retry_identity_value(&mut hash, key);
+        }
+    }
+
+    hash.finalize().into()
 }
 
 /// Buffers selected successful plans and releases them in paired lineage order,

@@ -48,7 +48,7 @@ pub use repl::{ReplSession, parse_admitted_repl};
 /// crate verifies its pinned profile before either boundary admits an import.
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
-pub fn reference_standard_sources() -> [(String, String); 46] {
+pub fn reference_standard_sources() -> [(String, String); 47] {
     orna_standard::reference_standard_sources_v1()
 }
 
@@ -9651,6 +9651,37 @@ mod tests {
             &batch_for(composed_left),
             &batch_for(repeated_left)
         ));
+    }
+
+    #[test]
+    fn relation_plan_reuses_equal_cloned_prefixes_on_shared_union_batch() {
+        let local_filter = Value::Bool(true);
+        let outer_filter = Value::Bool(false);
+        let operand = RelationPlan::new("UnknownOperand".into())
+            .with_stage(RelationStage::Filter(vec![local_filter.clone()]));
+        let cascade = RelationPlan::union(
+            RelationPlan::new("CascadeLeft".into()),
+            RelationPlan::new("CascadeRight".into()),
+        )
+        .with_stage(RelationStage::Filter(vec![outer_filter.clone()]))
+        .flush_filter_cascade();
+        let batch_for = |leaf: &RelationPlan| match leaf.stages.as_slice() {
+            [RelationStage::SharedFilter(batch)] => Arc::clone(batch),
+            stages => panic!("expected one shared batch, got {stages:?}"),
+        };
+        let shared_outer = batch_for(cascade.source_union.as_ref().unwrap().0.as_ref());
+        let composed = RelationPlan::union(operand.clone(), operand)
+            .with_stage(RelationStage::SharedFilter(shared_outer))
+            .flush_filter_cascade();
+        let (left, right) = composed.source_union.as_ref().expect("unknown union remains");
+        let left_batch = batch_for(left);
+        let right_batch = batch_for(right);
+
+        assert!(Arc::ptr_eq(&left_batch, &right_batch));
+        assert_eq!(
+            left_batch.values().cloned().collect::<Vec<_>>(),
+            vec![local_filter, outer_filter]
+        );
     }
 
     #[test]

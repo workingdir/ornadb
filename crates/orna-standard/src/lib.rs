@@ -131,6 +131,7 @@ pub const REFERENCE_STANDARD_TEST_PATH_V1: &str = "std/test.orna";
 pub const REFERENCE_STANDARD_GENERICS_PATH_V1: &str = "std/generics.orna";
 pub const REFERENCE_STANDARD_TYPE_UTILS_PATH_V1: &str = "std/type_utils.orna";
 pub const REFERENCE_STANDARD_PATTERN_PATH_V1: &str = "std/pattern.orna";
+pub const REFERENCE_STANDARD_REGEX_PATH_V1: &str = "std/regex.orna";
 pub const REFERENCE_STANDARD_ITERATOR_PATH_V1: &str = "std/iterator.orna";
 pub const REFERENCE_STANDARD_LAZY_PATH_V1: &str = "std/lazy.orna";
 pub const REFERENCE_STANDARD_VIEWS_PATH_V1: &str = "std/views.orna";
@@ -199,6 +200,8 @@ const REFERENCE_STANDARD_TYPE_UTILS_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/type_utils.orna");
 const REFERENCE_STANDARD_PATTERN_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/pattern.orna");
+const REFERENCE_STANDARD_REGEX_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/regex.orna");
 const REFERENCE_STANDARD_ITERATOR_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/iterator.orna");
 const REFERENCE_STANDARD_LAZY_SOURCE_V1: &str = include_str!("../../../stdlib/std/lazy.orna");
@@ -213,7 +216,7 @@ const REFERENCE_STANDARD_REFLECTION_SOURCE_V1: &str =
 /// This is the current source-backed standard boundary. The retained `orna.std/1`–
 /// `orna.std/11` APIs below model older, explicitly versioned snapshots.
 #[must_use]
-pub fn reference_standard_sources_v1() -> [(String, String); 46] {
+pub fn reference_standard_sources_v1() -> [(String, String); 47] {
     [
         (
             REFERENCE_STANDARD_MATH_PATH_V1.into(),
@@ -398,6 +401,10 @@ pub fn reference_standard_sources_v1() -> [(String, String); 46] {
         (
             REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1.into(),
             REFERENCE_STANDARD_IO_ENVIRONMENT_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_REGEX_PATH_V1.into(),
+            REFERENCE_STANDARD_REGEX_SOURCE_V1.into(),
         ),
     ]
 }

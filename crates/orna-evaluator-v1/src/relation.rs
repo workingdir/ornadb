@@ -282,6 +282,9 @@ pub(super) struct FilterBatch {
     flattened: OnceLock<Vec<Arc<Vec<Value>>>>,
     // Weak entries allow cloned shared prefixes to reuse joins without cycles.
     continuations: Mutex<HashMap<usize, Weak<FilterBatch>>>,
+    // Cloned leaf plans can carry equal, separately owned filter prefixes.
+    // Keep their joins shared when they append the same outer suffix.
+    prefixed_batches: Mutex<Vec<Weak<FilterBatch>>>,
 }
 
 #[derive(Debug)]
@@ -296,6 +299,7 @@ impl FilterBatch {
             node: FilterBatchNode::Values(Arc::new(values)),
             flattened: OnceLock::new(),
             continuations: Mutex::new(HashMap::new()),
+            prefixed_batches: Mutex::new(Vec::new()),
         })
     }
 
@@ -308,17 +312,37 @@ impl FilterBatch {
         if let Some(batch) = continuations.get(&key).and_then(Weak::upgrade) {
             return batch;
         }
+        // A shared prefix may outlive the compiled joins that once used it.
+        // Prune those expired weak entries when the prefix needs a new join
+        // so repeated unknown-union compilations do not grow a dead cache.
+        continuations.retain(|_, batch| batch.strong_count() > 0);
         let batch = Arc::new(Self {
             node: FilterBatchNode::Then(Arc::clone(previous), Arc::clone(next)),
             flattened: OnceLock::new(),
             continuations: Mutex::new(HashMap::new()),
+            prefixed_batches: Mutex::new(Vec::new()),
         });
         continuations.insert(key, Arc::downgrade(&batch));
         batch
     }
 
     fn prefixed_by(values: Vec<Value>, next: &Arc<Self>) -> Arc<Self> {
-        Self::followed_by(&Self::from_values(values), next)
+        let mut prefixed_batches = next
+            .prefixed_batches
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        prefixed_batches.retain(|batch| batch.strong_count() > 0);
+        for batch in prefixed_batches.iter().filter_map(Weak::upgrade) {
+            let FilterBatchNode::Then(previous, suffix) = &batch.node else {
+                continue;
+            };
+            if Arc::ptr_eq(suffix, next) && previous.values().eq(values.iter()) {
+                return batch;
+            }
+        }
+        let batch = Self::followed_by(&Self::from_values(values), next);
+        prefixed_batches.push(Arc::downgrade(&batch));
+        batch
     }
 
     pub(super) fn chunks(&self) -> &[Arc<Vec<Value>>] {
@@ -627,5 +651,28 @@ impl RelationPlan {
                 .push(RelationStage::SharedFilter(predicates)),
         }
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FilterBatch;
+    use crate::Value;
+
+    #[test]
+    fn shared_filter_join_cache_discards_expired_continuations() {
+        let prefix = FilterBatch::from_values(vec![Value::Bool(true)]);
+        let abandoned_suffix = FilterBatch::from_values(vec![Value::Bool(false)]);
+        let abandoned_join = FilterBatch::followed_by(&prefix, &abandoned_suffix);
+        assert_eq!(prefix.continuations.lock().unwrap().len(), 1);
+        drop(abandoned_join);
+
+        let live_suffix = FilterBatch::from_values(vec![Value::Bool(true)]);
+        let live_join = FilterBatch::followed_by(&prefix, &live_suffix);
+
+        let continuations = prefix.continuations.lock().unwrap();
+        assert_eq!(continuations.len(), 1);
+        assert!(continuations.values().all(|join| join.upgrade().is_some()));
+        assert_eq!(live_join.values().count(), 2);
     }
 }
