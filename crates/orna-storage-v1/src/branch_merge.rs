@@ -310,6 +310,9 @@ enum BufferedBranchMergeTombstoneDelta {
 /// position delays that decision; an intervening position that omits the key
 /// separates a later re-delete. Once an earlier position has been released,
 /// a later position may record the key again as a separate event.
+/// Mixing whole-plan and depth-fragment submissions at one pending position
+/// reports `ConflictingSubmission` before fragment-index validation; the mode
+/// conflict takes precedence for that position.
 /// Concurrent completions may arrive out of order; future deltas wait until
 /// every earlier paired position is present. Split waves wait until every
 /// fragment arrives, then flatten in canonical table/key order atomically.
@@ -412,6 +415,12 @@ impl BranchMergeTombstoneHistory {
         };
         if order < expected {
             return Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order });
+        }
+        if matches!(
+            self.pending_deltas.get(&order),
+            Some(BufferedBranchMergeTombstoneDelta::WholePlan(_))
+        ) {
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
         }
         if fragment_count == 0 || fragment >= fragment_count {
             return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
