@@ -8380,6 +8380,99 @@ fn tuple_checkpoint_compaction_fold_preserves_slot_pin_identity() {
 }
 
 #[test]
+fn tuple_checkpoint_label_fold_rebind_keeps_computed_pin_maps() {
+    let source = include_str!("fixtures/historical-tuple-checkpoint-label-fold.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-tuple-checkpoint-label-fold.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "a folded rebind with changed selector-label membership must fail: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("tuple_checkpoint_label_fold_rebind")
+        })
+        .expect("tuple checkpoint label-fold fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["tuple_checkpoint_label_fold_rebind"].ty
+    else {
+        panic!("tuple checkpoint label-fold proof must return computed values");
+    };
+    let Type::Record(values) = result.as_ref() else {
+        panic!("tuple checkpoint proof must expose saved, retained and candidate values");
+    };
+
+    let slot_maps = |name: &str| {
+        let value = values.get(name).expect("computed checkpoint value");
+        assert_canonical_snapshot_context_maps(value);
+        let Type::List(element) = value else {
+            panic!("{name} must remain a checkpoint list: {value:?}");
+        };
+        let Type::Tuple(slots) = element.as_ref() else {
+            panic!("{name} must retain its tuple element: {element:?}");
+        };
+        assert_eq!(slots.len(), 3, "{name} must preserve all tuple slots");
+        slots
+            .iter()
+            .map(|slot| {
+                let mut selectors = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut selectors);
+                selectors.retain(|selector| selector.starts_with("selector:HEAD~"));
+                assert!(
+                    !selectors.is_empty(),
+                    "{name} must expose its computed selector map: {slot:?}"
+                );
+                selectors
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let saved = slot_maps("saved");
+    assert_eq!(
+        saved,
+        vec![
+            BTreeSet::from(["selector:HEAD~30".into(), "selector:HEAD~31".into()]),
+            BTreeSet::from(["selector:HEAD~30".into(), "selector:HEAD~32".into()]),
+            BTreeSet::from(["selector:HEAD~31".into(), "selector:HEAD~32".into()]),
+        ],
+        "saved folded maps must have one distinct shared label per slot pair"
+    );
+    assert_eq!(
+        slot_maps("retained"),
+        saved,
+        "failed label-topology rebind must retain saved computed maps"
+    );
+    assert_eq!(
+        slot_maps("candidate"),
+        vec![
+            BTreeSet::from(["selector:HEAD~40".into(), "selector:HEAD~41".into()]),
+            BTreeSet::from(["selector:HEAD~40".into(), "selector:HEAD~42".into()]),
+            BTreeSet::from(["selector:HEAD~40".into(), "selector:HEAD~43".into()]),
+        ],
+        "candidate folded maps must expose the new shared all-slot label"
+    );
+}
+
+#[test]
 fn pinned_callable_map_width_rebind_preserves_computed_values() {
     let source = include_str!("fixtures/historical-pinned-map-width-rebind-values.orna");
     let parsed = orna_syntax_v1::parse_module(source);
