@@ -1,0 +1,44 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn paired_capture_wave() =
+    ((left_selected, left_sibling): (sys.SnapshotRef, sys.SnapshotRef),
+     (right_selected, right_sibling): (sys.SnapshotRef, sys.SnapshotRef)) =>
+        (terminal_pin: sys.SnapshotRef) => [
+            {
+                pin: left_selected,
+                capture: factory_at(left_selected),
+            },
+            {
+                pin: left_sibling,
+                capture: factory_at(left_sibling),
+            },
+            {
+                pin: right_selected,
+                capture: factory_at(right_selected),
+            },
+            {
+                pin: right_sibling,
+                capture: factory_at(right_sibling),
+            },
+            {
+                pin: terminal_pin,
+                capture: factory_at(terminal_pin),
+            },
+        ];
+
+pub fn paired_unknown_width_does_not_promote_siblings() {
+    let callback = paired_capture_wave();
+    let saved = callback(
+        (sys.snapshot("HEAD~60"), sys.snapshot("HEAD~59")),
+        (sys.snapshot("HEAD~58"), sys.snapshot("HEAD~57")),
+    )(sys.snapshot("HEAD~56"));
+    let suppressed = callback(
+        (sys.snapshot("HEAD~50"), sys.snapshot("HEAD~49")),
+        (sys.snapshot("HEAD~48"), missing_pin),
+    )(sys.snapshot("HEAD~46"));
+    {
+        saved: saved,
+        suppressed: suppressed,
+    }
+}
