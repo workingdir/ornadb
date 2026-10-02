@@ -6,6 +6,7 @@ use orna_sys_v1::{
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_storm_limit_chain_rebinds.orna");
+const BRANCH_CAP_FIXTURE: &str = include_str!("fixtures/planner_storm_rebind_branch_caps.orna");
 
 fn branch(
     limits: &[u64],
@@ -192,4 +193,101 @@ fn rebind_overflow_is_preserved_and_positions_are_validated() {
         ),
         Err(ExplainError::InvalidExpression)
     );
+}
+
+#[test]
+fn nested_rebind_cascades_stay_inside_each_branch_local_storm_cap() {
+    let parsed = orna_syntax_v1::parse_module(BRANCH_CAP_FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    // ORNA-PLAN does not define how nested cascade estimates interact with a
+    // parent branch's local cap. Keep each rebind inside its immediate bounded
+    // branch input, then combine sibling branches under their shared input cap.
+    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+        &query(Some(100), Some(1_000)),
+        &[storm(
+            "expr:outer-cap-storm",
+            vec![
+                branch(
+                    &[4, 100],
+                    1,
+                    vec![rebind(
+                        1,
+                        vec![storm(
+                            "expr:two-arm-rebind",
+                            vec![branch(&[20], 1, vec![]), branch(&[20], 1, vec![])],
+                        )],
+                    )],
+                ),
+                branch(&[12], 1, vec![]),
+            ],
+        )],
+        &[],
+    )
+    .expect("nested rebind branches remain isolated by their parent caps");
+
+    let filter = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Filter)
+        .expect("storm is represented by an aggregate filter");
+    assert_eq!(filter.estimated_rows(), Some(8));
+    assert_eq!(filter.estimated_bytes(), Some(80));
+    assert_eq!(filter.estimated_work(), Some(236));
+    assert_eq!(
+        filter.details().get("branch_limit_chains"),
+        Some(&PlanDetail::Text("1:[4,100];2:[12]".to_owned()))
+    );
+    assert_eq!(
+        filter.details().get("limit_chain_rebind_shapes"),
+        Some(&PlanDetail::Text("1@1:[1:[20]/1;2:[20]/1]".to_owned()))
+    );
+    assert_eq!(
+        filter.details().get("branch_local_storm_cap_scope"),
+        Some(&PlanDetail::Text(
+            "each_cascade_output_capped_to_immediate_input_rows_and_bytes".to_owned()
+        ))
+    );
+    assert_eq!(
+        filter.details().get("limit_chain_rebind_cap_scope"),
+        Some(&PlanDetail::Text(
+            "post_limit_branch_rows_and_bytes".to_owned()
+        ))
+    );
+}
+
+#[test]
+fn overflowing_rebind_work_keeps_the_parent_branch_cap() {
+    let source_rows = u64::MAX / 4;
+    let overflowing_rebind = storm(
+        "expr:wide-rebind-storm",
+        (0..8)
+            .map(|_| branch(&[u64::MAX], 1, vec![]))
+            .collect(),
+    );
+    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+        &query(Some(source_rows), Some(0)),
+        &[storm(
+            "expr:outer-cap-storm",
+            vec![branch(
+                &[u64::MAX, u64::MAX],
+                1,
+                vec![rebind(1, vec![overflowing_rebind])],
+            )],
+        )],
+        &[],
+    )
+    .expect("the branch cap and nested work overflow are both retained");
+
+    let rows = explained.root().estimated_rows().expect("known source rows");
+    assert!(rows > 0);
+    assert!(rows <= source_rows);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    assert!(explained.nodes().iter().any(|node| {
+        node.details().get("estimated_work_overflow") == Some(&PlanDetail::Boolean(true))
+    }));
 }
