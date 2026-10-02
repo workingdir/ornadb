@@ -1,0 +1,18 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn paired_checkpoint_map_compatible_shape_rebind_returns_values() {
+    let saved = {
+        first: factory_at(sys.snapshot("HEAD~12")),
+        second: factory_at(sys.snapshot("HEAD~11")),
+    };
+    let rolling = saved;
+    rolling = {
+        first: factory_at(sys.snapshot("HEAD~10")),
+        second: factory_at(sys.snapshot("HEAD~9")),
+    };
+    {
+        saved: saved,
+        rolling: rolling,
+    }
+}
