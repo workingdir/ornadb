@@ -557,6 +557,9 @@ impl BranchMergeTombstoneHistory {
     /// released only after all `fragment_count` pieces arrive; their tombstones
     /// are then normalized by table and canonical key, regardless of fragment
     /// completion order. An empty fragment still counts toward completeness.
+    /// For an existing wave, a changed fragment count is reported before an
+    /// index that is invalid under the caller's changed count, preserving the
+    /// wave's authoritative depth label in diagnostics.
     pub fn submit_depth_merge_fragment(
         &mut self,
         order: u64,
@@ -568,7 +571,7 @@ impl BranchMergeTombstoneHistory {
             order,
             BranchMergeTombstoneSubmissionMode::DepthFragments,
         )?;
-        if fragment_count == 0 || fragment >= fragment_count {
+        if fragment_count == 0 {
             return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
                 fragment,
                 fragment_count,
@@ -590,12 +593,24 @@ impl BranchMergeTombstoneHistory {
                         actual: fragment_count,
                     });
                 }
+                if fragment >= fragment_count {
+                    return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+                        fragment,
+                        fragment_count,
+                    });
+                }
                 if fragments.contains_key(&fragment) {
                     return Err(BranchMergeTombstoneHistoryError::DuplicateFragment {
                         order,
                         fragment,
                     });
                 }
+            }
+            None if fragment >= fragment_count => {
+                return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+                    fragment,
+                    fragment_count,
+                });
             }
             None => {}
         }
@@ -1186,7 +1201,7 @@ impl BranchMergeTombstoneHistory {
             recovery.order,
             BranchMergeTombstoneSubmissionMode::DepthFragments,
         )?;
-        if recovery.fragment_count == 0 || recovery.fragment >= recovery.fragment_count {
+        if recovery.fragment_count == 0 {
             return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
                 fragment: recovery.fragment,
                 fragment_count: recovery.fragment_count,
@@ -1205,12 +1220,24 @@ impl BranchMergeTombstoneHistory {
                         actual: recovery.fragment_count,
                     });
                 }
+                if recovery.fragment >= recovery.fragment_count {
+                    return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+                        fragment: recovery.fragment,
+                        fragment_count: recovery.fragment_count,
+                    });
+                }
                 fragments
             }
             Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => unreachable!(
                 "whole-plan mode conflicts are classified before fragment recovery"
             ),
             None => {
+                if recovery.fragment >= recovery.fragment_count {
+                    return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+                        fragment: recovery.fragment,
+                        fragment_count: recovery.fragment_count,
+                    });
+                }
                 return Err(BranchMergeTombstoneHistoryError::NoIncompleteDepthWave {
                     order: recovery.order,
                 });
