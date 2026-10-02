@@ -6924,6 +6924,233 @@ fn paired_checkpoint_retains_merged_snapshot_maps_through_rebind_storms() {
 }
 
 #[test]
+fn paired_depth_storms_retain_field_maps_at_each_rebound_depth() {
+    let source = include_str!(
+        "fixtures/historical-paired-checkpoint-depth-storm-chained-rebind.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-checkpoint-depth-storm-chained-rebind.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_checkpoint_depth_storm_chained_rebind_retains_maps")
+        })
+        .expect("paired depth-storm checkpoint module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_checkpoint_depth_storm_chained_rebind_retains_maps"]
+        .ty
+    else {
+        panic!("paired depth-storm checkpoint must be callable");
+    };
+    let Type::Record(lanes) = result.as_ref() else {
+        panic!("paired depth-storm checkpoint must expose both lanes");
+    };
+
+    let cases: [
+        (
+            &str,
+            &str,
+            &str,
+            &[&str],
+            Option<&[&str]>,
+            Option<&[&str]>,
+        );
+        18
+    ] = [
+        ("left", "root", "saved", &["950", "948"], None, None),
+        (
+            "left",
+            "root",
+            "after_storm",
+            &["945", "944"],
+            None,
+            None,
+        ),
+        ("left", "root", "restored", &["950", "948"], None, None),
+        (
+            "left",
+            "middle",
+            "saved",
+            &["950", "948"],
+            Some(&["850", "848"]),
+            None,
+        ),
+        (
+            "left",
+            "middle",
+            "after_storm",
+            &["945", "944"],
+            Some(&["845", "844"]),
+            None,
+        ),
+        (
+            "left",
+            "middle",
+            "restored",
+            &["950", "948"],
+            Some(&["850", "848"]),
+            None,
+        ),
+        (
+            "left",
+            "leaf",
+            "saved",
+            &["950", "948"],
+            Some(&["850", "848"]),
+            Some(&["750", "748"]),
+        ),
+        (
+            "left",
+            "leaf",
+            "after_storm",
+            &["945", "944"],
+            Some(&["845", "844"]),
+            Some(&["745", "744"]),
+        ),
+        (
+            "left",
+            "leaf",
+            "restored",
+            &["950", "948"],
+            Some(&["850", "848"]),
+            Some(&["750", "748"]),
+        ),
+        ("right", "root", "saved", &["930", "928"], None, None),
+        (
+            "right",
+            "root",
+            "after_storm",
+            &["925", "924"],
+            None,
+            None,
+        ),
+        ("right", "root", "restored", &["930", "928"], None, None),
+        (
+            "right",
+            "middle",
+            "saved",
+            &["930", "928"],
+            Some(&["830", "828"]),
+            None,
+        ),
+        (
+            "right",
+            "middle",
+            "after_storm",
+            &["925", "924"],
+            Some(&["825", "824"]),
+            None,
+        ),
+        (
+            "right",
+            "middle",
+            "restored",
+            &["930", "928"],
+            Some(&["830", "828"]),
+            None,
+        ),
+        (
+            "right",
+            "leaf",
+            "saved",
+            &["930", "928"],
+            Some(&["830", "828"]),
+            Some(&["730", "728"]),
+        ),
+        (
+            "right",
+            "leaf",
+            "after_storm",
+            &["925", "924"],
+            Some(&["825", "824"]),
+            Some(&["725", "724"]),
+        ),
+        (
+            "right",
+            "leaf",
+            "restored",
+            &["930", "928"],
+            Some(&["830", "828"]),
+            Some(&["730", "728"]),
+        ),
+    ];
+
+    for (lane, depth, stage, roots, middles, leaves) in cases {
+        let Type::Record(stages) = lanes.get(lane).expect("paired lane") else {
+            panic!("{lane} must preserve each checkpoint depth");
+        };
+        let Type::Record(depths) = stages.get(depth).expect("checkpoint depth") else {
+            panic!("{lane}.{depth} must retain stage maps");
+        };
+        let fields = checkpoint_output_fields(depths.get(stage).expect("checkpoint stage"));
+        for (field, expected) in [
+            ("root_pin", Some(roots)),
+            ("root", Some(roots)),
+            ("middle_pin", middles),
+            ("middle", middles),
+            ("leaf_pin", leaves),
+            ("leaf", leaves),
+        ] {
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(fields.get(field).expect("checkpoint field"), &mut contexts);
+            if let Some(expected) = expected {
+                assert_eq!(
+                    contexts,
+                    expected
+                        .iter()
+                        .map(|selector| format!("selector:HEAD~{selector}"))
+                        .collect(),
+                    "{lane}.{depth}.{stage}.{field} must retain its selected snapshot map"
+                );
+            } else {
+                assert_eq!(
+                    contexts.len(),
+                    2,
+                    "{lane}.{depth}.{stage}.{field} must retain both nested binders: {contexts:?}"
+                );
+                assert!(
+                    contexts
+                        .iter()
+                        .all(|context| context.starts_with("selector:binder:")),
+                    "{lane}.{depth}.{stage}.{field} must remain isolated from selected maps: {contexts:?}"
+                );
+            }
+        }
+        for (pin_field, value_field) in [
+            ("root_pin", "root"),
+            ("middle_pin", "middle"),
+            ("leaf_pin", "leaf"),
+        ] {
+            let mut pin_contexts = BTreeSet::new();
+            collect_snapshot_contexts(
+                fields.get(pin_field).expect("snapshot pin field"),
+                &mut pin_contexts,
+            );
+            let mut value_contexts = BTreeSet::new();
+            collect_snapshot_contexts(
+                fields.get(value_field).expect("historical value field"),
+                &mut value_contexts,
+            );
+            assert_eq!(
+                pin_contexts, value_contexts,
+                "{lane}.{depth}.{stage}.{pin_field} and {value_field} must share one map"
+            );
+        }
+    }
+}
+
+#[test]
 fn paired_reproduction_checkpoint_types_stay_stable_across_interleaved_analyses() {
     const FUNCTION: &str =
         "paired_reproductions_remain_stable_across_chained_storm_orders";
