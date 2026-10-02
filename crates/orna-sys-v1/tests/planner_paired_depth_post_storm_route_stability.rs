@@ -138,6 +138,37 @@ fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
     let first_routes = routes_for_stage(&explained, 1);
     let post_storm_routes = routes_for_stage(&explained, 2);
     let third_stage_routes = routes_for_stage(&explained, 3);
+    for (stage, prefix) in [
+        (1, "root/storm1/"),
+        (2, "root/storm1/output/storm2/"),
+        (3, "root/storm1/output/storm2/output/storm3/"),
+    ] {
+        let filter = explained
+            .nodes()
+            .iter()
+            .find(|node| {
+                node.kind() == PlanNodeKind::Filter
+                    && node.details().get("disjunct_storm") == Some(&PlanDetail::Integer(stage))
+            })
+            .expect("storm stage is visible");
+        let scope_summary = match filter
+            .details()
+            .get("limit_chain_rebind_byte_cap_handoff_scopes_by_depth")
+        {
+            Some(PlanDetail::Text(scopes)) => scopes,
+            other => panic!("expected handoff scopes by depth, got {other:?}"),
+        };
+        for depth in scope_summary.split(';') {
+            let (_, scopes) = depth.split_once(':').expect("depth scope entry");
+            for handoff in scopes.split(',') {
+                let (scope, _) = handoff.split_once('=').expect("handoff scope entry");
+                assert!(
+                    scope.starts_with(prefix),
+                    "stage {stage} scope {scope:?} should retain typed ancestry prefix {prefix:?}"
+                );
+            }
+        }
+    }
     assert!(first_routes.iter().all(|route| {
         route.input_scope.starts_with("root/storm1/")
             && route.output_scope.starts_with("root/storm1/")
