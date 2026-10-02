@@ -239,20 +239,23 @@ impl PackageResolver {
     /// its own committed manifest. Sibling aliases remain pinned in the source
     /// session and do not retarget the replacement's closure. Each replacement
     /// starts a new resolution branch: aliases from the prior parent's
-    /// manifest are not inherited or used as fallback at the next depth. The
+    /// manifest are not inherited or used as fallback at the next depth.
     /// If an alias is rebound through several candidates before nested
-    /// expansion, only the currently attached pin supplies that next manifest;
-    /// the earlier candidates' manifests are not accumulated. The
-    /// Rebinding several prefix-related aliases in one session keeps them as
-    /// independent exact-key entries; expanding one replacement uses only its
-    /// own manifest and never combines it with another rebound alias's pins.
-    /// selected session keeps every unmodified exact key pinned, including a
-    /// longer prefix-related sibling. Expanding the rebound database gives
-    /// its own manifest a fresh next-depth session, even when one of its keys
-    /// has the same spelling as that retained sibling. The
-    /// reference is silent on precedence across rebound alias chains; v1 makes
-    /// the selected parent's committed manifest authoritative for that depth.
-    /// The reference requires each historical parent's exact pins but does not
+    /// expansion, the currently attached pin supplies that session's next
+    /// manifest; earlier candidates are not accumulated. A caller can retain a
+    /// candidate pin before rebinding again. It remains immutable, and
+    /// explicitly resolving it later reads its own manifest after the source
+    /// session has moved on. Since the reference is silent on storm history,
+    /// v1 treats the explicitly passed pin as the caller's closure choice.
+    ///
+    /// Rebinding prefix-related aliases in one session keeps them as
+    /// independent exact-key entries. The session retains every unmodified
+    /// key, including longer prefix-related siblings. Expanding one replacement
+    /// uses only its manifest to create a fresh next-depth session, even when
+    /// that manifest names an alias matching a retained sibling. The reference
+    /// is silent on precedence across rebound alias chains; v1 makes the
+    /// selected parent's committed manifest authoritative at that depth. The
+    /// reference requires exact pins for each historical parent but does not
     /// require flattening a recursive closure into one session.
     pub fn resolve_for_parent(
         &self,
