@@ -15,6 +15,8 @@ mod publication_policy;
 
 pub use branch_merge::{
     BranchMergeBudget, BranchMergeConflict, BranchMergeError, BranchMergePlan,
+    BranchMergeTombstoneEvent, BranchMergeTombstoneHistory,
+    BranchMergeTombstoneHistoryError,
     BranchMergePlanSequenceError, BranchMergePlanSequencer, BranchMergeReport,
     SequencedBranchMergePlan,
     BranchRowSource, CheckpointId, KeyRange, MergeSide, MergedSegment, MergedTable,
