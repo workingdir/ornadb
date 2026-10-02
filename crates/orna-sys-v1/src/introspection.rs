@@ -823,6 +823,36 @@ pub enum PlanByteCapScopeSegment {
     NestedStormOutput { index: usize },
 }
 
+impl PlanByteCapScopeSegment {
+    /// Returns the canonical display component for this typed scope segment.
+    ///
+    /// ORNA-PLAN specifies typed planner ancestry but does not prescribe its
+    /// text spelling. The local stable mapping is `StormStage` to `stormN`,
+    /// `StormStageOutput` to `storm_stage_outputN`, `Branch` to `branchN`,
+    /// `Limit` to `limitN`, `BranchOutput` to `branch_outputN`, `Rebind` to
+    /// `rebindN`, `Cascade` to `cascadeN`, `RebindCascadeOutput` to
+    /// `rebind_outputP_C`, `NestedStorm` to `nestedN`, and
+    /// `NestedStormOutput` to `nested_outputN`. `N` is a one-based index or
+    /// position; `P_C` is the rebind position and cascade index. The typed
+    /// segment remains authoritative when a display stem is abbreviated.
+    pub fn scope_component_label(&self) -> String {
+        match self {
+            Self::StormStage { index } => format!("storm{index}"),
+            Self::StormStageOutput { index } => format!("storm_stage_output{index}"),
+            Self::Branch { index } => format!("branch{index}"),
+            Self::Limit { position } => format!("limit{position}"),
+            Self::BranchOutput { index } => format!("branch_output{index}"),
+            Self::Rebind { position } => format!("rebind{position}"),
+            Self::Cascade { index } => format!("cascade{index}"),
+            Self::RebindCascadeOutput { position, index } => {
+                format!("rebind_output{position}_{index}")
+            }
+            Self::NestedStorm { index } => format!("nested{index}"),
+            Self::NestedStormOutput { index } => format!("nested_output{index}"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PlanNode {
     reference: PlanNodeRef,
@@ -3034,28 +3064,8 @@ fn rebind_byte_cap_handoff_route_records(
 fn byte_cap_scope_path_label(path: &[PlanByteCapScopeSegment]) -> String {
     let mut scope = "root".to_owned();
     for segment in path {
-        let label = match segment {
-            PlanByteCapScopeSegment::StormStage { index } => format!("storm{index}"),
-            // ORNA-PLAN does not prescribe labels; preserve the complete typed
-            // segment name and producer index so it cannot read as a nested output.
-            PlanByteCapScopeSegment::StormStageOutput { index } => {
-                format!("storm_stage_output{index}")
-            }
-            PlanByteCapScopeSegment::Branch { index } => format!("branch{index}"),
-            PlanByteCapScopeSegment::Limit { position } => format!("limit{position}"),
-            PlanByteCapScopeSegment::BranchOutput { index } => format!("branch_output{index}"),
-            PlanByteCapScopeSegment::Rebind { position } => format!("rebind{position}"),
-            PlanByteCapScopeSegment::Cascade { index } => format!("cascade{index}"),
-            PlanByteCapScopeSegment::RebindCascadeOutput { position, index } => {
-                format!("rebind_output{position}_{index}")
-            }
-            PlanByteCapScopeSegment::NestedStorm { index } => format!("nested{index}"),
-            PlanByteCapScopeSegment::NestedStormOutput { index } => {
-                format!("nested_output{index}")
-            }
-        };
         scope.push('/');
-        scope.push_str(&label);
+        scope.push_str(&segment.scope_component_label());
     }
     scope
 }
@@ -3813,6 +3823,41 @@ impl PlanNodeKind {
 #[cfg(test)]
 mod byte_cap_handoff_route_scope_tests {
     use super::*;
+
+    #[test]
+    fn scope_component_labels_preserve_each_typed_segment() {
+        let segments = [
+            (PlanByteCapScopeSegment::StormStage { index: 2 }, "storm2"),
+            (
+                PlanByteCapScopeSegment::StormStageOutput { index: 3 },
+                "storm_stage_output3",
+            ),
+            (PlanByteCapScopeSegment::Branch { index: 4 }, "branch4"),
+            (PlanByteCapScopeSegment::Limit { position: 5 }, "limit5"),
+            (
+                PlanByteCapScopeSegment::BranchOutput { index: 6 },
+                "branch_output6",
+            ),
+            (PlanByteCapScopeSegment::Rebind { position: 7 }, "rebind7"),
+            (PlanByteCapScopeSegment::Cascade { index: 8 }, "cascade8"),
+            (
+                PlanByteCapScopeSegment::RebindCascadeOutput {
+                    position: 9,
+                    index: 10,
+                },
+                "rebind_output9_10",
+            ),
+            (PlanByteCapScopeSegment::NestedStorm { index: 11 }, "nested11"),
+            (
+                PlanByteCapScopeSegment::NestedStormOutput { index: 12 },
+                "nested_output12",
+            ),
+        ];
+
+        for (segment, expected) in segments {
+            assert_eq!(segment.scope_component_label(), expected);
+        }
+    }
 
     #[test]
     fn typed_paths_drive_scope_summaries_and_route_fingerprint() {
