@@ -1,0 +1,18 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn paired_direct_capture_wave() =
+    (left_pin: sys.SnapshotRef, right_pin: sys.SnapshotRef) => [
+        { pin: left_pin, capture: factory_at(left_pin) },
+        { pin: right_pin, capture: factory_at(right_pin) },
+    ];
+
+pub fn unknown_sibling_suppresses_direct_pair_rebind() {
+    let callback = paired_direct_capture_wave();
+    let complete = callback(sys.snapshot("HEAD~60"), sys.snapshot("HEAD~59"));
+    let suppressed = callback(sys.snapshot("HEAD~50"), missing_pin);
+    {
+        complete: complete,
+        suppressed: suppressed,
+    }
+}

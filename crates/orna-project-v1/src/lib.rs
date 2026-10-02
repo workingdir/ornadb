@@ -27,7 +27,7 @@ mod unicode16;
 pub use attachments::{
     AttachedDatabaseSession, AttachedRelationSource, AttachmentError, PACKAGE_PIN_MANIFEST_PATH,
     PackagePin, PackagePinManifest, PackagePinSpec, PackageResolver, PinnedDatabase,
-    ReboundPathResolution, SiblingRebindResolution,
+    ReboundPathCheckpoint, ReboundPathResolution, SiblingRebindResolution,
 };
 
 /// Bounded resource limits applied before source contents are read.
