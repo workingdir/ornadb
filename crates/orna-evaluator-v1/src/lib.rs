@@ -3565,7 +3565,7 @@ impl Context<'_, '_> {
 
             match name {
                 "filter" => {
-                    plan = plan.with_stage(RelationStage::Filter(ordered[1].clone()));
+                    plan = plan.with_stage(RelationStage::Filter(vec![ordered[1].clone()]));
                     Ok(Value::Relation(plan))
                 }
                 // The reference specifies relation composition and order but
@@ -4149,25 +4149,27 @@ impl Context<'_, '_> {
         for (local_index, stage) in stages.iter().enumerate() {
             let index = stage_offset + local_index;
             match stage {
-                RelationStage::Filter(predicate) => {
-                    self.step()?;
-                    let result = self.invoke_predicate(predicate, value.clone(), depth + 1)?;
-                    let Value::Bool(result) = result else {
-                        return Err(error("ORNA-EVAL-TYPE"));
-                    };
-                    if !result {
-                        let mut rows = vec![RelationRow::Skip];
-                        // Once a preceding take has consumed its bound, a
-                        // downstream filter rejection still exhausts that
-                        // bounded relation. Propagate the stop now so the
-                        // source is not evaluated once more just to discover
-                        // the already-reached bound.
-                        if stages.iter().enumerate().any(|(offset, stage)| {
-                            matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
-                        }) {
-                            rows.push(RelationRow::End);
+                RelationStage::Filter(predicates) => {
+                    for predicate in predicates {
+                        self.step()?;
+                        let result = self.invoke_predicate(predicate, value.clone(), depth + 1)?;
+                        let Value::Bool(result) = result else {
+                            return Err(error("ORNA-EVAL-TYPE"));
+                        };
+                        if !result {
+                            let mut rows = vec![RelationRow::Skip];
+                            // Once a preceding take has consumed its bound, a
+                            // downstream filter rejection still exhausts that
+                            // bounded relation. Propagate the stop now so the
+                            // source is not evaluated once more just to discover
+                            // the already-reached bound.
+                            if stages.iter().enumerate().any(|(offset, stage)| {
+                                matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
+                            }) {
+                                rows.push(RelationRow::End);
+                            }
+                            return Ok(rows);
                         }
-                        return Ok(rows);
                     }
                 }
                 RelationStage::Map(transform) => {
