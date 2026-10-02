@@ -16141,7 +16141,7 @@ fn snapshot_selector_context(
 /// selector identity. Literal and built-in selectors retain canonical
 /// identities. Dynamic arguments use the call occurrence because this pass
 /// does not evaluate selector values. Returned function parameters shadow
-/// same-named selectors from the caller while the returned function is dormant.
+/// same-named selectors from the caller throughout the returned signature.
 fn specialize_dynamic_parameter_snapshot_contexts(
     ty: &Type,
     parameter_names: Option<&[String]>,
@@ -16239,7 +16239,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                             local,
                             call_span,
                             historical_context,
-                            shadowed_parameters,
+                            &nested_shadowed_parameters,
                         )
                     })
                     .collect(),
