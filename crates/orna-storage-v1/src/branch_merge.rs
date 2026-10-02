@@ -304,10 +304,12 @@ enum BranchMergeTombstoneSubmissionMode {
 
 /// Append-only tombstone history for committed paired merge plans.
 ///
-/// MERGE-1 is silent on tombstone accumulation across committed waves and on
-/// overlapping depth fragments. This v1 policy accepts paired plans at their
-/// exact lineage positions, appends table/key-ordered deletion events in
-/// lineage order, and advances through restore-only empty deltas.
+/// MERGE-1 is silent on tombstone accumulation across committed waves,
+/// overlapping depth fragments, and cross-mode retries after release. This v1
+/// policy retains the accepted mode for each released position so cross-mode
+/// conflicts stay distinguishable from same-mode stale retries. It accepts
+/// paired plans at exact lineage positions and appends table/key-ordered
+/// deletion events in lineage order, advancing through restore-only empty deltas.
 /// Duplicate table/key events within one lineage position are rejected as
 /// soon as the overlapping fragment arrives. Two concurrently buffered
 /// positions cannot record the same logical key when every intervening
