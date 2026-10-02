@@ -20,6 +20,7 @@ use crate::{
     REFERENCE_STANDARD_SET_PATH_V1,
     REFERENCE_STANDARD_IO_PATH_V1, REFERENCE_STANDARD_FS_PATH_V1,
     REFERENCE_STANDARD_CONCURRENT_PATH_V1, REFERENCE_STANDARD_ERROR_PATH_V1,
+    REFERENCE_STANDARD_TEST_PATH_V1,
     reference_standard_catalogue_v1,
     reference_standard_profile_v1, reference_standard_sources_v1,
 };
@@ -34,6 +35,7 @@ fn pinned_std_entrypoint_imports_optional_content_modules() {
     assert!(entrypoint.lines().any(|line| line.trim() == "use encoding;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use url;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use net;"));
+    assert!(entrypoint.lines().any(|line| line.trim() == "use test;"));
 }
 
 #[test]
@@ -56,6 +58,27 @@ fn pinned_network_entrypoint_exports_http_and_websocket_modules() {
             "std.net must import {module}"
         );
     }
+}
+
+#[test]
+fn pinned_test_module_resolves_against_core_without_importing_optional_std() {
+    let source = include_str!("../../../../stdlib/std/test.orna");
+    let parsed = orna_syntax_v1::parse_module_with_file(source, "test.orna");
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("test.orna", source)],
+        &orna_semantic_v1::Catalogue::authoritative_core(),
+    );
+    assert!(
+        analysis.is_ok(),
+        "{}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
 }
 
 #[test]
@@ -402,6 +425,37 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[18].1.contains(contract), "missing contract: {contract}");
     }
+    assert_eq!(sources[33].0, REFERENCE_STANDARD_TEST_PATH_V1);
+    for declaration in [
+        "pub fn expect(condition: Bool",
+        "pub fn expect_true(value: Bool)",
+        "pub fn expect_false(value: Bool)",
+        "pub fn expect_equal<T>(actual: T, expected: T)",
+        "pub fn expect_not_equal<T>(actual: T, unexpected: T)",
+        "pub fn expect_some<T>(value: T?)",
+        "pub fn expect_none<T>(value: T?)",
+        "pub fn expect_failure<T>(action: fn(): T, code: Str?)",
+        "pub fn for_all<T>(",
+        "pub fn integer_range(",
+        "pub fn elements<T>(values: [T])",
+        "pub fn list_of<T>(element: fn(Int, Int): T, maximum_length: Int)",
+        "pub fn run_fixture(",
+        "pub fn with_isolated_database<T>(",
+    ] {
+        assert!(sources[33].1.contains(declaration), "missing std.test declaration `{declaration}`");
+    }
+    for contract in [
+        "Core `assert` remains",
+        "zero-based case index",
+        "pair always produces the same value",
+        "worktree-local CWD",
+        "developer credentials, local",
+        "live services are never implicit",
+        "lower-inclusive",
+        "upper-exclusive",
+    ] {
+        assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
+    }
     assert_eq!(sources[19].0, REFERENCE_STANDARD_ERROR_PATH_V1);
     assert!(sources[19].1.contains("pub fn make(code: Str, message: Str): Error"));
     assert!(sources[19]
@@ -484,6 +538,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         (REFERENCE_STANDARD_URL_PATH_V1, 30),
         (REFERENCE_STANDARD_NET_HTTP_PATH_V1, 31),
         (REFERENCE_STANDARD_NET_WEBSOCKET_PATH_V1, 32),
+        (REFERENCE_STANDARD_TEST_PATH_V1, 33),
     ] {
         let mut changed_source = sources[source_index].1.clone();
         changed_source.push_str("\n// changed after the captured snapshot\n");
@@ -522,6 +577,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     let random_hash_consumer = include_str!("fixtures/v1_random_hash_consumer.orna");
     let serialization_consumer = include_str!("fixtures/v1_serialization_consumer.orna");
     let network_consumer = include_str!("fixtures/v1_network_consumer.orna");
+    let test_consumer = include_str!("fixtures/v1_test_consumer.orna");
     for (path, source) in [
         ("list_consumer.orna", include_str!("fixtures/v1_list_consumer.orna")),
         ("map_consumer.orna", include_str!("fixtures/v1_map_consumer.orna")),
@@ -554,6 +610,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
             ModuleInput::new("random_hash_consumer.orna", random_hash_consumer),
             ModuleInput::new("serialization_consumer.orna", serialization_consumer),
             ModuleInput::new("network_consumer.orna", network_consumer),
+            ModuleInput::new("test_consumer.orna", test_consumer),
         ],
         &catalogue,
     );
