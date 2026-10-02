@@ -613,6 +613,24 @@ impl ReboundPathResolution {
     }
 }
 
+/// Independently resolved sibling paths, kept in input order.
+#[derive(Clone, Debug, Default)]
+pub struct SiblingRebindResolution {
+    routes: Vec<ReboundPathResolution>,
+}
+
+impl SiblingRebindResolution {
+    /// The sibling results in the same order as their input plans.
+    pub fn routes(&self) -> &[ReboundPathResolution] {
+        &self.routes
+    }
+
+    /// Takes ownership of the sibling results in input order.
+    pub fn into_routes(self) -> Vec<ReboundPathResolution> {
+        self.routes
+    }
+}
+
 /// A primary database and zero or more read-only, commit-pinned attachments.
 #[derive(Clone, Debug)]
 pub struct AttachedDatabaseSession {
