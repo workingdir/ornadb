@@ -385,7 +385,7 @@ impl RelationStage {
                 Some(left.values().eq(right.iter()))
             }
             (Self::SharedFilter(left), Self::SharedFilter(right)) => {
-                Some(left.values().eq(right.values()))
+                Some(Arc::ptr_eq(left, right) || left.values().eq(right.values()))
             }
             _ => None,
         }
@@ -568,6 +568,8 @@ impl RelationPlan {
             }
         };
         let (left, right) = self.source_union.take().expect("checked union source");
+        // Keep composed roots shared when the same operand batch fans out to
+        // several leaves under this cascade.
         let mut shared_joins = FilterBatchJoinCache::new();
         self.source_union = Some((
             Box::new(left.push_filter_cascade(Arc::clone(&predicates), &mut shared_joins)),
