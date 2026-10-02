@@ -6825,6 +6825,470 @@ fn sibling_depth_storms_preserve_convergent_terminal_routes() {
 }
 
 #[test]
+fn reversed_sibling_storm_order_preserves_convergent_terminal_routes() {
+    let package_source = include_str!("fixtures/attach-package.orna");
+    let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
+    let aliases = [
+        "archive",
+        "archive_copy",
+        "archive_copy_archive",
+        "archive_copy_archive_archive",
+    ];
+    let branch_count = 2;
+    let depth_candidate_count = 2;
+    let terminal_candidate_count = 3;
+    let marker = |depth: usize, branch: usize, variant: usize| {
+        (depth + 1) * 100 + branch * 10 + variant
+    };
+
+    let terminal_commits: Vec<String> = (0..terminal_candidate_count)
+        .map(|variant| {
+            write_package_snapshot(
+                shared_dir.path(),
+                package_source,
+                &format!("{}", marker(3, 0, variant)),
+                None,
+                &format!("order-stable terminal {variant}"),
+            )
+        })
+        .collect();
+    let deep_commits: Vec<Vec<String>> = (0..branch_count)
+        .map(|branch| {
+            (0..depth_candidate_count)
+                .map(|variant| {
+                    let manifest = format!("{} {}\n", aliases[3], terminal_commits[0]);
+                    write_package_snapshot(
+                        shared_dir.path(),
+                        package_source,
+                        &format!("{}", marker(2, branch, variant)),
+                        Some(&manifest),
+                        &format!("branch {branch} deep {variant} shared terminal"),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    let shared_deep_commit = deep_commits[0][0].clone();
+    let middle_commits: Vec<Vec<String>> = (0..branch_count)
+        .map(|branch| {
+            (0..depth_candidate_count)
+                .map(|variant| {
+                    let manifest = format!("{} {}\n", aliases[2], shared_deep_commit);
+                    write_package_snapshot(
+                        shared_dir.path(),
+                        package_source,
+                        &format!("{}", marker(1, branch, variant)),
+                        Some(&manifest),
+                        &format!("branch {branch} middle {variant} shared deep pin"),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    let parent_manifest = format!("{} {}\n", aliases[1], middle_commits[0][0]);
+    let parent_commit = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "50",
+        Some(&parent_manifest),
+        "parent for reversed sibling storm schedules",
+    );
+
+    let loader = ProjectLoader::default();
+    let resolve_pin_grid = |alias: &str, commits: &[Vec<String>]| {
+        commits
+            .iter()
+            .map(|branch| {
+                branch
+                    .iter()
+                    .map(|commit| {
+                        PinnedDatabase::resolve(alias, shared_repository.clone(), commit, loader)
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let middle_pins = resolve_pin_grid(aliases[1], &middle_commits);
+    let deep_pins = resolve_pin_grid(aliases[2], &deep_commits);
+    let terminal_pins: Vec<PinnedDatabase> = terminal_commits
+        .iter()
+        .map(|commit| {
+            PinnedDatabase::resolve(aliases[3], shared_repository.clone(), commit, loader).unwrap()
+        })
+        .collect();
+    let parent_pin = PinnedDatabase::resolve(
+        aliases[0],
+        shared_repository.clone(),
+        &parent_commit,
+        loader,
+    )
+    .unwrap();
+    let resolver = PackageResolver::new(
+        aliases
+            .iter()
+            .map(|alias| ((*alias).to_owned(), shared_repository.clone())),
+        loader,
+    )
+    .unwrap();
+    let storm_alias = |session: &mut AttachedDatabaseSession,
+                       alias: &str,
+                       candidates: &[PinnedDatabase],
+                       sequence: &[usize]| {
+        for candidate in sequence {
+            session.detach_database(alias).unwrap();
+            session
+                .attach_database(candidates[*candidate].clone())
+                .unwrap();
+        }
+    };
+    let assert_pin = |session: &AttachedDatabaseSession, alias: &str, commit: &str| {
+        assert_eq!(session.database(alias).unwrap().pin().commit().as_str(), commit);
+    };
+    let assert_terminal = |session: &AttachedDatabaseSession, variant: usize| {
+        assert_pin(session, aliases[3], &terminal_commits[variant]);
+        assert_module_route(
+            session,
+            &format!("{}.orna", aliases[3]),
+            &format!("= {}", marker(3, 0, variant)),
+        );
+    };
+
+    let parent = resolver.resolve_for_parent(parent_pin).unwrap();
+    let mut forward_middle = vec![parent.clone(); branch_count];
+    let mut reverse_middle = vec![parent.clone(); branch_count];
+    let middle_sequences = [[1, 0, 1], [0, 1, 0]];
+    for branch in [0, 1] {
+        storm_alias(
+            &mut forward_middle[branch],
+            aliases[1],
+            &middle_pins[branch],
+            &middle_sequences[branch],
+        );
+    }
+    for branch in [1, 0] {
+        storm_alias(
+            &mut reverse_middle[branch],
+            aliases[1],
+            &middle_pins[branch],
+            &middle_sequences[branch],
+        );
+    }
+    let final_middle: Vec<PinnedDatabase> = (0..branch_count)
+        .map(|branch| forward_middle[branch].database(aliases[1]).unwrap().clone())
+        .collect();
+    for branch in 0..branch_count {
+        assert_pin(
+            &reverse_middle[branch],
+            aliases[1],
+            final_middle[branch].pin().commit().as_str(),
+        );
+        assert_module_route(&parent, &format!("{}.orna", aliases[1]), "= 200");
+    }
+
+    let mut forward_deep: Vec<AttachedDatabaseSession> = final_middle
+        .iter()
+        .map(|pin| resolver.resolve_for_parent(pin.clone()).unwrap())
+        .collect();
+    let reverse_middle_pins: Vec<PinnedDatabase> = (0..branch_count)
+        .map(|branch| reverse_middle[branch].database(aliases[1]).unwrap().clone())
+        .collect();
+    let mut reverse_deep: Vec<AttachedDatabaseSession> = reverse_middle_pins
+        .iter()
+        .map(|pin| resolver.resolve_for_parent(pin.clone()).unwrap())
+        .collect();
+    let shared_deep_pin = forward_deep[0].database(aliases[2]).unwrap().clone();
+    let forward_deep_snapshots = forward_deep.clone();
+    let reverse_deep_snapshots = reverse_deep.clone();
+    let deep_sequences = [[1, 0, 1], [0, 1, 0]];
+    for branch in [0, 1] {
+        storm_alias(
+            &mut forward_deep[branch],
+            aliases[2],
+            &deep_pins[branch],
+            &deep_sequences[branch],
+        );
+    }
+    for branch in [1, 0] {
+        storm_alias(
+            &mut reverse_deep[branch],
+            aliases[2],
+            &deep_pins[branch],
+            &deep_sequences[branch],
+        );
+    }
+    let final_deep: Vec<PinnedDatabase> = (0..branch_count)
+        .map(|branch| forward_deep[branch].database(aliases[2]).unwrap().clone())
+        .collect();
+    for branch in 0..branch_count {
+        assert_pin(
+            &reverse_deep[branch],
+            aliases[2],
+            final_deep[branch].pin().commit().as_str(),
+        );
+        assert_module_route(
+            &forward_deep_snapshots[branch],
+            &format!("{}.orna", aliases[2]),
+            "= 300",
+        );
+        assert_module_route(
+            &reverse_deep_snapshots[branch],
+            &format!("{}.orna", aliases[2]),
+            "= 300",
+        );
+    }
+
+    let mut forward_terminal: Vec<AttachedDatabaseSession> = final_deep
+        .iter()
+        .map(|pin| resolver.resolve_for_parent(pin.clone()).unwrap())
+        .collect();
+    let reverse_deep_pins: Vec<PinnedDatabase> = (0..branch_count)
+        .map(|branch| reverse_deep[branch].database(aliases[2]).unwrap().clone())
+        .collect();
+    let mut reverse_terminal: Vec<AttachedDatabaseSession> = reverse_deep_pins
+        .iter()
+        .map(|pin| resolver.resolve_for_parent(pin.clone()).unwrap())
+        .collect();
+    for terminal in forward_terminal.iter().chain(reverse_terminal.iter()) {
+        assert_terminal(terminal, 0);
+    }
+    let forward_manifest_routes = forward_terminal.clone();
+    let reverse_manifest_routes = reverse_terminal.clone();
+    let terminal_sequences = [[1, 2, 1], [2, 1, 2]];
+    for branch in [0, 1] {
+        storm_alias(
+            &mut forward_terminal[branch],
+            aliases[3],
+            &terminal_pins,
+            &terminal_sequences[branch],
+        );
+    }
+    for branch in [1, 0] {
+        storm_alias(
+            &mut reverse_terminal[branch],
+            aliases[3],
+            &terminal_pins,
+            &terminal_sequences[branch],
+        );
+    }
+    for (branch, final_variant) in [(0, 1), (1, 2)] {
+        assert_terminal(&forward_terminal[branch], final_variant);
+        assert_terminal(&reverse_terminal[branch], final_variant);
+        assert_terminal(&forward_manifest_routes[branch], 0);
+        assert_terminal(&reverse_manifest_routes[branch], 0);
+    }
+    let reopened_shared_route = resolver.resolve_for_parent(shared_deep_pin).unwrap();
+    assert_terminal(&reopened_shared_route, 0);
+}
+
+#[test]
+fn convergent_sibling_terminal_storms_keep_paired_depth_routes_stable() {
+    let package_source = include_str!("fixtures/attach-package.orna");
+    let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
+    let aliases = [
+        "archive",
+        "archive_copy",
+        "archive_copy_archive",
+        "archive_copy_archive_archive",
+    ];
+    let marker = |depth: usize, variant: usize| (depth + 1) * 100 + variant;
+
+    let terminal_commits: Vec<String> = (0..3)
+        .map(|variant| {
+            write_package_snapshot(
+                shared_dir.path(),
+                package_source,
+                &format!("{}", marker(3, variant)),
+                None,
+                &format!("convergent terminal {variant}"),
+            )
+        })
+        .collect();
+    let deep_commits: Vec<String> = (0..3)
+        .map(|variant| {
+            let manifest = format!("{} {}\n", aliases[3], terminal_commits[0]);
+            write_package_snapshot(
+                shared_dir.path(),
+                package_source,
+                &format!("{}", marker(2, variant)),
+                Some(&manifest),
+                &format!("paired-depth candidate {variant}"),
+            )
+        })
+        .collect();
+    let shared_deep_commit = deep_commits[0].clone();
+    let middle_commits: Vec<String> = (0..3)
+        .map(|variant| {
+            let manifest = format!("{} {}\n", aliases[2], shared_deep_commit);
+            write_package_snapshot(
+                shared_dir.path(),
+                package_source,
+                &format!("{}", marker(1, variant)),
+                Some(&manifest),
+                &format!("sibling middle candidate {variant}"),
+            )
+        })
+        .collect();
+    let parent_manifest = format!("{} {}\n", aliases[1], middle_commits[0]);
+    let parent_commit = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "50",
+        Some(&parent_manifest),
+        "parent for convergent sibling terminal storms",
+    );
+
+    let loader = ProjectLoader::default();
+    let resolve_pins = |alias: &str, commits: &[String]| {
+        commits
+            .iter()
+            .map(|commit| {
+                PinnedDatabase::resolve(alias, shared_repository.clone(), commit, loader).unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    let middle_pins = resolve_pins(aliases[1], &middle_commits);
+    let deep_pins = resolve_pins(aliases[2], &deep_commits);
+    let terminal_pins = resolve_pins(aliases[3], &terminal_commits);
+    let parent_pin = PinnedDatabase::resolve(
+        aliases[0],
+        shared_repository.clone(),
+        &parent_commit,
+        loader,
+    )
+    .unwrap();
+    let resolver = PackageResolver::new(
+        aliases
+            .iter()
+            .map(|alias| ((*alias).to_owned(), shared_repository.clone())),
+        loader,
+    )
+    .unwrap();
+    let assert_pin = |session: &AttachedDatabaseSession, alias: &str, commit: &str| {
+        assert_eq!(session.database(alias).unwrap().pin().commit().as_str(), commit);
+    };
+    let assert_route = |session: &AttachedDatabaseSession, alias: &str, depth, variant| {
+        assert_module_route(
+            session,
+            &format!("{}.orna", alias),
+            &format!("= {}", marker(depth, variant)),
+        );
+    };
+
+    let parent = resolver.resolve_for_parent(parent_pin).unwrap();
+    let mut siblings = [parent.clone(), parent.clone()];
+    let mut retained_middle = [None, None];
+    for (sibling, candidate) in [(0, 1), (1, 2), (1, 1), (0, 2), (1, 2), (0, 1)] {
+        siblings[sibling].detach_database(aliases[1]).unwrap();
+        siblings[sibling]
+            .attach_database(middle_pins[candidate].clone())
+            .unwrap();
+        retained_middle[sibling]
+            .get_or_insert_with(|| siblings[sibling].database(aliases[1]).unwrap().clone());
+        assert_pin(
+            &siblings[sibling],
+            aliases[1],
+            &middle_commits[candidate],
+        );
+        assert_route(&siblings[sibling], aliases[1], 1, candidate);
+    }
+    assert_route(&parent, aliases[1], 1, 0);
+
+    let selected_middle: Vec<PinnedDatabase> = siblings
+        .iter()
+        .map(|sibling| sibling.database(aliases[1]).unwrap().clone())
+        .collect();
+    let mut deep_branches: Vec<AttachedDatabaseSession> = selected_middle
+        .iter()
+        .map(|pin| resolver.resolve_for_parent(pin.clone()).unwrap())
+        .collect();
+    let retained_shared_deep = deep_branches[0].database(aliases[2]).unwrap().clone();
+    let manifest_deep_routes = deep_branches.clone();
+    let mut retained_deep = [None, None];
+    for (sibling, candidate) in [(0, 1), (1, 2), (1, 1), (0, 2), (1, 0), (0, 0)] {
+        deep_branches[sibling]
+            .detach_database(aliases[2])
+            .unwrap();
+        deep_branches[sibling]
+            .attach_database(deep_pins[candidate].clone())
+            .unwrap();
+        retained_deep[sibling]
+            .get_or_insert_with(|| deep_branches[sibling].database(aliases[2]).unwrap().clone());
+        assert_pin(
+            &deep_branches[sibling],
+            aliases[2],
+            &deep_commits[candidate],
+        );
+        assert_route(&deep_branches[sibling], aliases[2], 2, candidate);
+    }
+    for sibling in 0..2 {
+        assert_pin(&deep_branches[sibling], aliases[2], &shared_deep_commit);
+        assert_route(&deep_branches[sibling], aliases[2], 2, 0);
+        assert_pin(&manifest_deep_routes[sibling], aliases[2], &shared_deep_commit);
+        assert_route(&manifest_deep_routes[sibling], aliases[2], 2, 0);
+    }
+
+    let shared_deep_pins: Vec<PinnedDatabase> = deep_branches
+        .iter()
+        .map(|branch| branch.database(aliases[2]).unwrap().clone())
+        .collect();
+    assert_eq!(
+        shared_deep_pins[0].pin().commit(),
+        shared_deep_pins[1].pin().commit()
+    );
+    let mut terminal_branches: Vec<AttachedDatabaseSession> = shared_deep_pins
+        .iter()
+        .map(|pin| resolver.resolve_for_parent(pin.clone()).unwrap())
+        .collect();
+    let manifest_terminal_routes = terminal_branches.clone();
+    let mut retained_terminal = [None, None];
+    for (sibling, candidate) in [(0, 1), (1, 2), (1, 1), (0, 2), (1, 2)] {
+        terminal_branches[sibling]
+            .detach_database(aliases[3])
+            .unwrap();
+        terminal_branches[sibling]
+            .attach_database(terminal_pins[candidate].clone())
+            .unwrap();
+        retained_terminal[sibling]
+            .get_or_insert_with(|| terminal_branches[sibling].database(aliases[3]).unwrap().clone());
+        assert_pin(
+            &terminal_branches[sibling],
+            aliases[3],
+            &terminal_commits[candidate],
+        );
+        assert_route(&terminal_branches[sibling], aliases[3], 3, candidate);
+    }
+    for sibling in 0..2 {
+        assert_pin(
+            &terminal_branches[sibling],
+            aliases[3],
+            &terminal_commits[2],
+        );
+        assert_route(&terminal_branches[sibling], aliases[3], 3, 2);
+        assert_route(&manifest_terminal_routes[sibling], aliases[3], 3, 0);
+    }
+
+    let fresh_shared_route = resolver
+        .resolve_for_parent(retained_shared_deep)
+        .unwrap();
+    assert_route(&fresh_shared_route, aliases[3], 3, 0);
+    for sibling in 0..2 {
+        let middle_route = resolver
+            .resolve_for_parent(retained_middle[sibling].take().unwrap())
+            .unwrap();
+        assert_route(&middle_route, aliases[2], 2, 0);
+        let retained_deep_route = resolver
+            .resolve_for_parent(retained_deep[sibling].take().unwrap())
+            .unwrap();
+        assert_route(&retained_deep_route, aliases[3], 3, 0);
+        let retained_terminal_route = resolver
+            .resolve_for_parent(retained_terminal[sibling].take().unwrap())
+            .unwrap();
+        assert_eq!(retained_terminal_route.attached().count(), 0);
+    }
+}
+
+#[test]
 fn three_sibling_depth_storms_keep_convergent_routes_stable() {
     let package_source = include_str!("fixtures/attach-package.orna");
     let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);

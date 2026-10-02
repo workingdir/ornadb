@@ -4125,6 +4125,104 @@ fn paired_nested_closure_chain_depth_storms_reject_cross_chain_leaf_mixing() {
 }
 
 #[test]
+fn paired_nested_chain_rebind_cascades_preserve_each_captured_depth() {
+    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-cascades.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-chain-rebind-cascades.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired root, bridge, and leaf closures must preserve their captured pins through chained rebind cascades: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_nested_chain_rebind_cascades_reject_cross_chain_terminal_mixing() {
+    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-cascades-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-chain-rebind-cascades-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "terminal values from opposite sides of the paired nested chain must remain type-distinct: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_nested_chain_rebind_replays_preserve_captured_pin_identity() {
+    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-replay-stability.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-chain-rebind-replay-stability.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "replaying saved paired closures after nested decoy storms must preserve root, bridge, leaf, and terminal pin identity: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn paired_nested_chain_rebind_replays_reject_cross_chain_terminal_mixing() {
+    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-replay-stability-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-chain-rebind-replay-stability-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "replayed terminal closures from opposite sides of a paired chain must remain type-distinct: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
