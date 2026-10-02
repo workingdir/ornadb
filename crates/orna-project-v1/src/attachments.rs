@@ -370,6 +370,13 @@ impl PackageResolver {
     /// pre-rebind snapshots retain their original routes. Since the reference
     /// is silent on this wider post-storm sequence, v1 treats every reopened
     /// closure as a fresh route root and keeps rebinds local to that session.
+    /// If a later paired middle/deep rebind selects different child pins for
+    /// sibling roots, each new deep closure follows the exact middle
+    /// manifest it was opened from. Rebinding its deep alias affects only
+    /// that closure; retained pre-storm and manifest-selected snapshots keep
+    /// their own pins. The reference is silent on diverging post-storm child
+    /// routes, so v1 resolves each edge from its selected immutable pin and
+    /// does not inherit a sibling's prior route.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
