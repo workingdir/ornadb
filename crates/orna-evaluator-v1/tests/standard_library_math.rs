@@ -23,9 +23,9 @@ fn pinned_math_module_provides_exact_integer_utilities() {
     );
     for clause in include_str!("fixtures/stdlib-math-contract-t7auz.orna").split("&&") {
         let clause = clause.trim();
-        let result = session
-            .submit(clause)
-            .unwrap_or_else(|error| panic!("math contract clause {clause:?} failed: {}", error.code()));
+        let result = session.submit(clause).unwrap_or_else(|error| {
+            panic!("math contract clause {clause:?} failed: {}", error.code())
+        });
         assert_eq!(result, Some(bool_value(true)), "math clause: {clause}");
     }
 }
