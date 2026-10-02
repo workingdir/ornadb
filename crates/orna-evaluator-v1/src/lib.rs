@@ -21,8 +21,8 @@ use orna_syntax_v1::{
     PatternField, ReplInput, Statement, StringSegment, parse_expression, parse_repl,
 };
 use orna_value_v1::{
-    CANONICAL_NAN_BITS, ErrorValue as CanonicalErrorValue, Raw, float_max, float_min,
-    float_ordinary_eq, float_total_cmp,
+    CANONICAL_NAN_BITS, ErrorValue as CanonicalErrorValue, Raw, domain_digest, float_max,
+    float_min, float_ordinary_eq, float_total_cmp,
 };
 use sha2::{Digest as _, Sha256};
 use unicode_normalization::UnicodeNormalization;
@@ -68,6 +68,23 @@ const DEFAULT_DEPTH: usize = 64;
 const DEFAULT_ITEMS: usize = 1_024;
 const DEFAULT_STRING_BYTES: usize = 16_384;
 const DEFAULT_INTEGER_DIGITS: usize = 1_024;
+
+fn unicode_16_white_space(value: char) -> bool {
+    matches!(
+        value,
+        '\u{0009}'..='\u{000D}'
+            | '\u{0020}'
+            | '\u{0085}'
+            | '\u{00A0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200A}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202F}'
+            | '\u{205F}'
+            | '\u{3000}'
+    )
+}
 
 /// Explicit resource bounds. All zero values reject evaluation immediately.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1261,6 +1278,15 @@ enum Value {
         upper_inclusive: bool,
     },
     List(Vec<Value>),
+    /// Immutable replayable source over a finite list. `position` is the
+    /// `orna.list.v1` index of the next item; the digest binds the source
+    /// label to the canonical typed encoding of the complete list.
+    Stream {
+        values: Vec<Value>,
+        source_label: String,
+        source_digest: [u8; 32],
+        position: usize,
+    },
     Relation(RelationPlan),
     Tuple(Vec<Value>),
     Record(BTreeMap<String, Value>),
@@ -1460,6 +1486,7 @@ impl Value {
         match self {
             Self::Function { .. } | Self::Closure(_) => true,
             Self::List(values) | Self::Tuple(values) => values.iter().any(Self::contains_callable),
+            Self::Stream { values, .. } => values.iter().any(Self::contains_callable),
             Self::Record(values) => values.values().any(Self::contains_callable),
             Self::NominalRecord { fields, .. } => {
                 fields.iter().any(|(_, value)| value.contains_callable())
@@ -1475,6 +1502,7 @@ impl Value {
         match self {
             Self::Float(_) => true,
             Self::List(values) | Self::Tuple(values) => values.iter().any(Self::contains_float),
+            Self::Stream { values, .. } => values.iter().any(Self::contains_float),
             Self::Record(values) => values.values().any(Self::contains_float),
             Self::NominalRecord { fields, .. } => {
                 fields.iter().any(|(_, value)| value.contains_float())
@@ -1496,7 +1524,7 @@ impl Value {
             Self::Function { .. } | Self::Closure(_) => {
                 return Err(error("ORNA-EVAL-UNSUPPORTED"));
             }
-            Self::Relation(_) | Self::Period { .. } => {
+            Self::Relation(_) | Self::Stream { .. } | Self::Period { .. } => {
                 return Err(error("ORNA-EVAL-UNSUPPORTED"));
             }
             // Error values are only available to the handling side of `|?`.
@@ -3705,6 +3733,7 @@ impl Context<'_, '_> {
         let mut state = RelationBucketState::try_new(spec.clone()).map_err(bucket_error)?;
         let prefix = RelationPlan {
             source: plan.source.clone(),
+            source_identity: plan.source_identity,
             source_union: plan.source_union.clone(),
             stages: plan.stages[..bucket_index].to_vec(),
         };
@@ -3718,6 +3747,7 @@ impl Context<'_, '_> {
             };
             let group_plan = RelationPlan {
                 source: plan.source.clone(),
+                source_identity: plan.source_identity,
                 source_union: plan.source_union.clone(),
                 stages: plan.stages[..bucket_index + 1 + sort_pos].to_vec(),
             };
@@ -4379,6 +4409,7 @@ impl Context<'_, '_> {
         };
         let prefix = RelationPlan {
             source: plan.source.clone(),
+            source_identity: plan.source_identity,
             source_union: plan.source_union.clone(),
             stages: plan.stages[..sort_index].to_vec(),
         };
@@ -4887,6 +4918,12 @@ impl Context<'_, '_> {
         let native_time = native_binding
             .filter(|binding| binding.kind == StandardBindingKind::Time)
             .map(|binding| binding.operation);
+        let root_stream = root_stream_name(callee);
+        let stream = match (root_stream, input.as_ref()) {
+            (Some("from_list"), None) => Some("from_list"),
+            (Some("for_each"), Some(Value::Stream { .. })) => Some("for_each"),
+            _ => None,
+        };
         let native_hash = native_binding
             .filter(|binding| binding.kind == StandardBindingKind::Hash)
             .map(|binding| binding.operation);
@@ -4940,6 +4977,7 @@ impl Context<'_, '_> {
         // primitives for operations whose values are erased at runtime.
         if !native_asof_join
             && !native_collection
+            && stream.is_none()
             && native_math.is_none()
             && native_text.is_none()
             && native_bits.is_none()
@@ -5128,6 +5166,7 @@ impl Context<'_, '_> {
             .or(text)
             .or(stats)
             .or(time)
+            .or(stream)
             .or(native_hash)
             .or(native_base64)
             .or(collection)
@@ -5169,7 +5208,7 @@ impl Context<'_, '_> {
             arguments,
             values,
             implicit,
-            collection.is_some(),
+            collection.is_some() || stream.is_some(),
         )?;
         if math.is_some() {
             self.math(name, values)
@@ -5202,6 +5241,8 @@ impl Context<'_, '_> {
             }
         } else if time.is_some() {
             self.time(name, values)
+        } else if stream.is_some() {
+            self.stream(name, values, depth)
         } else if native_hash.is_some() {
             self.hash(name, values)
         } else if native_base64.is_some() {
@@ -5438,9 +5479,11 @@ impl Context<'_, '_> {
         let name = name.strip_prefix("__").unwrap_or(name);
         match (name, values.as_slice()) {
             ("trim", [Value::String(value)]) => {
-                // The bounded profile trims the Unicode White_Space set used
-                // by the runtime string implementation.
-                self.string(value.trim().to_owned()).map(Value::String)
+                // Keep the pinned standard profile independent of the Rust
+                // toolchain's Unicode tables. Unicode 16.0.0's White_Space
+                // property is stable and explicitly listed above.
+                self.string(value.trim_matches(unicode_16_white_space).to_owned())
+                    .map(Value::String)
             }
             ("split", [Value::String(value), Value::String(separator)]) => {
                 // This profile preserves leading/trailing empty fields. An
@@ -5609,6 +5652,86 @@ impl Context<'_, '_> {
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
+    fn stream(
+        &mut self,
+        name: &str,
+        values: Vec<Value>,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        match (name, values.as_slice()) {
+            ("from_list", [Value::List(items), Value::String(source_label)]) => {
+                self.items(items.len())?;
+                let source_label = self.string(source_label.clone())?;
+                let source_digest = self.list_stream_digest(&source_label, items)?;
+                Ok(Value::Stream {
+                    values: items.clone(),
+                    source_label,
+                    source_digest,
+                    position: 0,
+                })
+            }
+            (
+                "for_each",
+                [
+                    Value::Stream {
+                        values,
+                        source_label,
+                        source_digest,
+                        position,
+                    },
+                    action,
+                ],
+            ) => {
+                self.items(values.len())?;
+                if *position > values.len()
+                    || self.list_stream_digest(source_label, values)? != *source_digest
+                {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                let mut next_index = *position;
+                while next_index < values.len() {
+                    self.step()?;
+                    let result = self.invoke_predicate(
+                        action,
+                        values[next_index].clone(),
+                        depth + 1,
+                    )?;
+                    if !matches!(result, Value::Unit | Value::Null) {
+                        return Err(error("ORNA-EVAL-TYPE"));
+                    }
+                    // Callback completion and checkpoint movement consume
+                    // independent cancellable steps; failures leave the
+                    // next-item position unchanged.
+                    self.step()?;
+                    next_index += 1;
+                }
+                Ok(Value::Unit)
+            }
+            ("from_list", [_, _]) | ("for_each", [_, _]) => Err(error("ORNA-EVAL-TYPE")),
+            _ => Err(error("ORNA-EVAL-ARGUMENT")),
+        }
+    }
+
+    fn list_stream_digest(
+        &mut self,
+        source_label: &str,
+        values: &[Value],
+    ) -> Result<[u8; 32], EvaluationError> {
+        self.string(source_label.to_owned())?;
+        self.items(values.len())?;
+        let mut encoded_values = Vec::with_capacity(values.len());
+        for value in values {
+            self.step()?;
+            encoded_values.push(value.clone().raw()?);
+            self.items(encoded_values.len())?;
+        }
+        let identity = Raw::Array(vec![
+            Raw::Text(source_label.to_owned()),
+            Raw::Array(encoded_values),
+        ]);
+        domain_digest("orna.list.v1", &identity).map_err(|_| error("ORNA-EVAL-VALUE"))
+    }
+
     fn collection(
         &mut self,
         name: &str,
@@ -7771,6 +7894,8 @@ fn named_arguments(
         | "base64.encode" | "base64.decode" => &["input"],
         "hash.domain_sha256" => &["domain", "payload"],
         "chunk" => &["values", "size"],
+        "from_list" => &["values", "source_identity"],
+        "for_each" => &["stream", "action"],
         "flatten" | "unique" | "pairs" => &["values"],
         "distinct" | "count" => &["rows"],
         "last" => &["rows"],
@@ -8280,6 +8405,19 @@ fn time_name(expression: &Expr) -> Option<&str> {
     standard_name(expression, "time")
 }
 
+fn root_stream_name(expression: &Expr) -> Option<&'static str> {
+    match expression {
+        Expr::Field { base, name, .. }
+            if name == "from_list"
+                && matches!(base.as_ref(), Expr::Name { text, .. } if text == "Stream") =>
+        {
+            Some("from_list")
+        }
+        Expr::Name { text, .. } if text == "for_each" => Some("for_each"),
+        _ => None,
+    }
+}
+
 fn root_collection_name(expression: &Expr) -> Option<&str> {
     let Expr::Name { text, .. } = expression else {
         return None;
@@ -8337,6 +8475,9 @@ fn relation_call_candidate(
 }
 
 fn relation_expression_candidate(expression: &Expr, scope: &Scope) -> bool {
+    if system_relation_source(expression).is_some() {
+        return true;
+    }
     if let Expr::Name { text, .. } = expression {
         return matches!(scope.0.get(text), Some(Value::Relation(_)));
     }
