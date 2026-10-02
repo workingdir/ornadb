@@ -7924,7 +7924,9 @@ fn infer(
                             infer(value, scope, &locals, diagnostics)
                         };
                         effects.join(&x.effects);
-                        let ty = x.ty;
+                        // A local alias of a typed pin keeps the source
+                        // parameter identity for later rebinding and capture.
+                        let ty = specialize_snapshot_ref_parameter(value, &x.ty, &locals);
                         if ty == Type::Bottom {
                             final_control = Some(Inferred {
                                 ty,
@@ -8626,7 +8628,8 @@ fn infer_assignment(
     local: &mut BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> EffectSummary {
-    let value = infer(value, scope, local, diagnostics);
+    let value_expression = value;
+    let value = infer(value_expression, scope, local, diagnostics);
     match (target, operator) {
         (AssignmentTarget::Name { name, .. }, AssignmentOperator::Set) => {
             let expected = local.get(name).map(|symbol| symbol.ty.clone());
@@ -8636,8 +8639,16 @@ fn infer_assignment(
                 {
                     // Rebinding changes the pin seen by later reads of this local;
                     // inferred closure types retain the previous snapshot value.
+                    let rebound_type = specialize_snapshot_ref_parameter(
+                        value_expression,
+                        &value.ty,
+                        local,
+                    );
                     if let Some(symbol) = local.get_mut(name) {
-                        symbol.ty = value.ty.clone();
+                        // When a parameter is rebound from another snapshot
+                        // parameter, preserve the source identity so returned
+                        // closure chains specialize against that caller input.
+                        symbol.ty = rebound_type;
                     }
                 }
                 Some(expected) => require_same(&expected, &value.ty, diagnostics),
