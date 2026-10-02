@@ -14388,6 +14388,40 @@ fn contains_type_error(ty: &Type) -> bool {
     }
 }
 
+/// Tuple widths in callback signatures are part of the binding wave even when
+/// the tuple is nested under a higher-order function or aggregate parameter.
+/// If a nested width is unknown during recovery, do not partially promote pins
+/// from sibling arguments.
+fn contains_tuple_type(ty: &Type) -> bool {
+    match ty {
+        Type::Tuple(_) => true,
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => contains_tuple_type(element),
+        Type::Record(fields) => fields.values().any(contains_tuple_type),
+        Type::Applied { arguments, .. } => arguments.iter().any(contains_tuple_type),
+        Type::Function {
+            parameters, result, ..
+        } => parameters.iter().any(contains_tuple_type) || contains_tuple_type(result),
+        Type::MoneyPerUnit { currency, unit } => {
+            contains_tuple_type(currency) || contains_tuple_type(unit)
+        }
+        Type::Int
+        | Type::Decimal
+        | Type::Float
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null
+        | Type::Named(_)
+        | Type::Bottom
+        | Type::Error => false,
+    }
+}
+
 /// `Bottom` is compatible during ordinary contextual checking, but a value
 /// containing a non-returning tuple or record component is never produced as
 /// an argument. Walk only value aggregates: a callback's Bottom result or an
@@ -16634,7 +16668,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
             let Some(actual) = argument_types.get(argument_index) else {
                 return true;
             };
-            matches!(formal, Type::Tuple(_))
+            contains_tuple_type(formal)
                 && (contains_type_error(formal)
                     || contains_type_error(actual)
                     || !types_match(formal, actual))
@@ -16642,9 +16676,9 @@ fn specialize_dynamic_parameter_snapshot_contexts(
     // The reference specifies pin identity but leaves recovery after a call
     // that cannot reach the callee unspecified. Treat its binding wave
     // transactionally:
-    // a malformed tuple or any missing required argument must not rebind
-    // otherwise valid siblings captured by the returned callable. Omitted
-    // defaults are valid.
+    // a malformed tuple at any depth in an argument signature, or any missing
+    // required argument, must not rebind otherwise valid siblings captured by
+    // the returned callable. Omitted defaults are valid.
     let suppress_rebinding = nonreturning_argument || incomplete_argument;
     if !suppress_rebinding {
         for (parameter_index, formal) in formal_parameters.iter().enumerate() {
@@ -17020,7 +17054,7 @@ fn collect_snapshot_binder_contexts(
                 }
             }
         }
-        (Type::Tuple(formal), Type::Tuple(actual)) => {
+        (Type::Tuple(formal), Type::Tuple(actual)) if formal.len() == actual.len() => {
             for (formal, actual) in formal.iter().zip(actual) {
                 collect_snapshot_binder_contexts(formal, actual, into);
             }
@@ -19597,6 +19631,106 @@ mod tests {
         assert_ne!(
             left, right,
             "suppression must keep same-named paired pin slots at distinct widths"
+        );
+    }
+
+    #[test]
+    fn unknown_nested_paired_width_suppresses_sibling_identity_promotion() {
+        let callback_selected =
+            contextual_snapshot_ref("selector:binder:callback.orna@10..18:parameter:selected");
+        let callback_sibling =
+            contextual_snapshot_ref("selector:binder:callback.orna@20..28:parameter:sibling");
+        let paired_selected =
+            contextual_snapshot_ref("selector:binder:pair.orna@30..38:parameter:selected");
+        let paired_sibling =
+            contextual_snapshot_ref("selector:binder:pair.orna@40..48:parameter:sibling");
+        let formal_callback = Type::Function {
+            parameters: vec![Type::Tuple(vec![
+                callback_selected.clone(),
+                callback_sibling.clone(),
+            ])],
+            parameter_names: None,
+            default_parameters: BTreeSet::new(),
+            result: Box::new(Type::Text),
+        };
+        let formal_pair = Type::Tuple(vec![paired_selected.clone(), paired_sibling.clone()]);
+        let actual_callback = Type::Function {
+            parameters: vec![Type::Tuple(vec![
+                contextual_snapshot_ref("selector:HEAD~12"),
+                Type::Error,
+            ])],
+            parameter_names: None,
+            default_parameters: BTreeSet::new(),
+            result: Box::new(Type::Text),
+        };
+        let arguments = (0..2)
+            .map(|index| orna_syntax_v1::Argument {
+                name: None,
+                value: Expr::Name {
+                    text: format!("argument_{index}"),
+                    span: SyntaxSpan::new(50 + index * 10, 55 + index * 10),
+                },
+                span: SyntaxSpan::new(50 + index * 10, 55 + index * 10),
+            })
+            .collect::<Vec<_>>();
+        let result = Type::Record(BTreeMap::from([
+            ("callback_selected".into(), callback_selected),
+            ("callback_sibling".into(), callback_sibling),
+            ("paired_selected".into(), paired_selected),
+            ("paired_sibling".into(), paired_sibling),
+        ]));
+
+        let specialized = specialize_dynamic_parameter_snapshot_contexts(
+            &result,
+            &[formal_callback, formal_pair],
+            &BTreeSet::new(),
+            None,
+            &arguments,
+            &[
+                actual_callback,
+                Type::Tuple(vec![
+                    contextual_snapshot_ref("selector:HEAD~10"),
+                    contextual_snapshot_ref("selector:HEAD~9"),
+                ]),
+            ],
+            &BTreeMap::new(),
+            &SyntaxSpan::new(45, 75),
+            None,
+        );
+
+        let mut contexts = BTreeSet::new();
+        collect_test_snapshot_contexts(&specialized, &mut contexts);
+        assert_eq!(
+            contexts.len(),
+            4,
+            "all paired pins must remain represented after an unknown nested width: {contexts:?}"
+        );
+        assert!(
+            contexts
+                .iter()
+                .all(|context| context.starts_with("selector:dynamic-call:")),
+            "no valid callback or sibling pin may be promoted independently: {contexts:?}"
+        );
+        assert!(
+            !contexts.iter().any(|context| context.contains("HEAD~")),
+            "unknown paired width must suppress all concrete identities in this wave: {contexts:?}"
+        );
+    }
+
+    #[test]
+    fn binder_context_collector_rejects_partial_tuple_widths() {
+        let formal = Type::Tuple(vec![
+            contextual_snapshot_ref("selector:binder:pair.orna@10..18:parameter:selected"),
+            contextual_snapshot_ref("selector:binder:pair.orna@20..28:parameter:sibling"),
+        ]);
+        let actual = Type::Tuple(vec![contextual_snapshot_ref("selector:HEAD~12")]);
+        let mut binder_contexts = BTreeMap::new();
+
+        collect_snapshot_binder_contexts(&formal, &actual, &mut binder_contexts);
+
+        assert!(
+            binder_contexts.is_empty(),
+            "an unpaired width must not collect even the valid tuple prefix: {binder_contexts:?}"
         );
     }
 
