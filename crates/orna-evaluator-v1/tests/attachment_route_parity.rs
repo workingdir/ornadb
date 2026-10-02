@@ -1104,6 +1104,14 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         .unwrap_or_else(|error| panic!("checkpoint pair cascade failed: {error:?}"));
 
     let replay_handoff = checkpoint_replay.retained_wave(4).unwrap()[0].clone();
+    let replay_depth_label = checkpoint_replay.retained_depth_label(4, 0).unwrap();
+    assert_eq!(replay_depth_label.wave(), 4);
+    assert_eq!(replay_depth_label.depth(), 0);
+    assert_eq!(
+        pin_route(&replay_handoff),
+        pin_route(saved_handoff.handoff()),
+        "the checkpoint depth label still identifies every exact pin after later pair folds"
+    );
     assert_eq!(
         replay_handoff.primary().pin().name(),
         saved_handoff.handoff().primary().pin().name()
