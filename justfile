@@ -136,6 +136,10 @@ sys-artifact-ci: sys-binding-conformance-ci
 sys-binding-conformance-ci:
     cargo test --locked -p orna-sys-v1 --features dev-sys-export --test system_binding_stubs --test host_registry_parity --test sys_schema_regeneration --test sys_api_generation
 
+# Exercise every generated host operation through its registered evaluator dispatch arm.
+sys-dispatch-coverage-ci:
+    cargo test --locked -p orna-evaluator-v1 --features orna-sys-v1/dev-sys-export --lib every_generated_host_operation_reaches_its_native_dispatch_arm
+
 # Validate the tree-sitter grammar and editor metadata without installing editor runtimes.
 # This static gate requires its CLI prerequisites: Python 3.11+, tree-sitter CLI, node, and cargo.
 editor-tooling-check:
