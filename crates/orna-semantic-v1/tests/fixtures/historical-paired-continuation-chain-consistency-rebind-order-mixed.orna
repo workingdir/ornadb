@@ -1,0 +1,68 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn final_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+            };
+
+pub fn terminal_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+                continuation: final_at(terminal_pin),
+            };
+
+pub fn continuation_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+                continuation: terminal_at(terminal_pin),
+            };
+
+// A paired final-stage storm must not make the two captured terminal pins interchangeable.
+pub fn paired_continuation_chain_rebind_orders_reject_cross_pairing() {
+    let left_stage_one = continuation_at(sys.snapshot("HEAD~960"))(sys.snapshot("HEAD~920"))(sys.snapshot("HEAD~880"))(sys.snapshot("HEAD~840"));
+    let right_stage_one = continuation_at(sys.snapshot("HEAD~950"))(sys.snapshot("HEAD~910"))(sys.snapshot("HEAD~870"))(sys.snapshot("HEAD~830"));
+    let left_stage_two = left_stage_one.continuation(sys.snapshot("HEAD~800"))(sys.snapshot("HEAD~780"))(sys.snapshot("HEAD~760"));
+    let right_stage_two = right_stage_one.continuation(sys.snapshot("HEAD~790"))(sys.snapshot("HEAD~770"))(sys.snapshot("HEAD~750"));
+
+    let roots_saved = (left_stage_two.continuation, right_stage_two.continuation);
+    let roots_rolling = roots_saved;
+    roots_rolling = (final_at(sys.snapshot("HEAD~739")), final_at(sys.snapshot("HEAD~729")));
+    roots_rolling = (final_at(sys.snapshot("HEAD~738")), final_at(sys.snapshot("HEAD~728")));
+    roots_rolling = roots_saved;
+    let (left_root, right_root) = roots_rolling;
+    let bridges_saved = (left_root(sys.snapshot("HEAD~740")), right_root(sys.snapshot("HEAD~730")));
+    let bridges_rolling = bridges_saved;
+    bridges_rolling = (left_root(sys.snapshot("HEAD~738")), right_root(sys.snapshot("HEAD~728")));
+    bridges_rolling = bridges_saved;
+    let (left_bridge, right_bridge) = bridges_rolling;
+    let leaves_saved = (left_bridge(sys.snapshot("HEAD~720")), right_bridge(sys.snapshot("HEAD~710")));
+    let leaves_rolling = leaves_saved;
+    leaves_rolling = (left_bridge(sys.snapshot("HEAD~718")), right_bridge(sys.snapshot("HEAD~708")));
+    leaves_rolling = leaves_saved;
+    let (left_leaf, right_leaf) = leaves_rolling;
+    let left_final = left_leaf(sys.snapshot("HEAD~700"));
+    let right_final = right_leaf(sys.snapshot("HEAD~690"));
+
+    {
+        cross_pair: [left_final.terminal, right_final.terminal],
+    }
+}
