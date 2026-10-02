@@ -301,6 +301,8 @@ pub enum Type {
     Text,
     Bool,
     Null,
+    /// A completed no-value expression; distinct from the portable `null` value.
+    Unit,
     List(Box<Type>),
     /// A bounded numeric range.  This semantic-only value retains its bound
     /// type without constructing an iterator or admitting generic ranges.
@@ -2297,6 +2299,7 @@ fn resolve_type_aliases(
         | Type::Text
         | Type::Bool
         | Type::Null
+        | Type::Unit
         | Type::Bottom
         | Type::Error => ty.clone(),
     }
@@ -2377,6 +2380,7 @@ fn canonicalize_type_with_identities(ty: &Type, identities: &BTreeMap<String, St
         | Type::Text
         | Type::Bool
         | Type::Null
+        | Type::Unit
         | Type::Bottom
         | Type::Error => ty.clone(),
     }
@@ -2589,8 +2593,8 @@ fn primitive(name: &str) -> Option<Type> {
         "Instant" => Type::Instant,
         "Str" | "Text" | "String" => Type::Text,
         "Bool" => Type::Bool,
-        "Unit" => Type::Null,
         "Null" => Type::Null,
+        "Unit" => Type::Unit,
         "BOOLEAN" | "BOOL" => Type::Bool,
         "INTEGER" | "INT" | "BIGINT" => Type::Int,
         "FLOAT" => Type::Float,
@@ -4225,7 +4229,8 @@ fn static_type_is_known(ty: &Type, scope: &Scope) -> bool {
         | Type::Instant
         | Type::Text
         | Type::Bool
-        | Type::Null => true,
+        | Type::Null
+        | Type::Unit => true,
         Type::Named(name) => {
             matches!(
                 name.as_str(),
@@ -5811,6 +5816,7 @@ fn type_mentions_generic(ty: &Type, generic_names: &BTreeSet<String>) -> bool {
         | Type::Text
         | Type::Bool
         | Type::Null
+        | Type::Unit
         | Type::Bottom
         | Type::Error => false,
     }
@@ -5878,6 +5884,7 @@ fn substitute_generic_type(ty: &Type, substitutions: &BTreeMap<String, Type>) ->
         | Type::Text
         | Type::Bool
         | Type::Null
+        | Type::Unit
         | Type::Bottom
         | Type::Error => ty.clone(),
     }
@@ -6170,10 +6177,16 @@ fn infer_local_generic_call(
                 arguments,
                 index,
             );
+            let explicit_context = explicit_type_arguments
+                .is_some()
+                .then(|| expected.map(|expected| substitute_generic_type(expected, &substitutions)))
+                .flatten();
             let local_constructor_scope = expected.is_some_and(|expected| {
                 matches!(expected, Type::Named(name) if bounded_generic_names.contains(name))
             });
-            let inferred = if let Some(expected) = expected {
+            let inferred = if let Some(expected) = explicit_context.as_ref() {
+                infer_contextual(&argument.value, expected, scope, local, diagnostics)
+            } else if let Some(expected) = expected {
                 if type_mentions_generic(expected, &generic_names) {
                     if local_constructor_scope {
                         let mut argument_scope = scope.clone();
@@ -8508,6 +8521,7 @@ fn type_contains_error(ty: &Type) -> bool {
         | Type::Text
         | Type::Bool
         | Type::Null
+        | Type::Unit
         | Type::Named(_)
         | Type::Bottom => false,
     }
@@ -8761,7 +8775,7 @@ fn infer_while(
     let mut effects = condition.effects;
     effects.join(&body.effects);
     Inferred {
-        ty: Type::Null,
+        ty: Type::Unit,
         effects,
     }
 }
@@ -8906,7 +8920,7 @@ fn infer_for(
     let mut effects = iterable.effects;
     effects.join(&body.effects);
     Inferred {
-        ty: Type::Null,
+        ty: Type::Unit,
         effects,
     }
 }
@@ -11025,6 +11039,7 @@ fn is_sort_key_type(ty: &Type) -> bool {
         | Type::Record(_)
         | Type::Optional(_)
         | Type::Null
+        | Type::Unit
         | Type::MoneyPerUnit { .. }
         | Type::Function { .. } => false,
     }
@@ -13313,6 +13328,7 @@ fn is_default_float_equality_type(ty: &Type) -> bool {
         | Type::Text
         | Type::Bool
         | Type::Null
+        | Type::Unit
         | Type::Named(_)
         | Type::Bottom
         | Type::Error => false,
@@ -14500,6 +14516,10 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
     }
     match (expected, actual) {
         (Type::Optional(_), Type::Null) => true,
+        (Type::List(expected), Type::List(actual))
+        | (Type::Range(expected), Type::Range(actual))
+        | (Type::Relation(expected), Type::Relation(actual))
+        | (Type::Stream(expected), Type::Stream(actual)) => types_match(expected, actual),
         // Optional parameters accept their non-null payload directly; callers
         // do not need to wrap ordinary values in a nullable constructor.
         (Type::Optional(expected), actual) => types_match(expected, actual),
@@ -14604,6 +14624,7 @@ fn contains_type_error(ty: &Type) -> bool {
         | Type::Text
         | Type::Bool
         | Type::Null
+        | Type::Unit
         | Type::Named(_)
         | Type::Bottom => false,
     }
@@ -14637,6 +14658,7 @@ fn contains_tuple_type(ty: &Type) -> bool {
         | Type::Text
         | Type::Bool
         | Type::Null
+        | Type::Unit
         | Type::Named(_)
         | Type::Bottom
         | Type::Error => false,
@@ -18719,6 +18741,7 @@ fn contains_secret_value_type(ty: &Type) -> bool {
         | Type::Text
         | Type::Bool
         | Type::Null
+        | Type::Unit
         | Type::Bottom
         | Type::Error => false,
     }
@@ -19090,6 +19113,7 @@ fn is_lawful_all_unique_key_type(ty: &Type, scope: &Scope) -> bool {
             | Type::Text
             | Type::Bool
             | Type::Null
+            | Type::Unit
             | Type::Bottom => true,
         }
     }

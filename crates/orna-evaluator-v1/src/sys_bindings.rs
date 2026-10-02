@@ -756,6 +756,10 @@ impl EffectHandler for SysHostBindingRegistry {
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         self.dispatch(operation, arguments, cancellation)
     }
+
+    fn fork_task_child(&mut self, _child_index: usize) -> Option<Box<dyn EffectHandler + Send>> {
+        Some(Box::new(self.clone()))
+    }
 }
 
 fn redacted_error(code: &'static str) -> EvaluationError {
