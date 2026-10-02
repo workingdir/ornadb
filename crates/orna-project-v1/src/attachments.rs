@@ -869,6 +869,43 @@ impl PackageResolver {
         Ok(SiblingRebindResolution { routes })
     }
 
+    /// Applies an ordered chain of shared terminal-depth pairs across sibling
+    /// routes. Each pair continues from the last snapshot in the latest wave,
+    /// allowing the next pair to follow the newly rebound closure one depth
+    /// farther. The reference does not define chained post-storm selection;
+    /// v1 uses this retained-wave tail and returns no partial chain if any
+    /// sibling or pair fails.
+    pub fn extend_sibling_terminal_pair_chain(
+        &self,
+        previous: &SiblingRebindResolution,
+        replacement_waves: &[[PinnedDatabase; 2]],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let mut routes = previous.routes.clone();
+        for replacements in replacement_waves {
+            let next_routes = routes
+                .iter()
+                .map(|route| {
+                    let latest_wave = route
+                        .retained_wave_lengths
+                        .len()
+                        .checked_sub(1)
+                        .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+                    let latest_snapshot = route.retained_wave_lengths[latest_wave]
+                        .checked_sub(1)
+                        .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+                    self.extend_nested_terminal_pair_from_wave(
+                        route,
+                        latest_wave,
+                        latest_snapshot,
+                        replacements.clone(),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            routes = next_routes;
+        }
+        Ok(SiblingRebindResolution { routes })
+    }
+
     /// Repeats one identical rebind path across a completed sibling batch.
     /// Each branch extends from its own terminal session and keeps its earlier
     /// route snapshots; the returned batch preserves sibling order.
