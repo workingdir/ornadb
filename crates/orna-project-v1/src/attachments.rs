@@ -502,6 +502,27 @@ impl PackageResolver {
         self.resolve_for_parent(selected)
     }
 
+    /// Rebinds one exact alias on a private copy of `parent`, then resolves
+    /// the replacement's next closure. The returned snapshot preserves the
+    /// prior route, and a failed expansion leaves the caller's session intact.
+    /// Where the reference does not define rebind ordering, v1 uses the new
+    /// pin's committed manifest for this edge.
+    pub fn resolve_nested_rebind(
+        &self,
+        parent: &AttachedDatabaseSession,
+        replacement: PinnedDatabase,
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let alias = replacement.pin.name.clone();
+        let retained = vec![parent.clone()];
+        let mut rebound_parent = parent.clone();
+        rebound_parent.rebind_database(replacement)?;
+        let final_session = self.resolve_nested_for_alias(&rebound_parent, &alias)?;
+        Ok(ReboundPathResolution {
+            final_session,
+            retained_sessions: retained,
+        })
+    }
+
     /// Resolves a chain of exact aliases from a retained session snapshot.
     /// Each edge is selected from the session opened at the preceding edge;
     /// a failure leaves the caller's snapshot untouched.
