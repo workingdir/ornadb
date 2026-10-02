@@ -788,6 +788,31 @@ impl PackageResolver {
         )
     }
 
+    /// Rebinds each terminal pair in a storm from the same retained route.
+    /// Unlike a pair chain, one pair's handoff is not used as the next pair's
+    /// root, so repeated rebinds do not widen the closure depth. The selected
+    /// wave and snapshot remain stable because extensions append history.
+    /// The reference is silent on storm root selection; v1 uses the exact
+    /// caller-selected snapshot and returns no partial extension on failure.
+    pub fn extend_nested_terminal_pair_storm_from_wave(
+        &self,
+        previous: &ReboundPathResolution,
+        wave: usize,
+        snapshot: usize,
+        replacement_waves: &[[PinnedDatabase; 2]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let mut route = previous.clone();
+        for replacements in replacement_waves {
+            route = self.extend_nested_terminal_pair_from_wave(
+                &route,
+                wave,
+                snapshot,
+                replacements.clone(),
+            )?;
+        }
+        Ok(route)
+    }
+
     /// Resolves independently rebound paths for sibling parent snapshots.
     /// Each input plan is `(parent, replacements)`; results keep input order
     /// and each route retains its own pre-rebind sessions. No partial batch is
