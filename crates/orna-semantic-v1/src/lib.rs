@@ -7291,6 +7291,21 @@ fn infer(
                             Type::Error
                         }
                     });
+                let ty = match (&parameter.pattern, &ty) {
+                    (Pattern::Name(name, span), ty)
+                        if local
+                            .get(name)
+                            .is_some_and(|symbol| symbol.kind == SymbolKind::Parameter)
+                            && is_snapshot_ref_value(ty) =>
+                    {
+                        let source = span.file.as_deref().unwrap_or("<unknown>");
+                        contextual_snapshot_ref(&format!(
+                            "selector:binder:{source}@{}..{}:parameter:{name}",
+                            span.start, span.end
+                        ))
+                    }
+                    (_, ty) => ty.clone(),
+                };
                 if ty == Type::Error {
                     // Keep an underconstrained lambda parameter in scope as
                     // an error-typed local. This lets the annotation
@@ -13963,6 +13978,15 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
     if matches!(expected, Type::Error) || matches!(actual, Type::Error) {
         return true;
     }
+    // A shadowing lambda's contextual parameter key identifies its binder in
+    // returned callback types; callers may still supply any SnapshotRef value.
+    if snapshot_ref_context_key(expected)
+        .and_then(snapshot_ref_binder_id)
+        .is_some()
+        && is_snapshot_ref_value(actual)
+    {
+        return true;
+    }
     if expected == &Type::Named("sys.SnapshotRef".into())
         && is_contextual_snapshot_ref(actual)
     {
@@ -16090,6 +16114,43 @@ fn is_snapshot_ref_value(ty: &Type) -> bool {
     ty == &Type::Named("sys.SnapshotRef".into()) || is_contextual_snapshot_ref(ty)
 }
 
+fn snapshot_ref_context_key(ty: &Type) -> Option<&str> {
+    let Type::Applied { base, arguments } = ty else {
+        return None;
+    };
+    if base != "sys.SnapshotRefContext" {
+        return None;
+    }
+    match arguments.as_slice() {
+        [Type::Named(selector)] => Some(selector),
+        _ => None,
+    }
+}
+
+fn snapshot_ref_binder_id(selector: &str) -> Option<&str> {
+    selector
+        .strip_prefix("selector:binder:")?
+        .split_once(":parameter:")
+        .map(|(binder, _)| binder)
+}
+
+fn snapshot_parameter_context(
+    selector: &str,
+) -> Option<(Option<&str>, &str, bool)> {
+    let selector = selector.strip_prefix("selector:")?;
+    let (captured, selector) = if let Some(selector) = selector.strip_prefix("capture:") {
+        (true, selector)
+    } else {
+        (false, selector)
+    };
+    if let Some(parameter) = selector.strip_prefix("parameter:") {
+        return Some((None, parameter, captured));
+    }
+    let selector = selector.strip_prefix("binder:")?;
+    let (binder, parameter) = selector.split_once(":parameter:")?;
+    Some((Some(binder), parameter, captured))
+}
+
 /// Gives a selected history root a type-level context key so decomposing its
 /// namespace or callable path does not erase which selected snapshot it came
 /// from. Literal selectors use their decoded value; dynamic selectors use
@@ -16141,7 +16202,9 @@ fn snapshot_selector_context(
 /// selector identity. Literal and built-in selectors retain canonical
 /// identities. Dynamic arguments use the call occurrence because this pass
 /// does not evaluate selector values. Returned function parameters shadow
-/// same-named selectors from the caller throughout the returned signature.
+/// same-named selectors from the caller throughout the returned signature;
+/// shadowing SnapshotRef lambda parameters also retain a binder identity so a
+/// captured alias is specialized at the depth where it was introduced.
 fn specialize_dynamic_parameter_snapshot_contexts(
     ty: &Type,
     parameter_names: Option<&[String]>,
@@ -16177,15 +16240,13 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
         Type::Applied { base, arguments: values }
             if base == "sys.SnapshotRefContext"
                 && let [Type::Named(selector)] = values.as_slice()
-                && let Some((parameter, captured)) = selector
-                    .strip_prefix("selector:capture:parameter:")
-                    .map(|parameter| (parameter, true))
-                    .or_else(|| {
-                        selector
-                            .strip_prefix("selector:parameter:")
-                            .map(|parameter| (parameter, false))
-                    })
-                && (captured || !shadowed_parameters.contains(parameter)) =>
+                && let Some((binder, parameter, captured)) = snapshot_parameter_context(selector)
+                && match binder {
+                    Some(binder) => {
+                        !shadowed_parameters.contains(&format!("binder:{binder}"))
+                    }
+                    None => captured || !shadowed_parameters.contains(parameter),
+                } =>
         {
             let argument_index = parameter_names
                 .and_then(|names| names.iter().position(|name| name == parameter))
@@ -16233,6 +16294,13 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
             let mut nested_shadowed_parameters = shadowed_parameters.clone();
             if let Some(names) = function_parameter_names {
                 nested_shadowed_parameters.extend(names.iter().cloned());
+            }
+            for parameter in parameters {
+                if let Some(selector) = snapshot_ref_context_key(parameter)
+                    && let Some(binder) = snapshot_ref_binder_id(selector)
+                {
+                    nested_shadowed_parameters.insert(format!("binder:{binder}"));
+                }
             }
             Type::Function {
                 parameters: parameters
@@ -16478,7 +16546,8 @@ fn call_argument_snapshot_context(
 
 /// A typed `SnapshotRef` parameter has no concrete identity while its body is
 /// summarized. Parameter references use a caller-specialized key; local aliases
-/// use a capture key so same-named nested parameters cannot retarget them.
+/// use capture keys so same-named nested parameters cannot retarget them, with
+/// a lexical binder identity for aliases of shadowing lambda parameters.
 /// Uncontextualized non-parameter references stay generic because this semantic
 /// pass cannot infer their runtime pin.
 fn specialize_snapshot_ref_parameter(
@@ -16487,6 +16556,17 @@ fn specialize_snapshot_ref_parameter(
     local: &BTreeMap<String, Symbol>,
 ) -> Type {
     if is_contextual_snapshot_ref(snapshot) {
+        if let Expr::Name { text, .. } = expression
+            && local
+                .get(text)
+                .is_some_and(|symbol| symbol.kind == SymbolKind::Parameter)
+            && let Some(selector) = snapshot_ref_context_key(snapshot)
+            && let Some(binder) = snapshot_ref_binder_id(selector)
+        {
+            return contextual_snapshot_ref(&format!(
+                "selector:capture:binder:{binder}:parameter:{text}"
+            ));
+        }
         return snapshot.clone();
     }
     match expression {
