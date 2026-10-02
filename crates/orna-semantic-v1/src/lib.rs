@@ -7291,21 +7291,8 @@ fn infer(
                             Type::Error
                         }
                     });
-                let ty = match (&parameter.pattern, &ty) {
-                    (Pattern::Name(name, span), ty)
-                        if local
-                            .get(name)
-                            .is_some_and(|symbol| is_snapshot_ref_value(&symbol.ty))
-                            && is_snapshot_ref_value(ty) =>
-                    {
-                        let source = span.file.as_deref().unwrap_or("<unknown>");
-                        contextual_snapshot_ref(&format!(
-                            "selector:binder:{source}@{}..{}:parameter:{name}",
-                            span.start, span.end
-                        ))
-                    }
-                    (_, ty) => ty.clone(),
-                };
+                let ty =
+                    scope_shadowed_snapshot_ref_pattern(&parameter.pattern, &ty, local);
                 if ty == Type::Error {
                     // Keep an underconstrained lambda parameter in scope as
                     // an error-typed local. This lets the annotation
@@ -7596,6 +7583,7 @@ fn infer(
                     let result = historical_database.unwrap_or_else(|| {
                         specialize_dynamic_parameter_snapshot_contexts(
                             &result,
+                            &parameters,
                             parameter_names.as_deref(),
                             arguments,
                             &values,
@@ -14154,6 +14142,15 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
         // Optional parameters accept their non-null payload directly; callers
         // do not need to wrap ordinary values in a nullable constructor.
         (Type::Optional(expected), actual) => types_match(expected, actual),
+        // Tuple parameters bind their component types recursively, including
+        // contextual SnapshotRef leaves.
+        (Type::Tuple(expected), Type::Tuple(actual)) => {
+            expected.len() == actual.len()
+                && expected
+                    .iter()
+                    .zip(actual)
+                    .all(|(expected, actual)| types_match(expected, actual))
+        }
         (
             Type::Applied {
                 base: expected_base,
@@ -16271,6 +16268,41 @@ fn is_snapshot_ref_value(ty: &Type) -> bool {
     ty == &Type::Named("sys.SnapshotRef".into()) || is_contextual_snapshot_ref(ty)
 }
 
+/// Give a shadowing SnapshotRef parameter a lexical identity even when its
+/// pattern binds it below a tuple. The reference specifies
+/// pin identity but is silent on destructured shadow binders, so retain the
+/// same source-span scoping used for name parameters at every supported leaf.
+fn scope_shadowed_snapshot_ref_pattern(
+    pattern: &Pattern,
+    ty: &Type,
+    local: &BTreeMap<String, Symbol>,
+) -> Type {
+    match (pattern, ty) {
+        (Pattern::Name(name, span), ty)
+            if local
+                .get(name)
+                .is_some_and(|symbol| is_snapshot_ref_value(&symbol.ty))
+                && is_snapshot_ref_value(ty) =>
+        {
+            let source = span.file.as_deref().unwrap_or("<unknown>");
+            contextual_snapshot_ref(&format!(
+                "selector:binder:{source}@{}..{}:parameter:{name}",
+                span.start, span.end
+            ))
+        }
+        (Pattern::Tuple { elements, .. }, Type::Tuple(types)) if elements.len() == types.len() => {
+            Type::Tuple(
+                elements
+                    .iter()
+                    .zip(types)
+                    .map(|(pattern, ty)| scope_shadowed_snapshot_ref_pattern(pattern, ty, local))
+                    .collect(),
+            )
+        }
+        _ => ty.clone(),
+    }
+}
+
 fn snapshot_ref_context_key(ty: &Type) -> Option<&str> {
     let Type::Applied { base, arguments } = ty else {
         return None;
@@ -16364,6 +16396,7 @@ fn snapshot_selector_context(
 /// captured alias is specialized at the depth where it was introduced.
 fn specialize_dynamic_parameter_snapshot_contexts(
     ty: &Type,
+    formal_parameters: &[Type],
     parameter_names: Option<&[String]>,
     arguments: &[orna_syntax_v1::Argument],
     argument_types: &[Type],
@@ -16371,6 +16404,20 @@ fn specialize_dynamic_parameter_snapshot_contexts(
     call_span: &SyntaxSpan,
     historical_context: Option<&Type>,
 ) -> Type {
+    let mut binder_contexts = BTreeMap::new();
+    for (parameter_index, formal) in formal_parameters.iter().enumerate() {
+        let Some(argument_index) = call_argument_index_for_position(
+            parameter_names,
+            parameter_index,
+            arguments,
+        ) else {
+            continue;
+        };
+        let Some(actual) = argument_types.get(argument_index) else {
+            continue;
+        };
+        collect_snapshot_binder_contexts(formal, actual, &mut binder_contexts);
+    }
     specialize_dynamic_parameter_snapshot_contexts_scoped(
         ty,
         parameter_names,
@@ -16380,6 +16427,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(
         call_span,
         historical_context,
         &BTreeSet::new(),
+        &binder_contexts,
     )
 }
 
@@ -16392,6 +16440,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
     call_span: &SyntaxSpan,
     historical_context: Option<&Type>,
     shadowed_parameters: &BTreeSet<String>,
+    binder_contexts: &BTreeMap<String, Type>,
 ) -> Type {
     match ty {
         Type::Applied { base, arguments: values }
@@ -16405,41 +16454,49 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                     None => captured || !shadowed_parameters.contains(parameter),
                 } =>
         {
-            let argument_index = parameter_names
-                .and_then(|names| names.iter().position(|name| name == parameter))
-                .and_then(|index| call_argument_index_for_parameter(parameter_names, index, arguments));
-            if let Some(argument_index) = argument_index
-                && let Some(argument) = arguments.get(argument_index)
+            if let Some(binder) = binder
+                && let Some(actual) = binder_contexts.get(binder)
             {
-                call_argument_snapshot_context(
-                    &argument.value,
-                    argument_types.get(argument_index),
-                    call_span,
-                    local,
-                )
-            } else if historical_context.is_some_and(|context| context == ty)
-                || argument_types
-                    .iter()
-                    .any(|actual| contains_snapshot_context_key(actual, selector))
-                || parameter_names.is_some_and(|names| names.iter().all(|name| name != parameter))
-            {
-                // A closure's result may mention its captured selector even
-                // when the current zero-argument call has no parameter to
-                // substitute. Preserve that exact context instead of
-                // inventing a call-site identity. A selector name absent from
-                // this call's parameters belongs to a nested callable and
-                // stays symbolic until that callable is invoked. The reference
-                // requires exact SnapshotRef pinning but leaves this nested
-                // closure specialization detail unspecified. `database.as_of(pin)`
-                // also forwards the context already carried by its argument.
-                ty.clone()
+                actual.clone()
             } else {
-                contextual_snapshot_ref(&format!(
-                    "selector:dynamic-call:{}:{}..{}:parameter:{parameter}",
-                    call_span.file.as_deref().unwrap_or("<unknown>"),
-                    call_span.start,
-                    call_span.end,
-                ))
+                let argument_index = parameter_names
+                    .and_then(|names| names.iter().position(|name| name == parameter))
+                    .and_then(|index| {
+                        call_argument_index_for_parameter(parameter_names, index, arguments)
+                    });
+                if let Some(argument_index) = argument_index
+                    && let Some(argument) = arguments.get(argument_index)
+                {
+                    call_argument_snapshot_context(
+                        &argument.value,
+                        argument_types.get(argument_index),
+                        call_span,
+                        local,
+                    )
+                } else if historical_context.is_some_and(|context| context == ty)
+                    || argument_types
+                        .iter()
+                        .any(|actual| contains_snapshot_context_key(actual, selector))
+                    || parameter_names.is_some_and(|names| names.iter().all(|name| name != parameter))
+                {
+                    // A closure's result may mention its captured selector even
+                    // when the current zero-argument call has no parameter to
+                    // substitute. Preserve that exact context instead of
+                    // inventing a call-site identity. A selector name absent from
+                    // this call's parameters belongs to a nested callable and
+                    // stays symbolic until that callable is invoked. The reference
+                    // requires exact SnapshotRef pinning but leaves this nested
+                    // closure specialization detail unspecified. `database.as_of(pin)`
+                    // also forwards the context already carried by its argument.
+                    ty.clone()
+                } else {
+                    contextual_snapshot_ref(&format!(
+                        "selector:dynamic-call:{}:{}..{}:parameter:{parameter}",
+                        call_span.file.as_deref().unwrap_or("<unknown>"),
+                        call_span.start,
+                        call_span.end,
+                    ))
+                }
             }
         }
         Type::Function {
@@ -16453,11 +16510,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                 nested_shadowed_parameters.extend(names.iter().cloned());
             }
             for parameter in parameters {
-                if let Some(selector) = snapshot_ref_context_key(parameter)
-                    && let Some(binder) = snapshot_ref_binder_id(selector)
-                {
-                    nested_shadowed_parameters.insert(format!("binder:{binder}"));
-                }
+                collect_snapshot_ref_binder_ids(parameter, &mut nested_shadowed_parameters);
             }
             Type::Function {
                 parameters: parameters
@@ -16472,6 +16525,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                             call_span,
                             historical_context,
                             &nested_shadowed_parameters,
+                            binder_contexts,
                         )
                     })
                     .collect(),
@@ -16486,6 +16540,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                     call_span,
                     historical_context,
                     &nested_shadowed_parameters,
+                    binder_contexts,
                 )),
             }
         },
@@ -16499,6 +16554,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                 call_span,
                 historical_context,
                 shadowed_parameters,
+                binder_contexts,
             ),
         )),
         Type::Range(element) => Type::Range(Box::new(
@@ -16511,6 +16567,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                 call_span,
                 historical_context,
                 shadowed_parameters,
+                binder_contexts,
             ),
         )),
         Type::Relation(element) => Type::Relation(Box::new(
@@ -16523,6 +16580,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                 call_span,
                 historical_context,
                 shadowed_parameters,
+                binder_contexts,
             ),
         )),
         Type::Stream(element) => Type::Stream(Box::new(
@@ -16535,6 +16593,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                 call_span,
                 historical_context,
                 shadowed_parameters,
+                binder_contexts,
             ),
         )),
         Type::Optional(element) => Type::Optional(Box::new(
@@ -16547,6 +16606,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                 call_span,
                 historical_context,
                 shadowed_parameters,
+                binder_contexts,
             ),
         )),
         Type::Record(fields) => Type::Record(
@@ -16564,6 +16624,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                             call_span,
                             historical_context,
                             shadowed_parameters,
+                            binder_contexts,
                         ),
                     )
                 })
@@ -16582,6 +16643,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                         call_span,
                         historical_context,
                         shadowed_parameters,
+                        binder_contexts,
                     )
                 })
                 .collect(),
@@ -16600,11 +16662,120 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                         call_span,
                         historical_context,
                         shadowed_parameters,
+                        binder_contexts,
                     )
                 })
                 .collect(),
         },
         _ => ty.clone(),
+    }
+}
+
+fn call_argument_index_for_position(
+    parameter_names: Option<&[String]>,
+    parameter_index: usize,
+    arguments: &[orna_syntax_v1::Argument],
+) -> Option<usize> {
+    if parameter_names.is_some() {
+        return call_argument_index_for_parameter(parameter_names, parameter_index, arguments);
+    }
+    arguments
+        .iter()
+        .enumerate()
+        .filter(|(_, argument)| argument.name.is_none())
+        .nth(parameter_index)
+        .map(|(argument_index, _)| argument_index)
+}
+
+/// Pair binder-scoped SnapshotRef leaves in a callable's formal argument
+/// shape with the exact contextual values supplied at this call site.
+fn collect_snapshot_binder_contexts(
+    formal: &Type,
+    actual: &Type,
+    into: &mut BTreeMap<String, Type>,
+) {
+    if is_contextual_snapshot_ref(formal) && is_contextual_snapshot_ref(actual) {
+        if let Some(binder) = snapshot_ref_context_key(formal).and_then(snapshot_ref_binder_id) {
+            into.insert(binder.to_owned(), actual.clone());
+        }
+        return;
+    }
+    match (formal, actual) {
+        (Type::List(formal), Type::List(actual))
+        | (Type::Range(formal), Type::Range(actual))
+        | (Type::Relation(formal), Type::Relation(actual))
+        | (Type::Stream(formal), Type::Stream(actual))
+        | (Type::Optional(formal), Type::Optional(actual)) => {
+            collect_snapshot_binder_contexts(formal, actual, into);
+        }
+        (Type::Record(formal), Type::Record(actual)) => {
+            for (name, formal) in formal {
+                if let Some(actual) = actual.get(name) {
+                    collect_snapshot_binder_contexts(formal, actual, into);
+                }
+            }
+        }
+        (Type::Tuple(formal), Type::Tuple(actual)) => {
+            for (formal, actual) in formal.iter().zip(actual) {
+                collect_snapshot_binder_contexts(formal, actual, into);
+            }
+        }
+        (
+            Type::Applied {
+                base: formal_base,
+                arguments: formal,
+            },
+            Type::Applied {
+                base: actual_base,
+                arguments: actual,
+            },
+        ) if formal_base == actual_base => {
+            for (formal, actual) in formal.iter().zip(actual) {
+                collect_snapshot_binder_contexts(formal, actual, into);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Nested callable parameters shadow matching binder identities through their
+/// result type. Walk aggregate patterns as well as direct SnapshotRef values.
+fn collect_snapshot_ref_binder_ids(ty: &Type, into: &mut BTreeSet<String>) {
+    if is_contextual_snapshot_ref(ty) {
+        if let Some((Some(binder), _, _)) = snapshot_ref_context_key(ty)
+            .and_then(snapshot_parameter_context)
+        {
+            into.insert(format!("binder:{binder}"));
+        }
+        return;
+    }
+    match ty {
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => collect_snapshot_ref_binder_ids(element, into),
+        Type::Record(fields) => {
+            for value in fields.values() {
+                collect_snapshot_ref_binder_ids(value, into);
+            }
+        }
+        Type::Tuple(elements) => {
+            for element in elements {
+                collect_snapshot_ref_binder_ids(element, into);
+            }
+        }
+        Type::Applied { arguments, .. } => {
+            for argument in arguments {
+                collect_snapshot_ref_binder_ids(argument, into);
+            }
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            collect_snapshot_ref_binder_ids(currency, into);
+            collect_snapshot_ref_binder_ids(unit, into);
+        }
+        // A callable nested inside a parameter has its own lexical scope.
+        _ => {}
     }
 }
 
