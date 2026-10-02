@@ -333,6 +333,10 @@ impl PackageResolver {
     /// routes converge on one deep pin, each branch can take its own paired
     /// depth and terminal storms while retaining the exact shared route from
     /// each selected pin's manifest.
+    /// Since the reference does not define an event order across sibling
+    /// sessions, v1 makes independent storms order-stable: interleaving or
+    /// reversing operations across branches leaves each branch at its own
+    /// last selected pin on every edge.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
