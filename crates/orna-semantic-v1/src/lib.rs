@@ -17555,6 +17555,7 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
         }
         (Type::Record(expected), Type::Record(actual)) => {
             expected.len() == actual.len()
+                && record_pin_identity_topology_matches(expected, actual)
                 && expected.iter().all(|(name, expected)| {
                     actual.get(name).is_some_and(|actual| {
                         pinned_snapshot_shape_matches(expected, actual)
@@ -17741,6 +17742,34 @@ fn tuple_pin_identity_topology_matches(expected: &[Type], actual: &[Type]) -> bo
         }
     }
 
+    snapshot_context_topology_matches(&pin_maps)
+}
+
+/// Record fields form sibling slots just like tuple positions. A rebind may
+/// rename concrete selectors, but it must preserve which fields share a
+/// captured pin across every nested depth. The reference is silent about this
+/// local record-rebind edge, so use the same conservative topology rule as
+/// tuple rebinding rather than allowing equal-width fields to split or merge.
+fn record_pin_identity_topology_matches(
+    expected: &BTreeMap<String, Type>,
+    actual: &BTreeMap<String, Type>,
+) -> bool {
+    let mut pin_maps = Vec::new();
+    for (name, expected) in expected {
+        let Some(actual) = actual.get(name) else {
+            return false;
+        };
+        if !collect_corresponding_snapshot_context_maps(expected, actual, &mut pin_maps) {
+            return false;
+        }
+    }
+
+    snapshot_context_topology_matches(&pin_maps)
+}
+
+fn snapshot_context_topology_matches(
+    pin_maps: &[(BTreeSet<String>, BTreeSet<String>)],
+) -> bool {
     pin_maps.iter().enumerate().all(|(index, (expected, actual))| {
         expected.len() == actual.len()
             && pin_maps[index + 1..]
