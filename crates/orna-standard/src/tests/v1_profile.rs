@@ -8,6 +8,9 @@ use crate::{
     REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1,
     REFERENCE_STANDARD_STREAM_PATH_V1,
     REFERENCE_STANDARD_RANDOM_PATH_V1, REFERENCE_STANDARD_HASH_PATH_V1,
+    REFERENCE_STANDARD_ENCODING_PATH_V1, REFERENCE_STANDARD_ENCODING_ORNA_PATH_V1,
+    REFERENCE_STANDARD_ENCODING_OVB_PATH_V1, REFERENCE_STANDARD_ENCODING_JSON_PATH_V1,
+    REFERENCE_STANDARD_ENCODING_BASE64_PATH_V1,
     REFERENCE_STANDARD_TIME_COMPACT_PATH_V1, REFERENCE_STANDARD_TIME_CLOCK_PATH_V1,
     REFERENCE_STANDARD_TIME_WORDS_PATH_V1, REFERENCE_STANDARD_TIME_ISO_PATH_V1,
     REFERENCE_STANDARD_OPTION_PATH_V1, REFERENCE_STANDARD_RESULT_PATH_V1,
@@ -24,6 +27,18 @@ fn pinned_std_entrypoint_imports_random_and_hash_modules() {
     let entrypoint = include_str!("../../../../stdlib/std/main.orna");
     assert!(entrypoint.lines().any(|line| line.trim() == "use hash;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use random;"));
+    assert!(entrypoint.lines().any(|line| line.trim() == "use encoding;"));
+}
+
+#[test]
+fn pinned_encoding_entrypoint_exports_its_named_codec_modules() {
+    let entrypoint = include_str!("../../../../stdlib/std/encoding/main.orna");
+    for module in ["base64", "json", "orna", "ovb"] {
+        assert!(
+            entrypoint.lines().any(|line| line.trim() == format!("use {module};")),
+            "std.encoding must import {module}"
+        );
+    }
 }
 
 #[test]
@@ -164,6 +179,81 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[23].1.contains(contract), "missing hash contract `{contract}`");
     }
+    assert_eq!(sources[24].0, REFERENCE_STANDARD_ENCODING_PATH_V1);
+    for module in ["base64", "json", "orna", "ovb"] {
+        assert!(sources[24].1.contains(&format!("use {module};")));
+    }
+    assert_eq!(sources[25].0, REFERENCE_STANDARD_ENCODING_ORNA_PATH_V1);
+    for declaration in [
+        "pub fn encode<T>(value: T): Str",
+        "pub fn decode<T>(input: Str): T",
+    ] {
+        assert!(sources[25].1.contains(declaration), "missing Orna codec declaration `{declaration}`");
+    }
+    for contract in [
+        "schema directed",
+        "never executes declarations, imports",
+        "exactly one final LF",
+        "primary-key order followed by stable field-ID order",
+        "NFC field",
+        "finite Float uses 17 significant",
+        "padded standard Base64",
+        "decode(input, as: T)",
+    ] {
+        assert!(sources[25].1.contains(contract), "missing canonical text contract `{contract}`");
+    }
+    assert_eq!(sources[26].0, REFERENCE_STANDARD_ENCODING_OVB_PATH_V1);
+    for declaration in [
+        "pub fn encode<T>(value: T): Blob",
+        "pub fn decode<T>(input: Blob): T",
+    ] {
+        assert!(sources[26].1.contains(declaration), "missing OVB declaration `{declaration}`");
+    }
+    for contract in [
+        "OVB-1 is the pinned binary value profile",
+        "shortest permitted",
+        "duplicate keys",
+        "noncanonical",
+        "Decimal uses tag 60000",
+        "Nominal records, enums, references and system values",
+        "explicit type witness",
+    ] {
+        assert!(sources[26].1.contains(contract), "missing OVB contract `{contract}`");
+    }
+    assert_eq!(sources[27].0, REFERENCE_STANDARD_ENCODING_JSON_PATH_V1);
+    for declaration in [
+        "pub fn encode<T>(value: T): Str",
+        "pub fn decode<T>(input: Str): T",
+        "pub fn decode_with_options<T>(input: Str, ignore_unknown_fields: Bool = false): T",
+    ] {
+        assert!(sources[27].1.contains(declaration), "missing JSON declaration `{declaration}`");
+    }
+    for contract in [
+        "schema directed",
+        "Duplicate object keys are always rejected",
+        "Missing fields remain distinct",
+        "numeric tokens are parsed without first rounding",
+        "Unknown fields fail by default",
+        "nonstandard numeric tokens",
+    ] {
+        assert!(sources[27].1.contains(contract), "missing JSON contract `{contract}`");
+    }
+    assert_eq!(sources[28].0, REFERENCE_STANDARD_ENCODING_BASE64_PATH_V1);
+    for declaration in [
+        "pub fn encode(input: Blob): Str",
+        "pub fn decode(input: Str): Blob",
+    ] {
+        assert!(sources[28].1.contains(declaration), "missing Base64 declaration `{declaration}`");
+    }
+    for contract in [
+        "RFC 4648 alphabet",
+        "required `=` padding",
+        "noncanonical",
+        "nonzero unused trailing bits",
+        "URL-safe Base64",
+    ] {
+        assert!(sources[28].1.contains(contract), "missing Base64 contract `{contract}`");
+    }
     assert_eq!(sources[11].0, REFERENCE_STANDARD_OPTION_PATH_V1);
     assert!(sources[11].1.contains("pub fn and_then<T, U>"));
     assert_eq!(sources[12].0, REFERENCE_STANDARD_RESULT_PATH_V1);
@@ -283,26 +373,33 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     for (path, source_index) in [
         (REFERENCE_STANDARD_RANDOM_PATH_V1, 22),
         (REFERENCE_STANDARD_HASH_PATH_V1, 23),
+        (REFERENCE_STANDARD_ENCODING_PATH_V1, 24),
+        (REFERENCE_STANDARD_ENCODING_ORNA_PATH_V1, 25),
+        (REFERENCE_STANDARD_ENCODING_OVB_PATH_V1, 26),
+        (REFERENCE_STANDARD_ENCODING_JSON_PATH_V1, 27),
+        (REFERENCE_STANDARD_ENCODING_BASE64_PATH_V1, 28),
     ] {
         let mut changed_source = sources[source_index].1.clone();
         changed_source.push_str("\n// changed after the captured snapshot\n");
         assert!(profile.verify_source(path, &changed_source).is_err());
     }
 
-    let catalogue = reference_standard_catalogue_v1().expect("the standard module checks");
-    for (path, source) in &sources[13..] {
-        let module_analysis = analyze_with_catalogue(
-            &[ModuleInput::new(path, source)],
-            &orna_semantic_v1::Catalogue::authoritative_core(),
-        );
-        let parse_diagnostics = module_analysis
-            .diagnostics
-            .iter()
-            .filter(|diagnostic| diagnostic.code() == "ORNA-S000-PARSE")
-            .map(|diagnostic| diagnostic.message())
-            .collect::<Vec<_>>();
-        assert!(parse_diagnostics.is_empty(), "{path}: {parse_diagnostics:?}");
+    for (path, source) in &sources {
+        let parsed = orna_syntax_v1::parse_module_with_file(source, path);
+        assert!(parsed.is_ok(), "{path}: {:?}", parsed.diagnostics);
     }
+    let serialization_calls =
+        include_str!("fixtures/v1_serialization_calls.orna");
+    let parsed_serialization_calls = orna_syntax_v1::parse_module_with_file(
+        serialization_calls,
+        "serialization_calls.orna",
+    );
+    assert!(
+        parsed_serialization_calls.is_ok(),
+        "{:?}",
+        parsed_serialization_calls.diagnostics
+    );
+    let catalogue = reference_standard_catalogue_v1().expect("the standard module checks");
     let consumer = include_str!("fixtures/v1_collection_operations_consumer.orna");
     let asof_consumer = include_str!("fixtures/v1_standard_consumer.orna");
     let option_result_consumer = include_str!("fixtures/v1_option_result_consumer.orna");
@@ -313,6 +410,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     let time_calendar_consumer = include_str!("fixtures/v1_time_calendar_consumer.orna");
     let iteration_consumer = include_str!("fixtures/v1_iteration_consumer.orna");
     let random_hash_consumer = include_str!("fixtures/v1_random_hash_consumer.orna");
+    let serialization_consumer = include_str!("fixtures/v1_serialization_consumer.orna");
     for (path, source) in [
         ("list_consumer.orna", include_str!("fixtures/v1_list_consumer.orna")),
         ("map_consumer.orna", include_str!("fixtures/v1_map_consumer.orna")),
@@ -343,6 +441,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
             ModuleInput::new("time_calendar_consumer.orna", time_calendar_consumer),
             ModuleInput::new("iteration_consumer.orna", iteration_consumer),
             ModuleInput::new("random_hash_consumer.orna", random_hash_consumer),
+            ModuleInput::new("serialization_consumer.orna", serialization_consumer),
         ],
         &catalogue,
     );
