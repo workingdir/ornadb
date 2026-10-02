@@ -7505,6 +7505,50 @@ fn exact_checkpoint_map_equality_returns_boolean_and_real_checkpoint() {
 }
 
 #[test]
+fn checkpoint_map_compatible_rebind_returns_each_real_snapshot_value() {
+    let source = include_str!(
+        "fixtures/historical-checkpoint-map-compatible-rebind-values.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-checkpoint-map-compatible-rebind-values.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("checkpoint_map_compatible_rebind_returns_values")
+        })
+        .expect("checkpoint-map compatibility fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["checkpoint_map_compatible_rebind_returns_values"].ty
+    else {
+        panic!("checkpoint-map rebind proof must export a function");
+    };
+    let Type::Record(values) = result.as_ref() else {
+        panic!("checkpoint-map rebind must return its computed values");
+    };
+    for (name, selector) in [
+        ("saved", "selector:HEAD~12"),
+        ("rolling", "selector:HEAD~10"),
+    ] {
+        let value = values.get(name).expect("real checkpoint value");
+        assert_canonical_snapshot_context_maps(value);
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(value, &mut contexts);
+        assert_eq!(contexts, BTreeSet::from([selector.to_owned()]), "{name}");
+    }
+}
+
+#[test]
 fn paired_checkpoint_snapshot_maps_survive_chained_depth_storms() {
     let source = include_str!(
         "fixtures/historical-paired-checkpoint-snapshot-retention-depth-storm.orna"
