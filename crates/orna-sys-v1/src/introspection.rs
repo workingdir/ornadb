@@ -2072,6 +2072,10 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             rebind_byte_cap_handoff_scopes_by_depth_text(
                 &byte_cap_handoff_estimates_by_depth,
             );
+        let limit_chain_rebind_byte_cap_handoff_routes_by_depth_text =
+            rebind_byte_cap_handoff_routes_by_depth_text(
+                &byte_cap_handoff_estimates_by_depth,
+            );
         let limit_chain_rebind_predicates = storm
             .branches
             .iter()
@@ -2129,6 +2133,10 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             (
                 "limit_chain_rebind_byte_cap_handoff_scopes_by_depth".to_owned(),
                 PlanDetail::Text(limit_chain_rebind_byte_cap_handoff_scopes_by_depth_text),
+            ),
+            (
+                "limit_chain_rebind_byte_cap_handoff_routes_by_depth".to_owned(),
+                PlanDetail::Text(limit_chain_rebind_byte_cap_handoff_routes_by_depth_text),
             ),
             (
                 "limit_chain_rebind_predicates".to_owned(),
@@ -2416,6 +2424,7 @@ struct Cardinality {
 }
 
 struct RebindByteCapHandoffEstimate {
+    input_scope: String,
     scope: String,
     input_bytes: Option<u64>,
     output_bytes: Option<u64>,
@@ -2808,6 +2817,34 @@ fn rebind_byte_cap_handoff_scopes_by_depth_text(
         .join(";")
 }
 
+fn rebind_byte_cap_handoff_routes_by_depth_text(
+    estimates: &RebindByteCapHandoffEstimatesByDepth,
+) -> String {
+    estimates
+        .iter()
+        .map(|(depth, handoffs)| {
+            let handoffs = handoffs
+                .iter()
+                .map(|handoff| {
+                    let input_bytes = handoff
+                        .input_bytes
+                        .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+                    let output_bytes = handoff
+                        .output_bytes
+                        .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+                    format!(
+                        "{}=>{}={input_bytes}>{output_bytes}",
+                        handoff.input_scope, handoff.scope
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{depth}:{handoffs}")
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
 fn disjunct_storm_cascade_cardinality_and_work(
     input: Cardinality,
     storm: &DisjunctStormCascadeDescription,
@@ -2856,6 +2893,7 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
 
     for (branch_index, branch) in branches.iter().enumerate() {
         let mut branch_cardinality = input;
+        let mut branch_byte_scope = format!("{storm_path}/branch{}", branch_index + 1);
         for (limit_index, limit) in branch.nested_limits.iter().enumerate() {
             match (work, branch_cardinality.rows) {
                 (Some(total), Some(limit_work)) => match total.checked_add(limit_work) {
@@ -2869,6 +2907,7 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
                 (None, _) => {}
             }
             branch_cardinality = limit_cardinality(branch_cardinality, *limit);
+            branch_byte_scope = format!("{branch_byte_scope}/limit{}", limit_index + 1);
             for (rebind_index, rebind) in branch
                 .limit_rebinds
                 .iter()
@@ -2877,6 +2916,7 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
             {
                 for (cascade_index, rebind_storm) in rebind.storms.iter().enumerate() {
                     let handoff_input_bytes = branch_cardinality.bytes;
+                    let handoff_input_scope = branch_byte_scope.clone();
                     let handoff_scope = format!(
                         "{storm_path}/branch{}/limit{}/rebind{}/cascade{}",
                         branch_index + 1,
@@ -2896,7 +2936,8 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
                         .entry(storm_depth)
                         .or_default()
                         .push(RebindByteCapHandoffEstimate {
-                            scope: handoff_scope,
+                            input_scope: handoff_input_scope,
+                            scope: handoff_scope.clone(),
                             input_bytes: handoff_input_bytes,
                             output_bytes: rebound.bytes,
                         });
@@ -2913,6 +2954,7 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
                         (None, _) => {}
                     }
                     branch_cardinality = rebound;
+                    branch_byte_scope = handoff_scope;
                 }
             }
         }
