@@ -312,6 +312,13 @@ impl PackageResolver {
     /// pins; rebinding that terminal alias in one closure changes only that
     /// closure's route, while another retained branch can still resolve the
     /// shared manifest-selected terminal pin.
+    /// Distinct sibling closures expanded before any terminal rebind also
+    /// keep independent route state when their terminal storms are interleaved.
+    /// Each session follows only its own last attached terminal pin, and a
+    /// fresh expansion from their shared deep pin still starts at the terminal
+    /// pin recorded in that deep manifest. The reference is silent on shared
+    /// terminal route storms, so v1 applies the exact-alias last-pin rule per
+    /// session.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
