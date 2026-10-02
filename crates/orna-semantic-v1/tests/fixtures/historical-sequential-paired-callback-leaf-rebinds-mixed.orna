@@ -1,0 +1,34 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+// Opposite leaf lanes remain distinct after they are rebound separately.
+pub fn paired_leaf_rebinds_reject_cross_lane_parallel_mix() {
+    let rolling = (
+        (
+            () => factory_at(sys.snapshot("HEAD~80")),
+            () => factory_at(sys.snapshot("HEAD~60")),
+        ),
+        (
+            () => factory_at(sys.snapshot("HEAD~40")),
+            () => factory_at(sys.snapshot("HEAD~20")),
+        ),
+    );
+    let ((left_root, left_leaf), (right_root, right_leaf)) = rolling;
+
+    rolling = (
+        (left_root, () => factory_at(sys.snapshot("HEAD~59"))),
+        (right_root, right_leaf),
+    );
+    let after_left = rolling;
+    let ((middle_left_root, middle_left_leaf), (middle_right_root, middle_right_leaf)) = after_left;
+    rolling = (
+        (middle_left_root, middle_left_leaf),
+        (
+            middle_right_root,
+            () => factory_at(sys.snapshot("HEAD~19")),
+        ),
+    );
+
+    let ((final_left_root, final_left_leaf), (final_right_root, final_right_leaf)) = rolling;
+    std.concurrent.parallel([final_left_leaf, final_right_leaf])
+}
