@@ -253,6 +253,101 @@ fn sys_http_registry_dispatches_real_bounded_loopback_response() {
 }
 
 #[test]
+fn sys_http_start_wait_and_cancel_dispatch_real_native_behavior() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let mut received = 0;
+        loop {
+            let count = stream.read(&mut request[received..]).unwrap();
+            received += count;
+            if count == 0
+                || request[..received]
+                    .windows(4)
+                    .any(|window| window == b"\r\n\r\n")
+            {
+                break;
+            }
+        }
+        assert!(request[..received].starts_with(b"GET /probe HTTP/1.1\r\n"));
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\nasync-response",
+            )
+            .unwrap();
+    });
+    let origin = format!("http://{address}/");
+    let url = format!("http://{address}/probe");
+    let mut http = HttpProvider::new(Duration::from_secs(2), 4096, 1024).unwrap();
+    http.allow_origin(&origin).unwrap();
+    let mut bindings =
+        SysHostBindingRegistry::new(EnvironmentProvider::default()).with_http_provider(http);
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    session
+        .submit(include_str!("fixtures/stdlib-use-net-http-mpk0d.orna"))
+        .unwrap();
+    let source =
+        include_str!("fixtures/stdlib-net-http-start-wait-wxip1.orna").replace("URL_VALUE", &url);
+    let result = session
+        .submit_with_sys_host_bindings(&source, &mut bindings)
+        .unwrap()
+        .unwrap();
+    server.join().unwrap();
+    assert!(matches!(
+        result.raw(),
+        OvbRaw::Array(parts)
+            if parts.len() == 3
+                && parts[0] == OvbRaw::Int(200.into())
+                && parts[2] == OvbRaw::Bytes(b"async-response".to_vec())
+    ));
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let mut received = 0;
+        loop {
+            let count = stream.read(&mut request[received..]).unwrap();
+            received += count;
+            if count == 0
+                || request[..received]
+                    .windows(4)
+                    .any(|window| window == b"\r\n\r\n")
+            {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+    });
+    let origin = format!("http://{address}/");
+    let url = format!("http://{address}/probe");
+    let mut http = HttpProvider::new(Duration::from_secs(2), 4096, 1024).unwrap();
+    http.allow_origin(&origin).unwrap();
+    let mut bindings =
+        SysHostBindingRegistry::new(EnvironmentProvider::default()).with_http_provider(http);
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    session
+        .submit(include_str!("fixtures/stdlib-use-net-http-mpk0d.orna"))
+        .unwrap();
+    let source =
+        include_str!("fixtures/stdlib-net-http-start-cancel-wxip1.orna").replace("URL_VALUE", &url);
+    assert_eq!(
+        session
+            .submit_with_sys_host_bindings(&source, &mut bindings)
+            .unwrap(),
+        Some(CanonicalValue::new(Raw::Bool(true)).unwrap()),
+        "cancellation reports that it stopped the in-flight request"
+    );
+    server.join().unwrap();
+}
+
+#[test]
 fn sys_http_registry_requires_an_installed_origin_allowlist() {
     let url = "http://127.0.0.1:9/never-connected";
     let source = include_str!("fixtures/stdlib-net-http-send-mpk0d.orna").replace("URL_VALUE", url);
