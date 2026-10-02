@@ -4809,6 +4809,46 @@ fn malformed_nested_tuple_does_not_partially_bind_snapshot_identities() {
 }
 
 #[test]
+fn nested_tuple_error_wave_keeps_paired_capture_pins_atomic() {
+    let source = include_str!("fixtures/historical-paired-nested-tuple-error-wave.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-tuple-error-wave.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_UNRESOLVED),
+        "the recovery wave must retain its unresolved-name diagnostic"
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_nested_tuple_error_wave_atomicity")
+        })
+        .expect("paired tuple error-wave fixture module");
+    let ty = &module.symbols["paired_nested_tuple_error_wave_atomicity"].ty;
+    let summary = format!("{ty:?}");
+    assert!(
+        !summary.contains("HEAD~380") && !summary.contains("HEAD~370"),
+        "an error in a later nested tuple leaf must not specialize earlier pins in that wave: {summary}"
+    );
+    assert!(
+        summary.contains("HEAD~450") && summary.contains("HEAD~320"),
+        "the failed wave must preserve earlier and later valid capture depths: {summary}"
+    );
+}
+
+#[test]
 fn concurrent_callback_tuples_reject_cross_lane_identity_mix_after_rebind() {
     let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
