@@ -19,6 +19,7 @@ use crate::{
     REFERENCE_STANDARD_LIST_PATH_V1, REFERENCE_STANDARD_MAP_PATH_V1,
     REFERENCE_STANDARD_SET_PATH_V1,
     REFERENCE_STANDARD_IO_PATH_V1, REFERENCE_STANDARD_FS_PATH_V1,
+    REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1, REFERENCE_STANDARD_IO_METADATA_PATH_V1,
     REFERENCE_STANDARD_CONCURRENT_PATH_V1, REFERENCE_STANDARD_ERROR_PATH_V1,
     REFERENCE_STANDARD_TEST_PATH_V1,
     REFERENCE_STANDARD_GENERICS_PATH_V1, REFERENCE_STANDARD_TYPE_UTILS_PATH_V1,
@@ -1055,4 +1056,68 @@ fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions(
     let reads = consumer.symbols.get("reads").expect("filesystem wrapper");
     assert!(reads.effects.effects.contains("filesystem"));
     assert!(reads.effects.may_fail);
+}
+
+#[test]
+fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
+    let sources = reference_standard_sources_v1();
+    assert_eq!(sources.len(), 44);
+    for (index, path) in [
+        (42, REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1),
+        (43, REFERENCE_STANDARD_IO_METADATA_PATH_V1),
+    ] {
+        assert_eq!(sources[index].0, path);
+        let parsed = orna_syntax_v1::parse_module_with_file(&sources[index].1, path);
+        assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
+    }
+
+    let profile = reference_standard_profile_v1();
+    for path in [
+        REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1,
+        REFERENCE_STANDARD_IO_METADATA_PATH_V1,
+    ] {
+        let source = sources
+            .iter()
+            .find(|(source_path, _)| source_path == path)
+            .expect("filesystem path and metadata source is pinned");
+        profile
+            .verify_source(path, &source.1)
+            .expect("source bytes match the captured std snapshot");
+        let mut changed_source = source.1.clone();
+        changed_source.push_str("\n// changed after snapshot capture\n");
+        assert!(profile.verify_source(path, &changed_source).is_err());
+    }
+
+    let catalogue = reference_standard_catalogue_v1()
+        .expect("the path and metadata modules resolve in the captured std profile");
+    let consumer_source =
+        include_str!("fixtures/v1_filesystem_paths_metadata_consumer_l80o5.orna");
+    let parsed = orna_syntax_v1::parse_module_with_file(
+        consumer_source,
+        "filesystem_paths_metadata_consumer.orna",
+    );
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "filesystem_paths_metadata_consumer.orna",
+            consumer_source,
+        )],
+        &catalogue,
+    );
+    assert!(
+        analysis.is_ok(),
+        "{}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+    let consumer = analysis
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "filesystem_paths_metadata_consumer")
+        .expect("filesystem consumer module");
+    assert!(consumer.symbols.contains_key("child_path"));
 }
