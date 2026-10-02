@@ -127,6 +127,10 @@ lint:
 test:
     cargo test --locked --workspace --all-targets
 
+# Verify provider dispatch metadata export/schema conformance and generated-artifact drift.
+sys-artifact-ci:
+    cargo test --locked -p orna-sys-v1 --features dev-sys-export --test sys_api_export --test system_registry_parity --test system_provider_abi
+
 # Validate the tree-sitter grammar and editor metadata without installing editor runtimes.
 # This static gate requires its CLI prerequisites: Python 3.11+, tree-sitter CLI, node, and cargo.
 editor-tooling-check:
