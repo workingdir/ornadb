@@ -1,0 +1,22 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+// Concurrent callbacks from the two pair lanes must not collapse to one pin.
+pub fn concurrent_paired_tuple_pins_reject_lane_mix() {
+    let rolling = (
+        (sys.snapshot("HEAD~80"), sys.snapshot("HEAD~60")),
+        (sys.snapshot("HEAD~40"), sys.snapshot("HEAD~20")),
+    );
+    let saved = rolling;
+    rolling = (
+        (sys.snapshot("HEAD~79"), sys.snapshot("HEAD~59")),
+        (sys.snapshot("HEAD~39"), sys.snapshot("HEAD~19")),
+    );
+    rolling = saved;
+
+    let ((left_root, left_leaf), (right_root, right_leaf)) = rolling;
+    std.concurrent.parallel([
+        () => factory_at(left_leaf),
+        () => factory_at(right_leaf),
+    ])
+}

@@ -1,0 +1,15 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn returning_to_an_old_pin_does_not_relabel_middle_closure() {
+    let rolling = chained_factory(sys.snapshot("HEAD~30"));
+    rolling = chained_factory(sys.snapshot("HEAD~20"));
+    let middle = rolling;
+    rolling = chained_factory(sys.snapshot("HEAD~10"));
+    rolling = chained_factory(sys.snapshot("HEAD~30"));
+    [middle, rolling]
+}

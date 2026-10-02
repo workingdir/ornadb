@@ -1,0 +1,63 @@
+pub table PlannerPairedDepthPostStormRouteStability(id: Int) {
+    first: Bool,
+    second: Bool,
+    third: Bool,
+    fourth: Bool,
+    fifth: Bool,
+    sixth: Bool,
+    seventh: Bool,
+    eighth: Bool,
+    ninth: Bool,
+}
+pub fn paired_depth_post_storm_routes() = PlannerPairedDepthPostStormRouteStability
+    | union(
+        PlannerPairedDepthPostStormRouteStability
+            | take(120)
+            | take(60)
+            | filter(row => row.first)
+            | union(
+                PlannerPairedDepthPostStormRouteStability
+                    | take(16)
+                    | take(8)
+                    | filter(row => row.second)
+                    | union(
+                        PlannerPairedDepthPostStormRouteStability
+                            | take(4)
+                            | filter(row => row.third)
+                    )
+            )
+    )
+    | union(
+        PlannerPairedDepthPostStormRouteStability
+            | take(96)
+            | take(48)
+            | filter(row => row.fourth)
+            | union(
+                PlannerPairedDepthPostStormRouteStability
+                    | take(12)
+                    | take(6)
+                    | filter(row => row.fifth)
+                    | union(
+                        PlannerPairedDepthPostStormRouteStability
+                            | take(3)
+                            | filter(row => row.sixth)
+                    )
+            )
+    )
+    | union(
+        PlannerPairedDepthPostStormRouteStability
+            | take(72)
+            | take(36)
+            | filter(row => row.seventh)
+            | union(
+                PlannerPairedDepthPostStormRouteStability
+                    | take(16)
+                    | take(8)
+                    | filter(row => row.eighth)
+                    | union(
+                        PlannerPairedDepthPostStormRouteStability
+                            | take(4)
+                            | filter(row => row.ninth)
+                    )
+            )
+    );

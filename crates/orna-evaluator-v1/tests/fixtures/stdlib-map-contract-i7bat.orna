@@ -1,0 +1,46 @@
+pub fn map_contract(): Bool {
+    let start: [(Str, Int)] = [];
+    let empty: [(Str, Int)] = [];
+    let first = map.insert(start, "alpha", 1);
+    let second = map.insert(first, "beta", 2);
+    let updated = map.insert(second, "alpha", 9);
+    let unique_entries = map.from_entries([
+        ("alpha", 1),
+        ("beta", 2),
+        ("alpha", 9),
+    ]);
+    map.size(updated) == 2
+        && map.keys(updated) == ["alpha", "beta"]
+        && map.values(updated) == [9, 2]
+        && map.keys(unique_entries) == ["alpha", "beta"]
+        && map.values(unique_entries) == [9, 2]
+        && map.to_entries(updated) == [("alpha", 9), ("beta", 2)]
+        && !map.is_empty(updated)
+        && map.is_empty(empty)
+        && map.contains_key(updated, "alpha")
+        && !map.contains_key(updated, "missing")
+        && case map.get(updated, "alpha") {
+            Some(value): value == 9,
+            null: false,
+        }
+        && case map.get(updated, "missing") {
+            Some(_): false,
+            null: true,
+        }
+        && map.keys(map.remove(updated, "alpha")) == ["beta"]
+        && map.keys(map.merge(updated, map.from_entries([
+            ("beta", 7),
+            ("gamma", 3),
+        ]))) == ["alpha", "beta", "gamma"]
+        && map.values(map.merge(updated, map.from_entries([
+            ("beta", 7),
+            ("gamma", 3),
+        ]))) == [9, 7, 3]
+        && case map.get(map.merge(updated, map.from_entries([
+            ("beta", 7),
+            ("gamma", 3),
+        ])), "beta") {
+            Some(value): value == 7,
+            null: false,
+        }
+}

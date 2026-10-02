@@ -329,6 +329,42 @@ impl AdmittedReplSession {
         Ok(value)
     }
 
+    /// Executes a checked input with the read-only native sys host bindings.
+    /// Environment reads are limited to the explicit provider allowlist; this
+    /// path does not grant database, process, or mutation effects.
+    pub fn submit_with_sys_host_bindings(
+        &mut self,
+        source: &str,
+        bindings: &mut crate::SysHostBindingRegistry,
+    ) -> Result<Option<CanonicalValue>, ReplError> {
+        let input = match self.parse(source) {
+            Ok(input) => input,
+            Err(error) => return Err(self.publish_failure(error)),
+        };
+        let admission = match self.semantic.stage(&input).map_err(semantic_error) {
+            Ok(admission) => admission,
+            Err(error) => return Err(self.publish_failure(error)),
+        };
+        let mut runtime = self.runtime.clone();
+        let value = match runtime
+            .submit_admitted_with_effects(&input, bindings)
+            .map_err(ReplError::runtime)
+        {
+            Ok(value) => value,
+            Err(error) => return Err(self.publish_failure(error)),
+        };
+        let mut semantic = self.semantic.clone();
+        if semantic.commit(admission).is_err() {
+            return Err(self.publish_failure(ReplError::fixed("ORNA-REPL-COMMIT")));
+        }
+        runtime.set_last_status(
+            CanonicalValue::new(orna_foundation_v1::OvbRaw::Null).expect("null is canonical"),
+        );
+        self.runtime = runtime;
+        self.semantic = semantic;
+        Ok(value)
+    }
+
     /// Parses and semantically admits an effectful input without executing or
     /// publishing it.
     ///
@@ -499,6 +535,16 @@ fn admitted_runtime_sources(
                     );
                 }
                 Declaration::Use { .. } => {}
+                // The bounded REPL admits pinned standard functions as
+                // executable source, while enum constructors are still
+                // represented by the semantic catalogue only. Keep an
+                // optional std enum module from preventing unrelated std
+                // functions from loading; ordinary project enums remain
+                // outside this evaluator boundary.
+                Declaration::Enum { .. }
+                    if namespace
+                        .as_deref()
+                        .is_some_and(|namespace| namespace.starts_with("std.")) => {}
                 _ => return Err(ReplError::fixed("ORNA-REPL-UNSUPPORTED")),
             }
         }

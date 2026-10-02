@@ -1,0 +1,10 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn exact_checkpoint_map_equality_returns_value(pin: sys.SnapshotRef) {
+    let checkpoint = factory_at(pin);
+    {
+        same_checkpoint: checkpoint == checkpoint,
+        checkpoint: checkpoint,
+    }
+}

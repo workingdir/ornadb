@@ -1,0 +1,8 @@
+use std.net;
+
+pub fn parse_url(input: Str) = std.url.parse(input);
+pub fn send_http(request, limits) = std.net.http.send(request, limits);
+pub fn cancel_http(handle) = std.net.http.cancel(handle);
+pub fn connect_websocket(url, headers, options) =
+    std.net.websocket.connect(url, headers, options);
+pub fn cancel_websocket(connection) = std.net.websocket.cancel(connection);

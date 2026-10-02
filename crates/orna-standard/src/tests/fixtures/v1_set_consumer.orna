@@ -1,0 +1,3 @@
+use std.set as set;
+
+pub fn set_operations(value: [Int]): [Int] = set.union(value, set.from_list([1, 2]));

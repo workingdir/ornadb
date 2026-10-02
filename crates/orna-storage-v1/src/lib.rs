@@ -14,10 +14,14 @@ mod scan_planner;
 mod publication_policy;
 
 pub use branch_merge::{
-    BranchMergeBudget, BranchMergeConflict, BranchMergeError, BranchMergePlan,
-    BranchMergeReport, BranchRowSource, CheckpointId, KeyRange, MergeSide,
-    MergedSegment, MergedTable, RowSegmentManifest, TableManifest, ThreeWaySnapshot,
-    merge_three_way_snapshots,
+    BranchMergeBudget, BranchMergeConflict, BranchMergeDepthFragmentRecovery,
+    BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
+    BranchMergeTombstoneEvent, BranchMergeTombstoneHistory,
+    BranchMergeTombstoneHistoryError,
+    BranchMergePlanSequenceError, BranchMergePlanSequencer, BranchMergeReport,
+    SequencedBranchMergePlan,
+    BranchRowSource, CheckpointId, KeyRange, MergeSide, MergedSegment, MergedTable,
+    RowSegmentManifest, TableManifest, ThreeWaySnapshot, merge_three_way_snapshots,
 };
 
 pub use compact::{
