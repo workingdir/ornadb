@@ -319,6 +319,11 @@ impl PackageResolver {
     /// pin recorded in that deep manifest. The reference is silent on shared
     /// terminal route storms, so v1 applies the exact-alias last-pin rule per
     /// session.
+    /// Paired sibling branches may also storm their middle and deep aliases
+    /// independently before reaching a shared terminal pin. Each terminal
+    /// closure still begins at the exact pin in its selected deep manifest;
+    /// interleaving later terminal storms cannot change the other branch or a
+    /// fresh expansion from either retained deep pin.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
