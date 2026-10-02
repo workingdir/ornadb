@@ -1,0 +1,25 @@
+pub table PlannerStormUnknownRebindOutputAncestry(id: Int) {
+    outer: Bool,
+    nested: Bool,
+    leaf: Bool,
+}
+
+pub fn unknown_rebind_output_ancestry() = PlannerStormUnknownRebindOutputAncestry
+    | take(96)
+    | union(
+        PlannerStormUnknownRebindOutputAncestry
+            | take(64)
+            | union(
+                PlannerStormUnknownRebindOutputAncestry | take(48) | filter(row => row.leaf),
+                PlannerStormUnknownRebindOutputAncestry | take(32) | filter(row => row.leaf)
+            )
+            | take(48)
+            | filter(row => row.nested),
+        PlannerStormUnknownRebindOutputAncestry | take(24) | filter(row => row.outer)
+    )
+    | union(
+        PlannerStormUnknownRebindOutputAncestry
+            | take(24)
+            | filter(row => row.nested),
+        PlannerStormUnknownRebindOutputAncestry | take(12) | filter(row => row.outer)
+    );
