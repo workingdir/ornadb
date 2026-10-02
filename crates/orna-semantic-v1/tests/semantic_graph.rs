@@ -4049,6 +4049,95 @@ fn concurrent_callback_tuples_preserve_pin_identity_across_rebind() {
 }
 
 #[test]
+fn sequential_paired_callback_leaf_rebinds_preserve_sibling_pins() {
+    let source = include_str!("fixtures/historical-sequential-paired-callback-leaf-rebinds.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-sequential-paired-callback-leaf-rebinds.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "sequential leaf-lane rebinds must preserve sibling and saved callback pins: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_callback_leaf_rebinds_preserve_siblings")
+        })
+        .expect("sequential paired callback rebind fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_callback_leaf_rebinds_preserve_siblings"]
+        .ty
+    else {
+        panic!("paired callback rebind proof must be a function");
+    };
+    let Type::Record(streams) = result.as_ref() else {
+        panic!("paired callback rebind proof must expose concurrent checkpoints");
+    };
+    let pin_type = |name: &str| {
+        let Type::Stream(element) = streams.get(name).expect("parallel result field") else {
+            panic!("{name} must be a parallel stream");
+        };
+        assert!(
+            matches!(element.as_ref(), Type::Applied { base, .. } if base == "sys.HistoricalCallable"),
+            "{name} must retain its captured pin: {element:?}"
+        );
+        element.as_ref()
+    };
+
+    assert_eq!(pin_type("saved_left_root"), pin_type("middle_left_root"));
+    assert_eq!(pin_type("middle_left_root"), pin_type("final_left_root"));
+    assert_eq!(pin_type("saved_right_root"), pin_type("final_right_root"));
+    assert_ne!(pin_type("saved_left_root"), pin_type("saved_right_root"));
+
+    assert_ne!(pin_type("saved_left_leaf"), pin_type("middle_left_leaf"));
+    assert_eq!(pin_type("saved_right_leaf"), pin_type("middle_right_leaf"));
+    assert_eq!(pin_type("middle_left_leaf"), pin_type("final_left_leaf"));
+    assert_ne!(pin_type("middle_right_leaf"), pin_type("final_right_leaf"));
+    assert_ne!(pin_type("final_left_leaf"), pin_type("final_right_leaf"));
+}
+
+#[test]
+fn sequential_paired_callback_leaf_rebinds_reject_cross_lane_parallel_mix() {
+    let source = include_str!("fixtures/historical-sequential-paired-callback-leaf-rebinds-mixed.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-sequential-paired-callback-leaf-rebinds-mixed.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "separately rebound tuple leaves from opposite lanes must remain type-distinct: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn concurrent_callback_tuples_reject_cross_lane_identity_mix_after_rebind() {
     let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
