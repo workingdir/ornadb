@@ -21682,6 +21682,105 @@ fn paired_recovery_retry_identity_tracks_results_across_uneven_row_segments() {
 }
 
 #[test]
+fn paired_fragment_retry_identity_preserves_tuple_depth_across_restores() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    assert!(fixture_rows.iter().any(|row| row.key == string("root")));
+    assert!(fixture_rows.iter().any(|row| row.key == string("root/child")));
+
+    let shallow = CanonicalValue::new(OvbRaw::Tag(
+        60015,
+        Box::new(OvbRaw::Array(vec![OvbRaw::Text("root".into())])),
+    ))
+    .unwrap();
+    let deep = CanonicalValue::new(OvbRaw::Tag(
+        60015,
+        Box::new(OvbRaw::Array(vec![
+            OvbRaw::Text("root".into()),
+            OvbRaw::Text("child".into()),
+        ])),
+    ))
+    .unwrap();
+    assert!(orna_foundation_v1::compare_primary_keys(&shallow, &deep).is_err());
+
+    let make_step = |order, reverse_segments| {
+        let keys = if reverse_segments {
+            vec![deep.clone(), shallow.clone()]
+        } else {
+            vec![shallow.clone(), deep.clone()]
+        };
+        let plan = BranchMergePlan {
+            schema: schema(true, FieldType::Str),
+            tables: BTreeMap::from([(
+                id(1),
+                orna_storage_v1::MergedTable {
+                    id: id(1),
+                    whole_table_reuse: None,
+                    segments: keys
+                        .into_iter()
+                        .map(|key| MergedSegment::Rows {
+                            range: KeyRange::all(),
+                            rows: Vec::new(),
+                            tombstones: vec![key],
+                        })
+                        .collect(),
+                },
+            )]),
+            checkpoints: BTreeMap::from([(
+                b"stream".to_vec(),
+                CheckpointGeneration {
+                    generation: 4,
+                    position: Some(b"paired-restore".to_vec()),
+                },
+            )]),
+            report: Default::default(),
+        };
+        SequencedBranchMergePlan {
+            order,
+            ordered_row_tombstones: plan.ordered_row_tombstones(),
+            plan,
+        }
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history.submit_depth_merge_fragment(0, 0, 2, &[]).unwrap();
+    history
+        .submit_depth_merge_fragment(1, 0, 2, &[(id(1), shallow.clone())])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 1, 2, &[(id(1), deep.clone())])
+        .unwrap();
+    history
+        .bind_depth_fragment_retry_plan(&make_step(1, true))
+        .unwrap();
+
+    let released = history
+        .recover_depth_merge_fragments_with_appends(
+            &[BranchMergeDepthFragmentRecovery {
+                order: 0,
+                fragment: 1,
+                fragment_count: 2,
+                tombstones: Vec::new(),
+            }],
+            &[make_step(1, false)],
+        )
+        .expect("the same paired retry survives tuple-depth and segment-layout changes");
+    assert_eq!(
+        released.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [1, 1],
+    );
+    let expected_keys = vec![shallow, deep];
+    assert_eq!(
+        released.iter().map(|event| event.key.clone()).collect::<Vec<_>>(),
+        expected_keys,
+        "released tuple-depth tombstones retain ascending tuple arity across fragment boundaries",
+    );
+    assert_eq!(history.next_order(), Some(2));
+}
+
+#[test]
 fn paired_fragment_retries_bind_full_identity_across_uneven_chains() {
     let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
         .split("\n\n")

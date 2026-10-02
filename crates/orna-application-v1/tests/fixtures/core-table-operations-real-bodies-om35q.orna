@@ -1,0 +1,30 @@
+pub table Note(id: Int) {
+    text: Str,
+    quantity: Int,
+}
+
+pub fn main() {
+    let inserted = Note.insert({ id: 2, text: "inserted", quantity: 3 });
+    assert inserted.id == 2;
+    assert inserted.text == "inserted";
+    assert inserted.quantity == 3;
+
+    let updated = Note.update(1, { quantity: 5 });
+    assert updated.id == 1;
+    assert updated.text == "original";
+    assert updated.quantity == 5;
+
+    let upserted = Note.upsert({ id: 1, text: "upserted" });
+    assert upserted.id == 1;
+    assert upserted.text == "upserted";
+    assert upserted.quantity == 5;
+
+    let created = Note.upsert({ id: 3, text: "created", quantity: 9 });
+    assert created.id == 3;
+    assert created.text == "created";
+    assert created.quantity == 9;
+
+    Note.delete(2);
+
+    Note.rekey(1, 4)
+}
