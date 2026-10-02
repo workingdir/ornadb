@@ -1611,10 +1611,12 @@ dependencies = [
  "orna-syntax-v1",
  "orna-sys-macros",
  "quote",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "syn 2.0.119",
+ "uuid",
 ]
 
 [[package]]
@@ -1983,6 +1985,7 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",

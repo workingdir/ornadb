@@ -1,10 +1,12 @@
-pub table Note(id: Int) { text: Str, }
+pub table Note(id: Int) { doubled: Int, }
 
-fn insert_note(): Bool {
-  Note.insert({ id: 7, text: "committed from admitted source" });
-  true
+fn insert_note(): Int {
+  let key = 3 * 4;
+  let computed = key + 5;
+  Note.insert({ id: key, doubled: computed });
+  computed * 2
 }
 
-pub fn main(): Bool {
+pub fn main(): Int {
   insert_note()
 }

@@ -3,12 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-mod build_support;
 mod build_host;
+mod build_support;
 
-use build_support::{
-    collect_rust_sources, generate_sys_artifacts,
-};
+use build_support::{collect_rust_sources, generate_sys_artifacts};
 
 fn rust_sources(root: &Path, output: &mut Vec<PathBuf>) -> std::io::Result<()> {
     let mut entries = fs::read_dir(root)?.collect::<Result<Vec<_>, _>>()?;
@@ -69,8 +67,17 @@ fn main() {
         .expect("write generated api/sys.json");
     let host_registry = build_host::generate_host_registry(&source_root)
         .expect("annotated native sys host operations form a valid registry");
+    let host_registry_schema = build_host::generate_host_registry_schema()
+        .expect("generate deterministic native sys host-operation schema");
+    build_host::validate_host_registry_json(&host_registry, &host_registry_schema)
+        .expect("generated native sys host-operation registry matches its schema");
     fs::write(out_dir.join("system_host_operations.json"), host_registry)
         .expect("write generated native sys host-operation registry");
+    fs::write(
+        out_dir.join("system_host_operations.schema.json"),
+        host_registry_schema,
+    )
+    .expect("write generated native sys host-operation schema");
     fs::write(
         out_dir.join("system_api_schema.json"),
         artifacts.schema_json,
@@ -80,7 +87,7 @@ fn main() {
         out_dir.join("system_provider_abi.json"),
         artifacts.provider_abi_json,
     )
-        .expect("write generated typed system provider ABI");
+    .expect("write generated typed system provider ABI");
     let binding_root = out_dir.join("system_bindings");
     if binding_root.exists() {
         fs::remove_dir_all(&binding_root).expect("remove stale generated sys binding stubs");
@@ -91,6 +98,9 @@ fn main() {
             .expect("create generated sys module directory");
         fs::write(path, source).expect("write generated Orna sys module stub");
     }
-    fs::write(out_dir.join("system_bindings.orna"), artifacts.binding_bundle)
-        .expect("write generated Orna sys binding stubs");
+    fs::write(
+        out_dir.join("system_bindings.orna"),
+        artifacts.binding_bundle,
+    )
+    .expect("write generated Orna sys binding stubs");
 }
