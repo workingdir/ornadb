@@ -134,7 +134,7 @@ sys-artifact-ci: sys-binding-conformance-ci
 
 # Sweep generated declaration parsing, registry typing/dispatch, and embedded schema parity.
 sys-binding-conformance-ci:
-    cargo test --locked -p orna-sys-v1 --features dev-sys-export --test system_binding_stubs --test host_registry_parity --test sys_schema_regeneration
+    cargo test --locked -p orna-sys-v1 --features dev-sys-export --test system_binding_stubs --test host_registry_parity --test sys_schema_regeneration --test sys_api_generation
 
 # Validate the tree-sitter grammar and editor metadata without installing editor runtimes.
 # This static gate requires its CLI prerequisites: Python 3.11+, tree-sitter CLI, node, and cargo.
