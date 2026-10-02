@@ -236,7 +236,9 @@ pub struct BranchMergePlan {
 ///
 /// Paired chain storms run with per-invocation budgets and result buffers.
 /// Concurrent retries therefore preserve each table's complete tombstone
-/// sequence without sharing partial work or budget state.
+/// sequence without sharing partial work or budget state. Storm breadth across
+/// several prefix depths does not change table-local order or delete
+/// precedence, even when a later table's scan fails after earlier tables.
 ///
 /// A read failure at any table or range aborts the whole invocation. Facts
 /// gathered from earlier tables or depth ranges remain private; after source
