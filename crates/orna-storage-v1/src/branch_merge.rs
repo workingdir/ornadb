@@ -288,6 +288,12 @@ pub struct BranchMergePlan {
 /// deleting storm or chain keys restored in it. Retries start from that latest
 /// paired base, emit only the new exact-key deletions, and append one selected
 /// plan so re-deletes become new history events without replaying old ones.
+/// MERGE-1 is silent on isolation between concurrent retry invocations. This
+/// v1 policy keeps row buffers, budgets, and candidate plans invocation-local:
+/// a failure after one paired table has materialized aborts only that attempt,
+/// while peer retries from the same committed base can still return complete
+/// independent plans. Callers append only one successful plan per committed
+/// wave.
 ///
 /// A read failure at any table or range aborts the whole invocation. Facts
 /// gathered from earlier tables or depth ranges remain private; after source
