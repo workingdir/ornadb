@@ -1,0 +1,31 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn nested_bundle_at(pin: sys.SnapshotRef) = {
+    direct: chained_factory(pin),
+    reader: chained_factory(pin)().read,
+    continuation: chained_factory(pin)().read(),
+};
+
+pub fn nested_pin_stages_remain_distinct_after_rebind_round_trip() {
+    let rolling = nested_bundle_at(sys.snapshot("HEAD~80"));
+    rolling = nested_bundle_at(sys.snapshot("HEAD~70"));
+    let early = rolling;
+    rolling = nested_bundle_at(sys.snapshot("HEAD~60"));
+    let middle = rolling;
+    rolling = nested_bundle_at(sys.snapshot("HEAD~50"));
+    rolling = nested_bundle_at(sys.snapshot("HEAD~40"));
+    rolling = nested_bundle_at(sys.snapshot("HEAD~30"));
+    rolling = nested_bundle_at(sys.snapshot("HEAD~20"));
+    rolling = nested_bundle_at(sys.snapshot("HEAD~10"));
+    rolling = nested_bundle_at(sys.snapshot("HEAD~80"));
+    [
+        early.continuation,
+        middle.continuation,
+        rolling.continuation,
+    ]
+}
