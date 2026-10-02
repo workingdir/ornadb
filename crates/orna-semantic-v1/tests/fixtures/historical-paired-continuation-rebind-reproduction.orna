@@ -1,0 +1,119 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn terminal_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+            };
+
+pub fn followup_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+                continuation: terminal_at(terminal_pin),
+            };
+
+pub fn cascade_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+                followup: followup_at(terminal_pin),
+            };
+
+// Recreate captured closures from their pins after storms, then reproduce the next continuation.
+pub fn paired_continuation_rebind_reproductions_remain_consistent() {
+    let left_origin = cascade_at(sys.snapshot("HEAD~1060"))(sys.snapshot("HEAD~1020"))(sys.snapshot("HEAD~980"))(sys.snapshot("HEAD~940"));
+    let right_origin = cascade_at(sys.snapshot("HEAD~1050"))(sys.snapshot("HEAD~1010"))(sys.snapshot("HEAD~970"))(sys.snapshot("HEAD~930"));
+    let left_reproduced = cascade_at(sys.snapshot("HEAD~1060"))(sys.snapshot("HEAD~1020"))(sys.snapshot("HEAD~980"))(sys.snapshot("HEAD~940"));
+    let right_reproduced = cascade_at(sys.snapshot("HEAD~1050"))(sys.snapshot("HEAD~1010"))(sys.snapshot("HEAD~970"))(sys.snapshot("HEAD~930"));
+
+    let left_followup_root_rolling = left_origin.followup;
+    left_followup_root_rolling = followup_at(sys.snapshot("HEAD~939"));
+    left_followup_root_rolling = followup_at(sys.snapshot("HEAD~938"));
+    let left_followup_root_reproduced = left_reproduced.followup;
+    let left_followup_bridge_rolling = left_followup_root_reproduced(sys.snapshot("HEAD~900"));
+    left_followup_bridge_rolling = left_followup_root_reproduced(sys.snapshot("HEAD~898"));
+    left_followup_bridge_rolling = left_followup_root_reproduced(sys.snapshot("HEAD~899"));
+    let left_followup_bridge_reproduced = left_followup_root_reproduced(sys.snapshot("HEAD~900"));
+    let left_followup_leaf_rolling = left_followup_bridge_reproduced(sys.snapshot("HEAD~880"));
+    left_followup_leaf_rolling = left_followup_bridge_reproduced(sys.snapshot("HEAD~878"));
+    left_followup_leaf_rolling = left_followup_bridge_reproduced(sys.snapshot("HEAD~879"));
+    let left_followup_leaf_reproduced = left_followup_bridge_reproduced(sys.snapshot("HEAD~880"));
+    let left_followup_after_storm = left_followup_leaf_reproduced(sys.snapshot("HEAD~860"));
+    let left_followup_origin = left_origin.followup(sys.snapshot("HEAD~900"))(sys.snapshot("HEAD~880"))(sys.snapshot("HEAD~860"));
+    let left_followup_direct_reproduction = left_reproduced.followup(sys.snapshot("HEAD~900"))(sys.snapshot("HEAD~880"))(sys.snapshot("HEAD~860"));
+
+    let right_followup_bridge_rolling = right_origin.followup(sys.snapshot("HEAD~890"));
+    right_followup_bridge_rolling = right_origin.followup(sys.snapshot("HEAD~888"));
+    right_followup_bridge_rolling = right_origin.followup(sys.snapshot("HEAD~889"));
+    let right_followup_root_rolling = right_origin.followup;
+    right_followup_root_rolling = followup_at(sys.snapshot("HEAD~929"));
+    right_followup_root_rolling = followup_at(sys.snapshot("HEAD~928"));
+    let right_followup_root_reproduced = right_reproduced.followup;
+    let right_followup_bridge_reproduced = right_followup_root_reproduced(sys.snapshot("HEAD~890"));
+    let right_followup_leaf_rolling = right_followup_bridge_reproduced(sys.snapshot("HEAD~870"));
+    right_followup_leaf_rolling = right_followup_bridge_reproduced(sys.snapshot("HEAD~868"));
+    right_followup_leaf_rolling = right_followup_bridge_reproduced(sys.snapshot("HEAD~869"));
+    let right_followup_leaf_reproduced = right_followup_bridge_reproduced(sys.snapshot("HEAD~870"));
+    let right_followup_after_storm = right_followup_leaf_reproduced(sys.snapshot("HEAD~850"));
+    let right_followup_origin = right_origin.followup(sys.snapshot("HEAD~890"))(sys.snapshot("HEAD~870"))(sys.snapshot("HEAD~850"));
+    let right_followup_direct_reproduction = right_reproduced.followup(sys.snapshot("HEAD~890"))(sys.snapshot("HEAD~870"))(sys.snapshot("HEAD~850"));
+
+    let left_terminal_root_rolling = left_followup_origin.continuation;
+    left_terminal_root_rolling = terminal_at(sys.snapshot("HEAD~859"));
+    left_terminal_root_rolling = terminal_at(sys.snapshot("HEAD~858"));
+    let left_terminal_root_reproduced = left_followup_direct_reproduction.continuation;
+    let left_terminal_bridge_rolling = left_terminal_root_reproduced(sys.snapshot("HEAD~840"));
+    left_terminal_bridge_rolling = left_terminal_root_reproduced(sys.snapshot("HEAD~838"));
+    left_terminal_bridge_rolling = left_terminal_root_reproduced(sys.snapshot("HEAD~839"));
+    let left_terminal_bridge_reproduced = left_terminal_root_reproduced(sys.snapshot("HEAD~840"));
+    let left_terminal_leaf_rolling = left_terminal_bridge_reproduced(sys.snapshot("HEAD~820"));
+    left_terminal_leaf_rolling = left_terminal_bridge_reproduced(sys.snapshot("HEAD~818"));
+    left_terminal_leaf_rolling = left_terminal_bridge_reproduced(sys.snapshot("HEAD~819"));
+    let left_terminal_leaf_reproduced = left_terminal_bridge_reproduced(sys.snapshot("HEAD~820"));
+    let left_terminal_after_storm = left_terminal_leaf_reproduced(sys.snapshot("HEAD~800"));
+    let left_terminal_origin = left_followup_origin.continuation(sys.snapshot("HEAD~840"))(sys.snapshot("HEAD~820"))(sys.snapshot("HEAD~800"));
+    let left_terminal_direct_reproduction = left_followup_direct_reproduction.continuation(sys.snapshot("HEAD~840"))(sys.snapshot("HEAD~820"))(sys.snapshot("HEAD~800"));
+
+    let right_terminal_bridge_rolling = right_followup_origin.continuation(sys.snapshot("HEAD~830"));
+    right_terminal_bridge_rolling = right_followup_origin.continuation(sys.snapshot("HEAD~828"));
+    right_terminal_bridge_rolling = right_followup_origin.continuation(sys.snapshot("HEAD~829"));
+    let right_terminal_leaf_rolling = right_terminal_bridge_rolling(sys.snapshot("HEAD~810"));
+    right_terminal_leaf_rolling = right_terminal_bridge_rolling(sys.snapshot("HEAD~808"));
+    let right_terminal_root_rolling = right_followup_origin.continuation;
+    right_terminal_root_rolling = terminal_at(sys.snapshot("HEAD~849"));
+    right_terminal_root_rolling = terminal_at(sys.snapshot("HEAD~848"));
+    let right_terminal_root_reproduced = right_followup_direct_reproduction.continuation;
+    let right_terminal_bridge_reproduced = right_terminal_root_reproduced(sys.snapshot("HEAD~830"));
+    let right_terminal_leaf_reproduced = right_terminal_bridge_reproduced(sys.snapshot("HEAD~810"));
+    let right_terminal_after_storm = right_terminal_leaf_reproduced(sys.snapshot("HEAD~790"));
+    let right_terminal_origin = right_followup_origin.continuation(sys.snapshot("HEAD~830"))(sys.snapshot("HEAD~810"))(sys.snapshot("HEAD~790"));
+    let right_terminal_direct_reproduction = right_followup_direct_reproduction.continuation(sys.snapshot("HEAD~830"))(sys.snapshot("HEAD~810"))(sys.snapshot("HEAD~790"));
+
+    {
+        followup: {
+            left: [left_followup_origin, left_followup_after_storm, left_followup_direct_reproduction],
+            right: [right_followup_origin, right_followup_after_storm, right_followup_direct_reproduction],
+        },
+        terminal: {
+            left: [left_terminal_origin, left_terminal_after_storm, left_terminal_direct_reproduction],
+            right: [right_terminal_origin, right_terminal_after_storm, right_terminal_direct_reproduction],
+        },
+    }
+}
