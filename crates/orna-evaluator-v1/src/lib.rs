@@ -6436,33 +6436,26 @@ impl Context<'_, '_> {
                     Value::String(zone),
                     Value::String(ambiguous),
                 ],
+            ) => self.resolve_local_time(local, zone, ambiguous, None),
+            (
+                "resolve_local",
+                [
+                    Value::String(local),
+                    Value::String(zone),
+                    Value::String(ambiguous),
+                    gap,
+                ],
             ) => {
-                if !matches!(ambiguous.as_str(), "reject" | "earlier" | "later") {
-                    return Err(error("ORNA-EVAL-VALUE"));
-                }
-                self.step()?;
-                let local = parse_local_datetime(local).ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
-                let zone = resolve_time_zone(zone).map_err(|_| error("ORNA-EVAL-VALUE"))?;
-                let instant = match zone
-                    .resolve_local(local)
-                    .map_err(|_| error("ORNA-EVAL-VALUE"))?
-                {
-                    LocalTimeResolution::Unique { instant, .. } => instant,
-                    LocalTimeResolution::Ambiguous { earlier, .. } if ambiguous == "earlier" => {
-                        earlier
-                    }
-                    LocalTimeResolution::Ambiguous { later, .. } if ambiguous == "later" => later,
-                    // A portable implementation cannot choose a machine-local
-                    // gap policy. Ambiguous times require an explicit choice.
-                    LocalTimeResolution::Ambiguous { .. }
-                    | LocalTimeResolution::Nonexistent { .. } => {
-                        return Err(error("ORNA-EVAL-VALUE"));
-                    }
+                let gap = match gap {
+                    Value::Null | Value::Option(None) => None,
+                    Value::String(gap) => Some(gap.as_str()),
+                    Value::Option(Some(inner)) => match inner.as_ref() {
+                        Value::String(gap) => Some(gap.as_str()),
+                        _ => return Err(error("ORNA-EVAL-TYPE")),
+                    },
+                    _ => return Err(error("ORNA-EVAL-TYPE")),
                 };
-                Ok(Value::Instant {
-                    unix_seconds: instant.unix_seconds,
-                    nanosecond: instant.nanosecond,
-                })
+                self.resolve_local_time(local, zone, ambiguous, gap)
             }
             (
                 "duration.compact.format"
@@ -6502,6 +6495,81 @@ impl Context<'_, '_> {
             ("offset_at" | "resolve_local", _) => Err(error("ORNA-EVAL-TYPE")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
+    }
+    fn resolve_local_time(
+        &mut self,
+        local_text: &str,
+        zone_name: &str,
+        ambiguous: &str,
+        gap_adjustment: Option<&str>,
+    ) -> Result<Value, EvaluationError> {
+        if !matches!(ambiguous, "reject" | "earlier" | "later")
+            || !matches!(
+                gap_adjustment,
+                None | Some("reject" | "shift_forward" | "shift_backward")
+            )
+        {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        self.step()?;
+        let local = parse_local_datetime(local_text).ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+        let zone = resolve_time_zone(zone_name).map_err(|_| error("ORNA-EVAL-VALUE"))?;
+        let instant = match zone
+            .resolve_local(local)
+            .map_err(|_| error("ORNA-EVAL-VALUE"))?
+        {
+            LocalTimeResolution::Unique { instant, .. } => instant,
+            LocalTimeResolution::Ambiguous { earlier, .. } if ambiguous == "earlier" => earlier,
+            LocalTimeResolution::Ambiguous { later, .. } if ambiguous == "later" => later,
+            LocalTimeResolution::Ambiguous { .. } => return Err(error("ORNA-EVAL-VALUE")),
+            LocalTimeResolution::Nonexistent { before, after } => {
+                let adjustment = match gap_adjustment {
+                    Some("shift_forward") => "shift_forward",
+                    Some("shift_backward") => "shift_backward",
+                    None | Some("reject") => return Err(error("ORNA-EVAL-VALUE")),
+                    _ => return Err(error("ORNA-EVAL-VALUE")),
+                };
+                let offset_before = zone
+                    .at(before)
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?
+                    .offset_seconds;
+                let offset_after = zone
+                    .at(after)
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?
+                    .offset_seconds;
+                let utc = resolve_time_zone("UTC").map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                let LocalTimeResolution::Unique {
+                    instant: local_as_utc,
+                    ..
+                } = utc
+                    .resolve_local(local)
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?
+                else {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                };
+                let offset = if adjustment == "shift_forward" {
+                    offset_before
+                } else {
+                    offset_after
+                };
+                let shifted = Instant::new(
+                    local_as_utc
+                        .unix_seconds
+                        .checked_sub(i64::from(offset))
+                        .ok_or_else(|| error("ORNA-EVAL-VALUE"))?,
+                    local.nanosecond,
+                )
+                .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                // Validate the shifted instant against the selected zone's
+                // supported range and transition table before returning it.
+                zone.at(shifted).map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                shifted
+            }
+        };
+        Ok(Value::Instant {
+            unix_seconds: instant.unix_seconds,
+            nanosecond: instant.nanosecond,
+        })
     }
     fn base64(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
         match (name, values.as_slice()) {
@@ -9698,7 +9766,11 @@ fn named_arguments(
         "replace" => &["value", "from", "to"],
         "normalise" => &["value", "form"],
         "offset_at" => &["instant", "zone"],
-        "resolve_local" => &["local", "zone", "ambiguous"],
+        "resolve_local" => match values.len() {
+            3 => &["local", "zone", "ambiguous"],
+            4 => &["local", "zone", "ambiguous", "gap"],
+            _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+        },
         "duration.compact.format"
         | "duration.clock.format"
         | "duration.words.format"
