@@ -19237,6 +19237,14 @@ mod tests {
                 Type::Named("selector:binder:second".into()),
             ],
         };
+        let wider = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:HEAD~6".into()),
+                Type::Named("selector:HEAD~5".into()),
+                Type::Named("selector:HEAD~4".into()),
+            ],
+        };
         let malformed = Type::Applied {
             base: "semantic.SnapshotContextMap".into(),
             arguments: vec![Type::Named("domain.Factory".into())],
@@ -19271,8 +19279,15 @@ mod tests {
         assert!(types_match(&first, &first));
         assert!(types_match(&first, &Type::Bottom));
         assert!(pinned_snapshot_shape_matches(&first, &first));
+        assert!(pinned_snapshot_shape_matches(&first, &second));
+        assert!(!pinned_snapshot_shape_matches(&first, &wider));
+        assert!(!pinned_snapshot_shape_matches(
+            &contextual_snapshot_ref("selector:HEAD~3"),
+            &first
+        ));
         assert!(type_contains_pinned_snapshot_identity(&first));
         assert!(pinned_snapshot_rebind_compatible(&first, &second));
+        assert!(!pinned_snapshot_rebind_compatible(&first, &wider));
         assert!(!is_snapshot_context_map_shape(&malformed));
         assert!(!types_match(&malformed, &malformed));
         assert!(!types_match(&malformed, &Type::Bottom));
