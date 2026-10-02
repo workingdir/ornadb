@@ -1,5 +1,6 @@
 use orna_evolution_v1::{
-    CanonicalValue, CheckpointGeneration, Field, FieldRole, FieldType, KeyedRow, ObjectId,
+    CanonicalValue, CheckpointGeneration, EvolutionVersion, Field, FieldRole, FieldType, KeyedRow,
+    ObjectId,
     RowKeyKind, RowMergeConflict, Schema, Table,
 };
 use orna_foundation_v1::OvbRaw;
@@ -20030,6 +20031,95 @@ fn paired_restore_waves_reject_pending_logical_tombstone_duplicates() {
         .collect::<Vec<_>>();
     assert_eq!(repeated_orders, [2, 3]);
     assert_eq!(history.next_order(), Some(4));
+}
+
+#[test]
+fn paired_restore_waves_reject_logical_duplicates_across_submission_modes() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let repeated_key = fixture_rows
+        .iter()
+        .find(|row| row.key == string("a/child/deep"))
+        .expect("the in-crate depth fixture supplies the repeated tombstone")
+        .key
+        .clone();
+    let components = vec![OvbRaw::Text("a/child/deep".into())];
+    let equivalent_key = CanonicalValue::new(OvbRaw::Tag(
+        60015,
+        Box::new(OvbRaw::Array(components)),
+    ))
+    .unwrap();
+    assert_ne!(repeated_key, equivalent_key);
+    assert_eq!(
+        orna_foundation_v1::compare_primary_keys(&repeated_key, &equivalent_key),
+        Ok(std::cmp::Ordering::Equal),
+    );
+
+    let empty_plan = || BranchMergePlan {
+        schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+        tables: BTreeMap::new(),
+        checkpoints: BTreeMap::new(),
+        report: Default::default(),
+    };
+    let whole_plan = |order, key| SequencedBranchMergePlan {
+        order,
+        plan: empty_plan(),
+        ordered_row_tombstones: vec![(id(1), key)],
+    };
+
+    // A later whole paired plan can be in flight while an earlier depth wave
+    // arrives. The logical duplicate must be rejected independent of the
+    // submission API used for each position.
+    let mut whole_then_fragments = BranchMergeTombstoneHistory::new(0);
+    assert!(whole_then_fragments
+        .submit(&whole_plan(2, repeated_key.clone()))
+        .unwrap()
+        .is_empty());
+    let before_duplicate = whole_then_fragments.clone();
+    assert_eq!(
+        whole_then_fragments.submit_depth_merge_fragment(
+            1,
+            0,
+            2,
+            &[(id(1), equivalent_key.clone())],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConcurrentDuplicateTombstone {
+            first_order: 1,
+            second_order: 2,
+        }),
+    );
+    assert_eq!(whole_then_fragments, before_duplicate);
+
+    // The reverse arrival order follows the same logical-key rule.
+    let mut fragments_then_whole = BranchMergeTombstoneHistory::new(0);
+    assert!(fragments_then_whole
+        .submit_depth_merge_fragment(2, 0, 2, &[(id(1), repeated_key.clone())])
+        .unwrap()
+        .is_empty());
+    let before_duplicate = fragments_then_whole.clone();
+    assert_eq!(
+        fragments_then_whole.submit(&whole_plan(1, equivalent_key.clone())),
+        Err(BranchMergeTombstoneHistoryError::ConcurrentDuplicateTombstone {
+            first_order: 1,
+            second_order: 2,
+        }),
+    );
+    assert_eq!(fragments_then_whole, before_duplicate);
+
+    // Mixing APIs for the same position is a conflicting submission in both
+    // directions, distinct from replaying a whole plan or stale lineage.
+    let mut same_position = BranchMergeTombstoneHistory::new(0);
+    same_position
+        .submit_depth_merge_fragment(0, 0, 2, &[(id(1), repeated_key)])
+        .unwrap();
+    let before_conflict = same_position.clone();
+    assert_eq!(
+        same_position.submit(&whole_plan(0, equivalent_key)),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 0 }),
+    );
+    assert_eq!(same_position, before_conflict);
 }
 
 #[test]
