@@ -362,6 +362,14 @@ impl PackageResolver {
     /// then converge again through local terminal rebinds. The reference is
     /// silent on repeated post-storm depth waves; v1 keeps each wave rooted
     /// in the exact pins selected along its own path.
+    /// After an earlier terminal storm across several siblings, a later
+    /// paired middle/deep closure wave also starts from each sibling's newly
+    /// selected middle pin, then follows that middle pin's exact deep pin.
+    /// Rebinding those reopened terminal closures can converge on one exact
+    /// terminal pin without merging their state: prior storm sessions and
+    /// pre-rebind snapshots retain their original routes. Since the reference
+    /// is silent on this wider post-storm sequence, v1 treats every reopened
+    /// closure as a fresh route root and keeps rebinds local to that session.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
