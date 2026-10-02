@@ -6934,7 +6934,7 @@ fn infer_contextual_lambda(
             .map(type_of)
             .or_else(|| expected_parameters.get(index).cloned())
             .unwrap_or(Type::Error);
-        bind_pattern(
+        bind_parameter_pattern(
             &parameter.pattern,
             ty.clone(),
             scope,
@@ -7299,9 +7299,18 @@ fn infer(
                     // unresolved-name diagnostic.
                     if let Pattern::Name(name, _) = &parameter.pattern {
                         insert_local_binding(name, Type::Error, &mut locals, diagnostics);
+                        if let Some(symbol) = locals.get_mut(name) {
+                            symbol.kind = SymbolKind::Parameter;
+                        }
                     }
                 } else {
-                    bind_pattern(&parameter.pattern, ty.clone(), scope, &mut locals, diagnostics);
+                    bind_parameter_pattern(
+                        &parameter.pattern,
+                        ty.clone(),
+                        scope,
+                        &mut locals,
+                        diagnostics,
+                    );
                 }
                 types.push(ty);
             }
@@ -16163,12 +16172,17 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 || argument_types
                     .iter()
                     .any(|actual| contains_snapshot_context_key(actual, selector))
+                || parameter_names.is_some_and(|names| names.iter().all(|name| name != parameter))
             {
                 // A closure's result may mention its captured selector even
                 // when the current zero-argument call has no parameter to
                 // substitute. Preserve that exact context instead of
-                // inventing a call-site identity. `database.as_of(pin)` also
-                // forwards the context already carried by its argument.
+                // inventing a call-site identity. A selector name absent from
+                // this call's parameters belongs to a nested callable and
+                // stays symbolic until that callable is invoked. The reference
+                // requires exact SnapshotRef pinning but leaves this nested
+                // closure specialization detail unspecified. `database.as_of(pin)`
+                // also forwards the context already carried by its argument.
                 ty.clone()
             } else {
                 contextual_snapshot_ref(&format!(
