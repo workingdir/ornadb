@@ -21,6 +21,8 @@ const PARTIAL_ESTIMATE_REBIND_STAGES_FIXTURE: &str =
     include_str!("fixtures/planner_storm_partial_estimate_rebind_stages.orna");
 const UNKNOWN_REBIND_NESTED_CAPS_FIXTURE: &str =
     include_str!("fixtures/planner_storm_unknown_rebind_nested_caps.orna");
+const DEEP_UNKNOWN_REBIND_CAPS_FIXTURE: &str =
+    include_str!("fixtures/planner_storm_deep_unknown_rebind_caps.orna");
 
 fn branch(
     limits: &[u64],
@@ -920,6 +922,136 @@ fn known_byte_caps_survive_unknown_work_in_nested_rebind_storm_stages() {
         stages[0].details().get("nested_cascade_shapes"),
         Some(PlanDetail::Text(shapes)) if !shapes.is_empty()
     ));
+}
+
+#[test]
+fn byte_caps_stay_local_through_deep_unknown_rebind_chains() {
+    let parsed = orna_syntax_v1::parse_module(DEEP_UNKNOWN_REBIND_CAPS_FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    let leaf_first = storm(
+        "expr:deep-leaf-first",
+        (0..2).map(|_| branch(&[80], 2, vec![])).collect(),
+    );
+    let leaf_second = storm(
+        "expr:deep-leaf-second",
+        (0..3).map(|_| branch(&[60], 3, vec![])).collect(),
+    );
+    let mut deep_branch = branch(
+        &[20, 8],
+        1,
+        vec![
+            rebind(1, vec![leaf_first]),
+            rebind(2, vec![leaf_second]),
+        ],
+    );
+    deep_branch.nested_storms.push(storm(
+        "expr:deep-post-rebind-storm",
+        (0..2).map(|_| branch(&[40], 2, vec![])).collect(),
+    ));
+    let nested_rebind = storm(
+        "expr:nested-rebind-chain",
+        vec![deep_branch, branch(&[6], 2, vec![])],
+    );
+
+    let middle_rebind = storm(
+        "expr:middle-rebind-chain",
+        vec![
+            branch(
+                &[24, 12],
+                1,
+                vec![
+                    rebind(1, vec![nested_rebind.clone()]),
+                    rebind(2, vec![storm(
+                        "expr:middle-position-two",
+                        (0..2).map(|_| branch(&[30], 2, vec![])).collect(),
+                    )]),
+                ],
+            ),
+            branch(&[8], 2, vec![]),
+        ],
+    );
+    let mut outer_branch = branch(
+        &[32, 18],
+        1,
+        vec![
+            rebind(1, vec![middle_rebind.clone()]),
+            rebind(2, vec![storm(
+                "expr:outer-position-two",
+                (0..2).map(|_| branch(&[22], 2, vec![])).collect(),
+            )]),
+        ],
+    );
+    outer_branch.nested_storms.push(storm(
+        "expr:outer-post-chain-nested",
+        vec![branch(&[14, 7], 1, vec![rebind(1, vec![nested_rebind.clone()])])],
+    ));
+
+    let stages = [
+        storm(
+            "expr:deep-unknown-stage-one",
+            vec![outer_branch.clone(), branch(&[10], 2, vec![])],
+        ),
+        storm(
+            "expr:deep-unknown-stage-two",
+            vec![
+                branch(&[20, 9], 1, vec![rebind(1, vec![middle_rebind.clone()])]),
+                branch(&[7], 2, vec![]),
+            ],
+        ),
+        storm(
+            "expr:deep-unknown-stage-three",
+            vec![
+                branch(&[5], 1, vec![rebind(1, vec![nested_rebind])]),
+                branch(&[3], 1, vec![]),
+            ],
+        ),
+    ];
+    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+        &query(None, Some(2_048)),
+        &stages,
+        &[],
+    )
+    .expect("nested rebinds use only their immediate known-byte branch cap");
+    let mut filters = explained
+        .nodes()
+        .iter()
+        .filter(|node| {
+            node.kind() == PlanNodeKind::Filter && node.details().contains_key("disjunct_storm")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(filters.len(), 3);
+    filters.sort_by_key(|filter| match filter.details().get("disjunct_storm") {
+        Some(PlanDetail::Integer(index)) => *index,
+        _ => unreachable!("top-level storm stages carry their one-based index"),
+    });
+
+    let estimates = filters
+        .iter()
+        .map(|filter| (filter.estimated_rows(), filter.estimated_bytes(), filter.estimated_work()))
+        .collect::<Vec<_>>();
+    assert!(estimates.iter().all(|(rows, bytes, work)| {
+        rows.is_none() && bytes.is_some() && work.is_none()
+    }));
+    assert!(estimates[0].1.unwrap() <= 2_048);
+    for pair in estimates.windows(2) {
+        assert_eq!(pair[1].0, None);
+        assert!(pair[1].1.unwrap() <= pair[0].1.unwrap());
+        assert_eq!(pair[1].2, None);
+    }
+    assert!(matches!(
+        filters[0].details().get("limit_chain_rebind_shapes"),
+        Some(PlanDetail::Text(shapes)) if shapes.matches('@').count() >= 3
+    ));
+    assert_eq!(
+        filters[0]
+            .details()
+            .get("nested_limit_chain_rebind_byte_cap_scope"),
+        Some(&PlanDetail::Text(
+            "immediate_post_limit_branch_bytes_at_every_rebind_nesting_depth".to_owned()
+        ))
+    );
 }
 
 #[test]
