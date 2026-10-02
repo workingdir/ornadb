@@ -201,6 +201,27 @@ impl SysHostBindingRegistry {
                         .collect(),
                 )
             }
+            "std.io.fs.metadata" | "std.io.fs.symlink_metadata"
+                if operation.implementation == operation.name.rsplit('.').next().unwrap_or("") =>
+            {
+                let [root, path] = arguments else {
+                    return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
+                };
+                let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+                let path = raw_text(path.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+                let metadata = if operation.name == "std.io.fs.metadata" {
+                    provider.metadata(root, path)
+                } else {
+                    provider.symlink_metadata(root, path)
+                }
+                .map_err(|failure| self.failure(operation, failure.code()))?;
+                OvbRaw::Array(vec![
+                    OvbRaw::Text(metadata.kind),
+                    optional_value(metadata.size.map(|size| OvbRaw::Int(size.into()))),
+                    optional_value(metadata.modified.and_then(system_time_raw)),
+                    optional_value(metadata.created.and_then(system_time_raw)),
+                ])
+            }
             "std.io.fs.create_dir" if operation.implementation == "create_dir" => {
                 let [root, path, parents, exist_ok] = arguments else {
                     return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
@@ -518,6 +539,43 @@ fn http_response_raw(response: HostHttpResponse) -> Result<OvbRaw, EvaluationErr
         ),
         OvbRaw::Bytes(response.body),
     ]))
+}
+
+fn optional_value(value: Option<OvbRaw>) -> OvbRaw {
+    let mut fields = vec![OvbRaw::Int(if value.is_some() {
+        1.into()
+    } else {
+        0.into()
+    })];
+    if let Some(value) = value {
+        fields.push(value);
+    }
+    OvbRaw::Tag(60013, Box::new(OvbRaw::Array(fields)))
+}
+
+fn system_time_raw(value: std::time::SystemTime) -> Option<OvbRaw> {
+    let (seconds, nanoseconds) = match value.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => (
+            i64::try_from(duration.as_secs()).ok()?,
+            duration.subsec_nanos(),
+        ),
+        Err(error) => {
+            let duration = error.duration();
+            let seconds = i64::try_from(duration.as_secs()).ok()?;
+            if duration.subsec_nanos() == 0 {
+                (-seconds, 0)
+            } else {
+                (-seconds - 1, 1_000_000_000 - duration.subsec_nanos())
+            }
+        }
+    };
+    Some(OvbRaw::Tag(
+        60002,
+        Box::new(OvbRaw::Array(vec![
+            OvbRaw::Int(seconds.into()),
+            OvbRaw::Int(nanoseconds.into()),
+        ])),
+    ))
 }
 
 fn raw_text_array(value: &OvbRaw) -> Option<Vec<String>> {

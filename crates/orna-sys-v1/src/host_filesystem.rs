@@ -5,6 +5,7 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Component, Path, PathBuf},
+    time::SystemTime,
 };
 
 use orna_sys_macros::sys_host_operation;
@@ -19,6 +20,14 @@ pub enum FilesystemProviderError {
     NotDirectory,
     InvalidUtf8,
     Unavailable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostFilesystemMetadata {
+    pub kind: String,
+    pub size: Option<u64>,
+    pub modified: Option<SystemTime>,
+    pub created: Option<SystemTime>,
 }
 
 impl FilesystemProviderError {
@@ -185,6 +194,35 @@ impl FilesystemProvider {
             .collect::<Result<Vec<_>, _>>()?;
         names.sort();
         Ok(names)
+    }
+
+    #[sys_host_operation(
+        r###"{"name":"std.io.fs.metadata","version":{"major":1,"minor":0},"signature":"fn std.io.fs.metadata(root: Str, path: Str): (Str, Int?, Instant?, Instant?)","effects":["read"],"preconditions":["root is explicitly allowlisted by the host","path is relative and resolves beneath root","resolved symbolic links remain beneath root"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.not_found","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.read@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"metadata"}"###
+    )]
+    pub fn metadata(
+        &self,
+        root: &str,
+        path: &str,
+    ) -> Result<HostFilesystemMetadata, FilesystemProviderError> {
+        let root = self.authorized_root(root)?;
+        let resolved = self.resolve_existing(&root, path)?;
+        let metadata = fs::metadata(resolved).map_err(map_io_error)?;
+        Ok(metadata_value(&metadata, false))
+    }
+
+    #[sys_host_operation(
+        r###"{"name":"std.io.fs.symlink_metadata","version":{"major":1,"minor":0},"signature":"fn std.io.fs.symlink_metadata(root: Str, path: Str): (Str, Int?, Instant?, Instant?)","effects":["read"],"preconditions":["root is explicitly allowlisted by the host","path is relative and its parent resolves beneath root","final symbolic link is reported without following it"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.not_found","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.read@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"symlink_metadata"}"###
+    )]
+    pub fn symlink_metadata(
+        &self,
+        root: &str,
+        path: &str,
+    ) -> Result<HostFilesystemMetadata, FilesystemProviderError> {
+        let root = self.authorized_root(root)?;
+        let path = self.lexical_path(&root, path)?;
+        self.check_parent(&root, &path)?;
+        let metadata = fs::symlink_metadata(path).map_err(map_io_error)?;
+        Ok(metadata_value(&metadata, metadata.file_type().is_symlink()))
     }
 
     #[sys_host_operation(
@@ -360,6 +398,24 @@ impl FilesystemProvider {
             }
         }
         Ok(())
+    }
+}
+
+fn metadata_value(metadata: &fs::Metadata, is_symlink: bool) -> HostFilesystemMetadata {
+    let kind = if is_symlink {
+        "symlink"
+    } else if metadata.is_file() {
+        "file"
+    } else if metadata.is_dir() {
+        "directory"
+    } else {
+        "other"
+    };
+    HostFilesystemMetadata {
+        kind: kind.to_owned(),
+        size: (kind == "file" || kind == "symlink").then_some(metadata.len()),
+        modified: metadata.modified().ok(),
+        created: metadata.created().ok(),
     }
 }
 

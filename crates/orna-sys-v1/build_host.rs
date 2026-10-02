@@ -244,6 +244,12 @@ fn validate_operation(metadata: &Value, method: &syn::Signature) -> Result<(), S
         "std.io.fs.exists" => "fn std.io.fs.exists(root: Str, path: Str): Bool",
         "std.io.fs.is_directory" => "fn std.io.fs.is_directory(root: Str, path: Str): Bool",
         "std.io.fs.list" => "fn std.io.fs.list(root: Str, path: Str): [Str]",
+        "std.io.fs.metadata" => {
+            "fn std.io.fs.metadata(root: Str, path: Str): (Str, Int?, Instant?, Instant?)"
+        }
+        "std.io.fs.symlink_metadata" => {
+            "fn std.io.fs.symlink_metadata(root: Str, path: Str): (Str, Int?, Instant?, Instant?)"
+        }
         "std.io.fs.create_dir" => {
             "fn std.io.fs.create_dir(root: Str, path: Str, parents: Bool, exist_ok: Bool): Unit"
         }
@@ -397,6 +403,11 @@ fn validate_native_method_signature(
             "std.io.fs.list" => (
                 &[("root", "&str"), ("path", "&str")],
                 "Vec<String>",
+                "FilesystemProviderError",
+            ),
+            "std.io.fs.metadata" | "std.io.fs.symlink_metadata" => (
+                &[("root", "&str"), ("path", "&str")],
+                "HostFilesystemMetadata",
                 "FilesystemProviderError",
             ),
             "std.io.fs.create_dir" => (

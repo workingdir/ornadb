@@ -31,7 +31,7 @@ fn embedded_host_registry_matches_deterministic_annotated_method_projection() {
 
     let registry = system_host_operation_registry();
     let operations = registry.operations().collect::<Vec<_>>();
-    assert_eq!(operations.len(), 15);
+    assert_eq!(operations.len(), 17);
     assert_eq!(
         registry
             .operation("std.io.environment.get")
@@ -65,6 +65,8 @@ fn embedded_host_registry_matches_deterministic_annotated_method_projection() {
         "std.io.fs.exists",
         "std.io.fs.is_directory",
         "std.io.fs.list",
+        "std.io.fs.metadata",
+        "std.io.fs.symlink_metadata",
         "std.io.fs.create_dir",
         "std.io.fs.remove_file",
         "std.io.fs.copy_file",

@@ -54,6 +54,25 @@ fn sys_filesystem_registry_dispatches_real_reads_writes_lists_and_denials() {
             CanonicalValue::new(Raw::Array(vec![Raw::Text("input.txt".into())])).unwrap()
         ))
     );
+    let metadata = session
+        .submit_with_sys_host_bindings(
+            &fixture_root(
+                include_str!("fixtures/stdlib-io-fs-metadata-mpk0d.orna"),
+                root.path(),
+            ),
+            &mut bindings,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        metadata.raw(),
+        OvbRaw::Array(fields)
+            if fields.len() == 4
+                && fields[0] == OvbRaw::Text("file".into())
+                && fields[1] == OvbRaw::Tag(60013, Box::new(OvbRaw::Array(vec![
+                    OvbRaw::Int(1.into()), OvbRaw::Int(17.into())
+                ])))
+    ));
     assert_eq!(
         session.submit_with_sys_host_bindings(
             &fixture_root(
@@ -74,6 +93,57 @@ fn sys_filesystem_registry_dispatches_real_reads_writes_lists_and_denials() {
                 &fixture_root(
                     include_str!("fixtures/stdlib-io-fs-traversal-mpk0d.orna"),
                     root.path()
+                ),
+                &mut bindings,
+            )
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-ERROR"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn sys_filesystem_symlink_metadata_is_non_following_and_reads_cannot_escape_root() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.txt"), "outside-secret").unwrap();
+    symlink(
+        outside.path().join("secret.txt"),
+        root.path().join("outside-link"),
+    )
+    .unwrap();
+    let mut filesystem = FilesystemProvider::new();
+    filesystem.allow_root(root.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem);
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    session
+        .submit(include_str!("fixtures/stdlib-use-io-fs-mpk0d.orna"))
+        .unwrap();
+
+    let metadata = session
+        .submit_with_sys_host_bindings(
+            &fixture_root(
+                include_str!("fixtures/stdlib-io-fs-symlink-metadata-mpk0d.orna"),
+                root.path(),
+            ),
+            &mut bindings,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        metadata.raw(),
+        OvbRaw::Array(fields) if fields[0] == OvbRaw::Text("symlink".into())
+    ));
+    assert_eq!(
+        session
+            .submit_with_sys_host_bindings(
+                &fixture_root(
+                    include_str!("fixtures/stdlib-io-fs-symlink-read-mpk0d.orna"),
+                    root.path(),
                 ),
                 &mut bindings,
             )
