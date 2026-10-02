@@ -1,0 +1,3 @@
+use std.concurrent as concurrent;
+
+pub fn delayed() = concurrent.sleep(5.s);

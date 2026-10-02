@@ -305,6 +305,9 @@ impl PackageResolver {
     /// This remains true through additional nested edges: a late branch reads
     /// each selected middle and deep manifest in turn, then applies terminal
     /// alias storms only to the route reached through those exact pins.
+    /// A middle pin retained before a sibling rebind is also an independent
+    /// late-branch root: reopening it follows its own deep manifest and
+    /// terminal route rather than inheriting the sibling's later selections.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,

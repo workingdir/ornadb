@@ -11,6 +11,7 @@ use crate::{
     REFERENCE_STANDARD_LIST_PATH_V1, REFERENCE_STANDARD_MAP_PATH_V1,
     REFERENCE_STANDARD_SET_PATH_V1,
     REFERENCE_STANDARD_IO_PATH_V1, REFERENCE_STANDARD_FS_PATH_V1,
+    REFERENCE_STANDARD_CONCURRENT_PATH_V1,
     reference_standard_catalogue_v1,
     reference_standard_profile_v1, reference_standard_sources_v1,
 };
@@ -94,6 +95,24 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     assert!(sources[17].1.contains("source_path: Str"));
     assert!(sources[17].1.contains("destination_path: Str"));
     assert!(sources[17].1.contains("overwrite: Bool"));
+    assert_eq!(sources[18].0, REFERENCE_STANDARD_CONCURRENT_PATH_V1);
+    for declaration in [
+        "pub fn parallel<T>(callbacks: [fn(): T]): [T]",
+        "pub fn race<T>(callbacks: [fn(): T]): T",
+        "pub fn timeout<T>(callback: fn(): T, duration: Duration): T",
+        "pub fn sleep(duration: Duration): Null",
+    ] {
+        assert!(sources[18].1.contains(declaration), "missing `{declaration}`");
+    }
+    for contract in [
+        "input order",
+        "cancel and join",
+        "lowest input-index",
+        "clock/waiting effect",
+        "cancellation-aware",
+    ] {
+        assert!(sources[18].1.contains(contract), "missing contract: {contract}");
+    }
     let option_module_analysis = analyze_with_catalogue(
         &[ModuleInput::new("option.orna", &sources[11].1)],
         &orna_semantic_v1::Catalogue::authoritative_core(),
@@ -108,6 +127,20 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
             .collect::<Vec<_>>()
             .join("; ")
     );
+    let concurrent_module_analysis = analyze_with_catalogue(
+        &[ModuleInput::new("concurrent.orna", &sources[18].1)],
+        &orna_semantic_v1::Catalogue::authoritative_core(),
+    );
+    assert!(
+        concurrent_module_analysis.is_ok(),
+        "{}",
+        concurrent_module_analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
     let profile = reference_standard_profile_v1();
     assert_eq!(profile.snapshot(), "orna.std/v1-reference-library");
     for (path, source) in &sources {
@@ -115,6 +148,11 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
             .verify_source(path, source)
             .expect("the exact 1.0 source is pinned");
     }
+    let mut changed_concurrent_source = sources[18].1.clone();
+    changed_concurrent_source.push_str("\n// changed after the captured snapshot\n");
+    assert!(profile
+        .verify_source(REFERENCE_STANDARD_CONCURRENT_PATH_V1, &changed_concurrent_source)
+        .is_err());
 
     let catalogue = reference_standard_catalogue_v1().expect("the standard module checks");
     for (path, source) in &sources[13..] {
@@ -135,6 +173,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     let option_result_consumer = include_str!("fixtures/v1_option_result_consumer.orna");
     let text_numeric_consumer = include_str!("fixtures/v1_text_numeric_consumer.orna");
     let collections_consumer = include_str!("fixtures/v1_collections_consumer.orna");
+    let concurrent_consumer = include_str!("fixtures/v1_concurrent_consumer.orna");
     for (path, source) in [
         ("list_consumer.orna", include_str!("fixtures/v1_list_consumer.orna")),
         ("map_consumer.orna", include_str!("fixtures/v1_map_consumer.orna")),
@@ -160,6 +199,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
             ModuleInput::new("option_result_consumer.orna", option_result_consumer),
             ModuleInput::new("text_numeric_consumer.orna", text_numeric_consumer),
             ModuleInput::new("collections_consumer.orna", collections_consumer),
+            ModuleInput::new("concurrent_consumer.orna", concurrent_consumer),
         ],
         &catalogue,
     );
