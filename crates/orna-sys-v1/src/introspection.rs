@@ -724,6 +724,8 @@ pub struct PlanByteCapHandoffRoute {
 pub enum PlanByteCapScopeSegment {
     /// A one-based top-level storm stage.
     StormStage { index: usize },
+    /// The bounded output of a one-based top-level storm stage.
+    StormStageOutput { index: usize },
     /// A one-based branch within a storm.
     Branch { index: usize },
     /// A one-based nested limit position within a branch.
@@ -2003,6 +2005,7 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
         );
         current_cardinality = cardinality;
     }
+    let mut prior_storm_stage_path = Vec::new();
     for (storm_index, storm) in disjunct_storm_cascades.iter().enumerate() {
         let storm_stage_index = storm_index + 1;
         let storm_index =
@@ -2010,9 +2013,10 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
         let branch_count =
             u64::try_from(storm.branches.len()).map_err(|_| ExplainError::TooManyNodes)?;
         let mut byte_cap_handoff_estimates_by_depth = BTreeMap::new();
-        let storm_scope_path = [PlanByteCapScopeSegment::StormStage {
+        let mut storm_scope_path = prior_storm_stage_path.clone();
+        storm_scope_path.push(PlanByteCapScopeSegment::StormStage {
             index: storm_stage_index,
-        }];
+        });
         let (cardinality, work, overflowed) = disjunct_storm_cascade_cardinality_and_work(
             current_cardinality,
             storm,
@@ -2277,6 +2281,10 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             work,
         );
         current_cardinality = cardinality;
+        prior_storm_stage_path = storm_scope_path;
+        prior_storm_stage_path.push(PlanByteCapScopeSegment::StormStageOutput {
+            index: storm_stage_index,
+        });
     }
     if !query.projections.is_empty() {
         let cardinality = current_cardinality;
@@ -3597,6 +3605,10 @@ fn hash_byte_cap_scope_path(hash: &mut Sha256, path: &[PlanByteCapScopeSegment])
         match segment {
             PlanByteCapScopeSegment::StormStage { index } => {
                 hash.update([0]);
+                hash.update((*index as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::StormStageOutput { index } => {
+                hash.update([6]);
                 hash.update((*index as u64).to_be_bytes());
             }
             PlanByteCapScopeSegment::Branch { index } => {

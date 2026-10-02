@@ -1522,13 +1522,18 @@ fn unknown_row_byte_caps_report_scoped_handoff_routes_by_nested_depth() {
         other => panic!("expected typed byte-cap handoff routes, got {other:?}"),
     };
     assert_eq!(second_routes.len(), 2);
+    let second_stage_ancestry = [
+        PlanByteCapScopeSegment::StormStage { index: 1 },
+        PlanByteCapScopeSegment::StormStageOutput { index: 1 },
+        PlanByteCapScopeSegment::StormStage { index: 2 },
+    ];
     assert_eq!(
-        second_routes[0].input_path[0],
-        PlanByteCapScopeSegment::StormStage { index: 2 }
+        &second_routes[0].input_path[..second_stage_ancestry.len()],
+        second_stage_ancestry
     );
     assert_eq!(
-        second_routes[1].output_path[0],
-        PlanByteCapScopeSegment::StormStage { index: 2 }
+        &second_routes[1].output_path[..second_stage_ancestry.len()],
+        second_stage_ancestry
     );
 
     let serialized = serde_json::to_value(&explained).expect("explained plans serialize");
@@ -1643,6 +1648,93 @@ fn typed_handoff_routes_preserve_nested_storm_steps_and_unknown_bytes() {
             .unwrap()["details"]["limit_chain_rebind_byte_cap_handoff_route_records"][0]
             ["input_path"][3],
         serde_json::json!({ "kind": "nested_storm", "index": 1 })
+    );
+}
+
+#[test]
+fn typed_handoff_routes_preserve_prior_storm_stage_outputs() {
+    let parsed = orna_syntax_v1::parse_module(REBIND_CAP_HANDOFF_ROUTES_FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let stages = (1..=3)
+        .map(|stage| {
+            let cascade = storm(
+                &format!("expr:stage-{stage}-bounded-cascade"),
+                vec![branch(&[40], 1, vec![])],
+            );
+            storm(
+                &format!("expr:stage-{stage}-handoff"),
+                vec![branch(&[80], 1, vec![rebind(1, vec![cascade])])],
+            )
+        })
+        .collect::<Vec<_>>();
+    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+        &query(Some(256), Some(8_192)),
+        &stages,
+        &[],
+    )
+    .expect("three chained storm stages retain typed handoff ancestry");
+    let mut filters = explained
+        .nodes()
+        .iter()
+        .filter(|node| {
+            node.kind() == PlanNodeKind::Filter && node.details().contains_key("disjunct_storm")
+        })
+        .collect::<Vec<_>>();
+    filters.sort_by_key(|filter| match filter.details().get("disjunct_storm") {
+        Some(PlanDetail::Integer(stage)) => *stage,
+        _ => unreachable!("top-level storm filters carry their stage number"),
+    });
+    assert_eq!(filters.len(), 3);
+
+    for (stage_index, filter) in filters.iter().enumerate() {
+        let routes = match filter
+            .details()
+            .get("limit_chain_rebind_byte_cap_handoff_route_records")
+        {
+            Some(PlanDetail::ByteCapHandoffRoutes(routes)) => routes,
+            other => panic!("expected typed byte-cap handoff routes, got {other:?}"),
+        };
+        assert_eq!(routes.len(), 1);
+
+        let mut expected_input_path = Vec::new();
+        for prior_stage in 1..=stage_index {
+            expected_input_path.push(PlanByteCapScopeSegment::StormStage {
+                index: prior_stage,
+            });
+            expected_input_path.push(PlanByteCapScopeSegment::StormStageOutput {
+                index: prior_stage,
+            });
+        }
+        expected_input_path.push(PlanByteCapScopeSegment::StormStage {
+            index: stage_index + 1,
+        });
+        expected_input_path.extend([
+            PlanByteCapScopeSegment::Branch { index: 1 },
+            PlanByteCapScopeSegment::Limit { position: 1 },
+        ]);
+        assert_eq!(routes[0].input_path, expected_input_path);
+
+        expected_input_path.extend([
+            PlanByteCapScopeSegment::Rebind { position: 1 },
+            PlanByteCapScopeSegment::Cascade { index: 1 },
+        ]);
+        assert_eq!(routes[0].output_path, expected_input_path);
+        assert!(routes[0].input_bytes.is_some());
+        assert!(routes[0].output_bytes.is_some());
+    }
+
+    let serialized = serde_json::to_value(&explained).expect("explained plans serialize");
+    let third_stage = serialized["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["details"]["disjunct_storm"] == 3)
+        .expect("third storm stage is serialized");
+    assert_eq!(
+        third_stage["details"]["limit_chain_rebind_byte_cap_handoff_route_records"][0]
+            ["input_path"][3],
+        serde_json::json!({ "kind": "storm_stage_output", "index": 2 })
     );
 }
 
