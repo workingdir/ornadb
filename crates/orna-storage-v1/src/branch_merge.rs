@@ -292,6 +292,9 @@ pub struct BranchMergePlan {
 /// does not specify how those plans compose, so this v1 policy keeps each
 /// result relative to its own paired base and branch snapshots; one wave's
 /// restore or tombstone delta never becomes another wave's implicit input.
+/// Worker completion order is not history order: callers sequence selected
+/// successful deltas by their committed base lineage and append each only
+/// after that wave commits.
 /// MERGE-1 is silent on isolation between concurrent retry invocations. This
 /// v1 policy keeps row buffers, budgets, and candidate plans invocation-local:
 /// a failure after one paired table has materialized aborts only that attempt,
