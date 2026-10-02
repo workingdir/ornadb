@@ -1,0 +1,1 @@
+std.hash.to_hex(std.hash.domain_sha256("test", payload))

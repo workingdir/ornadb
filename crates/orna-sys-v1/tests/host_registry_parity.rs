@@ -16,6 +16,13 @@ fn embedded_host_registry_matches_deterministic_annotated_method_projection() {
     let second = build_host::generate_host_registry(&source_root).unwrap();
     assert_eq!(first, second, "host registry generation is deterministic");
     assert_eq!(first, system_host_operation_registry_json());
+    let out_dir = Path::new(env!("OUT_DIR"));
+    assert_eq!(
+        std::fs::read_to_string(out_dir.join("system_host_operations.json"))
+            .expect("read build-generated host operation registry"),
+        first,
+        "the compiled host registry bytes match the fresh annotated-method projection"
+    );
     let first_schema = build_host::generate_host_registry_schema().unwrap();
     let second_schema = build_host::generate_host_registry_schema().unwrap();
     assert_eq!(
@@ -23,6 +30,12 @@ fn embedded_host_registry_matches_deterministic_annotated_method_projection() {
         "host registry schema is deterministic"
     );
     assert_eq!(first_schema, system_host_operation_registry_schema_json());
+    assert_eq!(
+        std::fs::read_to_string(out_dir.join("system_host_operations.schema.json"))
+            .expect("read build-generated host operation schema"),
+        first_schema,
+        "the compiled host schema bytes match the fresh generated schema"
+    );
     build_host::validate_host_registry_json(&first, &first_schema)
         .expect("generated host registry conforms to its generated JSON Schema");
     let schema: serde_json::Value = serde_json::from_str(&first_schema).unwrap();
@@ -140,7 +153,7 @@ fn generated_registry_schema_rejects_unknown_fields_and_malformed_failure_codes(
     assert!(
         build_host::validate_host_registry_json(&malformed_code.to_string(), schema)
             .unwrap_err()
-            .contains("invalid host failure code"),
+            .contains("invalid sys failure code"),
         "the published failure-code taxonomy is enforced by the artifact schema"
     );
 

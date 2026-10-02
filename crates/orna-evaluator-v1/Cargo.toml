@@ -8,9 +8,12 @@ description = "Bounded deterministic evaluator for the Orna 1.0 expression subse
 publish = false
 
 [dependencies]
+base64 = "0.22.1"
 num-bigint = "0.4.6"
 num-integer = "0.1.47"
 num-traits = "0.2.19"
+serde = "1.0"
+serde_json = { version = "1.0.151", features = ["arbitrary_precision"] }
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-project-v1 = { path = "../orna-project-v1" }
 orna-standard = { path = "../orna-standard" }
@@ -18,6 +21,7 @@ orna-semantic-v1 = { path = "../orna-semantic-v1" }
 orna-sys-v1 = { path = "../orna-sys-v1" }
 orna-syntax-v1 = { path = "../orna-syntax-v1" }
 orna-value-v1 = { path = "../orna-value-v1" }
+sha2 = "0.10.9"
 unicode-normalization = "=0.1.24"
 
 [dev-dependencies]

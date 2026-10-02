@@ -1,0 +1,10 @@
+pub table Entry(id: Int) {
+    nickname: Str?,
+    assert every(entry => entry.id > 0);
+    assert all_unique(entry => { nickname: entry.nickname });
+}
+
+fn parent() {
+    Entry.insert({ id: 1, nickname: null });
+    Entry.delete(1);
+}

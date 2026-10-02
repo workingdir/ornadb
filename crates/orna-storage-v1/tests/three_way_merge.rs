@@ -22107,6 +22107,166 @@ fn paired_fragment_retry_bindings_are_atomic_across_uneven_chains() {
 }
 
 #[test]
+fn paired_storm_recovery_reports_stale_depth_labels_before_bad_indices() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(0, 0, 3, &[(id(1), fixture_key("root"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 0, 4, &[(id(1), fixture_key("root/child"))])
+        .unwrap();
+
+    let before_stale_submit_label = history.clone();
+    assert_eq!(
+        history.submit_depth_merge_fragment(0, 2, 2, &[]),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 0,
+            expected: 3,
+            actual: 2,
+        }),
+        "the existing wave count identifies a stale depth label even when its index is out of range",
+    );
+    assert_eq!(history, before_stale_submit_label);
+
+    let before_stale_recovery_label = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[BranchMergeDepthFragmentRecovery {
+                order: 1,
+                fragment: 3,
+                fragment_count: 3,
+                tombstones: Vec::new(),
+            }],
+            &[],
+        ),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 1,
+            expected: 4,
+            actual: 3,
+        }),
+        "recovery retains the paired wave's own uneven depth label instead of reporting only a bad index",
+    );
+    assert_eq!(history, before_stale_recovery_label);
+}
+
+#[test]
+fn uneven_cascade_checks_stale_labels_before_paired_retry_conflicts() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let make_step = |generation| {
+        let key = fixture_key("root/child");
+        SequencedBranchMergePlan {
+            order: 1,
+            plan: BranchMergePlan {
+                schema: schema(true, FieldType::Str),
+                tables: BTreeMap::from([(
+                    id(1),
+                    orna_storage_v1::MergedTable {
+                        id: id(1),
+                        whole_table_reuse: None,
+                        segments: vec![MergedSegment::Rows {
+                            range: KeyRange::all(),
+                            rows: Vec::new(),
+                            tombstones: vec![key.clone()],
+                        }],
+                    },
+                )]),
+                checkpoints: BTreeMap::from([(
+                    b"stream".to_vec(),
+                    CheckpointGeneration {
+                        generation,
+                        position: Some(b"uneven-cascade".to_vec()),
+                    },
+                )]),
+                report: Default::default(),
+            },
+            ordered_row_tombstones: vec![(id(1), key)],
+        }
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(0, 0, 3, &[(id(1), fixture_key("root"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 0, 1, &[(id(1), fixture_key("root/child"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(2, 0, 4, &[(id(1), fixture_key("z"))])
+        .unwrap();
+    history.bind_depth_fragment_retry_plan(&make_step(7)).unwrap();
+
+    let recoveries = [
+        BranchMergeDepthFragmentRecovery {
+            order: 2,
+            fragment: 2,
+            fragment_count: 3,
+            tombstones: Vec::new(),
+        },
+        BranchMergeDepthFragmentRecovery {
+            order: 0,
+            fragment: 2,
+            fragment_count: 2,
+            tombstones: Vec::new(),
+        },
+    ];
+    let changed_pair = make_step(8);
+    let before_cascade = history.clone();
+
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &recoveries,
+            std::slice::from_ref(&changed_pair),
+        ),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 0,
+            expected: 3,
+            actual: 2,
+        }),
+        "the earliest stale label in an uneven cascade wins over a later append conflict",
+    );
+    assert_eq!(history, before_cascade);
+
+    assert_eq!(
+        history.bind_depth_fragment_retry_plans_with_recovery(
+            std::slice::from_ref(&changed_pair),
+            &recoveries,
+            &[],
+        ),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 0,
+            expected: 3,
+            actual: 2,
+        }),
+        "the earliest stale label is validated before a later paired identity conflict",
+    );
+    assert_eq!(history, before_cascade);
+}
+
+#[test]
 fn paired_fragment_retry_binding_recovery_and_replay_are_atomic() {
     let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
         .split("\n\n")
@@ -22247,6 +22407,290 @@ fn paired_fragment_retry_binding_recovery_and_replay_are_atomic() {
         "a changed checkpoint identity is not treated as a replay",
     );
     assert_eq!(history, before_changed_replay);
+}
+
+#[test]
+fn paired_restore_fold_keeps_uneven_fragment_retry_labels() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let make_step = |generation| {
+        let key = fixture_key("root/child");
+        SequencedBranchMergePlan {
+            order: 1,
+            plan: BranchMergePlan {
+                schema: schema(true, FieldType::Str),
+                tables: BTreeMap::from([(
+                    id(1),
+                    orna_storage_v1::MergedTable {
+                        id: id(1),
+                        whole_table_reuse: None,
+                        segments: vec![MergedSegment::Rows {
+                            range: KeyRange::all(),
+                            rows: Vec::new(),
+                            tombstones: vec![key.clone()],
+                        }],
+                    },
+                )]),
+                checkpoints: BTreeMap::from([(
+                    b"stream".to_vec(),
+                    CheckpointGeneration {
+                        generation,
+                        position: Some(b"uneven-fold".to_vec()),
+                    },
+                )]),
+                report: Default::default(),
+            },
+            ordered_row_tombstones: vec![(id(1), key)],
+        }
+    };
+    let repair = |order, fragment, fragment_count| BranchMergeDepthFragmentRecovery {
+        order,
+        fragment,
+        fragment_count,
+        tombstones: Vec::new(),
+    };
+    let key = fixture_key("root/child");
+    let paired = make_step(7);
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history.submit_depth_merge_fragment(0, 0, 2, &[]).unwrap();
+    history.submit_depth_merge_fragment(1, 0, 3, &[]).unwrap();
+    history
+        .submit_depth_merge_fragment(1, 1, 3, &[(id(1), key.clone())])
+        .unwrap();
+    history.submit_depth_merge_fragment(1, 2, 3, &[]).unwrap();
+    history.bind_depth_fragment_retry_plan(&paired).unwrap();
+
+    let recoveries = [repair(0, 1, 2)];
+    let bindings = [paired.clone()];
+    let first_fold = history
+        .bind_depth_fragment_retry_plans_with_recovery(&bindings, &recoveries, &bindings)
+        .unwrap();
+    assert_eq!(
+        first_fold,
+        vec![BranchMergeTombstoneEvent {
+            order: 1,
+            table: id(1),
+            key: fixture_key("root/child"),
+        }],
+        "the uneven two- and three-fragment waves fold to the paired fixture event once",
+    );
+    assert_eq!(history.next_order(), Some(2));
+
+    let committed = history.clone();
+    assert!(history
+        .bind_depth_fragment_retry_plans_with_recovery(&bindings, &recoveries, &bindings)
+        .unwrap()
+        .is_empty(), "an exact replay stays idempotent after the fold");
+    assert_eq!(history, committed);
+
+    assert_eq!(
+        history.bind_depth_fragment_retry_plans_with_recovery(
+            &bindings,
+            &[repair(0, 1, 3)],
+            &bindings,
+        ),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 0,
+            expected: 2,
+            actual: 3,
+        }),
+        "the committed earlier wave keeps its own retry label across the uneven fold",
+    );
+    assert_eq!(history, committed);
+
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(&[repair(1, 0, 4)], &[]),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 1,
+            expected: 3,
+            actual: 4,
+        }),
+        "the later wave retains its different label after both positions commit",
+    );
+    assert_eq!(history, committed);
+
+    assert_eq!(
+        history.submit_depth_merge_fragment(0, 1, 3, &[]),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 0,
+            expected: 2,
+            actual: 3,
+        }),
+        "direct submission validates the earlier folded wave's own label before stale order",
+    );
+    assert_eq!(history, committed);
+
+    assert_eq!(
+        history.submit_depth_merge_fragment(1, 0, 4, &[]),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 1,
+            expected: 3,
+            actual: 4,
+        }),
+        "direct submission validates the later folded wave's different label before stale order",
+    );
+    assert_eq!(history, committed);
+
+    assert_eq!(
+        history.submit_depth_merge_fragment(0, 2, 2, &[]),
+        Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+            fragment: 2,
+            fragment_count: 2,
+        }),
+        "the earlier folded wave rejects an out-of-range member of its retry-label pair",
+    );
+    assert_eq!(history, committed);
+
+    assert_eq!(
+        history.submit_depth_merge_fragment(1, 3, 3, &[]),
+        Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+            fragment: 3,
+            fragment_count: 3,
+        }),
+        "the later folded wave rejects an out-of-range member of its different retry-label pair",
+    );
+    assert_eq!(history, committed);
+
+    assert_eq!(
+        history.submit_depth_merge_fragment(1, 0, 3, &[]),
+        Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 1 }),
+        "the original label still reaches the existing stale-position result",
+    );
+    assert_eq!(history, committed);
+}
+
+#[test]
+fn paired_storm_fold_validates_fragment_depth_identities_and_real_bodies() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let make_step = |order, paths: &[&str], generation, change_row| {
+        let keys = paths.iter().map(|path| fixture_key(path)).collect::<Vec<_>>();
+        let mut rows = fixture_rows[..4].to_vec();
+        if change_row {
+            rows[0].fields.insert(id(2), string("changed paired body"));
+        }
+        SequencedBranchMergePlan {
+            order,
+            plan: BranchMergePlan {
+                schema: schema(true, FieldType::Str),
+                tables: BTreeMap::from([(
+                    id(1),
+                    orna_storage_v1::MergedTable {
+                        id: id(1),
+                        whole_table_reuse: None,
+                        segments: vec![MergedSegment::Rows {
+                            range: KeyRange::all(),
+                            rows,
+                            tombstones: keys.clone(),
+                        }],
+                    },
+                )]),
+                checkpoints: BTreeMap::from([(
+                    b"stream".to_vec(),
+                    CheckpointGeneration {
+                        generation,
+                        position: Some(b"uneven-cascade".to_vec()),
+                    },
+                )]),
+                report: Default::default(),
+            },
+            ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+        }
+    };
+    let repair = |order, fragment, fragment_count, tombstones| {
+        BranchMergeDepthFragmentRecovery { order, fragment, fragment_count, tombstones }
+    };
+    let root = (id(1), fixture_key("root"));
+    let child = (id(1), fixture_key("root/child"));
+    let z = (id(1), fixture_key("z"));
+    let first = make_step(1, &["root", "root/child"], 7, false);
+    let second = make_step(2, &["z"], 9, false);
+    let cascade = [first.clone(), second.clone()];
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history.submit_depth_merge_fragment(0, 0, 2, &[]).unwrap();
+    history.submit_depth_merge_fragment(1, 0, 3, std::slice::from_ref(&root)).unwrap();
+    history.submit_depth_merge_fragment(1, 1, 3, std::slice::from_ref(&child)).unwrap();
+    history.submit_depth_merge_fragment(1, 2, 3, &[]).unwrap();
+    history.submit_depth_merge_fragment(2, 0, 2, std::slice::from_ref(&z)).unwrap();
+    history.submit_depth_merge_fragment(2, 1, 2, &[]).unwrap();
+
+    let MergedSegment::Rows { rows, .. } = &first.plan.tables[&id(1)].segments[0] else {
+        panic!("paired proof plan carries materialized fixture rows");
+    };
+    assert_eq!(rows[0].fields[&id(2)], string("Anchor root"));
+    let released = history
+        .bind_depth_fragment_retry_plans_with_recovery(
+            &cascade,
+            &[repair(0, 1, 2, Vec::new())],
+            &cascade,
+        )
+        .unwrap();
+    assert_eq!(
+        released,
+        vec![
+            BranchMergeTombstoneEvent { order: 1, table: id(1), key: fixture_key("root") },
+            BranchMergeTombstoneEvent { order: 1, table: id(1), key: fixture_key("root/child") },
+            BranchMergeTombstoneEvent { order: 2, table: id(1), key: fixture_key("z") },
+        ],
+        "the two- and three-fragment waves release their fixture deltas in cascade order",
+    );
+    let committed = history.clone();
+    assert!(history
+        .bind_depth_fragment_retry_plans_with_recovery(
+            &cascade,
+            &[repair(0, 1, 2, Vec::new())],
+            &cascade,
+        )
+        .unwrap()
+        .is_empty(), "an exact paired cascade retry is idempotent after release");
+    assert_eq!(history, committed);
+
+    assert_eq!(
+        history.submit_depth_merge_fragment(1, 1, 3, std::slice::from_ref(&z)),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a stale fragment label cannot substitute a different fixture tombstone",
+    );
+    assert_eq!(history, committed, "a changed fragment body is rejected atomically");
+
+    assert_eq!(
+        history.bind_depth_fragment_retry_plans_with_recovery(
+            &cascade,
+            &[repair(1, 1, 3, vec![z.clone()])],
+            &cascade,
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "combined cascade recovery validates the committed fragment body before replay",
+    );
+    assert_eq!(history, committed, "a changed combined retry leaves history untouched");
+
+    assert_eq!(
+        history.bind_depth_fragment_retry_plan(&make_step(1, &["root", "root/child"], 7, true)),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "the committed paired identity also rejects changed real row content",
+    );
+    assert_eq!(history, committed, "a changed paired body leaves history untouched");
 }
 
 #[test]
