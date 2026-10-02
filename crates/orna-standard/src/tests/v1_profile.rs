@@ -23,6 +23,7 @@ use crate::{
     REFERENCE_STANDARD_TEST_PATH_V1,
     REFERENCE_STANDARD_GENERICS_PATH_V1, REFERENCE_STANDARD_TYPE_UTILS_PATH_V1,
     REFERENCE_STANDARD_PATTERN_PATH_V1,
+    REFERENCE_STANDARD_ITERATOR_PATH_V1, REFERENCE_STANDARD_LAZY_PATH_V1,
     reference_standard_catalogue_v1,
     reference_standard_profile_v1, reference_standard_sources_v1,
 };
@@ -41,6 +42,8 @@ fn pinned_std_entrypoint_imports_optional_content_modules() {
     assert!(entrypoint.lines().any(|line| line.trim() == "use generics;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use type_utils;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use pattern;"));
+    assert!(entrypoint.lines().any(|line| line.trim() == "use iterator;"));
+    assert!(entrypoint.lines().any(|line| line.trim() == "use lazy;"));
 }
 
 #[test]
@@ -53,6 +56,20 @@ fn pinned_pattern_surface_typechecks_exhaustive_matches_and_destructuring() {
     let parsed = orna_syntax_v1::parse_module_with_file(&source, REFERENCE_STANDARD_PATTERN_PATH_V1);
     assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
     reference_standard_catalogue_v1().expect("the pinned pattern module checks with std sources");
+}
+
+#[test]
+fn pinned_iterator_and_lazy_surfaces_typecheck_as_ordinary_std_modules() {
+    let sources = reference_standard_sources_v1();
+    for (index, path) in [
+        (37, REFERENCE_STANDARD_ITERATOR_PATH_V1),
+        (38, REFERENCE_STANDARD_LAZY_PATH_V1),
+    ] {
+        assert_eq!(sources[index].0, path);
+        let parsed = orna_syntax_v1::parse_module_with_file(&sources[index].1, path);
+        assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
+    }
+    reference_standard_catalogue_v1().expect("iterator and lazy module sources check in the pinned profile");
 }
 
 #[test]
@@ -498,7 +515,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
-    assert_eq!(sources.len(), 37);
+    assert_eq!(sources.len(), 39);
     assert_eq!(sources[34].0, REFERENCE_STANDARD_GENERICS_PATH_V1);
     for declaration in [
         "pub fn identity<T>(value: T): T",
@@ -559,6 +576,52 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "Split into two optional projections",
     ] {
         assert!(sources[36].1.contains(contract), "missing std.pattern contract `{contract}`");
+    }
+    assert_eq!(sources[37].0, REFERENCE_STANDARD_ITERATOR_PATH_V1);
+    for declaration in [
+        "pub enum Iterator<T>",
+        "pub fn empty<T>(): Iterator<T>",
+        "pub fn next<T>(iterator: Iterator<T>): (T?, Iterator<T>)",
+        "pub fn from_list<T>(values: [T]): Iterator<T>",
+        "pub fn iterate<T>(seed: T, successor: fn(T): T): Iterator<T>",
+        "pub fn repeat<T>(value: T): Iterator<T>",
+        "pub fn map<T, U>(source: Iterator<T>, transform: fn(T): U): Iterator<U>",
+        "pub fn filter<T>(source: Iterator<T>, predicate: fn(T): Bool): Iterator<T>",
+        "pub fn take<T>(source: Iterator<T>, count: Int): Iterator<T>",
+        "pub fn drop<T>(source: Iterator<T>, count: Int): Iterator<T>",
+        "pub fn collect<T>(source: Iterator<T>): [T]",
+        "pub fn nth<T>(source: Iterator<T>, index: Int): T?",
+    ] {
+        assert!(sources[37].1.contains(declaration), "missing std.iterator declaration `{declaration}`");
+    }
+    for contract in [
+        "Creating or composing one does",
+        "replays its computation",
+        "pure callbacks when repeatable observations are required",
+        "Use `take` before `collect` on an infinite source",
+        "Terminal operation. Finite iterators are required",
+        "iterator count must be nonnegative",
+        "iterator index must be nonnegative",
+    ] {
+        assert!(sources[37].1.contains(contract), "missing std.iterator contract `{contract}`");
+    }
+    assert_eq!(sources[38].0, REFERENCE_STANDARD_LAZY_PATH_V1);
+    for declaration in [
+        "pub fn defer<T>(computation: fn(): T): fn(): T",
+        "pub fn force<T>(computation: fn(): T): T",
+        "pub fn map<T, U>(computation: fn(): T, transform: fn(T): U): fn(): U",
+        "pub fn and_then<T, U>(",
+        "pub fn zip<T, U>(left: fn(): T, right: fn(): U): fn(): (T, U)",
+        "pub fn constant<T>(value: T): fn(): T",
+    ] {
+        assert!(sources[38].1.contains(declaration), "missing std.lazy declaration `{declaration}`");
+    }
+    for contract in [
+        "return thunks without evaluating their computations",
+        "Every `force` call invokes its thunk again",
+        "call-by-name with no memoization",
+    ] {
+        assert!(sources[38].1.contains(contract), "missing std.lazy contract `{contract}`");
     }
     assert_eq!(sources[19].0, REFERENCE_STANDARD_ERROR_PATH_V1);
     assert!(sources[19].1.contains("pub fn make(code: Str, message: Str): Error"));
@@ -646,6 +709,8 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         (REFERENCE_STANDARD_GENERICS_PATH_V1, 34),
         (REFERENCE_STANDARD_TYPE_UTILS_PATH_V1, 35),
         (REFERENCE_STANDARD_PATTERN_PATH_V1, 36),
+        (REFERENCE_STANDARD_ITERATOR_PATH_V1, 37),
+        (REFERENCE_STANDARD_LAZY_PATH_V1, 38),
     ] {
         let mut changed_source = sources[source_index].1.clone();
         changed_source.push_str("\n// changed after the captured snapshot\n");
