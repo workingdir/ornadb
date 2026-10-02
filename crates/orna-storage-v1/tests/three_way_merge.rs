@@ -20363,19 +20363,23 @@ fn paired_depth_storm_tombstone_history_stabilizes_across_restore_waves() {
     let first_overlap = [(id(1), repeated_key.clone())];
     let mut overlap_guard = BranchMergeTombstoneHistory::new(0);
     assert!(overlap_guard
-        .submit_depth_merge_fragment(0, 0, 2, &first_overlap)
+        .submit_depth_merge_fragment(0, 0, 3, &first_overlap)
         .unwrap()
         .is_empty());
     let unchanged_overlap_guard = overlap_guard.clone();
     assert_eq!(
-        overlap_guard.submit_depth_merge_fragment(0, 1, 2, &first_overlap),
+        overlap_guard.submit_depth_merge_fragment(0, 1, 3, &first_overlap),
         Err(BranchMergeTombstoneHistoryError::DuplicateTombstone { order: 0 }),
-        "overlapping depth pieces cannot record one table/key twice in one wave",
+        "overlapping depth pieces are rejected before the wave completes",
     );
     assert_eq!(overlap_guard, unchanged_overlap_guard);
     let other_table_overlap = [(id(2), repeated_key.clone())];
     overlap_guard
-        .submit_depth_merge_fragment(0, 1, 2, &other_table_overlap)
+        .submit_depth_merge_fragment(0, 1, 3, &other_table_overlap)
+        .unwrap();
+    let other_key = [(id(1), string("a"))];
+    overlap_guard
+        .submit_depth_merge_fragment(0, 2, 3, &other_key)
         .unwrap();
     overlap_guard.append(&released_plans[1]).unwrap();
     overlap_guard.append(&released_plans[2]).unwrap();
