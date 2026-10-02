@@ -136,6 +136,9 @@ fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
 
     let first_routes = routes_for_stage(&explained, 1);
     let post_storm_routes = routes_for_stage(&explained, 2);
+    assert!(first_routes.iter().all(|route| {
+        route.input_scope.starts_with("root/") && route.output_scope.starts_with("root/")
+    }));
     for routes in [first_routes, post_storm_routes] {
         assert_eq!(
             routes.iter().map(|route| route.depth).collect::<Vec<_>>(),
@@ -206,6 +209,8 @@ fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
             &route.input_path[..post_storm_prefix.len()],
             post_storm_prefix
         );
+        assert!(route.input_scope.starts_with("root/storm1/output/storm2/"));
+        assert!(route.output_scope.starts_with("root/storm1/output/storm2/"));
     }
     assert!(
         post_storm_routes[2]
