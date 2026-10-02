@@ -15975,6 +15975,95 @@ fn paired_tombstone_chain_load_inputs(
     (base, left, right, source)
 }
 
+fn paired_tombstone_storm_inputs(
+    layout: usize,
+    reverse_rows: bool,
+) -> (
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    FixtureRows,
+) {
+    let template = parse_fixture(TOMBSTONE_RECOVERY_STORM, RowKeyKind::Explicit);
+    let make_rows = |table| {
+        TOMBSTONE_STORM_KEYS
+            .iter()
+            .map(|key| {
+                let mut row = rekey_row(&template, key);
+                row.table = table;
+                row
+            })
+            .collect::<Vec<_>>()
+    };
+    let table_one_rows = make_rows(id(1));
+    let table_two_rows = make_rows(id(2));
+    let (table_one_bounds, table_two_bounds): (&[&str], &[&str]) = if layout % 2 == 0 {
+        (
+            &["root/child", "root/child/deep", "root/child/deep/storm/c", "z"],
+            &["root/child/deep", "root/child/deep/storm/e"],
+        )
+    } else {
+        (
+            &["root", "root/child/deep/storm/d"],
+            &["root/child", "root/child/deep", "root/child/deep/storm/f"],
+        )
+    };
+
+    let mut base_tables = BTreeMap::new();
+    let mut left_tables = BTreeMap::new();
+    let mut right_tables = BTreeMap::new();
+    let mut source = FixtureRows::default();
+    for (table, rows, boundaries, locator_prefix, digest) in [
+        (id(1), table_one_rows, table_one_bounds, "paired-storm-a", 101_u8),
+        (id(2), table_two_rows, table_two_bounds, "paired-storm-b", 131_u8),
+    ] {
+        let encoded_boundaries = boundaries
+            .iter()
+            .map(|boundary| string(boundary).encode().unwrap())
+            .collect::<Vec<_>>();
+        let (base_manifest, base_locators) =
+            chain_split_manifest(digest, digest, &encoded_boundaries, &format!("{locator_prefix}-base"));
+        let (left_manifest, left_locators) = chain_split_manifest(
+            digest + 1,
+            digest + 16,
+            &encoded_boundaries,
+            &format!("{locator_prefix}-left"),
+        );
+        let (right_manifest, right_locators) = chain_split_manifest(
+            digest + 2,
+            digest + 32,
+            &encoded_boundaries,
+            &format!("{locator_prefix}-right"),
+        );
+
+        for index in 0..base_manifest.segments.len() {
+            let range = &base_manifest.segments[index].range;
+            let rows_in_range = rows
+                .iter()
+                .filter(|row| range.contains(&row.key.encode().unwrap()))
+                .cloned()
+                .collect::<Vec<_>>();
+            source.add(MergeSide::Base, &base_locators[index], rows_in_range);
+            source.add(MergeSide::Left, &left_locators[index], Vec::new());
+            source.add(MergeSide::Right, &right_locators[index], Vec::new());
+        }
+        base_tables.insert(table, base_manifest);
+        left_tables.insert(table, left_manifest);
+        right_tables.insert(table, right_manifest);
+    }
+    if reverse_rows {
+        for rows in source.rows.values_mut() {
+            rows.reverse();
+        }
+    }
+
+    let schema = paired_depth_schema();
+    let base = ThreeWaySnapshot { schema: schema.clone(), tables: base_tables, checkpoints: BTreeMap::new() };
+    let left = ThreeWaySnapshot { schema: schema.clone(), tables: left_tables, checkpoints: BTreeMap::new() };
+    let right = ThreeWaySnapshot { schema, tables: right_tables, checkpoints: BTreeMap::new() };
+    (base, left, right, source)
+}
+
 fn paired_distinct_depth_chain_inputs(
     first_table_split: bool,
     first_left_keeps_even: bool,
@@ -17368,6 +17457,77 @@ fn recovery_storms_keep_paired_tombstone_chain_order() {
             plan.tables[&id(2)].segments.len(),
             if first_table_split { 1 } else { 7 },
         );
+    }
+}
+
+#[test]
+fn recovery_storms_keep_paired_depth_tombstone_order() {
+    // MERGE-1 leaves ordering for wide paired-depth recovery storms open. The
+    // v1 policy discards a partial second-table scan, then gives synchronized
+    // retries the same table-local canonical tombstone order.
+    let (base, left, right, source) = paired_tombstone_storm_inputs(0, false);
+    let mut interrupted = FailAfterRowsFixtureRows {
+        source,
+        fail_after_rows: 13,
+        rows_delivered: 0,
+        failed_at: None,
+    };
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: 22, max_conflicts: 0 },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed after a partial row prefix".into(),
+        }),
+    );
+    assert_eq!(interrupted.rows_delivered, 13);
+    assert_eq!(
+        interrupted.failed_at,
+        Some((id(2), MergeSide::Base, b"paired-storm-b-base-0".to_vec())),
+        "the first table completes before the second table fails within its first depth range",
+    );
+
+    const RECOVERY_RETRIES: usize = 8;
+    let start = Arc::new(Barrier::new(RECOVERY_RETRIES));
+    let mut workers = Vec::with_capacity(RECOVERY_RETRIES);
+    for retry in 0..RECOVERY_RETRIES {
+        let layout = (retry / 2) % 2;
+        let (base, left, right, source) = paired_tombstone_storm_inputs(layout, retry % 2 == 1);
+        let gate = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+            let plan = merge_three_way_snapshots(
+                &base,
+                &left,
+                &right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 22, max_conflicts: 0 },
+            )
+            .expect("each concurrent storm retry fits its private exact budget");
+            (plan, layout)
+        }));
+    }
+
+    let expected_tombstones = TOMBSTONE_STORM_KEYS
+        .iter()
+        .map(|key| string(key))
+        .collect::<Vec<_>>();
+    for worker in workers {
+        let (plan, layout) = worker.join().expect("paired storm retry worker completes");
+        assert_eq!(plan.tables.keys().copied().collect::<Vec<_>>(), vec![id(1), id(2)]);
+        assert_eq!(plan.report.rows_examined, 22);
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        for table in [id(1), id(2)] {
+            assert_eq!(table_row_tombstones(&plan, table), expected_tombstones);
+            assert!(table_live_row_keys(&plan, table).is_empty());
+        }
+        let expected_segment_counts = if layout == 0 { (5, 3) } else { (3, 4) };
+        assert_eq!(plan.tables[&id(1)].segments.len(), expected_segment_counts.0);
+        assert_eq!(plan.tables[&id(2)].segments.len(), expected_segment_counts.1);
     }
 }
 
