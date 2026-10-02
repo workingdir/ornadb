@@ -17254,7 +17254,8 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
         return true;
     }
     if is_snapshot_context_map_shape(expected) && is_snapshot_context_map_shape(actual) {
-        return true;
+        return snapshot_context_map_cardinality(expected)
+            == snapshot_context_map_cardinality(actual);
     }
     match (expected, actual) {
         (
@@ -17375,6 +17376,21 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
                 && pinned_snapshot_shape_matches(expected_unit, actual_unit)
         }
         _ => false,
+    }
+}
+
+/// Selector identities may change during a local rebind, but the number of
+/// captured selector slots is part of the pinned shape. The reference is
+/// silent about local map rebinds; preserving cardinality avoids silently
+/// adding or dropping captured pins.
+fn snapshot_context_map_cardinality(ty: &Type) -> Option<usize> {
+    match ty {
+        Type::Applied { base, arguments }
+            if base == "sys.SnapshotRefContext" || base == "semantic.SnapshotContextMap" =>
+        {
+            Some(arguments.len())
+        }
+        _ => None,
     }
 }
 
