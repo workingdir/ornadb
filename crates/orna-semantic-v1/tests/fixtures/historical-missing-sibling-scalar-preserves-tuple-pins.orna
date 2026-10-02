@@ -1,0 +1,27 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn tuple_capture_with_required_label() =
+    ((left_selected, left_sibling): (sys.SnapshotRef, sys.SnapshotRef),
+     label: Str) =>
+        (terminal_pin: sys.SnapshotRef) => {
+            left_selected_capture: factory_at(left_selected),
+            left_sibling_capture: factory_at(left_sibling),
+            terminal_capture: factory_at(terminal_pin),
+            label: label,
+        };
+
+pub fn omitted_required_label_suppresses_tuple_capture_rebinding() {
+    let callback = tuple_capture_with_required_label();
+    let incomplete = callback(
+        (sys.snapshot("HEAD~700"), sys.snapshot("HEAD~690")),
+    )(sys.snapshot("HEAD~680"));
+    let complete = callback(
+        (sys.snapshot("HEAD~670"), sys.snapshot("HEAD~660")),
+        "complete",
+    )(sys.snapshot("HEAD~650"));
+    {
+        incomplete: incomplete,
+        complete: complete,
+    }
+}
