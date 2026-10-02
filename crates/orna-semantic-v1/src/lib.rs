@@ -9331,6 +9331,9 @@ fn infer_case_arm_body(
 }
 
 fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
+    if !checkpoint_snapshot_maps_are_valid(left) || !checkpoint_snapshot_maps_are_valid(right) {
+        return None;
+    }
     if left == right {
         return Some(left.clone());
     }
@@ -19221,11 +19224,14 @@ mod tests {
         assert!(!is_snapshot_context_map_shape(&singleton));
         assert!(!is_snapshot_context_map_shape(&unsorted));
         assert!(!is_snapshot_context_map_shape(&duplicate));
+        assert_eq!(merge_list_element_types(&first, &first), Some(first.clone()));
+        assert!(merge_list_element_types(&malformed, &malformed).is_none());
         assert!(merge_checkpoint_field_map(&malformed, &malformed).is_none());
         assert!(merge_checkpoint_field_map(&malformed, &first).is_none());
         assert!(!checkpoint_snapshot_maps_are_valid(&nested_malformed));
         assert!(!types_match(&nested_malformed, &nested_malformed));
         assert!(!type_contains_pinned_snapshot_identity(&nested_malformed));
+        assert!(merge_list_element_types(&nested_malformed, &nested_malformed).is_none());
         assert!(merge_checkpoint_field_map(&nested_malformed, &nested_malformed).is_none());
         assert!(!pinned_snapshot_rebind_compatible(
             &nested_malformed,
