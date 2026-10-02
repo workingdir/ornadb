@@ -5,7 +5,7 @@ use std::{
 };
 
 use orna_sys_v1::{
-    SystemProviderAbi, system_api_json, system_api_schema_json, system_binding_stubs,
+    SystemEffect, SystemProviderAbi, system_api_json, system_api_schema_json, system_binding_stubs,
     system_dispatch_table, system_host_operation_registry_json,
     system_host_operation_registry_schema_json, system_provider_abi_json,
     system_provider_abi_schema_json,
@@ -361,6 +361,201 @@ fn dispatch_metadata_schema_covers_nullable_roles_and_rejects_unknown_or_invalid
             .unwrap_err()
             .contains("invalid sys failure code"),
         "dispatch schema restricts operation failures to the sys vocabulary"
+    );
+}
+
+#[test]
+fn dispatch_metadata_regeneration_conforms_across_every_operation_and_role() {
+    const SHARED_PROVIDER_FAILURES: [&str; 3] = [
+        "sys.abi.precondition_failed",
+        "sys.abi.unavailable",
+        "sys.abi.provider_failed",
+    ];
+
+    fn effect_name(effect: SystemEffect) -> &'static str {
+        match effect {
+            SystemEffect::Read => "read",
+            SystemEffect::Invoke => "invoke",
+            SystemEffect::Admin => "admin",
+        }
+    }
+
+    let generated = regenerate();
+    let repeated = regenerate();
+    assert_eq!(
+        generated.provider_abi_json, repeated.provider_abi_json,
+        "independent typed-registry regeneration runs preserve dispatch metadata bytes"
+    );
+    assert_eq!(
+        generated.provider_abi_json,
+        system_provider_abi_json(),
+        "embedded dispatch metadata is the generated registry output"
+    );
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("dispatch metadata schema regenerates from its generator");
+    assert_eq!(
+        generated_schema,
+        system_provider_abi_schema_json(),
+        "embedded dispatch schema is the deterministic generated schema"
+    );
+
+    let registry: Value = serde_json::from_str(&generated.provider_abi_json)
+        .expect("regenerated dispatch metadata is JSON");
+    let schema: Value = serde_json::from_str(&generated_schema).expect("dispatch schema is JSON");
+    build_host::validate_json_against_schema(&generated.provider_abi_json, &generated_schema)
+        .expect("regenerated dispatch metadata conforms to the generated schema");
+    let table = SystemProviderAbi::from_json(&generated.provider_abi_json)
+        .expect("regenerated metadata parses into the typed dispatch table");
+    assert_eq!(&table, system_dispatch_table());
+
+    let api_json = system_api_json();
+    let api: Value = serde_json::from_str(&api_json).expect("published API is JSON");
+    let api_functions = api["functions"]
+        .as_array()
+        .expect("published API has function inventory")
+        .iter()
+        .map(|function| (function["name"].as_str().expect("function name"), function))
+        .collect::<BTreeMap<_, _>>();
+    let operation_rows = registry["operations"]
+        .as_array()
+        .expect("dispatch metadata has operations");
+    assert_eq!(operation_rows.len(), table.operations().count());
+    assert_eq!(operation_rows.len(), api_functions.len());
+
+    for row in operation_rows {
+        let name = row["name"].as_str().expect("dispatch operation name");
+        let contract = table
+            .operation(name)
+            .unwrap_or_else(|| panic!("missing typed dispatch contract for {name}"));
+        let function = api_functions
+            .get(name)
+            .unwrap_or_else(|| panic!("missing public API declaration for {name}"));
+
+        assert_eq!(
+            row["version"]["major"].as_u64(),
+            Some(contract.version.major.into())
+        );
+        assert_eq!(
+            row["version"]["minor"].as_u64(),
+            Some(contract.version.minor.into())
+        );
+        assert_eq!(
+            row["signature"].as_str(),
+            Some(contract.signature.source.as_str())
+        );
+        assert_eq!(row["signature"], function["signature"]);
+
+        let effects = contract.effects.iter().map(effect_name).collect::<Vec<_>>();
+        assert_eq!(effects.len(), 1, "operation {name} has one declared effect");
+        assert_eq!(row["effect"].as_str(), Some(effects[0]));
+        assert_eq!(row["effect"], function["effect"]);
+
+        let preconditions = contract
+            .preconditions
+            .iter()
+            .map(|precondition| precondition.declaration.as_str())
+            .collect::<Vec<_>>();
+        let metadata_preconditions = row["preconditions"]
+            .as_array()
+            .expect("dispatch preconditions are an array")
+            .iter()
+            .map(|precondition| precondition.as_str().expect("precondition string"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            metadata_preconditions, preconditions,
+            "preconditions for {name}"
+        );
+
+        let metadata_failures = row["failures"]
+            .as_array()
+            .expect("dispatch failures are an array")
+            .iter()
+            .map(|failure| failure.as_str().expect("failure code string").to_owned())
+            .collect::<BTreeSet<_>>();
+        let typed_failures = contract
+            .failures
+            .iter()
+            .filter(|failure| !SHARED_PROVIDER_FAILURES.contains(&failure.as_str()))
+            .map(|failure| failure.as_str().to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            metadata_failures, typed_failures,
+            "failure vocabulary for {name}"
+        );
+
+        let role = match (&contract.role, contract.role_version) {
+            (Some(role), Some(version)) => Some(format!(
+                "{}@{}.{}",
+                role.as_str(),
+                version.major,
+                version.minor
+            )),
+            (None, None) => None,
+            _ => panic!("role name/version must be present together for {name}"),
+        };
+        assert_eq!(row["role"].as_str(), role.as_deref(), "role for {name}");
+    }
+
+    let role_rows = registry["roles"]
+        .as_array()
+        .expect("dispatch role inventory");
+    assert_eq!(role_rows.len(), table.roles().count());
+    for row in role_rows {
+        let name = row["name"].as_str().expect("role name");
+        let role = table
+            .role(name)
+            .unwrap_or_else(|| panic!("missing typed semantic role {name}"));
+        assert_eq!(
+            row["version"]["major"].as_u64(),
+            Some(role.version.major.into())
+        );
+        assert_eq!(
+            row["version"]["minor"].as_u64(),
+            Some(role.version.minor.into())
+        );
+
+        let metadata_effects = row["effects"]
+            .as_array()
+            .expect("role effects are an array")
+            .iter()
+            .map(|effect| effect.as_str().expect("effect string").to_owned())
+            .collect::<BTreeSet<_>>();
+        let typed_effects = role
+            .effects
+            .iter()
+            .map(|effect| effect_name(effect).to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(metadata_effects, typed_effects, "effects for role {name}");
+
+        let metadata_operations = row["operations"]
+            .as_array()
+            .expect("role operations are an array")
+            .iter()
+            .map(|operation| operation.as_str().expect("operation ID string").to_owned())
+            .collect::<BTreeSet<_>>();
+        let typed_operations = role
+            .operations
+            .iter()
+            .map(|operation| operation.as_str().to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            metadata_operations, typed_operations,
+            "operations for role {name}"
+        );
+        assert_eq!(row["required"].as_bool(), Some(role.required));
+        assert_eq!(row["replaceable"].as_bool(), Some(role.replaceable));
+        assert_eq!(
+            row["builtin_provider"].as_str(),
+            role.builtin_provider
+                .as_ref()
+                .map(|provider| provider.as_str()),
+            "built-in provider for role {name}"
+        );
+    }
+
+    assert_eq!(
+        schema["$schema"], "https://json-schema.org/draft/2020-12/schema",
+        "the conformance matrix exercises the published schema dialect"
     );
 }
 
