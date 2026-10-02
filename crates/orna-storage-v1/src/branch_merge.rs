@@ -256,6 +256,77 @@ pub struct SequencedBranchMergePlan {
     pub ordered_row_tombstones: Vec<(ObjectId, CanonicalValue)>,
 }
 
+/// One exact-key tombstone event retained in committed paired history.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeTombstoneEvent {
+    pub order: u64,
+    pub table: ObjectId,
+    pub key: CanonicalValue,
+}
+
+/// Error returned when a sequenced plan cannot extend a tombstone history.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BranchMergeTombstoneHistoryError {
+    /// The supplied step is not the next lineage position.
+    OutOfOrder { expected: u64, actual: u64 },
+    /// The history already consumed the final representable lineage position.
+    OrderExhausted,
+}
+
+/// Append-only tombstone history for committed paired merge plans.
+///
+/// MERGE-1 is silent on how tombstones accumulate across committed waves. This
+/// v1 policy accepts each sequenced paired plan at exactly the next position,
+/// appends its table/key-ordered exact deletions without deduplicating prior
+/// events, and advances the position even when a restore wave has no new
+/// tombstones. A later deletion of a restored key is therefore a new event at
+/// its own commit position. A paired step is checked and appended atomically.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeTombstoneHistory {
+    next_order: Option<u64>,
+    events: Vec<BranchMergeTombstoneEvent>,
+}
+
+impl BranchMergeTombstoneHistory {
+    /// Starts history after the caller's already-committed prefix.
+    pub fn new(first_order: u64) -> Self {
+        Self { next_order: Some(first_order), events: Vec::new() }
+    }
+
+    /// Appends one plan emitted by [`BranchMergePlanSequencer`] at its next
+    /// lineage position. Empty deltas still consume their paired plan order.
+    pub fn append(
+        &mut self,
+        step: &SequencedBranchMergePlan,
+    ) -> Result<(), BranchMergeTombstoneHistoryError> {
+        let Some(expected) = self.next_order else {
+            return Err(BranchMergeTombstoneHistoryError::OrderExhausted);
+        };
+        if step.order != expected {
+            return Err(BranchMergeTombstoneHistoryError::OutOfOrder {
+                expected,
+                actual: step.order,
+            });
+        }
+
+        self.events.extend(step.ordered_row_tombstones.iter().map(|(table, key)| {
+            BranchMergeTombstoneEvent { order: step.order, table: *table, key: key.clone() }
+        }));
+        self.next_order = expected.checked_add(1);
+        Ok(())
+    }
+
+    /// Returns the next lineage position required by this history.
+    pub fn next_order(&self) -> Option<u64> {
+        self.next_order
+    }
+
+    /// Returns exact deletion events in their append order.
+    pub fn events(&self) -> &[BranchMergeTombstoneEvent] {
+        &self.events
+    }
+}
+
 /// Buffers selected successful plans and releases them in paired lineage order,
 /// independent of the order in which concurrent workers finish.
 ///
