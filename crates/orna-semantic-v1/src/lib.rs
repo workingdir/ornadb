@@ -7291,8 +7291,7 @@ fn infer(
                             Type::Error
                         }
                     });
-                let ty =
-                    scope_shadowed_snapshot_ref_pattern(&parameter.pattern, &ty, local);
+                let ty = scope_snapshot_ref_parameter_pattern(&parameter.pattern, &ty);
                 if ty == Type::Error {
                     // Keep an underconstrained lambda parameter in scope as
                     // an error-typed local. This lets the annotation
@@ -16268,22 +16267,13 @@ fn is_snapshot_ref_value(ty: &Type) -> bool {
     ty == &Type::Named("sys.SnapshotRef".into()) || is_contextual_snapshot_ref(ty)
 }
 
-/// Give a shadowing SnapshotRef parameter a lexical identity even when its
-/// pattern binds it below a tuple. The reference specifies
-/// pin identity but is silent on destructured shadow binders, so retain the
-/// same source-span scoping used for name parameters at every supported leaf.
-fn scope_shadowed_snapshot_ref_pattern(
-    pattern: &Pattern,
-    ty: &Type,
-    local: &BTreeMap<String, Symbol>,
-) -> Type {
+/// Give every SnapshotRef lambda parameter a lexical identity, including each
+/// component of a tuple pattern. This preserves the direct-binder scope used by
+/// current main and extends it to destructured pins, whose identity mechanics
+/// are unspecified by the reference.
+fn scope_snapshot_ref_parameter_pattern(pattern: &Pattern, ty: &Type) -> Type {
     match (pattern, ty) {
-        (Pattern::Name(name, span), ty)
-            if local
-                .get(name)
-                .is_some_and(|symbol| is_snapshot_ref_value(&symbol.ty))
-                && is_snapshot_ref_value(ty) =>
-        {
+        (Pattern::Name(name, span), ty) if is_snapshot_ref_value(ty) => {
             let source = span.file.as_deref().unwrap_or("<unknown>");
             contextual_snapshot_ref(&format!(
                 "selector:binder:{source}@{}..{}:parameter:{name}",
@@ -16295,7 +16285,7 @@ fn scope_shadowed_snapshot_ref_pattern(
                 elements
                     .iter()
                     .zip(types)
-                    .map(|(pattern, ty)| scope_shadowed_snapshot_ref_pattern(pattern, ty, local))
+                    .map(|(pattern, ty)| scope_snapshot_ref_parameter_pattern(pattern, ty))
                     .collect(),
             )
         }
