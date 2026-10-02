@@ -128,7 +128,7 @@ test:
     cargo test --locked --workspace --all-targets
 
 # Verify provider dispatch metadata export/schema conformance and generated-artifact drift.
-sys-artifact-ci: sys-binding-conformance-ci
+sys-artifact-ci: sys-binding-conformance-ci sys-dispatch-coverage-ci
     cargo test --locked -p orna-sys-v1 --features dev-sys-export --test sys_api_export --test system_registry_parity --test system_provider_abi
     cargo test --locked -p orna-evaluator-v1 --features orna-sys-v1/dev-sys-export --test generated_sys_host_binding_coverage --test standard_library_process_environment --test standard_library_filesystem_network
 
