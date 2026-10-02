@@ -47,3 +47,50 @@ fn time_remains_an_optional_explicit_standard_module() {
         "ORNA-S010-IMPORT"
     );
 }
+
+#[test]
+fn pinned_calendar_helpers_use_source_and_core_dates_work_without_std() {
+    let parsed = orna_syntax_v1::parse_repl(include_str!(
+        "fixtures/stdlib-time-calendar-contract-r0asr.orna"
+    ));
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-time-calendar-use-r0asr.orna")),
+        Ok(None)
+    );
+    let calendar_result =
+        session.submit(include_str!("fixtures/stdlib-time-calendar-contract-r0asr.orna"));
+    assert_eq!(
+        calendar_result,
+        Ok(Some(canonical(Raw::Array(vec![
+            Raw::Bool(true),
+            Raw::Bool(true),
+            Raw::Bool(true),
+            Raw::Bool(true),
+            Raw::Bool(true),
+            Raw::Bool(true),
+            Raw::Bool(true),
+            Raw::Bool(true),
+            Raw::Bool(true),
+            Raw::Bool(true),
+            Raw::Bool(true),
+        ])))),
+        "diagnostic={:?}",
+        calendar_result.as_ref().err().map(|error| error.code())
+    );
+
+    let mut without_std = AdmittedReplSession::new(Limits::default());
+    assert_eq!(
+        without_std.submit(include_str!("fixtures/stdlib-core-date-time-without-std-r0asr.orna")),
+        Ok(Some(canonical(Raw::Bool(true))))
+    );
+    assert_eq!(
+        without_std
+            .submit(include_str!("fixtures/stdlib-time-calendar-without-snapshot-r0asr.orna"))
+            .unwrap_err()
+            .code(),
+        "ORNA-S010-IMPORT"
+    );
+}

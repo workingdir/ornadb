@@ -1084,7 +1084,11 @@ pub fn explain_query_with_disjunct_storm_chain(
 /// cannot expand beyond its ancestor branch's bounded estimate. The immediate
 /// cap at a rebind is the current branch's bounded rows and bytes. An explicit
 /// rebind runs just after its one-based limit position and feeds its capped
-/// output to the following limit. Since
+/// output to the following limit. Rebinds at the same position run in
+/// declaration order, each consuming the previous rebind's bounded result.
+/// Row and byte estimates are capped independently; an unknown dimension stays
+/// unknown while a known dimension continues to use its immediate input cap.
+/// Since
 /// `sys.PlanNodeKind` has no union node, each storm is one aggregate filter
 /// node whose details retain the exact branch chains and rebind points; this
 /// avoids presenting sibling limits as a false serial pipeline. The
@@ -2076,6 +2080,19 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
                 "limit_chain_rebind_stage_input_scope".to_owned(),
                 PlanDetail::Text(
                     "post_limit_branch_input_then_previous_rebind_stage_bounded_rows_and_bytes"
+                        .to_owned(),
+                ),
+            ),
+            (
+                "limit_chain_rebind_stage_order".to_owned(),
+                PlanDetail::Text(
+                    "declaration_order_each_rebind_output_capped_before_next_rebind".to_owned(),
+                ),
+            ),
+            (
+                "limit_chain_rebind_dimension_scope".to_owned(),
+                PlanDetail::Text(
+                    "rows_and_bytes_capped_independently_unknown_dimensions_remain_unknown"
                         .to_owned(),
                 ),
             ),
