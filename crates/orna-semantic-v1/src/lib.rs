@@ -16548,13 +16548,10 @@ fn specialize_dynamic_parameter_snapshot_contexts(
     let nonreturning_argument = argument_types
         .iter()
         .any(contains_nonreturning_aggregate_component);
-    let incomplete_tuple_argument = formal_parameters
+    let incomplete_argument = formal_parameters
         .iter()
         .enumerate()
         .any(|(parameter_index, formal)| {
-            if !matches!(formal, Type::Tuple(_)) {
-                return false;
-            }
             let Some(argument_index) = call_argument_index_for_position(
                 parameter_names,
                 parameter_index,
@@ -16565,15 +16562,18 @@ fn specialize_dynamic_parameter_snapshot_contexts(
             let Some(actual) = argument_types.get(argument_index) else {
                 return true;
             };
-            contains_type_error(formal)
-                || contains_type_error(actual)
-                || !types_match(formal, actual)
+            matches!(formal, Type::Tuple(_))
+                && (contains_type_error(formal)
+                    || contains_type_error(actual)
+                    || !types_match(formal, actual))
         });
-    // The reference specifies pin identity but leaves recovery after a failed
-    // tuple call unspecified. Treat the call's binding wave transactionally:
-    // a malformed or missing required tuple must not rebind otherwise valid
-    // siblings captured by the returned callable. Omitted defaults are valid.
-    let suppress_rebinding = nonreturning_argument || incomplete_tuple_argument;
+    // The reference specifies pin identity but leaves recovery after a call
+    // that cannot reach the callee unspecified. Treat its binding wave
+    // transactionally:
+    // a malformed tuple or any missing required argument must not rebind
+    // otherwise valid siblings captured by the returned callable. Omitted
+    // defaults are valid.
+    let suppress_rebinding = nonreturning_argument || incomplete_argument;
     if !suppress_rebinding {
         for (parameter_index, formal) in formal_parameters.iter().enumerate() {
             let Some(argument_index) = call_argument_index_for_position(
@@ -16599,8 +16599,9 @@ fn specialize_dynamic_parameter_snapshot_contexts(
         }
     }
 
-    // A call with a non-returning argument or incomplete required tuple never
-    // reaches the callee. Keep its result symbolic instead of leaking sibling pins.
+    // A call with a non-returning argument, malformed tuple, or missing required
+    // argument never reaches the callee. Keep its result symbolic instead of
+    // leaking sibling pins.
     let (parameter_names, arguments, argument_types) = if suppress_rebinding {
         (None, &[][..], &[][..])
     } else {
