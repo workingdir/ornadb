@@ -2015,6 +2015,7 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
         current_cardinality = cardinality;
     }
     let mut prior_storm_stage_path = Vec::new();
+    let mut prior_storm_stage_scope = "root".to_owned();
     for (storm_index, storm) in disjunct_storm_cascades.iter().enumerate() {
         let storm_stage_index = storm_index + 1;
         let storm_index =
@@ -2026,11 +2027,16 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
         storm_scope_path.push(PlanByteCapScopeSegment::StormStage {
             index: storm_stage_index,
         });
+        let storm_scope = if storm_stage_index == 1 {
+            prior_storm_stage_scope.clone()
+        } else {
+            format!("{prior_storm_stage_scope}/storm{storm_stage_index}")
+        };
         let (cardinality, work, overflowed) = disjunct_storm_cascade_cardinality_and_work(
             current_cardinality,
             storm,
             1,
-            "root",
+            &storm_scope,
             &storm_scope_path,
             &mut byte_cap_handoff_estimates_by_depth,
         );
@@ -2314,6 +2320,13 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             work,
         );
         current_cardinality = cardinality;
+        // Match human-readable handoff labels to the complete typed ancestry
+        // path while preserving the established root label for the first stage.
+        prior_storm_stage_scope = if storm_stage_index == 1 {
+            format!("{storm_scope}/storm{storm_stage_index}/output")
+        } else {
+            format!("{storm_scope}/output")
+        };
         prior_storm_stage_path = storm_scope_path;
         prior_storm_stage_path.push(PlanByteCapScopeSegment::StormStageOutput {
             index: storm_stage_index,
