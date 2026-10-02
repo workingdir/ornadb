@@ -5904,6 +5904,63 @@ fn omitted_rebind_preserves_each_sibling_pin_identity_label() {
 }
 
 #[test]
+fn record_rebind_preserves_shared_sibling_pin_depth_labels() {
+    let source =
+        include_str!("fixtures/historical-record-sibling-pin-topology-rebind.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-record-sibling-pin-topology-rebind.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        1,
+        "splitting one shared depth pin across paired record siblings must reject the rebind: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("record_sibling_depth_rebind_keeps_labels")
+        })
+        .expect("record sibling pin topology fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["record_sibling_depth_rebind_keeps_labels"].ty
+    else {
+        panic!("valid record depth rebind must remain callable");
+    };
+    let Type::Record(fields) = result.as_ref() else {
+        panic!("valid record depth rebind must return both sibling values: {result:?}");
+    };
+    for (name, selector) in [("left", "HEAD~210"), ("right", "HEAD~209")] {
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(fields.get(name).expect("paired sibling"), &mut contexts);
+        assert_eq!(
+            contexts,
+            BTreeSet::from([format!("selector:{selector}")]),
+            "valid paired record rebind must retain the {name} depth label"
+        );
+    }
+}
+
+#[test]
 fn unknown_paired_width_suppresses_sibling_pin_promotion() {
     let source = include_str!(
         "fixtures/historical-unknown-paired-width-rebind-suppression.orna"
