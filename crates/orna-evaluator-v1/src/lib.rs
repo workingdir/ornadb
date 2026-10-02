@@ -9325,6 +9325,206 @@ mod tests {
         }
     }
 
+    fn evaluate_relation_collection_fixture(
+        source: &str,
+        bindings: &[(&str, Vec<Value>)],
+    ) -> Result<Value, EvaluationError> {
+        fn materialize(
+            context: &mut Context<'_, '_>,
+            value: Value,
+        ) -> Result<Value, EvaluationError> {
+            match value {
+                Value::Relation(plan) => {
+                    Ok(Value::List(context.collect_relation_values(&plan, 0)?))
+                }
+                Value::Tuple(parts) => Ok(Value::Tuple(
+                    parts
+                        .into_iter()
+                        .map(|part| materialize(context, part))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )),
+                Value::List(values) => Ok(Value::List(
+                    values
+                        .into_iter()
+                        .map(|value| materialize(context, value))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )),
+                value => Ok(value),
+            }
+        }
+
+        let parsed = parse_expression(source);
+        assert!(parsed.is_ok(), "{source}: {:?}", parsed.diagnostics);
+        let functions = Functions::new();
+        let mut context = test_context(&functions);
+        let mut scope = Scope(
+            bindings
+                .iter()
+                .map(|(name, values)| {
+                    (
+                        (*name).to_owned(),
+                        Value::Relation(RelationPlan::from_values(values.clone())),
+                    )
+                })
+                .collect(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            NominalDefinitions::new(),
+            BTreeSet::new(),
+        );
+        let value = context.evaluate(&parsed.value, &mut scope, 0)?;
+        materialize(&mut context, value)
+    }
+
+    #[test]
+    fn relation_collection_group_and_partition_return_computed_relation_rows() {
+        let ints = |values: &[i64]| {
+            values
+                .iter()
+                .map(|value| Value::Int(BigInt::from(*value)))
+                .collect::<Vec<_>>()
+        };
+        let grouped = evaluate_relation_collection_fixture(
+            include_str!("../tests/fixtures/relation-group-by-result-0re2w.orna"),
+            &[("rows", ints(&[31, 12, 22, 13, 33]))],
+        )
+        .expect("group_by computes a relation result");
+        assert_eq!(
+            grouped,
+            Value::List(vec![
+                Value::Tuple(vec![Value::Int(BigInt::from(1)), Value::List(ints(&[31]))]),
+                Value::Tuple(vec![
+                    Value::Int(BigInt::from(2)),
+                    Value::List(ints(&[12, 22])),
+                ]),
+                Value::Tuple(vec![
+                    Value::Int(BigInt::from(3)),
+                    Value::List(ints(&[13, 33])),
+                ]),
+            ])
+        );
+
+        let partitioned = evaluate_relation_collection_fixture(
+            include_str!("../tests/fixtures/relation-partition-result-0re2w.orna"),
+            &[("rows", ints(&[3, 2, 4, 1]))],
+        )
+        .expect("partition computes both result relations");
+        assert_eq!(
+            partitioned,
+            Value::Tuple(vec![Value::List(ints(&[2, 4])), Value::List(ints(&[3, 1]))])
+        );
+    }
+
+    #[test]
+    fn relation_collection_depth_operators_keep_real_values_and_order() {
+        let ints = |values: &[i64]| {
+            values
+                .iter()
+                .map(|value| Value::Int(BigInt::from(*value)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-chunk-result-0re2w.orna"),
+                &[("rows", ints(&[1, 2, 3]))],
+            )
+            .unwrap(),
+            Value::List(vec![Value::List(ints(&[1, 2])), Value::List(ints(&[3]))])
+        );
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-flatten-result-0re2w.orna"),
+                &[(
+                    "rows",
+                    vec![Value::List(ints(&[1, 2])), Value::List(ints(&[3]))]
+                )],
+            )
+            .unwrap(),
+            Value::List(ints(&[1, 2, 3]))
+        );
+        let left = ints(&[1, 2]);
+        let right = ["a", "b", "c"]
+            .into_iter()
+            .map(|value| Value::String(value.into()))
+            .collect::<Vec<_>>();
+        let zipped = Value::List(vec![
+            Value::Tuple(vec![left[0].clone(), right[0].clone()]),
+            Value::Tuple(vec![left[1].clone(), right[1].clone()]),
+        ]);
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-zip-result-0re2w.orna"),
+                &[("left", left.clone()), ("right", right.clone())],
+            )
+            .unwrap(),
+            zipped
+        );
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-zip-exact-result-0re2w.orna"),
+                &[("left", left), ("right", right[..2].to_vec())],
+            )
+            .unwrap(),
+            zipped
+        );
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-unique-result-0re2w.orna"),
+                &[("rows", ints(&[3, 1, 3, 2, 1]))],
+            )
+            .unwrap(),
+            Value::List(ints(&[3, 1, 2]))
+        );
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-split-when-result-0re2w.orna"),
+                &[("rows", ints(&[1, 2, 3, 4]))],
+            )
+            .unwrap(),
+            Value::List(vec![
+                Value::List(ints(&[1])),
+                Value::List(ints(&[2, 3])),
+                Value::List(ints(&[4])),
+            ])
+        );
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-rank-result-0re2w.orna"),
+                &[("rows", ints(&[3, 1, 2, 1]))],
+            )
+            .unwrap(),
+            Value::List(vec![
+                Value::Tuple(vec![
+                    Value::Int(BigInt::from(1)),
+                    Value::Int(BigInt::from(1))
+                ]),
+                Value::Tuple(vec![
+                    Value::Int(BigInt::from(1)),
+                    Value::Int(BigInt::from(1))
+                ]),
+                Value::Tuple(vec![
+                    Value::Int(BigInt::from(2)),
+                    Value::Int(BigInt::from(3))
+                ]),
+                Value::Tuple(vec![
+                    Value::Int(BigInt::from(3)),
+                    Value::Int(BigInt::from(4))
+                ]),
+            ])
+        );
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-asof-result-0re2w.orna"),
+                &[("left", ints(&[10])), ("right", ints(&[9, 11]))],
+            )
+            .unwrap(),
+            Value::List(vec![Value::Tuple(vec![
+                Value::Int(BigInt::from(10)),
+                Value::Option(Some(Box::new(Value::Int(BigInt::from(9))))),
+            ])])
+        );
+    }
+
     #[test]
     fn function_defaults_bind_in_declaration_order_and_only_when_omitted() {
         let parsed = orna_syntax_v1::parse_module(
