@@ -9798,7 +9798,7 @@ fn short_alias_rebound_to_long_pin_keeps_longer_nested_routes() {
 }
 
 #[test]
-fn repeated_paired_depth_storms_keep_sibling_pin_routes_consistent() {
+fn paired_depth_and_terminal_storms_keep_sibling_pin_routes_consistent() {
     let package_source = include_str!("fixtures/attach-package.orna");
     let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
     let aliases = [
@@ -9882,6 +9882,12 @@ fn repeated_paired_depth_storms_keep_sibling_pin_routes_consistent() {
     };
     let middle_pins = resolve_pin_grid(aliases[1], &middle_commits);
     let deep_pins = resolve_pin_grid(aliases[2], &deep_commits);
+    let terminal_pins: Vec<PinnedDatabase> = terminal_commits
+        .iter()
+        .map(|commit| {
+            PinnedDatabase::resolve(aliases[3], shared_repository.clone(), commit, loader).unwrap()
+        })
+        .collect();
     let parent_pin = PinnedDatabase::resolve(
         aliases[0],
         shared_repository.clone(),
@@ -9933,6 +9939,7 @@ fn repeated_paired_depth_storms_keep_sibling_pin_routes_consistent() {
     let mut waves = Vec::new();
     let mut final_terminals: Vec<Option<AttachedDatabaseSession>> =
         vec![None; sibling_count];
+    let mut final_deep_variants = vec![0; sibling_count];
     // Each sibling sees multiple paired depth waves in an interleaved order.
     // The last wave leaves distinct middle/deep routes on a shared terminal.
     for (sibling, middle_variant, deep_variant) in
@@ -10011,6 +10018,7 @@ fn repeated_paired_depth_storms_keep_sibling_pin_routes_consistent() {
             deep_variant,
         );
         final_terminals[sibling] = Some(terminal.clone());
+        final_deep_variants[sibling] = deep_variant;
         waves.push(RetainedWave {
             sibling,
             middle_variant,
@@ -10074,14 +10082,99 @@ fn repeated_paired_depth_storms_keep_sibling_pin_routes_consistent() {
         );
     }
 
-    let left_terminal = final_terminals[0].as_ref().unwrap();
-    let right_terminal = final_terminals[1].as_ref().unwrap();
+    let mut terminal_closures: Vec<AttachedDatabaseSession> = final_terminals
+        .into_iter()
+        .map(Option::unwrap)
+        .collect();
+    let manifest_terminal_snapshots = terminal_closures.clone();
+    let mut terminal_storm_snapshots = Vec::new();
+    let mut selected_terminal_variants = vec![0; sibling_count];
+    for (sibling, variant) in [(0, 1), (1, 0), (0, 0), (1, 1), (1, 0), (0, 0)] {
+        rebind(
+            &mut terminal_closures[sibling],
+            aliases[3],
+            &terminal_pins[variant],
+        );
+        selected_terminal_variants[sibling] = variant;
+        terminal_storm_snapshots.push((sibling, variant, terminal_closures[sibling].clone()));
+
+        for branch in 0..sibling_count {
+            let selected = selected_terminal_variants[branch];
+            assert_pin(
+                &terminal_closures[branch],
+                aliases[3],
+                &terminal_commits[selected],
+            );
+            assert_route(
+                &terminal_closures[branch],
+                &format!("{}.orna", aliases[3]),
+                3,
+                0,
+                selected,
+            );
+            assert_route(
+                &terminal_closures[branch],
+                "main.orna",
+                2,
+                branch,
+                final_deep_variants[branch],
+            );
+        }
+    }
+
+    for sibling in 0..sibling_count {
+        assert_pin(
+            &manifest_terminal_snapshots[sibling],
+            aliases[3],
+            &terminal_commits[0],
+        );
+        assert_route(
+            &manifest_terminal_snapshots[sibling],
+            &format!("{}.orna", aliases[3]),
+            3,
+            0,
+            0,
+        );
+        assert_route(
+            &manifest_terminal_snapshots[sibling],
+            "main.orna",
+            2,
+            sibling,
+            final_deep_variants[sibling],
+        );
+    }
+    for (sibling, variant, snapshot) in terminal_storm_snapshots {
+        assert_pin(&snapshot, aliases[3], &terminal_commits[variant]);
+        assert_route(&snapshot, &format!("{}.orna", aliases[3]), 3, 0, variant);
+        assert_route(
+            &snapshot,
+            "main.orna",
+            2,
+            sibling,
+            final_deep_variants[sibling],
+        );
+    }
+
+    let left_terminal = &terminal_closures[0];
+    let right_terminal = &terminal_closures[1];
     assert_pin(left_terminal, aliases[3], &terminal_commits[0]);
     assert_pin(right_terminal, aliases[3], &terminal_commits[0]);
     assert_route(left_terminal, &format!("{}.orna", aliases[3]), 3, 0, 0);
     assert_route(right_terminal, &format!("{}.orna", aliases[3]), 3, 0, 0);
-    assert_route(left_terminal, "main.orna", 2, 0, 0);
-    assert_route(right_terminal, "main.orna", 2, 1, 0);
+    assert_route(
+        left_terminal,
+        "main.orna",
+        2,
+        0,
+        final_deep_variants[0],
+    );
+    assert_route(
+        right_terminal,
+        "main.orna",
+        2,
+        1,
+        final_deep_variants[1],
+    );
     assert_pin(&parent, aliases[1], &middle_commits[0][0]);
     assert_route(&parent, &format!("{}.orna", aliases[1]), 1, 0, 0);
 }
