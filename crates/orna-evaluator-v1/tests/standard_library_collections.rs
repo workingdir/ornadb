@@ -1,9 +1,13 @@
 use orna_evaluator_v1::{AdmittedReplSession, Limits};
 use orna_foundation_v1::CanonicalValue;
-use orna_value_v1::Raw;
+use orna_value_v1::{Raw, Value};
 
 fn bool_value(value: bool) -> CanonicalValue {
     CanonicalValue::new(Raw::Bool(value)).unwrap()
+}
+
+fn unit_value() -> CanonicalValue {
+    CanonicalValue::new(Value::unit().raw().clone()).unwrap()
 }
 
 #[test]
@@ -37,7 +41,11 @@ fn pinned_list_map_and_set_modules_preserve_their_documented_order() {
         include_str!("fixtures/stdlib-call-set-contract-i7bat.orna"),
     ] {
         let evaluated = session.submit(call);
-        assert!(evaluated.is_ok(), "{call}: {}", evaluated.unwrap_err().code());
+        assert!(
+            evaluated.is_ok(),
+            "{call}: {}",
+            evaluated.unwrap_err().code()
+        );
         assert_eq!(evaluated.unwrap(), Some(bool_value(true)));
     }
 }
@@ -46,18 +54,24 @@ fn pinned_list_map_and_set_modules_preserve_their_documented_order() {
 fn core_intrinsics_work_without_the_optional_collection_modules() {
     let mut session = AdmittedReplSession::new(Limits::default());
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-core-without-collections-i7bat.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-core-without-collections-i7bat.orna"
+        )),
         Ok(Some(bool_value(true)))
     );
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-map-without-snapshot-i7bat.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-map-without-snapshot-i7bat.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-S010-IMPORT"
     );
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-core-without-collections-i7bat.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-core-without-collections-i7bat.orna"
+        )),
         Ok(Some(bool_value(true)))
     );
 }
@@ -105,18 +119,42 @@ fn pinned_stream_iteration_surface_is_optional_and_does_not_replace_core() {
 
     let mut without_std = AdmittedReplSession::new(Limits::default());
     assert_eq!(
-        without_std.submit(include_str!("fixtures/stdlib-core-without-collections-i7bat.orna")),
+        without_std.submit(include_str!(
+            "fixtures/stdlib-core-without-collections-i7bat.orna"
+        )),
         Ok(Some(bool_value(true)))
     );
     assert_eq!(
         without_std
-            .submit(include_str!("fixtures/stdlib-stream-without-snapshot-n8phe.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-stream-without-snapshot-n8phe.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-S010-IMPORT"
     );
     assert_eq!(
-        without_std.submit(include_str!("fixtures/stdlib-core-without-collections-i7bat.orna")),
+        without_std.submit(include_str!(
+            "fixtures/stdlib-core-without-collections-i7bat.orna"
+        )),
         Ok(Some(bool_value(true)))
+    );
+}
+
+#[test]
+fn list_backed_stream_replays_values_and_returns_unit_after_each_callback() {
+    let mut session = AdmittedReplSession::new(Limits::default());
+    let actual = session
+        .submit(include_str!(
+            "fixtures/stdlib-stream-for-each-unit-6844.orna"
+        ))
+        .unwrap_or_else(|error| panic!("finite stream call failed: {}", error.code()));
+    assert_eq!(actual, Some(unit_value()));
+    assert_eq!(
+        session.submit(include_str!(
+            "fixtures/stdlib-stream-for-each-unit-6844.orna"
+        )),
+        Ok(Some(unit_value())),
+        "a list-backed source is replayable from its initial position"
     );
 }

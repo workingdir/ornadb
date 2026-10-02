@@ -481,6 +481,37 @@ struct UnionRelationEffects {
     cursors: Vec<(String, Option<Vec<u8>>)>,
 }
 
+struct RepeatedUnknownRelationEffects {
+    rows: Vec<Value>,
+    starts: usize,
+}
+
+impl EffectHandler for RepeatedUnknownRelationEffects {
+    fn handle(&mut self, _: &Expr, _: &[Value]) -> Result<Option<Value>, EvaluationError> {
+        Ok(None)
+    }
+
+    fn scan_relation_page(
+        &mut self,
+        source: &str,
+        after: Option<&[u8]>,
+        _: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        assert_eq!(source, "sys.Storage");
+        assert!(after.is_none(), "each fixture source contains one row");
+        budget.debit(1)?;
+        let Some(row) = self.rows.get(self.starts).cloned() else {
+            panic!("unexpected extra scan for unknown source {}", self.starts);
+        };
+        self.starts += 1;
+        Ok(Some(RelationPage {
+            rows: vec![row],
+            next: None,
+        }))
+    }
+}
+
 impl UnionRelationEffects {
     fn new(left: Vec<Value>, right: Vec<Value>) -> Self {
         Self {
@@ -9249,6 +9280,23 @@ fn union_relations_preserve_declared_order_duplicates_and_bounded_terminals() {
         vec![("Left".into(), None), ("Left".into(), Some(vec![1])),],
         "take must stop before scanning the right relation"
     );
+}
+
+#[test]
+fn cloned_filter_continuations_do_not_promote_between_equal_named_unknowns() {
+    let body = parsed_expression(include_str!(
+        "fixtures/query-cloned-continuation-unknowns-9322q.orna"
+    ));
+    let mut effects = RepeatedUnknownRelationEffects {
+        rows: vec![Value::int(1.into()), Value::int(2.into()), Value::int(3.into())],
+        starts: 0,
+    };
+
+    let result = invoke_relation(body, &mut effects, Limits::default())
+        .unwrap_or_else(|error| panic!("the chained filter query computes its count: {}", error.code()));
+
+    assert_eq!(result, Value::int(2.into()));
+    assert_eq!(effects.starts, 3, "all three unknown operands contribute");
 }
 
 #[test]
