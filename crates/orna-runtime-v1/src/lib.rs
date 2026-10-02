@@ -24357,6 +24357,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_nested_union_filter_batches_stop_before_unknown_cascade_tail() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=40)
+            .map(|row_id| {
+                let title = if row_id == 10 { "later" } else { "current" };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, row_id)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(171), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-operand-filter-batches-unknown-tail.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Bool(true)).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (1, 4),
+            "the first matching row in the filtered left operand stops before either unknown leaf"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_nested_union_filter_batches_preserve_unknown_cascade_failure() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=40)
+            .map(|row_id| {
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, "current", row_id)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(172), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-operand-filter-batches-unknown-tail.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (6, 68),
+            "both ordered known leaves exhaust before the first unadmitted union tail"
+        );
+    }
+
+    #[tokio::test]
     async fn query_take_two_preserves_results_across_conjunct_filter_splits() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
