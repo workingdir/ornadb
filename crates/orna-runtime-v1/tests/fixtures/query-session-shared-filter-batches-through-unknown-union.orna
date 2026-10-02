@@ -1,0 +1,24 @@
+sys.Storage
+    | filter(storage => storage.id >= 7)
+    | union(sys.Storage | filter(storage => storage.id >= 7))
+    | filter(storage => storage.id >= 8)
+    | filter(storage => storage.id == 99)
+    | union(
+        sys.MaintenanceJob
+            | filter(job => job.id >= 8)
+            | filter(job => job.id == 99)
+    )
+    | union(
+        sys.MaintenanceJob
+            | filter(job => job.id >= 8)
+            | filter(job => job.id == 99)
+    )
+    | union(
+        sys.MaintenanceJob
+            | filter(job => job.id >= 8)
+            | filter(job => job.id == 99)
+    )
+    | filter(storage => storage.id >= 10)
+    | filter(storage => storage.id == 99)
+    | exists(storage => true)
+    |? (failure => failure.code)
