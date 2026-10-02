@@ -16789,11 +16789,14 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                     // Keep separate same-named tuple slots separate in the
                     // resulting symbolic pin map by carrying their formal
                     // binder identity alongside the shared call site.
-                    let binder_identity = binder
+                    // Binderless captured and live selectors can share a
+                    // parameter name. Preserve their source identity too, or
+                    // a suppressed rebind can collapse distinct map slots.
+                    let formal_identity = binder
                         .map(|binder| format!(":formal-binder:{binder}"))
-                        .unwrap_or_default();
+                        .unwrap_or_else(|| format!(":formal-selector:{selector}"));
                     contextual_snapshot_ref(&format!(
-                        "selector:dynamic-call:{}:{}..{}:parameter:{parameter}{binder_identity}",
+                        "selector:dynamic-call:{}:{}..{}:parameter:{parameter}{formal_identity}",
                         call_span.file.as_deref().unwrap_or("<unknown>"),
                         call_span.start,
                         call_span.end,
@@ -19732,6 +19735,65 @@ mod tests {
             binder_contexts.is_empty(),
             "an unpaired width must not collect even the valid tuple prefix: {binder_contexts:?}"
         );
+    }
+
+    #[test]
+    fn omitted_sibling_keeps_same_named_captured_and_live_slots_distinct() {
+        let result = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:capture:parameter:pin".into()),
+                Type::Named("selector:parameter:pin".into()),
+            ],
+        };
+        let arguments = vec![orna_syntax_v1::Argument {
+            name: None,
+            value: Expr::Name {
+                text: "supplied_pin".into(),
+                span: SyntaxSpan::new(10, 22),
+            },
+            span: SyntaxSpan::new(10, 22),
+        }];
+        let specialized = specialize_dynamic_parameter_snapshot_contexts(
+            &result,
+            &[
+                Type::Named("sys.SnapshotRef".into()),
+                Type::Tuple(vec![
+                    Type::Named("sys.SnapshotRef".into()),
+                    Type::Named("sys.SnapshotRef".into()),
+                ]),
+            ],
+            &BTreeSet::new(),
+            None,
+            &arguments,
+            &[contextual_snapshot_ref("selector:HEAD~12")],
+            &BTreeMap::new(),
+            &SyntaxSpan::new(5, 30),
+            None,
+        );
+
+        let Type::Applied { base, arguments } = &specialized else {
+            panic!("omission must preserve the pair rather than collapse it: {specialized:?}");
+        };
+        assert_eq!(base, "semantic.SnapshotContextMap");
+        assert!(is_snapshot_context_map_shape(&specialized));
+        assert_eq!(
+            arguments.len(),
+            2,
+            "both paired slots must remain distinct: {arguments:?}"
+        );
+        let Type::Named(left) = &arguments[0] else {
+            panic!("the first suppressed slot must retain a selector identity: {arguments:?}");
+        };
+        let Type::Named(right) = &arguments[1] else {
+            panic!("the second suppressed slot must retain a selector identity: {arguments:?}");
+        };
+        assert!(
+            left.starts_with("selector:dynamic-call:")
+                && right.starts_with("selector:dynamic-call:"),
+            "the failed call must preserve symbolic identities: {arguments:?}"
+        );
+        assert_ne!(left, right, "captured and live slots must not collapse");
     }
 
     fn collect_test_snapshot_contexts(ty: &Type, into: &mut BTreeSet<String>) {
