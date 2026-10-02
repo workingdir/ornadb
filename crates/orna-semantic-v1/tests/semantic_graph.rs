@@ -4687,6 +4687,128 @@ fn paired_tuple_shadow_waves_preserve_local_pin_scope() {
 }
 
 #[test]
+fn paired_nested_tuple_shadow_waves_keep_each_capture_depth_pin() {
+    let source = include_str!("fixtures/historical-paired-nested-tuple-shadow-depth-waves.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-tuple-shadow-depth-waves.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "nested tuple pins must stay scoped to their capture depth: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("paired_nested_tuple_shadow_waves"))
+        .expect("nested tuple shadow wave fixture module");
+    let Type::Function { result, .. } = &module.symbols["paired_nested_tuple_shadow_waves"].ty
+    else {
+        panic!("nested tuple shadow wave proof must be a function");
+    };
+    let Type::Record(lanes) = result.as_ref() else {
+        panic!("nested tuple shadow wave proof must expose both lanes");
+    };
+    let expected = |selector: &str| Type::Applied {
+        base: "sys.SnapshotRefContext".into(),
+        arguments: vec![Type::Named(format!("selector:{selector}"))],
+    };
+    for (lane_name, fields) in [
+        (
+            "left",
+            [
+                ("outer_selected", "HEAD~450"),
+                ("outer_left", "HEAD~440"),
+                ("outer_right", "HEAD~430"),
+                ("middle_selected", "HEAD~380"),
+                ("middle_left", "HEAD~370"),
+                ("middle_right", "HEAD~360"),
+                ("terminal_selected", "HEAD~320"),
+                ("terminal_left", "HEAD~310"),
+                ("terminal_right", "HEAD~300"),
+            ],
+        ),
+        (
+            "right",
+            [
+                ("outer_selected", "HEAD~420"),
+                ("outer_left", "HEAD~410"),
+                ("outer_right", "HEAD~400"),
+                ("middle_selected", "HEAD~350"),
+                ("middle_left", "HEAD~340"),
+                ("middle_right", "HEAD~330"),
+                ("terminal_selected", "HEAD~290"),
+                ("terminal_left", "HEAD~280"),
+                ("terminal_right", "HEAD~270"),
+            ],
+        ),
+    ] {
+        let Type::Record(streams) = lanes.get(lane_name).expect("paired lane") else {
+            panic!("{lane_name} must expose its pin streams");
+        };
+        for (field, selector) in fields {
+            let Type::Stream(element) = streams.get(field).expect("parallel result field") else {
+                panic!("{lane_name}.{field} must be a stream");
+            };
+            let Type::Applied { base, arguments } = element.as_ref() else {
+                panic!("{lane_name}.{field} must retain a historical callable pin");
+            };
+            assert_eq!(base, "sys.HistoricalCallable");
+            let [pin, _] = arguments.as_slice() else {
+                panic!("historical callable must expose its pin: {arguments:?}");
+            };
+            assert_eq!(pin, &expected(selector), "{lane_name}.{field}");
+        }
+    }
+}
+
+#[test]
+fn malformed_nested_tuple_does_not_partially_bind_snapshot_identities() {
+    let source = include_str!("fixtures/historical-nested-tuple-pin-shape-mismatch.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-nested-tuple-pin-shape-mismatch.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "an incompatible nested tuple must be rejected"
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("malformed_nested_tuple_call_keeps_pin_binders_symbolic")
+        })
+        .expect("nested tuple mismatch fixture module");
+    let ty = &module.symbols["malformed_nested_tuple_call_keeps_pin_binders_symbolic"].ty;
+    let summary = format!("{ty:?}");
+    assert!(
+        !summary.contains("HEAD~450") && !summary.contains("HEAD~440"),
+        "mismatched nested tuple leaves must not partially specialize pin contexts: {summary}"
+    );
+}
+
+#[test]
 fn concurrent_callback_tuples_reject_cross_lane_identity_mix_after_rebind() {
     let source = include_str!("fixtures/historical-concurrent-tuple-callback-rebind-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
