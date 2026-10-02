@@ -28,7 +28,7 @@ fn optional_text_value(value: Option<&str>) -> CanonicalValue {
 }
 
 #[test]
-fn process_and_environment_host_effects_fail_closed_without_bindings() {
+fn process_and_environment_host_effects_require_a_host_effect_handler() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
         .unwrap_or_else(|error| panic!("reference std failed to load: {}", error.code()));
     session
@@ -42,7 +42,7 @@ fn process_and_environment_host_effects_fail_closed_without_bindings() {
     ] {
         assert_eq!(
             session.submit(source).unwrap_err().code(),
-            "ORNA-EVAL-ERROR"
+            "ORNA-EVAL-UNSUPPORTED"
         );
     }
 }
