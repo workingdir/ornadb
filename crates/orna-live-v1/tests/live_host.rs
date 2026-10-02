@@ -6070,13 +6070,23 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
                 bridge_current_attachment = next_attachment;
             }
 
-            replay_durable_status_snapshots(
-                &mut bridge_host,
-                bridge_current_attachment,
-                &snapshots,
-                &mut sequence,
-                &mut application,
-            );
+            if bridge_reconnect % 2 == 0 {
+                replay_durable_status_snapshots(
+                    &mut bridge_host,
+                    bridge_current_attachment,
+                    &snapshots,
+                    &mut sequence,
+                    &mut application,
+                );
+            } else {
+                replay_durable_status_snapshots_reverse(
+                    &mut bridge_host,
+                    bridge_current_attachment,
+                    &snapshots,
+                    &mut sequence,
+                    &mut application,
+                );
+            }
 
             let first_pair_request = 83 + handoff_pair * 24 + bridge_reconnect * 2;
             let mut fresh_pair = Vec::with_capacity(2);
