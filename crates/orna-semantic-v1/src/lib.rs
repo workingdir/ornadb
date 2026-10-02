@@ -10,13 +10,13 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
-use orna_value_v1::{Decimal, path_decode_key_components};
 use orna_syntax_v1::{
     AssignmentOperator, AssignmentTarget, ControlKind, Declaration, Expr, FieldInitializer, Item,
-    LambdaParameter, LiteralKind, Pattern, ProtocolMember, SyntaxSpan, Statement,
-    StringSegment, SyntaxTree, TypeExpr, TypeMember, TypeRepresentation, UseTail, Visibility,
+    LambdaParameter, LiteralKind, Pattern, ProtocolMember, Statement, StringSegment, SyntaxSpan,
+    SyntaxTree, TypeExpr, TypeMember, TypeRepresentation, UseTail, Visibility,
     parse_module_with_file,
 };
+use orna_value_v1::{Decimal, path_decode_key_components};
 use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::{UnicodeNormalization, is_nfc};
@@ -878,10 +878,7 @@ impl Catalogue {
                 Namespace(vec!["std".into(), "ui".into()]),
                 [
                     ("UI", ui.clone()),
-                    (
-                        "Action",
-                        Type::Named("std.ui.Action".into()),
-                    ),
+                    ("Action", Type::Named("std.ui.Action".into())),
                     ("text", function(vec![Type::Text], ui.clone())),
                     ("button", function(vec![Type::Text, Type::Bool], ui.clone())),
                     (
@@ -1483,13 +1480,12 @@ impl RowUnitAdmission {
 /// This is schema admission only: it parses and type-checks the row expression,
 /// validates the encoded path key, and retains the existing assertion plans.
 /// Evaluation, persistence and assertion execution remain downstream concerns.
-pub fn admit_row_unit(
-    analysis: &Analysis,
-    input: &RowUnitInput<'_>,
-) -> RowUnitAdmission {
+pub fn admit_row_unit(analysis: &Analysis, input: &RowUnitInput<'_>) -> RowUnitAdmission {
     let mut result = RowUnitAdmission::default();
     if !analysis.is_ok() {
-        result.diagnostics.extend(analysis.diagnostics.iter().cloned());
+        result
+            .diagnostics
+            .extend(analysis.diagnostics.iter().cloned());
         return result;
     }
     if input.parse_as != "row_unit" {
@@ -1515,7 +1511,10 @@ pub fn admit_row_unit(
             .key_path
             .iter()
             .any(|component| !valid_row_component(component))
-        || !input.key_path.last().is_some_and(|component| component.ends_with(".orna"))
+        || !input
+            .key_path
+            .last()
+            .is_some_and(|component| component.ends_with(".orna"))
     {
         result.diagnostics.push(diag(
             DIAG_BAD_PATH,
@@ -1606,7 +1605,8 @@ pub fn admit_row_unit(
         return result;
     }
     let orna_syntax_v1::Expr::Record { fields, .. } = &parsed.value else {
-        result.diagnostics
+        result
+            .diagnostics
             .push(diag(DIAG_TYPE, "project row unit must contain one record"));
         return result;
     };
@@ -2017,12 +2017,8 @@ fn collect_header(
                 let Declaration::Function { signature, .. } = &item.declaration else {
                     return None;
                 };
-                (!signature.generics.is_empty()).then(|| {
-                    (
-                        signature.name.clone(),
-                        declared_generic_parameters(item),
-                    )
-                })
+                (!signature.generics.is_empty())
+                    .then(|| (signature.name.clone(), declared_generic_parameters(item)))
             })
             .collect(),
         implicit: false,
@@ -2590,6 +2586,10 @@ fn primitive(name: &str) -> Option<Type> {
         "Str" | "Text" | "String" => Type::Text,
         "Bool" => Type::Bool,
         "Null" => Type::Null,
+        // Unit is the source spelling for an operation with no value result.
+        // Keep it distinct in API documentation while sharing the evaluator's
+        // existing no-value semantic type.
+        "Unit" => Type::Null,
         "BOOLEAN" | "BOOL" => Type::Bool,
         "INTEGER" | "INT" | "BIGINT" => Type::Int,
         "FLOAT" => Type::Float,
@@ -2821,9 +2821,7 @@ fn resolve_imports_with_dependencies(
                     name,
                     generics,
                     members,
-                } if generics.is_empty() => {
-                    Some((name.clone(), members.clone()))
-                }
+                } if generics.is_empty() => Some((name.clone(), members.clone())),
                 _ => None,
             })
             .collect(),
@@ -3305,8 +3303,9 @@ fn collect_nominal_conversion_effects(scope: &mut Scope, tree: &SyntaxTree) {
             let Some(source) = valid_static_type(&arguments[0], scope) else {
                 continue;
             };
-            let Some(orna_syntax_v1::ImplMember::Function { signature, body, .. }) =
-                implementation.members.as_slice().first()
+            let Some(orna_syntax_v1::ImplMember::Function {
+                signature, body, ..
+            }) = implementation.members.as_slice().first()
             else {
                 continue;
             };
@@ -3344,9 +3343,7 @@ fn collect_nominal_conversion_effects(scope: &mut Scope, tree: &SyntaxTree) {
         }
     }
 }
-fn conversion_metadata(
-    scope: &Scope,
-) -> BTreeMap<String, Vec<(Type, EffectSummary)>> {
+fn conversion_metadata(scope: &Scope) -> BTreeMap<String, Vec<(Type, EffectSummary)>> {
     let mut metadata = BTreeMap::new();
     for (target, sources) in &scope.nominal_conversions {
         let entries = sources
@@ -3403,10 +3400,7 @@ fn merge_exported_conversion_metadata(
                 continue;
             };
             for (source, effects) in &schema.conversions {
-                let sources = scope
-                    .nominal_conversions
-                    .entry(target.clone())
-                    .or_default();
+                let sources = scope.nominal_conversions.entry(target.clone()).or_default();
                 if !sources.contains(source) {
                     sources.push(source.clone());
                 }
@@ -3529,18 +3523,13 @@ fn check_item(
                     // Key paths are reconstructed as an ordered list of named
                     // columns, so destructuring patterns have no stable schema
                     // surface here.
-                    _ => diagnostics.push(diag(
-                        DIAG_TYPE,
-                        "primary-key fields must have simple names",
-                    )),
+                    _ => diagnostics
+                        .push(diag(DIAG_TYPE, "primary-key fields must have simple names")),
                 }
                 if let Some(annotation) = &key.annotation {
                     validate_type_annotation(annotation, scope, &BTreeSet::new(), diagnostics);
                 } else {
-                    diagnostics.push(diag(
-                        DIAG_TYPE,
-                        "primary-key fields must declare a type",
-                    ));
+                    diagnostics.push(diag(DIAG_TYPE, "primary-key fields must declare a type"));
                 }
                 let ty = key
                     .annotation
@@ -3565,16 +3554,12 @@ fn check_item(
                     };
                     let resolved = resolved_type_of(annotation, scope);
                     schema.fields.insert(key_name.clone(), resolved.clone());
-                    if let Some((_, key_type)) = schema
-                        .admission
-                        .as_mut()
-                        .and_then(|admission| {
-                            admission
-                                .keys
-                                .iter_mut()
-                                .find(|(field, _)| field == key_name)
-                        })
-                    {
+                    if let Some((_, key_type)) = schema.admission.as_mut().and_then(|admission| {
+                        admission
+                            .keys
+                            .iter_mut()
+                            .find(|(field, _)| field == key_name)
+                    }) {
                         *key_type = resolved;
                     }
                 }
@@ -3652,7 +3637,8 @@ fn check_item(
                     continue;
                 };
                 let expected = resolved_type_of(annotation, scope);
-                let inferred = infer_contextual(default, &expected, scope, &row_locals, diagnostics);
+                let inferred =
+                    infer_contextual(default, &expected, scope, &row_locals, diagnostics);
                 require_same(&expected, &inferred.ty, diagnostics);
             }
             validate_non_overlapping_implementations(
@@ -3969,7 +3955,13 @@ fn validate_nested_implementation_members(
                     .unwrap_or_else(|| source.clone()),
                 _ => source.clone(),
             };
-            bind_pattern(&parameter.pattern, source_binding, scope, &mut local, diagnostics);
+            bind_pattern(
+                &parameter.pattern,
+                source_binding,
+                scope,
+                &mut local,
+                diagnostics,
+            );
             if matches!(target, Type::Named(name) if scope.nominal_rows.contains_key(name)) {
                 let inferred = infer_from_nominal_target(
                     body,
@@ -4141,8 +4133,10 @@ fn validate_nested_implementation_members(
     }
 
     for required in required_members {
-        let implemented = implementation.members.iter().any(|member| {
-            match (required, member) {
+        let implemented = implementation
+            .members
+            .iter()
+            .any(|member| match (required, member) {
                 (
                     ProtocolMember::Function { signature, .. },
                     orna_syntax_v1::ImplMember::Function {
@@ -4158,8 +4152,7 @@ fn validate_nested_implementation_members(
                     },
                 ) => name == implementation_name,
                 _ => false,
-            }
-        });
+            });
         if !implemented {
             diagnostics.push(diag(DIAG_TYPE, "missing protocol implementation member"));
         }
@@ -4200,7 +4193,6 @@ fn infer_from_nominal_target(
         effects: inferred.effects,
     }
 }
-
 
 /// Resolve only the static type shapes this closed semantic scope can prove.
 /// Unknown nominal names are not accepted merely because `type_of` preserves
@@ -4457,7 +4449,9 @@ fn compatible_protocol_function_signature(
         generic_scope
             .type_aliases
             .remove(&implementation_generic.name);
-        generic_scope.generic_type_parameters.insert(placeholder.clone());
+        generic_scope
+            .generic_type_parameters
+            .insert(placeholder.clone());
         generic_scope.type_aliases.insert(
             required_generic.name.clone(),
             Type::Named(placeholder.clone()),
@@ -6020,7 +6014,11 @@ fn resolved_generic_parameters(
         root.0
             .iter()
             .cloned()
-            .chain(path[1..path.len() - 1].iter().map(|part| (*part).to_owned()))
+            .chain(
+                path[1..path.len() - 1]
+                    .iter()
+                    .map(|part| (*part).to_owned()),
+            )
             .collect(),
     );
     scope
@@ -6039,8 +6037,7 @@ fn generic_bound_protocol(bound: &Type, scope: &Scope) -> Option<Type> {
             .names
             .get(name)
             .is_some_and(|symbol| symbol.kind == SymbolKind::Protocol)
-        || qualified_export(scope, name)
-            .is_some_and(|symbol| symbol.kind == SymbolKind::Protocol)
+        || qualified_export(scope, name).is_some_and(|symbol| symbol.kind == SymbolKind::Protocol)
         || matches!(name.as_str(), "Display" | "Present")
     {
         Some(bound.clone())
@@ -6070,7 +6067,11 @@ fn qualified_export<'a>(scope: &'a Scope, name: &str) -> Option<&'a Symbol> {
         root.0
             .iter()
             .cloned()
-            .chain(parts[1..parts.len() - 1].iter().map(|part| (*part).to_owned()))
+            .chain(
+                parts[1..parts.len() - 1]
+                    .iter()
+                    .map(|part| (*part).to_owned()),
+            )
             .collect(),
     );
     scope
@@ -6473,10 +6474,7 @@ fn bind_pattern(
                 DIAG_TYPE,
                 "tuple pattern arity does not match the value type",
             )),
-            _ => diagnostics.push(diag(
-                DIAG_TYPE,
-                "tuple pattern requires a tuple value",
-            )),
+            _ => diagnostics.push(diag(DIAG_TYPE, "tuple pattern requires a tuple value")),
         },
         Pattern::List { elements, .. } => match ty {
             Type::List(element_ty) => {
@@ -6484,10 +6482,7 @@ fn bind_pattern(
                     bind_pattern(pattern, (*element_ty).clone(), scope, into, diagnostics);
                 }
             }
-            _ => diagnostics.push(diag(
-                DIAG_TYPE,
-                "list pattern requires a list value",
-            )),
+            _ => diagnostics.push(diag(DIAG_TYPE, "list pattern requires a list value")),
         },
         Pattern::Record { fields, .. } => {
             bind_record_pattern(fields, &ty, scope, into, diagnostics);
@@ -6619,10 +6614,7 @@ fn bind_constructor_pattern(
         if let [argument] = arguments {
             bind_pattern(argument, (**inner).clone(), scope, into, diagnostics);
         } else {
-            diagnostics.push(diag(
-                DIAG_TYPE,
-                "Some pattern requires exactly one payload",
-            ));
+            diagnostics.push(diag(DIAG_TYPE, "Some pattern requires exactly one payload"));
         }
         return;
     }
@@ -7249,10 +7241,7 @@ fn infer(
                                 _ => None,
                             })
                             .unwrap_or_else(|| {
-                                diagnostics.push(diag(
-                                    DIAG_TYPE,
-                                    "field access requires a record",
-                                ));
+                                diagnostics.push(diag(DIAG_TYPE, "field access requires a record"));
                                 Type::Error
                             })
                     }
@@ -7489,13 +7478,10 @@ fn infer(
             {
                 return inferred;
             }
-            if let Some(inferred) =
-                infer_race_call(callee, arguments, scope, local, diagnostics)
-            {
+            if let Some(inferred) = infer_race_call(callee, arguments, scope, local, diagnostics) {
                 return inferred;
             }
-            if let Some(inferred) =
-                infer_timeout_call(callee, arguments, scope, local, diagnostics)
+            if let Some(inferred) = infer_timeout_call(callee, arguments, scope, local, diagnostics)
             {
                 return inferred;
             }
@@ -7520,16 +7506,15 @@ fn infer(
             let callee = infer(callee, scope, local, diagnostics);
             let mut effects = callee.effects.clone();
             effects.join(&intrinsic);
-            let call_parameters = callable_function_type(&callee.ty).and_then(|function_type| {
-                match function_type {
+            let call_parameters =
+                callable_function_type(&callee.ty).and_then(|function_type| match function_type {
                     Type::Function {
                         parameters,
                         parameter_names,
                         ..
                     } => Some((parameters.as_slice(), parameter_names.as_deref())),
                     _ => None,
-                }
-            });
+                });
             let values = arguments
                 .iter()
                 .enumerate()
@@ -7573,12 +7558,8 @@ fn infer(
                         None,
                         diagnostics,
                     );
-                    let historical_database = specialize_historical_database_result(
-                        &result,
-                        &values,
-                        arguments,
-                        local,
-                    );
+                    let historical_database =
+                        specialize_historical_database_result(&result, &values, arguments, local);
                     let result = historical_database.unwrap_or_else(|| {
                         specialize_dynamic_parameter_snapshot_contexts(
                             &result,
@@ -7885,9 +7866,7 @@ fn infer(
             let ty = if matches!(op.as_str(), "==" | "!=") {
                 if left.ty == Type::Error || right.ty == Type::Error {
                     Type::Error
-                } else if !types_match(&left.ty, &right.ty)
-                    && !types_match(&right.ty, &left.ty)
-                {
+                } else if !types_match(&left.ty, &right.ty) && !types_match(&right.ty, &left.ty) {
                     diagnostics.push(diag(DIAG_TYPE, "static types are incompatible"));
                     Type::Error
                 } else {
@@ -8221,7 +8200,9 @@ fn inferred_lambda_parameter_type(
 ) -> Option<Type> {
     inferred_comparison_parameter_type(body, name, scope, local)
         .or_else(|| lambda_numeric_parameter_usage(body, name).then_some(Type::Int))
-        .or_else(|| inferred_record_parameter_type(body, name).filter(|ty| !type_contains_error(ty)))
+        .or_else(|| {
+            inferred_record_parameter_type(body, name).filter(|ty| !type_contains_error(ty))
+        })
         .or_else(|| parameter_comparison_usage(body, name).then_some(Type::Error))
 }
 
@@ -8252,13 +8233,10 @@ fn inferred_comparison_parameter_type(
         match unwrap_group(parameter_side) {
             Expr::Name { text, .. } if text == name => Some(other),
             Expr::Field {
-                base,
-                name: field,
-                ..
-            } if is_direct_name(base, name) => Some(Type::Record(BTreeMap::from([(
-                field.clone(),
-                other,
-            )]))),
+                base, name: field, ..
+            } if is_direct_name(base, name) => {
+                Some(Type::Record(BTreeMap::from([(field.clone(), other)])))
+            }
             _ => None,
         }
     }
@@ -8290,12 +8268,12 @@ fn inferred_comparison_parameter_type(
                 inferred_comparison_parameter_type(&argument.value, name, scope, local)
             })
         }),
-        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => elements.iter().find_map(
-            |element| inferred_comparison_parameter_type(element, name, scope, local),
-        ),
-        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => fields.iter().find_map(
-            |field| inferred_comparison_parameter_type(&field.value, name, scope, local),
-        ),
+        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => elements
+            .iter()
+            .find_map(|element| inferred_comparison_parameter_type(element, name, scope, local)),
+        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => fields
+            .iter()
+            .find_map(|field| inferred_comparison_parameter_type(&field.value, name, scope, local)),
         Expr::Lambda { body, .. } => inferred_comparison_parameter_type(body, name, scope, local),
         Expr::Block {
             statements, tail, ..
@@ -8309,17 +8287,16 @@ fn inferred_comparison_parameter_type(
                 | Statement::Assignment { value, .. } => {
                     inferred_comparison_parameter_type(value, name, scope, local)
                 }
-                Statement::Return { value, .. } | Statement::Break { value, .. } => value
-                    .as_ref()
-                    .and_then(|value| {
+                Statement::Return { value, .. } | Statement::Break { value, .. } => {
+                    value.as_ref().and_then(|value| {
                         inferred_comparison_parameter_type(value, name, scope, local)
-                    }),
+                    })
+                }
                 Statement::Continue { .. } => None,
             })
             .or_else(|| {
-                tail.as_deref().and_then(|tail| {
-                    inferred_comparison_parameter_type(tail, name, scope, local)
-                })
+                tail.as_deref()
+                    .and_then(|tail| inferred_comparison_parameter_type(tail, name, scope, local))
             }),
         Expr::Control {
             condition,
@@ -8329,9 +8306,7 @@ fn inferred_comparison_parameter_type(
             ..
         } => condition
             .as_deref()
-            .and_then(|condition| {
-                inferred_comparison_parameter_type(condition, name, scope, local)
-            })
+            .and_then(|condition| inferred_comparison_parameter_type(condition, name, scope, local))
             .or_else(|| {
                 body.as_deref()
                     .and_then(|body| inferred_comparison_parameter_type(body, name, scope, local))
@@ -8652,11 +8627,8 @@ fn infer_assignment(
                 {
                     // Rebinding changes the pin seen by later reads of this local;
                     // inferred closure types retain the previous snapshot value.
-                    let rebound_type = specialize_snapshot_ref_parameter(
-                        value_expression,
-                        &value.ty,
-                        local,
-                    );
+                    let rebound_type =
+                        specialize_snapshot_ref_parameter(value_expression, &value.ty, local);
                     if let Some(symbol) = local.get_mut(name) {
                         // When a parameter is rebound from another snapshot
                         // parameter, preserve the source identity so returned
@@ -8673,9 +8645,7 @@ fn infer_assignment(
                         "snapshot context maps must contain canonical selector sets",
                     ));
                 }
-                Some(expected)
-                    if pinned_snapshot_rebind_compatible(&expected, &value.ty) =>
-                {
+                Some(expected) if pinned_snapshot_rebind_compatible(&expected, &value.ty) => {
                     // A local pin aggregate or historical closure now refers
                     // to the new selector identities; aliases inferred before
                     // this assignment keep their old contexts.
@@ -9119,8 +9089,7 @@ fn infer_case(
                     } else if catch_all {
                         for value in [false, true] {
                             if !covered.insert(value) {
-                                diagnostics
-                                    .push(diag(DIAG_TYPE, "boolean case arm is duplicated"));
+                                diagnostics.push(diag(DIAG_TYPE, "boolean case arm is duplicated"));
                             }
                         }
                     }
@@ -9384,12 +9353,12 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
             },
         ) if left_base == "sys.HistoricalCallable" && right_base == "sys.HistoricalCallable" => {
             match (left_arguments.as_slice(), right_arguments.as_slice()) {
-                ([left_snapshot, left_callable], [right_snapshot, right_callable]) => Some(
-                    historical_callable_type(
+                ([left_snapshot, left_callable], [right_snapshot, right_callable]) => {
+                    Some(historical_callable_type(
                         &merge_snapshot_context_map(left_snapshot, right_snapshot)?,
                         &merge_checkpoint_field_map(left_callable, right_callable)?,
-                    ),
-                ),
+                    ))
+                }
                 _ => None,
             }
         }
@@ -9442,12 +9411,12 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
                 result: Box::new(merge_checkpoint_field_map(left_result, right_result)?),
             })
         }
-        (Type::List(left), Type::List(right)) => {
-            Some(Type::List(Box::new(merge_checkpoint_field_map(left, right)?)))
-        }
-        (Type::Range(left), Type::Range(right)) => {
-            Some(Type::Range(Box::new(merge_checkpoint_field_map(left, right)?)))
-        }
+        (Type::List(left), Type::List(right)) => Some(Type::List(Box::new(
+            merge_checkpoint_field_map(left, right)?,
+        ))),
+        (Type::Range(left), Type::Range(right)) => Some(Type::Range(Box::new(
+            merge_checkpoint_field_map(left, right)?,
+        ))),
         (Type::Relation(left), Type::Relation(right)) => Some(Type::Relation(Box::new(
             merge_checkpoint_field_map(left, right)?,
         ))),
@@ -9469,14 +9438,12 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
                     .collect::<Option<BTreeMap<_, _>>>()?,
             ))
         }
-        (Type::Tuple(left), Type::Tuple(right)) if left.len() == right.len() => {
-            Some(Type::Tuple(
-                left.iter()
-                    .zip(right)
-                    .map(|(left, right)| merge_checkpoint_field_map(left, right))
-                    .collect::<Option<Vec<_>>>()?,
-            ))
-        }
+        (Type::Tuple(left), Type::Tuple(right)) if left.len() == right.len() => Some(Type::Tuple(
+            left.iter()
+                .zip(right)
+                .map(|(left, right)| merge_checkpoint_field_map(left, right))
+                .collect::<Option<Vec<_>>>()?,
+        )),
         (
             Type::Applied {
                 base: left_base,
@@ -9580,9 +9547,7 @@ fn checkpoint_snapshot_maps_are_valid(ty: &Type) -> bool {
         Type::Applied { base, .. } if base == "semantic.SnapshotContextMap" => {
             is_snapshot_context_map_shape(ty)
         }
-        Type::Applied { arguments, .. } => {
-            arguments.iter().all(checkpoint_snapshot_maps_are_valid)
-        }
+        Type::Applied { arguments, .. } => arguments.iter().all(checkpoint_snapshot_maps_are_valid),
         Type::List(element)
         | Type::Range(element)
         | Type::Relation(element)
@@ -9597,8 +9562,7 @@ fn checkpoint_snapshot_maps_are_valid(ty: &Type) -> bool {
                 && checkpoint_snapshot_maps_are_valid(result)
         }
         Type::MoneyPerUnit { currency, unit } => {
-            checkpoint_snapshot_maps_are_valid(currency)
-                && checkpoint_snapshot_maps_are_valid(unit)
+            checkpoint_snapshot_maps_are_valid(currency) && checkpoint_snapshot_maps_are_valid(unit)
         }
         _ => true,
     }
@@ -9898,11 +9862,7 @@ fn standard_collection_module_operation<'a>(
 // The pinned collection source declares one generic finite-list signature.
 // Nonempty calls get their element type from the rows; empty aggregates use
 // the caller's context where available and otherwise keep the Int zero rule.
-fn finite_list_aggregate_element(
-    _callee: &Expr,
-    _operation: &str,
-    _scope: &Scope,
-) -> Option<Type> {
+fn finite_list_aggregate_element(_callee: &Expr, _operation: &str, _scope: &Scope) -> Option<Type> {
     None
 }
 
@@ -9990,18 +9950,42 @@ fn infer_finite_list_collection_call(
     let portable_collection_call = match path.as_slice() {
         [operation] => matches!(
             *operation,
-            "filter" | "map" | "flat_map" | "sort_by" | "take" | "drop" | "distinct"
-                | "union" | "count" | "first" | "one" | "sum" | "min" | "max"
-                | "every" | "exists" | "chunk" | "flatten" | "partition" | "zip"
-                | "zip_exact" | "unique" | "group_by" | "pairs" | "window"
-                | "split_when" | "rank" | "asof_join"
+            "filter"
+                | "map"
+                | "flat_map"
+                | "sort_by"
+                | "take"
+                | "drop"
+                | "distinct"
+                | "union"
+                | "count"
+                | "first"
+                | "one"
+                | "sum"
+                | "min"
+                | "max"
+                | "every"
+                | "exists"
+                | "chunk"
+                | "flatten"
+                | "partition"
+                | "zip"
+                | "zip_exact"
+                | "unique"
+                | "group_by"
+                | "pairs"
+                | "window"
+                | "split_when"
+                | "rank"
+                | "asof_join"
         ),
         _ => standard_collection_module_operation(callee, scope, local).is_some(),
     };
-    if portable_collection_call && let Some(argument) = arguments
-        .iter()
-        .find(|argument| argument.name.as_deref() == Some("rows"))
-        .or_else(|| arguments.first())
+    if portable_collection_call
+        && let Some(argument) = arguments
+            .iter()
+            .find(|argument| argument.name.as_deref() == Some("rows"))
+            .or_else(|| arguments.first())
     {
         let mut probe_diagnostics = Vec::new();
         let inferred = infer(&argument.value, scope, local, &mut probe_diagnostics);
@@ -10308,9 +10292,7 @@ fn infer_finite_list_helper_collection(
         let contextual_callback = slot.is_some_and(|slot| {
             matches!(
                 (operation, slot),
-                ("partition" | "split_when", 1)
-                    | ("group_by" | "rank", 1)
-                    | ("asof_join", 2 | 3)
+                ("partition" | "split_when", 1) | ("group_by" | "rank", 1) | ("asof_join", 2 | 3)
             )
         }) && matches!(&argument.value, Expr::Lambda { .. });
         let inferred = if contextual_callback {
@@ -10350,23 +10332,27 @@ fn infer_finite_list_helper_collection(
         ));
     }
 
-    let list_element = |index: usize, name: &str, diagnostics: &mut Vec<Diagnostic>| {
-        match values.get(index).and_then(Option::as_ref) {
-            Some(Type::List(element)) => element.as_ref().clone(),
-            Some(Type::Error) | None => Type::Error,
-            Some(_) => {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    format!("std.collection {operation} {name} must be a finite list"),
-                ));
-                Type::Error
-            }
+    let list_element = |index: usize, name: &str, diagnostics: &mut Vec<Diagnostic>| match values
+        .get(index)
+        .and_then(Option::as_ref)
+    {
+        Some(Type::List(element)) => element.as_ref().clone(),
+        Some(Type::Error) | None => Type::Error,
+        Some(_) => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                format!("std.collection {operation} {name} must be a finite list"),
+            ));
+            Type::Error
         }
     };
     let first = list_element(0, "input", diagnostics);
     let result = match operation {
         "chunk" => {
-            let size = values.get(1).and_then(Option::as_ref).unwrap_or(&Type::Error);
+            let size = values
+                .get(1)
+                .and_then(Option::as_ref)
+                .unwrap_or(&Type::Error);
             require_same(&Type::Int, size, diagnostics);
             if let Some(index) = slots.get(1).and_then(|slot| *slot)
                 && is_non_positive_integer_constant(&arguments[index].value)
@@ -10452,7 +10438,10 @@ fn infer_finite_list_helper_collection(
         }
         "window" => {
             for index in [1, 2] {
-                let size = values.get(index).and_then(Option::as_ref).unwrap_or(&Type::Error);
+                let size = values
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .unwrap_or(&Type::Error);
                 require_same(&Type::Int, size, diagnostics);
                 if let Some(argument_index) = slots.get(index).and_then(|slot| *slot)
                     && is_non_positive_integer_constant(&arguments[argument_index].value)
@@ -10572,13 +10561,20 @@ fn infer_finite_list_simple_collection(
             format!("std.collection {operation} arguments do not match its static signature"),
         ));
     }
-    let first = values.first().and_then(Option::as_ref).cloned().unwrap_or(Type::Error);
+    let first = values
+        .first()
+        .and_then(Option::as_ref)
+        .cloned()
+        .unwrap_or(Type::Error);
     let Type::List(element) = first else {
         diagnostics.push(diag(
             DIAG_TYPE,
             format!("finite-list {operation} requires a finite list"),
         ));
-        return Inferred { ty: Type::Error, effects };
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
     };
     let result = match operation {
         "count" => Type::Int,
@@ -10594,12 +10590,16 @@ fn infer_finite_list_simple_collection(
             }
         }
         "take" | "drop" => {
-            let count = values.get(1).and_then(Option::as_ref).unwrap_or(&Type::Error);
+            let count = values
+                .get(1)
+                .and_then(Option::as_ref)
+                .unwrap_or(&Type::Error);
             if count != &Type::Int && count != &Type::Error {
                 diagnostics.push(diag(DIAG_TYPE, format!("{operation} count must be an Int")));
                 Type::Error
             } else if count == &Type::Int
-                && slots[1].is_some_and(|index| is_negative_integer_constant(&arguments[index].value))
+                && slots[1]
+                    .is_some_and(|index| is_negative_integer_constant(&arguments[index].value))
             {
                 diagnostics.push(diag(
                     DIAG_TYPE,
@@ -10611,7 +10611,11 @@ fn infer_finite_list_simple_collection(
             }
         }
         "union" => {
-            let right = values.get(1).and_then(Option::as_ref).cloned().unwrap_or(Type::Error);
+            let right = values
+                .get(1)
+                .and_then(Option::as_ref)
+                .cloned()
+                .unwrap_or(Type::Error);
             match right {
                 Type::List(right_element) if types_match(&element, &right_element) => {
                     Type::List(element)
@@ -11630,15 +11634,21 @@ fn infer_relation_collection_pipeline(
     if let Some(parameter) = callback_parameter {
         let expected_count = 1;
         let malformed = arguments.len() != expected_count
-            || arguments
-                .first()
-                .is_some_and(|argument| argument.name.as_deref().is_some_and(|name| name != parameter));
+            || arguments.first().is_some_and(|argument| {
+                argument
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name != parameter)
+            });
         let Some(argument) = arguments.first() else {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 format!("relation {operation} requires a {parameter} callback"),
             ));
-            return Inferred { ty: Type::Error, effects };
+            return Inferred {
+                ty: Type::Error,
+                effects,
+            };
         };
         let callback = infer_relation_callback(
             &argument.value,
@@ -11656,7 +11666,9 @@ fn infer_relation_collection_pipeline(
         if malformed {
             diagnostics.push(diag(
                 DIAG_TYPE,
-                format!("relation {operation} pipeline arguments do not match its static signature"),
+                format!(
+                    "relation {operation} pipeline arguments do not match its static signature"
+                ),
             ));
         }
         let valid = !malformed
@@ -11699,9 +11711,12 @@ fn infer_relation_collection_pipeline(
     };
     let mut malformed = arguments.len() != expected;
     if let Some(name) = expected_name {
-        malformed |= arguments
-            .first()
-            .is_some_and(|argument| argument.name.as_deref().is_some_and(|actual| actual != name));
+        malformed |= arguments.first().is_some_and(|argument| {
+            argument
+                .name
+                .as_deref()
+                .is_some_and(|actual| actual != name)
+        });
     }
     let mut values = Vec::with_capacity(arguments.len());
     for argument in arguments {
@@ -11751,7 +11766,10 @@ fn infer_relation_collection_pipeline(
         }
         "take" | "drop" => {
             if values.first().is_some_and(|ty| *ty != Type::Int) {
-                diagnostics.push(diag(DIAG_TYPE, format!("relation {operation} count must be an Int")));
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!("relation {operation} count must be an Int"),
+                ));
                 Type::Error
             } else if values.first() == Some(&Type::Int)
                 && is_negative_integer_constant(&arguments[0].value)
@@ -11779,9 +11797,7 @@ fn infer_relation_collection_pipeline(
             }
         },
         "sum" if is_sum_element_type(&element) => element.clone(),
-        "min" | "max" if is_sort_key_type(&element) => {
-            Type::Optional(Box::new(element.clone()))
-        }
+        "min" | "max" if is_sort_key_type(&element) => Type::Optional(Box::new(element.clone())),
         "sum" | "min" | "max" => {
             diagnostics.push(diag(
                 DIAG_TYPE,
@@ -11857,7 +11873,8 @@ fn infer_relation_union_call(
     }
     let left = &values[slots[0].expect("validated relation union left slot")];
     let right = &values[slots[1].expect("validated relation union right slot")];
-    let (Type::Relation(left_element), Type::Relation(right_element)) = (&left.ty, &right.ty) else {
+    let (Type::Relation(left_element), Type::Relation(right_element)) = (&left.ty, &right.ty)
+    else {
         return None;
     };
     if !types_match(left_element, right_element) {
@@ -12076,9 +12093,7 @@ fn infer_relation_terminal_call(
         "take" | "drop" => Type::Relation(element.clone()),
         "window" => Type::Relation(Box::new(Type::List(Box::new(element.as_ref().clone())))),
         "sum" if is_sum_element_type(element.as_ref()) => element.as_ref().clone(),
-        "min" | "max" if is_sort_key_type(element.as_ref()) => {
-            Type::Optional(element.clone())
-        }
+        "min" | "max" if is_sort_key_type(element.as_ref()) => Type::Optional(element.clone()),
         "sum" | "min" | "max" => {
             diagnostics.push(diag(
                 DIAG_TYPE,
@@ -12315,9 +12330,9 @@ fn infer_success_pipeline(
         };
     }
     if diagnostics.iter().any(|diagnostic| {
-        diagnostic.message().starts_with(
-            "a durable consumer function may own only one checkpointed source root"
-        )
+        diagnostic
+            .message()
+            .starts_with("a durable consumer function may own only one checkpointed source root")
     }) {
         return Inferred {
             ty: Type::Error,
@@ -12918,7 +12933,9 @@ fn infer_success_pipeline(
         {
             (Type::Relation(Box::new(element.clone())), Some(Type::Bool))
         }
-        ("distinct", false, []) if root_collection_intrinsic_is_unshadowed("distinct", scope, local) => {
+        ("distinct", false, [])
+            if root_collection_intrinsic_is_unshadowed("distinct", scope, local) =>
+        {
             if is_default_float_equality_type(&element) {
                 diagnostics.push(diag(
                     DIAG_TYPE,
@@ -13712,9 +13729,7 @@ fn infer_relation_member_call(
     let Expr::Field { base, name, .. } = callee else {
         return None;
     };
-    if !matches!(name.as_str(), "count" | "first")
-        || table_symbol(base, scope, local).is_some()
-    {
+    if !matches!(name.as_str(), "count" | "first") || table_symbol(base, scope, local).is_some() {
         return None;
     }
 
@@ -14196,8 +14211,7 @@ fn require_same(expected: &Type, actual: &Type, diagnostics: &mut Vec<Diagnostic
 }
 
 fn types_match(expected: &Type, actual: &Type) -> bool {
-    if !checkpoint_snapshot_maps_are_valid(expected)
-        || !checkpoint_snapshot_maps_are_valid(actual)
+    if !checkpoint_snapshot_maps_are_valid(expected) || !checkpoint_snapshot_maps_are_valid(actual)
     {
         return false;
     }
@@ -14222,9 +14236,7 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
     {
         return true;
     }
-    if expected == &Type::Named("sys.SnapshotRef".into())
-        && is_contextual_snapshot_ref(actual)
-    {
+    if expected == &Type::Named("sys.SnapshotRef".into()) && is_contextual_snapshot_ref(actual) {
         return true;
     }
     match (expected, actual) {
@@ -14498,10 +14510,8 @@ fn infer_timeout_call(
                     0 => &mut callback,
                     1 => &mut duration,
                     _ => {
-                        diagnostics.push(diag(
-                            DIAG_TYPE,
-                            "timeout expects a callback and a duration",
-                        ));
+                        diagnostics
+                            .push(diag(DIAG_TYPE, "timeout expects a callback and a duration"));
                         return Some(Inferred {
                             ty: Type::Error,
                             effects: EffectSummary::default(),
@@ -14842,9 +14852,9 @@ fn infer_descriptor_system_call(
     let result = descriptor_call_type(&function.result, &function.type_parameters)
         .expect("supported descriptor functions have concrete types");
     let result = if path == ["sys", "snapshot"] {
-        arguments.first().map(|argument| {
-            snapshot_selector_context(&argument.value, values.first(), local)
-        })
+        arguments
+            .first()
+            .map(|argument| snapshot_selector_context(&argument.value, values.first(), local))
             .unwrap_or(result)
     } else {
         result
@@ -15424,10 +15434,9 @@ fn substitute_generic_descriptor_type(
             if matches!(base.as_str(), "Relation" | "Query") =>
         {
             let element = arguments.first()?;
-            Some(Type::Relation(Box::new(substitute_generic_descriptor_type(
-                element,
-                substitutions,
-            )?)))
+            Some(Type::Relation(Box::new(
+                substitute_generic_descriptor_type(element, substitutions)?,
+            )))
         }
         system_api::SystemType::Applied { base, arguments } => Some(Type::Applied {
             base: base.clone(),
@@ -16331,9 +16340,10 @@ fn infer_nominal_conversion_call(
         return None;
     }
     let target_path = qualified_path(base);
-    if target_path.as_ref().is_some_and(|path| {
-        path.first().is_some_and(|root| local.contains_key(*root))
-    }) {
+    if target_path
+        .as_ref()
+        .is_some_and(|path| path.first().is_some_and(|root| local.contains_key(*root)))
+    {
         return None;
     }
     let symbol = if let Expr::Name { text, .. } = base.as_ref() {
@@ -16462,9 +16472,7 @@ fn snapshot_ref_binder_id(selector: &str) -> Option<&str> {
         .map(|(binder, _)| binder)
 }
 
-fn snapshot_parameter_context(
-    selector: &str,
-) -> Option<(Option<&str>, &str, bool)> {
+fn snapshot_parameter_context(selector: &str) -> Option<(Option<&str>, &str, bool)> {
     let selector = selector.strip_prefix("selector:")?;
     let (captured, selector) = if let Some(selector) = selector.strip_prefix("capture:") {
         (true, selector)
@@ -16548,25 +16556,24 @@ fn specialize_dynamic_parameter_snapshot_contexts(
     let nonreturning_argument = argument_types
         .iter()
         .any(contains_nonreturning_aggregate_component);
-    let incomplete_argument = formal_parameters
-        .iter()
-        .enumerate()
-        .any(|(parameter_index, formal)| {
-            let Some(argument_index) = call_argument_index_for_position(
-                parameter_names,
-                parameter_index,
-                arguments,
-            ) else {
-                return !default_parameters.contains(&parameter_index);
-            };
-            let Some(actual) = argument_types.get(argument_index) else {
-                return true;
-            };
-            matches!(formal, Type::Tuple(_))
-                && (contains_type_error(formal)
-                    || contains_type_error(actual)
-                    || !types_match(formal, actual))
-        });
+    let incomplete_argument =
+        formal_parameters
+            .iter()
+            .enumerate()
+            .any(|(parameter_index, formal)| {
+                let Some(argument_index) =
+                    call_argument_index_for_position(parameter_names, parameter_index, arguments)
+                else {
+                    return !default_parameters.contains(&parameter_index);
+                };
+                let Some(actual) = argument_types.get(argument_index) else {
+                    return true;
+                };
+                matches!(formal, Type::Tuple(_))
+                    && (contains_type_error(formal)
+                        || contains_type_error(actual)
+                        || !types_match(formal, actual))
+            });
     // The reference specifies pin identity but leaves recovery after a call
     // that cannot reach the callee unspecified. Treat its binding wave
     // transactionally:
@@ -16576,11 +16583,9 @@ fn specialize_dynamic_parameter_snapshot_contexts(
     let suppress_rebinding = nonreturning_argument || incomplete_argument;
     if !suppress_rebinding {
         for (parameter_index, formal) in formal_parameters.iter().enumerate() {
-            let Some(argument_index) = call_argument_index_for_position(
-                parameter_names,
-                parameter_index,
-                arguments,
-            ) else {
+            let Some(argument_index) =
+                call_argument_index_for_position(parameter_names, parameter_index, arguments)
+            else {
                 continue;
             };
             let Some(actual) = argument_types.get(argument_index) else {
@@ -16632,16 +16637,16 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
     binder_contexts: &BTreeMap<String, Type>,
 ) -> Type {
     match ty {
-        Type::Applied { base, arguments: values }
-            if base == "sys.SnapshotRefContext"
-                && let [Type::Named(selector)] = values.as_slice()
-                && let Some((binder, parameter, captured)) = snapshot_parameter_context(selector)
-                && match binder {
-                    Some(binder) => {
-                        !shadowed_parameters.contains(&format!("binder:{binder}"))
-                    }
-                    None => captured || !shadowed_parameters.contains(parameter),
-                } =>
+        Type::Applied {
+            base,
+            arguments: values,
+        } if base == "sys.SnapshotRefContext"
+            && let [Type::Named(selector)] = values.as_slice()
+            && let Some((binder, parameter, captured)) = snapshot_parameter_context(selector)
+            && match binder {
+                Some(binder) => !shadowed_parameters.contains(&format!("binder:{binder}")),
+                None => captured || !shadowed_parameters.contains(parameter),
+            } =>
         {
             if let Some(binder) = binder
                 && let Some(actual) = binder_contexts.get(binder)
@@ -16666,7 +16671,8 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                     || argument_types
                         .iter()
                         .any(|actual| contains_snapshot_context_key(actual, selector))
-                    || parameter_names.is_some_and(|names| names.iter().all(|name| name != parameter))
+                    || parameter_names
+                        .is_some_and(|names| names.iter().all(|name| name != parameter))
                 {
                     // A closure's result may mention its captured selector even
                     // when the current zero-argument call has no parameter to
@@ -16732,7 +16738,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                     binder_contexts,
                 )),
             }
-        },
+        }
         Type::List(element) => Type::List(Box::new(
             specialize_dynamic_parameter_snapshot_contexts_scoped(
                 element,
@@ -16837,7 +16843,10 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                 })
                 .collect(),
         ),
-        Type::Applied { base, arguments: values } => Type::Applied {
+        Type::Applied {
+            base,
+            arguments: values,
+        } => Type::Applied {
             base: base.clone(),
             arguments: values
                 .iter()
@@ -16931,8 +16940,8 @@ fn collect_snapshot_binder_contexts(
 /// result type. Walk aggregate patterns as well as direct SnapshotRef values.
 fn collect_snapshot_ref_binder_ids(ty: &Type, into: &mut BTreeSet<String>) {
     if is_contextual_snapshot_ref(ty) {
-        if let Some((Some(binder), _, _)) = snapshot_ref_context_key(ty)
-            .and_then(snapshot_parameter_context)
+        if let Some((Some(binder), _, _)) =
+            snapshot_ref_context_key(ty).and_then(snapshot_parameter_context)
         {
             into.insert(format!("binder:{binder}"));
         }
@@ -16976,7 +16985,9 @@ fn contains_snapshot_context_key(ty: &Type, key: &str) -> bool {
         {
             true
         }
-        Type::Function { parameters, result, .. } => {
+        Type::Function {
+            parameters, result, ..
+        } => {
             parameters
                 .iter()
                 .any(|parameter| contains_snapshot_context_key(parameter, key))
@@ -17215,15 +17226,15 @@ fn type_contains_valid_pinned_snapshot_identity(ty: &Type) -> bool {
         | Type::Relation(element)
         | Type::Stream(element)
         | Type::Optional(element) => type_contains_valid_pinned_snapshot_identity(element),
-        Type::Record(fields) => fields.values().any(type_contains_valid_pinned_snapshot_identity),
+        Type::Record(fields) => fields
+            .values()
+            .any(type_contains_valid_pinned_snapshot_identity),
         Type::Tuple(elements) => elements
             .iter()
             .any(type_contains_valid_pinned_snapshot_identity),
-        Type::Applied { arguments, .. } => {
-            arguments
-                .iter()
-                .any(type_contains_valid_pinned_snapshot_identity)
-        }
+        Type::Applied { arguments, .. } => arguments
+            .iter()
+            .any(type_contains_valid_pinned_snapshot_identity),
         Type::MoneyPerUnit { currency, unit } => {
             type_contains_valid_pinned_snapshot_identity(currency)
                 || type_contains_valid_pinned_snapshot_identity(unit)
@@ -17246,8 +17257,7 @@ fn type_contains_valid_pinned_snapshot_identity(ty: &Type) -> bool {
 /// local rebinding; permit it when the only differences are selector contexts
 /// on pinned snapshot values. Saved aliases retain their original identities.
 fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
-    if !checkpoint_snapshot_maps_are_valid(expected)
-        || !checkpoint_snapshot_maps_are_valid(actual)
+    if !checkpoint_snapshot_maps_are_valid(expected) || !checkpoint_snapshot_maps_are_valid(actual)
     {
         return false;
     }
@@ -17315,9 +17325,7 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
                 && expected_parameters
                     .iter()
                     .zip(actual_parameters)
-                    .all(|(expected, actual)| {
-                        pinned_snapshot_shape_matches(expected, actual)
-                    })
+                    .all(|(expected, actual)| pinned_snapshot_shape_matches(expected, actual))
                 && pinned_snapshot_shape_matches(expected_result, actual_result)
         }
         (Type::List(expected), Type::List(actual))
@@ -17330,9 +17338,9 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
         (Type::Record(expected), Type::Record(actual)) => {
             expected.len() == actual.len()
                 && expected.iter().all(|(name, expected)| {
-                    actual.get(name).is_some_and(|actual| {
-                        pinned_snapshot_shape_matches(expected, actual)
-                    })
+                    actual
+                        .get(name)
+                        .is_some_and(|actual| pinned_snapshot_shape_matches(expected, actual))
                 })
         }
         (Type::Tuple(expected), Type::Tuple(actual)) => {
@@ -17340,9 +17348,7 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
                 && expected
                     .iter()
                     .zip(actual)
-                    .all(|(expected, actual)| {
-                        pinned_snapshot_shape_matches(expected, actual)
-                    })
+                    .all(|(expected, actual)| pinned_snapshot_shape_matches(expected, actual))
         }
         (
             Type::Applied {
@@ -17359,9 +17365,7 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
                 && expected_arguments
                     .iter()
                     .zip(actual_arguments)
-                    .all(|(expected, actual)| {
-                        pinned_snapshot_shape_matches(expected, actual)
-                    })
+                    .all(|(expected, actual)| pinned_snapshot_shape_matches(expected, actual))
         }
         (
             Type::MoneyPerUnit {
@@ -17437,18 +17441,18 @@ fn bind_historical_closure_context(snapshot: &Type, ty: &Type) -> Type {
                 result: Box::new(bind_historical_closure_context(snapshot, result)),
             },
         ),
-        Type::List(element) => Type::List(Box::new(bind_historical_closure_context(
-            snapshot, element,
-        ))),
-        Type::Relation(element) => Type::Relation(Box::new(bind_historical_closure_context(
-            snapshot, element,
-        ))),
-        Type::Stream(element) => Type::Stream(Box::new(bind_historical_closure_context(
-            snapshot, element,
-        ))),
-        Type::Optional(element) => Type::Optional(Box::new(bind_historical_closure_context(
-            snapshot, element,
-        ))),
+        Type::List(element) => {
+            Type::List(Box::new(bind_historical_closure_context(snapshot, element)))
+        }
+        Type::Relation(element) => {
+            Type::Relation(Box::new(bind_historical_closure_context(snapshot, element)))
+        }
+        Type::Stream(element) => {
+            Type::Stream(Box::new(bind_historical_closure_context(snapshot, element)))
+        }
+        Type::Optional(element) => {
+            Type::Optional(Box::new(bind_historical_closure_context(snapshot, element)))
+        }
         Type::Record(fields) => Type::Record(
             fields
                 .iter()
@@ -17489,11 +17493,7 @@ fn historical_namespace_parts(ty: &Type) -> Option<(&Type, &str)> {
         .flatten()
 }
 
-
-fn historical_root_available(
-    modules: &BTreeMap<Namespace, ModuleHeader>,
-    root: &str,
-) -> bool {
+fn historical_root_available(modules: &BTreeMap<Namespace, ModuleHeader>, root: &str) -> bool {
     modules
         .keys()
         .any(|namespace| namespace.0.first().is_some_and(|part| part == root))
@@ -17519,7 +17519,10 @@ fn infer_historical_member(
                 effects: EffectSummary::default(),
             });
         }
-        diagnostics.push(diag(DIAG_UNRESOLVED, "historical database member cannot be resolved"));
+        diagnostics.push(diag(
+            DIAG_UNRESOLVED,
+            "historical database member cannot be resolved",
+        ));
         return Some(Inferred {
             ty: Type::Error,
             effects: EffectSummary::default(),
@@ -17607,7 +17610,10 @@ fn infer_historical_member(
             },
         });
     }
-    diagnostics.push(diag(DIAG_UNRESOLVED, "historical database member cannot be resolved"));
+    diagnostics.push(diag(
+        DIAG_UNRESOLVED,
+        "historical database member cannot be resolved",
+    ));
     Some(Inferred {
         ty: Type::Error,
         effects: EffectSummary::default(),
@@ -17710,7 +17716,10 @@ fn infer_numeric_postfix(base: &Type, name: &str, scope: &Scope) -> Option<Type>
         // ordinary Duration APIs (including optional std formatters) accept
         // them without requiring std to define the core temporal value.
         Type::Int | Type::Decimal
-            if matches!(name, "hour" | "hours" | "minute" | "minutes" | "min" | "second" | "seconds" | "s") =>
+            if matches!(
+                name,
+                "hour" | "hours" | "minute" | "minutes" | "min" | "second" | "seconds" | "s"
+            ) =>
         {
             Some(Type::Named("std.DURATION".into()))
         }
@@ -17903,8 +17912,7 @@ fn contains_secret_value_type(ty: &Type) -> bool {
         Type::Function {
             parameters, result, ..
         } => {
-            parameters.iter().any(contains_secret_value_type)
-                || contains_secret_value_type(result)
+            parameters.iter().any(contains_secret_value_type) || contains_secret_value_type(result)
         }
         Type::Named(name) => name == "Secret",
         Type::Int
@@ -18363,8 +18371,8 @@ fn declared_nominal_schema(item: &Item) -> Option<TableSchema> {
             } else {
                 private_required = true;
             }
-            }
         }
+    }
     Some(TableSchema {
         fields,
         // Only declaration-backed completeness is exported.  Default
@@ -18515,9 +18523,7 @@ fn primary_key_type_error(
                 _ => Some("type has no canonical primary-key encoding"),
             }
         }
-        Type::Float => {
-            Some("Float is not a valid primary-key type")
-        }
+        Type::Float => Some("Float is not a valid primary-key type"),
         Type::Applied { base, .. } if base == "Float" => {
             Some("Float is not a valid primary-key type")
         }
@@ -18810,7 +18816,11 @@ fn resolved_helper_summary_key(
         root.0
             .iter()
             .cloned()
-            .chain(path[1..path.len() - 1].iter().map(|part| (*part).to_owned()))
+            .chain(
+                path[1..path.len() - 1]
+                    .iter()
+                    .map(|part| (*part).to_owned()),
+            )
             .collect(),
     );
     let module = scope.available_modules.get(&namespace)?;
@@ -18990,9 +19000,7 @@ fn tables_referenced(
     names
 }
 fn valid_row_path(path: &str) -> bool {
-    !path.is_empty()
-        && path.len() <= 1024
-        && path.split('/').all(valid_row_path_component)
+    !path.is_empty() && path.len() <= 1024 && path.split('/').all(valid_row_path_component)
 }
 
 fn valid_row_path_component(component: &str) -> bool {
@@ -19095,7 +19103,11 @@ fn analysis_named_symbol<'a>(name: &str, analysis: &'a Analysis) -> Option<&'a S
             }
         }
     }
-    let matches = if qualified.is_empty() { exact } else { qualified };
+    let matches = if qualified.is_empty() {
+        exact
+    } else {
+        qualified
+    };
     (matches.len() == 1).then(|| matches[0])
 }
 
@@ -19111,10 +19123,9 @@ fn row_key_matches_type(value: &str, ty: &Type, analysis: &Analysis) -> bool {
             if matches!(name.as_str(), "Uuid" | "UUID" | "std.UUID") {
                 canonical_uuid(value)
             } else {
-                analysis_named_symbol(name, analysis)
-                    .is_some_and(|symbol| {
-                        symbol.kind == SymbolKind::Enum && symbol.enum_variants.contains(value)
-                    })
+                analysis_named_symbol(name, analysis).is_some_and(|symbol| {
+                    symbol.kind == SymbolKind::Enum && symbol.enum_variants.contains(value)
+                })
             }
         }
         _ => false,
@@ -19269,10 +19280,7 @@ mod tests {
             ],
         };
         let nested_malformed = Type::Record(BTreeMap::from([
-            (
-                "pin".into(),
-                contextual_snapshot_ref("selector:HEAD~3"),
-            ),
+            ("pin".into(), contextual_snapshot_ref("selector:HEAD~3")),
             ("map".into(), malformed.clone()),
         ]));
 
@@ -19298,7 +19306,10 @@ mod tests {
         assert!(!is_snapshot_context_map_shape(&singleton));
         assert!(!is_snapshot_context_map_shape(&unsorted));
         assert!(!is_snapshot_context_map_shape(&duplicate));
-        assert_eq!(merge_list_element_types(&first, &first), Some(first.clone()));
+        assert_eq!(
+            merge_list_element_types(&first, &first),
+            Some(first.clone())
+        );
         assert!(merge_list_element_types(&malformed, &malformed).is_none());
         assert!(merge_checkpoint_field_map(&malformed, &malformed).is_none());
         assert!(merge_checkpoint_field_map(&malformed, &first).is_none());
@@ -19334,7 +19345,12 @@ mod tests {
             "Bool is a closed case scrutinee: {:?}",
             analysis.diagnostics
         );
-        assert_eq!(analysis.diagnostics.len(), 1, "diagnostics: {:?}", analysis.diagnostics);
+        assert_eq!(
+            analysis.diagnostics.len(),
+            1,
+            "diagnostics: {:?}",
+            analysis.diagnostics
+        );
         assert_eq!(
             analysis.diagnostics[0].message(),
             "case expression does not cover true and false"
@@ -19819,7 +19835,7 @@ mod tests {
         );
         assert!(a.diagnostics.iter().any(|diagnostic| {
             diagnostic.message().starts_with(
-                "a durable consumer function may own only one checkpointed source root"
+                "a durable consumer function may own only one checkpointed source root",
             )
         }));
     }
@@ -19840,7 +19856,7 @@ mod tests {
         );
         assert!(a.diagnostics.iter().any(|diagnostic| {
             diagnostic.message().starts_with(
-                "a durable consumer function may own only one checkpointed source root"
+                "a durable consumer function may own only one checkpointed source root",
             )
         }));
     }
@@ -19861,11 +19877,17 @@ mod tests {
             "fixture provider roots must resolve before checking ownership: {:?}",
             analysis.diagnostics
         );
-        assert!(analysis.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message().contains(
-                "a durable consumer function may own only one checkpointed source root"
-            ) && diagnostic.message().contains("extract separate named consumer functions")
-        }), "diagnostics: {:?}", analysis.diagnostics);
+        assert!(
+            analysis.diagnostics.iter().any(|diagnostic| {
+                diagnostic.message().contains(
+                    "a durable consumer function may own only one checkpointed source root",
+                ) && diagnostic
+                    .message()
+                    .contains("extract separate named consumer functions")
+            }),
+            "diagnostics: {:?}",
+            analysis.diagnostics
+        );
     }
 
     #[test]
@@ -19980,5 +20002,4 @@ mod tests {
         )]);
         assert!(has(&analysis, DIAG_TYPE));
     }
-
 }
