@@ -19901,7 +19901,7 @@ fn concurrent_uneven_depth_restore_retries_isolate_failed_attempts() {
 }
 
 #[test]
-fn concurrent_paired_restore_plans_preserve_three_wave_commit_lineage() {
+fn concurrent_paired_storm_waves_preserve_sparse_table_lineage() {
     const RETRIES_PER_WAVE: usize = 4;
     const WAVES: usize = 3;
     let storm_template = parse_fixture(TOMBSTONE_RECOVERY_STORM, RowKeyKind::Explicit);
@@ -19917,18 +19917,6 @@ fn concurrent_paired_restore_plans_preserve_three_wave_commit_lineage() {
         .iter()
         .find(|row| row.key == string("z"))
         .expect("the storm fixture includes the shallow z key");
-    let anchor_b = anchor_rows
-        .iter()
-        .find(|row| row.key == string("b"))
-        .expect("the paired-chain fixture includes anchor b");
-    let storm_b = storm_rows
-        .iter()
-        .find(|row| row.key == string("root/child/deep/storm/b"))
-        .expect("the storm fixture includes descendant b");
-    let storm_e = storm_rows
-        .iter()
-        .find(|row| row.key == string("root/child/deep/storm/e"))
-        .expect("the storm fixture includes descendant e");
     let anchor_deep = anchor_rows
         .iter()
         .find(|row| row.key == string("a/child/deep"))
@@ -19950,15 +19938,9 @@ fn concurrent_paired_restore_plans_preserve_three_wave_commit_lineage() {
         .collect::<Vec<_>>();
     let wave_three_anchor_base = anchor_rows
         .iter()
-        .filter(|row| row.key != string("b"))
         .cloned()
         .collect::<Vec<_>>();
-    let wave_four_storm_base = storm_rows
-        .iter()
-        .filter(|row| row.key != string("root/child/deep/storm/b")
-            && row.key != string("root/child/deep/storm/e"))
-        .cloned()
-        .collect::<Vec<_>>();
+    let wave_four_storm_base = storm_rows.clone();
     let wave_four_anchor_base = anchor_rows
         .iter()
         .filter(|row| row.key != string("a/child/deep"))
@@ -19966,16 +19948,14 @@ fn concurrent_paired_restore_plans_preserve_three_wave_commit_lineage() {
         .collect::<Vec<_>>();
     assert_eq!(wave_two_anchor_base.len(), 4);
     assert_eq!(wave_three_storm_base.len(), TOMBSTONE_STORM_KEYS.len() - 1);
-    assert_eq!(wave_three_anchor_base.len(), 6);
-    assert_eq!(wave_four_storm_base.len(), TOMBSTONE_STORM_KEYS.len() - 2);
+    assert_eq!(wave_three_anchor_base.len(), 7);
+    assert_eq!(wave_four_storm_base.len(), TOMBSTONE_STORM_KEYS.len());
     assert_eq!(wave_four_anchor_base.len(), 6);
 
-    let wave_two_deletes = ["b", "z"];
-    let wave_three_deletes = [
-        "a/child/deep",
-        "root/child/deep/storm/b",
-        "root/child/deep/storm/e",
-    ];
+    // The first two commits have a tombstone delta in only one table; the
+    // later commit changes both. Paired ordering must not pad or drop history.
+    let wave_two_deletes = ["z"];
+    let wave_three_deletes = ["a/child/deep"];
     let wave_four_deletes = ["b", "c", "root/child/deep/storm/a", "root/child/deep/storm/d"];
     let storm_restores = storm_rows
         .iter()
@@ -20004,18 +19984,14 @@ fn concurrent_paired_restore_plans_preserve_three_wave_commit_lineage() {
                     &wave_three_storm_base[..],
                     &wave_three_anchor_base[..],
                     &wave_three_deletes[..],
-                    vec![(id(1), storm_z.clone()), (id(2), anchor_b.clone())],
+                    vec![(id(1), storm_z.clone())],
                 )
             } else {
                 (
                     &wave_four_storm_base[..],
                     &wave_four_anchor_base[..],
                     &wave_four_deletes[..],
-                    vec![
-                        (id(1), storm_b.clone()),
-                        (id(1), storm_e.clone()),
-                        (id(2), anchor_deep.clone()),
-                    ],
+                    vec![(id(2), anchor_deep.clone())],
                 )
             };
             let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
@@ -20103,27 +20079,19 @@ fn concurrent_paired_restore_plans_preserve_three_wave_commit_lineage() {
     }
 
     let storm_wave_two_delta = ["z"].map(string);
-    let anchor_wave_two_delta = ["b"].map(string);
+    let anchor_wave_two_delta = Vec::new();
     let storm_wave_two_live = TOMBSTONE_STORM_KEYS[..TOMBSTONE_STORM_KEYS.len() - 1]
         .iter()
         .map(|key| string(key))
         .collect::<Vec<_>>();
-    let anchor_wave_two_live = ["a", "a/child", "a/child/deep", "c", "d", "zz"].map(string);
-    let storm_wave_three_delta =
-        ["root/child/deep/storm/b", "root/child/deep/storm/e"].map(string);
+    let anchor_wave_two_live =
+        ["a", "a/child", "a/child/deep", "b", "c", "d", "zz"].map(string);
+    let storm_wave_three_delta = Vec::new();
     let anchor_wave_three_delta = ["a/child/deep"].map(string);
-    let storm_wave_three_live = [
-        "a",
-        "root",
-        "root/child",
-        "root/child/deep",
-        "root/child/deep/storm/a",
-        "root/child/deep/storm/c",
-        "root/child/deep/storm/d",
-        "root/child/deep/storm/f",
-        "z",
-    ]
-    .map(string);
+    let storm_wave_three_live = TOMBSTONE_STORM_KEYS
+        .iter()
+        .map(|key| string(key))
+        .collect::<Vec<_>>();
     let anchor_wave_three_live = ["a", "a/child", "b", "c", "d", "zz"].map(string);
     let storm_wave_four_delta =
         ["root/child/deep/storm/a", "root/child/deep/storm/d"].map(string);
@@ -20232,6 +20200,26 @@ fn concurrent_paired_restore_plans_preserve_three_wave_commit_lineage() {
     let wave_four = selected_wave_plans[2]
         .take()
         .expect("one successful plan represents the committed fourth wave");
+    let paired_commit_deltas = [&wave_two, &wave_three, &wave_four].map(|plan| {
+        (
+            table_row_tombstones(plan, id(1)),
+            table_row_tombstones(plan, id(2)),
+        )
+    });
+    assert_eq!(
+        paired_commit_deltas,
+        [
+            (["z"].map(string).to_vec(), Vec::new()),
+            (Vec::new(), ["a/child/deep"].map(string).to_vec()),
+            (
+                ["root/child/deep/storm/a", "root/child/deep/storm/d"]
+                    .map(string)
+                    .to_vec(),
+                ["b", "c"].map(string).to_vec(),
+            ),
+        ],
+        "paired commits preserve their shared order while table deltas stay local",
+    );
     let mut storm_history = TOMBSTONE_STORM_KEYS[..TOMBSTONE_STORM_KEYS.len() - 1]
         .iter()
         .map(|key| string(key))
@@ -20253,13 +20241,11 @@ fn concurrent_paired_restore_plans_preserve_three_wave_commit_lineage() {
             "root/child/deep/storm/e",
             "root/child/deep/storm/f",
             "z",
-            "root/child/deep/storm/b",
-            "root/child/deep/storm/e",
             "root/child/deep/storm/a",
             "root/child/deep/storm/d",
         ]
         .map(string),
-        "a later wave observed first still appends after its committed predecessor",
+        "empty paired-table deltas do not truncate the storm history prefix",
     );
     let mut anchor_history = ["a", "a/child", "a/child/deep"]
         .map(string)
@@ -20269,8 +20255,8 @@ fn concurrent_paired_restore_plans_preserve_three_wave_commit_lineage() {
     anchor_history.extend(table_row_tombstones(&wave_four, id(2)));
     assert_eq!(
         anchor_history,
-        ["a", "a/child", "a/child/deep", "b", "a/child/deep", "b", "c"].map(string),
-        "restored anchor deletions remain after their committed restore waves",
+        ["a", "a/child", "a/child/deep", "a/child/deep", "b", "c"].map(string),
+        "empty paired-table deltas do not truncate the anchor history prefix",
     );
 }
 
