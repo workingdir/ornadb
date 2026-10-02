@@ -9331,6 +9331,9 @@ fn infer_case_arm_body(
 }
 
 fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
+    if !checkpoint_snapshot_maps_are_valid(left) || !checkpoint_snapshot_maps_are_valid(right) {
+        return None;
+    }
     if left == right {
         return Some(left.clone());
     }
