@@ -24098,6 +24098,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_filter_storm_compiles_cascade_into_union_before_take_stop() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=40)
+            .map(|row_id| {
+                let title = if matches!(row_id, 10 | 20) {
+                    "later"
+                } else {
+                    "current"
+                };
+                let target = if row_id == 30 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(165), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The compiled filters retain candidates ten and twenty in the left
+        // union leaf. take(2) closes there before candidate thirty's missing
+        // lookup or any scan of the right leaf.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-filter-storm-cascade.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(2u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 14),
+            "the ordered left cascade satisfies take before the union's right leaf"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_filter_storm_compiles_cascade_into_union_preserving_failure() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (7u8..=40)
+            .map(|row_id| {
+                let title = if row_id == 10 { "later" } else { "current" };
+                let target = if row_id == 30 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(166), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // One match and the rejection at twenty leave take(2) short. The
+        // pushed cascade must continue in left-to-right union order and keep
+        // candidate thirty's lookup failure visible before the right leaf.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-filter-storm-cascade.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (3, 24),
+            "the short take reaches the left leaf's required tail failure"
+        );
+    }
+
+    #[tokio::test]
     async fn query_take_two_preserves_results_across_conjunct_filter_splits() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
