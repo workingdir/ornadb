@@ -26,7 +26,8 @@ use orna_semantic_v1::{
     Catalogue, ModuleInput, Namespace, SymbolKind, TableSchema, analyze_with_catalogue,
 };
 use orna_syntax_v1::{
-    CaseArm, Declaration, Expr, Statement, StringSegment, parse_module_with_file,
+    CaseArm, Declaration, Expr, FieldInitializer, Item, Pattern, Statement, StringSegment,
+    TableMember, parse_module_with_file,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -41,6 +42,7 @@ use std::{
 const DIGEST_DOMAIN: &[u8] = b"ORNA-ACTIVATION-DIGEST\0";
 const SOURCE_MUTATION_DOMAIN: &[u8] = b"ORNA-SOURCE-MUTATION\0";
 const MAX_ADMITTED_REPL_SESSIONS: usize = 4096;
+type TableInsertDefaults = BTreeMap<String, Vec<(String, Expr)>>;
 
 /// Errors raised before an application is allowed to execute.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -158,6 +160,7 @@ impl ApplicationAuthority {
         }
 
         let mut functions = Functions::new();
+        let table_insert_defaults = table_insert_defaults(&parsed.value.items);
         for item in &parsed.value.items {
             if let Declaration::Function { signature, body } = &item.declaration {
                 functions.insert(
@@ -182,6 +185,7 @@ impl ApplicationAuthority {
                 || source.contains("sys.MaintenanceJob"),
             entry,
             functions,
+            table_insert_defaults,
             limits: self.limits,
             module_header: analysis
                 .modules
@@ -219,7 +223,11 @@ impl ApplicationAuthority {
         arguments: &Environment,
     ) -> Result<StagedActivation, ApplicationError> {
         let tables = admitted_table_schemas(&application.module_header);
-        let mut handler = SourceMutationEffectHandler::new(tables);
+        let mut handler = SourceMutationEffectHandler::new(tables).with_insert_defaults(
+            application.table_insert_defaults.clone(),
+            application.functions.clone(),
+            application.limits,
+        );
         let value = invoke_named_with_effects(
             &application.entry,
             &application.functions,
@@ -252,7 +260,12 @@ impl ApplicationAuthority {
         let mut handler = SourceMutationEffectHandler::with_table_rows(
             tables,
             snapshot.table_rows().clone(),
-        )?;
+        )?
+        .with_insert_defaults(
+            application.table_insert_defaults.clone(),
+            application.functions.clone(),
+            application.limits,
+        );
         let value = invoke_named_with_effects(
             &application.entry,
             &application.functions,
@@ -285,6 +298,11 @@ impl ApplicationAuthority {
         let mut handler = SourceMutationEffectHandler::with_publication_rows(
             tables,
             publication_rows,
+        )
+        .with_insert_defaults(
+            application.table_insert_defaults.clone(),
+            application.functions.clone(),
+            application.limits,
         );
         let value = invoke_named_with_effects(
             &application.entry,
@@ -327,6 +345,11 @@ impl ApplicationAuthority {
             .await
             .map_err(ApplicationError::SourceEffectFailed)?;
         let mut handler = AsyncSourceMutationEffectHandler::new(tables, publication_rows);
+        handler.mutations = handler.mutations.with_insert_defaults(
+            application.table_insert_defaults.clone(),
+            application.functions.clone(),
+            application.limits,
+        );
         let mut value = invoke_named_with_effects(
             &application.entry,
             &application.functions,
@@ -667,6 +690,9 @@ impl StagedActivation {
 #[derive(Debug)]
 pub struct SourceMutationEffectHandler {
     tables: BTreeMap<String, TableSchema>,
+    insert_defaults: TableInsertDefaults,
+    default_functions: Functions,
+    default_limits: Limits,
     mutations: Vec<TableMutation>,
     next_ordinal: u64,
     publication_rows: Option<RuntimePublicationMetadataRows>,
@@ -679,6 +705,9 @@ impl SourceMutationEffectHandler {
     pub fn new(tables: BTreeMap<String, TableSchema>) -> Self {
         Self {
             tables,
+            insert_defaults: BTreeMap::new(),
+            default_functions: Functions::new(),
+            default_limits: Limits::default(),
             mutations: Vec::new(),
             next_ordinal: 0,
             publication_rows: None,
@@ -730,12 +759,27 @@ impl SourceMutationEffectHandler {
         Ok(handler)
     }
 
+    fn with_insert_defaults(
+        mut self,
+        defaults: TableInsertDefaults,
+        functions: Functions,
+        limits: Limits,
+    ) -> Self {
+        self.insert_defaults = defaults;
+        self.default_functions = functions;
+        self.default_limits = limits;
+        self
+    }
+
     fn with_publication_rows(
         tables: BTreeMap<String, TableSchema>,
         publication_rows: RuntimePublicationMetadataRows,
     ) -> Self {
         Self {
             tables,
+            insert_defaults: BTreeMap::new(),
+            default_functions: Functions::new(),
+            default_limits: Limits::default(),
             mutations: Vec::new(),
             next_ordinal: 0,
             publication_rows: Some(publication_rows),
@@ -934,6 +978,77 @@ impl SourceMutationEffectHandler {
             .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-ROW"))?;
         self.row_matches_schema(schema, &merged)?;
         Ok(merged)
+    }
+
+    fn complete_insert_row(
+        &mut self,
+        table: &str,
+        row: &CanonicalValue,
+        key_fields_only: bool,
+    ) -> Result<CanonicalValue, EvaluationError> {
+        let OvbRaw::Map(entries) = row.raw() else {
+            return Err(Self::effect_error("ORNA-EVAL-TABLE-ROW"));
+        };
+        let mut fields = BTreeMap::<String, OvbRaw>::new();
+        for (field, value) in entries {
+            let OvbRaw::Text(field) = field else {
+                return Err(Self::effect_error("ORNA-EVAL-TABLE-ROW"));
+            };
+            fields.insert(field.clone(), value.clone());
+        }
+
+        let defaults = self.insert_defaults.get(table).cloned().unwrap_or_default();
+        let schema = self.table(table)?.clone();
+        let key_names = self
+            .admission(&schema)?
+            .keys
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        for (field, expression) in defaults {
+            if key_fields_only && !key_names.contains(&field) {
+                continue;
+            }
+            if fields.contains_key(&field) {
+                continue;
+            }
+            let environment = fields
+                .iter()
+                .map(|(name, value)| {
+                    CanonicalValue::new(value.clone())
+                        .map(|value| (name.clone(), value))
+                        .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-ROW"))
+                })
+                .collect::<Result<Environment, _>>()?;
+            let helper = "__orna_table_insert_default".to_owned();
+            let mut functions = self.default_functions.clone();
+            functions.insert(
+                helper.clone(),
+                PureFunction {
+                    parameters: Vec::new(),
+                    body: expression,
+                    environment,
+                },
+            );
+            let value = invoke_named_with_effects(
+                &helper,
+                &functions,
+                &Environment::new(),
+                self.default_limits,
+                self,
+            )?;
+            fields.insert(field, value.raw().clone());
+        }
+
+        let mut entries = fields
+            .into_iter()
+            .map(|(field, value)| (OvbRaw::Text(field), value))
+            .collect::<Vec<_>>();
+        entries.sort_by(|(left, _), (right, _)| {
+            canonical_map_key(left).cmp(&canonical_map_key(right))
+        });
+        CanonicalValue::new(OvbRaw::Map(entries))
+            .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-ROW"))
     }
 
     fn key_components(
@@ -1373,14 +1488,15 @@ impl EffectHandler for SourceMutationEffectHandler {
         let Some(table) = self.admitted_table_name(&path).map(str::to_owned) else {
             return Ok(None);
         };
-        let schema = self.table(&table)?;
+        let schema = self.table(&table)?.clone();
         match name.as_str() {
             "insert" => {
                 let [row] = arguments else {
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 };
-                self.row_matches_schema(schema, row)?;
-                let key = self.key_from_row(schema, row)?;
+                let row = self.complete_insert_row(&table, row, false)?;
+                self.row_matches_schema(&schema, &row)?;
+                let key = self.key_from_row(&schema, &row)?;
                 if self.current_row_if_known(&table, &key)?.is_some() {
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-DUPLICATE-KEY"));
                 }
@@ -1389,15 +1505,16 @@ impl EffectHandler for SourceMutationEffectHandler {
                     .entry(table.to_owned())
                     .or_default()
                     .insert(key, Some(row.clone()));
-                Ok(Some(row.clone()))
+                Ok(Some(row))
             }
             "upsert" => {
                 let [patch] = arguments else {
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 };
-                let key = self.key_from_row(schema, patch)?;
+                let keyed_patch = self.complete_insert_row(&table, patch, true)?;
+                let key = self.key_from_row(&schema, &keyed_patch)?;
                 if let Some(existing) = self.current_row(&table, &key)? {
-                    let row = self.patch_row(schema, patch, &existing, true)?;
+                    let row = self.patch_row(&schema, patch, &existing, true)?;
                     self.record(&table, key.clone(), Some(row.clone()))?;
                     self.overlay
                         .entry(table.to_owned())
@@ -1405,13 +1522,15 @@ impl EffectHandler for SourceMutationEffectHandler {
                         .insert(key, Some(row.clone()));
                     Ok(Some(row))
                 } else {
-                    self.row_matches_schema(schema, patch)?;
-                    self.record_insert(&table, key.clone(), patch.clone())?;
+                    let row = self.complete_insert_row(&table, &keyed_patch, false)?;
+                    self.row_matches_schema(&schema, &row)?;
+                    let key = self.key_from_row(&schema, &row)?;
+                    self.record_insert(&table, key.clone(), row.clone())?;
                     self.overlay
                         .entry(table.to_owned())
                         .or_default()
-                        .insert(key, Some(patch.clone()));
-                    Ok(Some(patch.clone()))
+                        .insert(key, Some(row.clone()));
+                    Ok(Some(row))
                 }
             }
             "update" => {
@@ -1422,8 +1541,8 @@ impl EffectHandler for SourceMutationEffectHandler {
                 let existing = self
                     .current_row(&table, &key_bytes)?
                     .ok_or_else(|| Self::effect_error("ORNA-EVAL-TABLE-MISSING-ROW"))?;
-                let row = self.patch_row(schema, patch, &existing, false)?;
-                if self.key_from_row(schema, &row)? != key_bytes {
+                let row = self.patch_row(&schema, patch, &existing, false)?;
+                if self.key_from_row(&schema, &row)? != key_bytes {
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-KEY"));
                 }
                 self.record(&table, key_bytes.clone(), Some(row.clone()))?;
@@ -1437,7 +1556,7 @@ impl EffectHandler for SourceMutationEffectHandler {
                 let [key] = arguments else {
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 };
-                let admission = self.admission(schema)?;
+                let admission = self.admission(&schema)?;
                 if admission.keys.is_empty() {
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-UNADMITTED"));
                 }
@@ -1456,7 +1575,7 @@ impl EffectHandler for SourceMutationEffectHandler {
                 let [old_key, new_key] = arguments else {
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 };
-                let admission = self.admission(schema)?;
+                let admission = self.admission(&schema)?;
                 if admission.automatic_key || admission.keys.is_empty() {
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-UNADMITTED"));
                 }
@@ -1487,7 +1606,7 @@ impl EffectHandler for SourceMutationEffectHandler {
                 if self.current_row_if_known(&table, &new_key_bytes)?.is_some() {
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-DUPLICATE-KEY"));
                 }
-                let parts = self.key_components(schema, new_key)?;
+                let parts = self.key_components(&schema, new_key)?;
                 let mut key_entries = parts
                     .iter()
                     .zip(&admission.keys)
@@ -1500,8 +1619,8 @@ impl EffectHandler for SourceMutationEffectHandler {
                 });
                 let key_patch = CanonicalValue::new(OvbRaw::Map(key_entries))
                     .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-KEY"))?;
-                let row = self.patch_row(schema, &key_patch, &existing, true)?;
-                if self.key_from_row(schema, &row)? != new_key_bytes {
+                let row = self.patch_row(&schema, &key_patch, &existing, true)?;
+                if self.key_from_row(&schema, &row)? != new_key_bytes {
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-KEY"));
                 }
                 self.record_rekey(
@@ -1612,6 +1731,40 @@ fn admitted_table_schemas(
                 .map(|schema| (name.clone(), schema))
         })
         .collect()
+}
+
+fn table_insert_defaults(items: &[Item]) -> TableInsertDefaults {
+    let mut defaults = BTreeMap::new();
+    for item in items {
+        let Declaration::Table {
+            name,
+            keys,
+            members,
+        } = &item.declaration
+        else {
+            continue;
+        };
+        let mut table_defaults = Vec::new();
+        for key in keys {
+            if let (Pattern::Name(name, _), Some(expression)) = (&key.pattern, &key.default) {
+                table_defaults.push((name.clone(), expression.clone()));
+            }
+        }
+        for member in members {
+            if let TableMember::Field {
+                name,
+                initializer: Some(FieldInitializer::Default(expression)),
+                ..
+            } = member
+            {
+                table_defaults.push((name.clone(), expression.clone()));
+            }
+        }
+        if !table_defaults.is_empty() {
+            defaults.insert(name.clone(), table_defaults);
+        }
+    }
+    defaults
 }
 
 fn module_namespace(logical_path: &str) -> Namespace {
@@ -2206,6 +2359,7 @@ pub struct AdmittedApplication {
     requires_publication_metadata: bool,
     entry: String,
     functions: Functions,
+    table_insert_defaults: TableInsertDefaults,
     limits: Limits,
     module_header: orna_semantic_v1::ModuleHeader,
 }
@@ -2753,6 +2907,92 @@ mod tests {
         assert_eq!(
             CanonicalValue::decode(mutations[5].value().expect("rekeyed row")).unwrap(),
             row(4, "upserted", 5)
+        );
+    }
+
+    #[test]
+    fn table_insert_evaluates_key_and_row_defaults_once_into_the_returned_value() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "core-table-insert-defaults-om35q.orna",
+                include_str!("../tests/fixtures/core-table-insert-defaults-om35q.orna"),
+                "main",
+            )
+            .expect("defaulted table fixture should be admitted");
+
+        let expected = CanonicalValue::new(OvbRaw::Map(vec![
+            (OvbRaw::Text("id".into()), OvbRaw::Int(42.into())),
+            (
+                OvbRaw::Text("label".into()),
+                OvbRaw::Text("supplied label".into()),
+            ),
+            (OvbRaw::Text("sequence".into()), OvbRaw::Int(43.into())),
+        ]))
+        .expect("expected row is canonical");
+        let staged = authority
+            .evaluate_staged(&application, &Environment::new())
+            .expect("insert should materialize defaults before staging");
+        assert_eq!(staged.value(), &expected);
+        assert_eq!(staged.mutations().len(), 1);
+        assert!(staged.mutations()[0].is_insert());
+        assert_eq!(
+            CanonicalValue::decode(staged.mutations()[0].value().expect("stored row"))
+                .expect("stored row is canonical"),
+            expected
+        );
+    }
+
+    #[test]
+    fn table_upsert_materializes_defaults_only_on_its_insert_path() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "core-table-insert-defaults-om35q.orna",
+                include_str!("../tests/fixtures/core-table-insert-defaults-om35q.orna"),
+                "upsert_defaults",
+            )
+            .expect("defaulted upsert fixture should be admitted");
+        let expected = CanonicalValue::new(OvbRaw::Map(vec![
+            (OvbRaw::Text("id".into()), OvbRaw::Int(42.into())),
+            (
+                OvbRaw::Text("label".into()),
+                OvbRaw::Text("default label".into()),
+            ),
+            (OvbRaw::Text("sequence".into()), OvbRaw::Int(43.into())),
+        ]))
+        .expect("expected upsert row is canonical");
+
+        let mut effects = SourceMutationEffectHandler::with_table_rows(
+            admitted_table_schemas(&application.module_header),
+            BTreeMap::from([("Event".to_owned(), Vec::new())]),
+        )
+        .expect("empty activation snapshot should be valid")
+        .with_insert_defaults(
+            application.table_insert_defaults.clone(),
+            application.functions.clone(),
+            application.limits,
+        );
+        let value = invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            &Environment::new(),
+            application.limits,
+            &mut effects,
+        )
+        .expect("absent upsert should materialize table defaults");
+        assert_eq!(value, expected);
+        let mutations = effects
+            .into_mutations()
+            .expect("defaulted upsert mutation is canonical");
+        assert_eq!(mutations.len(), 1);
+        assert!(mutations[0].is_insert());
+        assert_eq!(
+            CanonicalValue::decode(mutations[0].value().expect("stored row"))
+                .expect("stored row is canonical"),
+            expected
         );
     }
 
