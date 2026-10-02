@@ -1,0 +1,91 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn bundle_at(pin: sys.SnapshotRef) = {
+    primary: chained_factory(pin),
+    backup: forwarded_factory(pin),
+    nested: {
+        reader: chained_factory(pin)().read,
+    },
+};
+
+pub fn structural_rebind_storm(
+    pin_0: sys.SnapshotRef,
+    pin_1: sys.SnapshotRef,
+    pin_2: sys.SnapshotRef,
+    pin_3: sys.SnapshotRef,
+    pin_4: sys.SnapshotRef,
+    pin_5: sys.SnapshotRef,
+    pin_6: sys.SnapshotRef,
+    pin_7: sys.SnapshotRef,
+) {
+    let rolling = bundle_at(pin_0);
+    let stage_0 = rolling;
+    rolling = bundle_at(pin_1);
+    let stage_1 = rolling;
+    rolling = bundle_at(pin_2);
+    let stage_2 = rolling;
+    rolling = bundle_at(pin_3);
+    let stage_3 = rolling;
+    rolling = bundle_at(pin_4);
+    let stage_4 = rolling;
+    rolling = bundle_at(pin_5);
+    let stage_5 = rolling;
+    rolling = bundle_at(pin_6);
+    let stage_6 = rolling;
+    rolling = bundle_at(pin_7);
+    let stage_7 = rolling;
+    rolling = stage_0;
+    let stage_8 = rolling;
+    {
+        stage_0: {
+            primary: [stage_0.primary, chained_factory(pin_0)],
+            backup: [stage_0.backup, forwarded_factory(pin_0)],
+            reader: [stage_0.nested.reader, chained_factory(pin_0)().read],
+        },
+        stage_1: {
+            primary: [stage_1.primary, chained_factory(pin_1)],
+            backup: [stage_1.backup, forwarded_factory(pin_1)],
+            reader: [stage_1.nested.reader, chained_factory(pin_1)().read],
+        },
+        stage_2: {
+            primary: [stage_2.primary, chained_factory(pin_2)],
+            backup: [stage_2.backup, forwarded_factory(pin_2)],
+            reader: [stage_2.nested.reader, chained_factory(pin_2)().read],
+        },
+        stage_3: {
+            primary: [stage_3.primary, chained_factory(pin_3)],
+            backup: [stage_3.backup, forwarded_factory(pin_3)],
+            reader: [stage_3.nested.reader, chained_factory(pin_3)().read],
+        },
+        stage_4: {
+            primary: [stage_4.primary, chained_factory(pin_4)],
+            backup: [stage_4.backup, forwarded_factory(pin_4)],
+            reader: [stage_4.nested.reader, chained_factory(pin_4)().read],
+        },
+        stage_5: {
+            primary: [stage_5.primary, chained_factory(pin_5)],
+            backup: [stage_5.backup, forwarded_factory(pin_5)],
+            reader: [stage_5.nested.reader, chained_factory(pin_5)().read],
+        },
+        stage_6: {
+            primary: [stage_6.primary, chained_factory(pin_6)],
+            backup: [stage_6.backup, forwarded_factory(pin_6)],
+            reader: [stage_6.nested.reader, chained_factory(pin_6)().read],
+        },
+        stage_7: {
+            primary: [stage_7.primary, chained_factory(pin_7)],
+            backup: [stage_7.backup, forwarded_factory(pin_7)],
+            reader: [stage_7.nested.reader, chained_factory(pin_7)().read],
+        },
+        stage_8: {
+            primary: [stage_8.primary, chained_factory(pin_0)],
+            backup: [stage_8.backup, forwarded_factory(pin_0)],
+            reader: [stage_8.nested.reader, chained_factory(pin_0)().read],
+        },
+    }
+}
