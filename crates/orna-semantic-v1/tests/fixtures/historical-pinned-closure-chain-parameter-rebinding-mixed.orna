@@ -1,0 +1,48 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn rebind_parameter_twice(pin: sys.SnapshotRef) {
+    let original = chained_factory(pin);
+    pin = sys.snapshot("HEAD~5");
+    let middle = chained_factory(pin);
+    pin = sys.snapshot("HEAD");
+    let current = chained_factory(pin);
+    { original: original, middle: middle, current: current }
+}
+
+pub fn different_rebinding_stages_do_not_compose() {
+    let chain = rebind_parameter_twice(sys.snapshot("HEAD~10"));
+    [chain.original, chain.middle, chain.current]
+}
+
+pub fn rebind_through_pinned_parameters(
+    pin: sys.SnapshotRef,
+    middle_pin: sys.SnapshotRef,
+    final_pin: sys.SnapshotRef,
+) {
+    let original = chained_factory(pin);
+    pin = middle_pin;
+    let middle = chained_factory(pin);
+    let final_source = final_pin;
+    pin = final_source;
+    let final = chained_factory(pin);
+    { original: original, middle: middle, final: final }
+}
+
+pub fn distinct_call_sites_keep_distinct_original_pins() {
+    let first = rebind_through_pinned_parameters(
+        sys.snapshot("HEAD~20"),
+        sys.snapshot("HEAD~10"),
+        sys.snapshot("HEAD~5"),
+    );
+    let second = rebind_through_pinned_parameters(
+        sys.snapshot("HEAD~30"),
+        sys.snapshot("HEAD~15"),
+        sys.snapshot("HEAD~3"),
+    );
+    [first.original, second.original]
+}
