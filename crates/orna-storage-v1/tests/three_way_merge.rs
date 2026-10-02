@@ -19901,9 +19901,9 @@ fn concurrent_uneven_depth_restore_retries_isolate_failed_attempts() {
 }
 
 #[test]
-fn concurrent_paired_storm_waves_preserve_sparse_table_lineage() {
+fn concurrent_paired_storm_waves_preserve_depth_event_lineage() {
     const RETRIES_PER_WAVE: usize = 4;
-    const WAVES: usize = 3;
+    const WAVES: usize = 4;
     let storm_template = parse_fixture(TOMBSTONE_RECOVERY_STORM, RowKeyKind::Explicit);
     let storm_rows = TOMBSTONE_STORM_KEYS
         .iter()
@@ -19946,17 +19946,38 @@ fn concurrent_paired_storm_waves_preserve_sparse_table_lineage() {
         .filter(|row| row.key != string("a/child/deep"))
         .cloned()
         .collect::<Vec<_>>();
+    let wave_five_storm_base = wave_four_storm_base
+        .iter()
+        .filter(|row| {
+            row.key != string("root/child/deep/storm/a")
+                && row.key != string("root/child/deep/storm/d")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let wave_five_anchor_base = anchor_rows
+        .iter()
+        .filter(|row| row.key != string("b") && row.key != string("c"))
+        .cloned()
+        .collect::<Vec<_>>();
     assert_eq!(wave_two_anchor_base.len(), 4);
     assert_eq!(wave_three_storm_base.len(), TOMBSTONE_STORM_KEYS.len() - 1);
     assert_eq!(wave_three_anchor_base.len(), 7);
     assert_eq!(wave_four_storm_base.len(), TOMBSTONE_STORM_KEYS.len());
     assert_eq!(wave_four_anchor_base.len(), 6);
+    assert_eq!(wave_five_storm_base.len(), TOMBSTONE_STORM_KEYS.len() - 2);
+    assert_eq!(wave_five_anchor_base.len(), 5);
 
-    // The first two commits have a tombstone delta in only one table; the
-    // later commit changes both. Paired ordering must not pad or drop history.
+    // Commit deltas alternate between one-table and paired updates, then add
+    // shallow ancestor tombstones after earlier storm-descendant events.
     let wave_two_deletes = ["z"];
     let wave_three_deletes = ["a/child/deep"];
     let wave_four_deletes = ["b", "c", "root/child/deep/storm/a", "root/child/deep/storm/d"];
+    let wave_five_deletes = [
+        "a/child",
+        "root/child/deep",
+        "root/child/deep/storm/b",
+        "root/child/deep/storm/f",
+    ];
     let storm_restores = storm_rows
         .iter()
         .filter(|row| row.key != string("z"))
@@ -19986,12 +20007,19 @@ fn concurrent_paired_storm_waves_preserve_sparse_table_lineage() {
                     &wave_three_deletes[..],
                     vec![(id(1), storm_z.clone())],
                 )
-            } else {
+            } else if wave == 2 {
                 (
                     &wave_four_storm_base[..],
                     &wave_four_anchor_base[..],
                     &wave_four_deletes[..],
                     vec![(id(2), anchor_deep.clone())],
+                )
+            } else {
+                (
+                    &wave_five_storm_base[..],
+                    &wave_five_anchor_base[..],
+                    &wave_five_deletes[..],
+                    Vec::new(),
                 )
             };
             let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
@@ -20041,7 +20069,11 @@ fn concurrent_paired_storm_waves_preserve_sparse_table_lineage() {
 
             let gate = Arc::clone(&start);
             let fail_after_rows = if retry == 0 {
-                if wave == 2 { 4 } else { 5 }
+                match wave {
+                    2 => 4,
+                    3 => 3,
+                    _ => 5,
+                }
             } else {
                 usize::MAX
             };
@@ -20109,6 +20141,23 @@ fn concurrent_paired_storm_waves_preserve_sparse_table_lineage() {
     ]
     .map(string);
     let anchor_wave_four_live = ["a", "a/child", "a/child/deep", "d", "zz"].map(string);
+    let storm_wave_five_delta = [
+        "root/child/deep",
+        "root/child/deep/storm/b",
+        "root/child/deep/storm/f",
+    ]
+    .map(string);
+    let anchor_wave_five_delta = ["a/child"].map(string);
+    let storm_wave_five_live = [
+        "a",
+        "root",
+        "root/child",
+        "root/child/deep/storm/c",
+        "root/child/deep/storm/e",
+        "z",
+    ]
+    .map(string);
+    let anchor_wave_five_live = ["a", "a/child/deep", "d", "zz"].map(string);
     let mut failures_by_wave = [0; WAVES];
     let mut successes_by_wave = [0; WAVES];
     let mut selected_wave_plans: [Option<BranchMergePlan>; WAVES] =
@@ -20131,7 +20180,14 @@ fn concurrent_paired_storm_waves_preserve_sparse_table_lineage() {
                 Err(error) => panic!("only the injected wave failure is expected: {error:?}"),
                 Ok(_) => panic!("a failed paired retry must not publish a candidate plan"),
             }
-            assert_eq!(source.rows_delivered, if wave == 2 { 4 } else { 5 });
+            assert_eq!(
+                source.rows_delivered,
+                match wave {
+                    2 => 4,
+                    3 => 3,
+                    _ => 5,
+                }
+            );
             assert_eq!(
                 source.failed_at.as_ref().map(|(table, side, _)| (*table, *side)),
                 Some((id(2), MergeSide::Left)),
@@ -20139,12 +20195,12 @@ fn concurrent_paired_storm_waves_preserve_sparse_table_lineage() {
             assert!(source.source.visited.iter().any(|(_, locator)| {
                 locator.starts_with(format!("concurrent-paired-storm-wave-{wave}-retry-{retry}-table-0-").as_bytes())
             }));
-            let restored_key = match wave {
+            let observed_key = match wave {
                 0 => "a",
                 1 => "b",
                 _ => "a/child/deep",
             };
-            assert!(source.rows_seen.contains(&string(restored_key)));
+            assert!(source.rows_seen.contains(&string(observed_key)));
             failures_by_wave[wave] += 1;
             continue;
         }
@@ -20161,11 +20217,16 @@ fn concurrent_paired_storm_waves_preserve_sparse_table_lineage() {
             assert_eq!(table_row_tombstones(&plan, id(2)), anchor_wave_three_delta);
             assert_eq!(table_live_row_keys(&plan, id(1)), storm_wave_three_live);
             assert_eq!(table_live_row_keys(&plan, id(2)), anchor_wave_three_live);
-        } else {
+        } else if wave == 2 {
             assert_eq!(table_row_tombstones(&plan, id(1)), storm_wave_four_delta);
             assert_eq!(table_row_tombstones(&plan, id(2)), anchor_wave_four_delta);
             assert_eq!(table_live_row_keys(&plan, id(1)), storm_wave_four_live);
             assert_eq!(table_live_row_keys(&plan, id(2)), anchor_wave_four_live);
+        } else {
+            assert_eq!(table_row_tombstones(&plan, id(1)), storm_wave_five_delta);
+            assert_eq!(table_row_tombstones(&plan, id(2)), anchor_wave_five_delta);
+            assert_eq!(table_live_row_keys(&plan, id(1)), storm_wave_five_live);
+            assert_eq!(table_live_row_keys(&plan, id(2)), anchor_wave_five_live);
         }
         for (table, mut row) in restore_rows {
             row.table = table;
@@ -20189,7 +20250,7 @@ fn concurrent_paired_storm_waves_preserve_sparse_table_lineage() {
     }
     assert_eq!(failures_by_wave, [1; WAVES]);
     assert_eq!(successes_by_wave, [RETRIES_PER_WAVE - 1; WAVES]);
-    assert_eq!(first_observed_wave, Some(2));
+    assert_eq!(first_observed_wave, Some(WAVES - 1));
 
     let wave_two = selected_wave_plans[0]
         .take()
@@ -20200,7 +20261,10 @@ fn concurrent_paired_storm_waves_preserve_sparse_table_lineage() {
     let wave_four = selected_wave_plans[2]
         .take()
         .expect("one successful plan represents the committed fourth wave");
-    let paired_commit_deltas = [&wave_two, &wave_three, &wave_four].map(|plan| {
+    let wave_five = selected_wave_plans[3]
+        .take()
+        .expect("one successful plan represents the committed fifth wave");
+    let paired_commit_deltas = [&wave_two, &wave_three, &wave_four, &wave_five].map(|plan| {
         (
             table_row_tombstones(plan, id(1)),
             table_row_tombstones(plan, id(2)),
@@ -20217,6 +20281,16 @@ fn concurrent_paired_storm_waves_preserve_sparse_table_lineage() {
                     .to_vec(),
                 ["b", "c"].map(string).to_vec(),
             ),
+            (
+                [
+                    "root/child/deep",
+                    "root/child/deep/storm/b",
+                    "root/child/deep/storm/f",
+                ]
+                .map(string)
+                .to_vec(),
+                ["a/child"].map(string).to_vec(),
+            ),
         ],
         "paired commits preserve their shared order while table deltas stay local",
     );
@@ -20227,6 +20301,7 @@ fn concurrent_paired_storm_waves_preserve_sparse_table_lineage() {
     storm_history.extend(table_row_tombstones(&wave_two, id(1)));
     storm_history.extend(table_row_tombstones(&wave_three, id(1)));
     storm_history.extend(table_row_tombstones(&wave_four, id(1)));
+    storm_history.extend(table_row_tombstones(&wave_five, id(1)));
     assert_eq!(
         storm_history,
         [
@@ -20243,6 +20318,9 @@ fn concurrent_paired_storm_waves_preserve_sparse_table_lineage() {
             "z",
             "root/child/deep/storm/a",
             "root/child/deep/storm/d",
+            "root/child/deep",
+            "root/child/deep/storm/b",
+            "root/child/deep/storm/f",
         ]
         .map(string),
         "empty paired-table deltas do not truncate the storm history prefix",
@@ -20253,9 +20331,11 @@ fn concurrent_paired_storm_waves_preserve_sparse_table_lineage() {
     anchor_history.extend(table_row_tombstones(&wave_two, id(2)));
     anchor_history.extend(table_row_tombstones(&wave_three, id(2)));
     anchor_history.extend(table_row_tombstones(&wave_four, id(2)));
+    anchor_history.extend(table_row_tombstones(&wave_five, id(2)));
     assert_eq!(
         anchor_history,
-        ["a", "a/child", "a/child/deep", "a/child/deep", "b", "c"].map(string),
+        ["a", "a/child", "a/child/deep", "a/child/deep", "b", "c", "a/child"]
+            .map(string),
         "empty paired-table deltas do not truncate the anchor history prefix",
     );
 }
