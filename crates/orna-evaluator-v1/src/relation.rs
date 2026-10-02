@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use num_bigint::BigInt;
 use num_integer::Integer;
@@ -280,6 +280,8 @@ pub(super) struct RelationPlan {
 pub(super) struct FilterBatch {
     node: FilterBatchNode,
     flattened: OnceLock<Vec<Arc<Vec<Value>>>>,
+    // Weak entries allow cloned shared prefixes to reuse joins without cycles.
+    continuations: Mutex<HashMap<usize, Weak<FilterBatch>>>,
 }
 
 #[derive(Debug)]
@@ -288,34 +290,34 @@ enum FilterBatchNode {
     Then(Arc<FilterBatch>, Arc<FilterBatch>),
 }
 
-type FilterBatchJoinCache = HashMap<(*const FilterBatch, *const FilterBatch), Arc<FilterBatch>>;
-
 impl FilterBatch {
     fn from_values(values: Vec<Value>) -> Arc<Self> {
         Arc::new(Self {
             node: FilterBatchNode::Values(Arc::new(values)),
             flattened: OnceLock::new(),
+            continuations: Mutex::new(HashMap::new()),
         })
     }
 
     fn followed_by(previous: &Arc<Self>, next: &Arc<Self>) -> Arc<Self> {
-        Arc::new(Self {
+        let key = Arc::as_ptr(next) as usize;
+        let mut continuations = previous
+            .continuations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(batch) = continuations.get(&key).and_then(Weak::upgrade) {
+            return batch;
+        }
+        // A shared prefix may outlive the compiled joins that once used it.
+        // Prune those expired weak entries when the prefix needs a new join
+        // so repeated unknown-union compilations do not grow a dead cache.
+        continuations.retain(|_, batch| batch.strong_count() > 0);
+        let batch = Arc::new(Self {
             node: FilterBatchNode::Then(Arc::clone(previous), Arc::clone(next)),
             flattened: OnceLock::new(),
-        })
-    }
-
-    fn shared_followed_by(
-        previous: &Arc<Self>,
-        next: &Arc<Self>,
-        joins: &mut FilterBatchJoinCache,
-    ) -> Arc<Self> {
-        let key = (Arc::as_ptr(previous), Arc::as_ptr(next));
-        if let Some(batch) = joins.get(&key) {
-            return Arc::clone(batch);
-        }
-        let batch = Self::followed_by(previous, next);
-        joins.insert(key, Arc::clone(&batch));
+            continuations: Mutex::new(HashMap::new()),
+        });
+        continuations.insert(key, Arc::downgrade(&batch));
         batch
     }
 
@@ -568,29 +570,19 @@ impl RelationPlan {
             }
         };
         let (left, right) = self.source_union.take().expect("checked union source");
-        // Keep composed roots shared when the same operand batch fans out to
-        // several leaves under this cascade.
-        let mut shared_joins = FilterBatchJoinCache::new();
         self.source_union = Some((
-            Box::new(left.push_filter_cascade(Arc::clone(&predicates), &mut shared_joins)),
-            Box::new(right.push_filter_cascade(predicates, &mut shared_joins)),
+            Box::new(left.push_filter_cascade(Arc::clone(&predicates))),
+            Box::new(right.push_filter_cascade(predicates)),
         ));
         self
     }
 
-    fn push_filter_cascade(
-        mut self,
-        predicates: Arc<FilterBatch>,
-        shared_joins: &mut FilterBatchJoinCache,
-    ) -> Self {
+    fn push_filter_cascade(mut self, predicates: Arc<FilterBatch>) -> Self {
         if let Some((left, right)) = self.source_union.take() {
             if self.stages.is_empty() {
                 self.source_union = Some((
-                    Box::new(left.push_filter_cascade(
-                        Arc::clone(&predicates),
-                        shared_joins,
-                    )),
-                    Box::new(right.push_filter_cascade(predicates, shared_joins)),
+                    Box::new(left.push_filter_cascade(Arc::clone(&predicates))),
+                    Box::new(right.push_filter_cascade(predicates)),
                 ));
                 return self;
             }
@@ -606,16 +598,13 @@ impl RelationPlan {
                         FilterBatch::prefixed_by(previous, &predicates)
                     }
                     RelationStage::SharedFilter(previous) => {
-                        FilterBatch::shared_followed_by(&previous, &predicates, shared_joins)
+                        FilterBatch::followed_by(&previous, &predicates)
                     }
                     _ => unreachable!("checked filter stage"),
                 };
                 self.source_union = Some((
-                    Box::new(left.push_filter_cascade(
-                        Arc::clone(&predicates),
-                        shared_joins,
-                    )),
-                    Box::new(right.push_filter_cascade(predicates, shared_joins)),
+                    Box::new(left.push_filter_cascade(Arc::clone(&predicates))),
+                    Box::new(right.push_filter_cascade(predicates)),
                 ));
                 return self;
             }
@@ -629,7 +618,7 @@ impl RelationPlan {
             }
             Some(RelationStage::SharedFilter(previous)) => {
                 self.stages.push(RelationStage::SharedFilter(
-                    FilterBatch::shared_followed_by(&previous, &predicates, shared_joins),
+                    FilterBatch::followed_by(&previous, &predicates),
                 ));
             }
             Some(previous) => {
@@ -642,5 +631,28 @@ impl RelationPlan {
                 .push(RelationStage::SharedFilter(predicates)),
         }
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FilterBatch;
+    use crate::Value;
+
+    #[test]
+    fn shared_filter_join_cache_discards_expired_continuations() {
+        let prefix = FilterBatch::from_values(vec![Value::Bool(true)]);
+        let abandoned_suffix = FilterBatch::from_values(vec![Value::Bool(false)]);
+        let abandoned_join = FilterBatch::followed_by(&prefix, &abandoned_suffix);
+        assert_eq!(prefix.continuations.lock().unwrap().len(), 1);
+        drop(abandoned_join);
+
+        let live_suffix = FilterBatch::from_values(vec![Value::Bool(true)]);
+        let live_join = FilterBatch::followed_by(&prefix, &live_suffix);
+
+        let continuations = prefix.continuations.lock().unwrap();
+        assert_eq!(continuations.len(), 1);
+        assert!(continuations.values().all(|join| join.upgrade().is_some()));
+        assert_eq!(live_join.values().count(), 2);
     }
 }

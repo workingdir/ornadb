@@ -171,8 +171,8 @@ fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
     let third_stage_routes = routes_for_stage(&explained, 3);
     for (stage, prefix) in [
         (1, "root/storm1/"),
-        (2, "root/storm1/storm_output1/storm2/"),
-        (3, "root/storm1/storm_output1/storm2/storm_output2/storm3/"),
+        (2, "root/storm1/storm_stage_output1/storm2/"),
+        (3, "root/storm1/storm_stage_output1/storm2/storm_stage_output2/storm3/"),
     ] {
         let filter = explained
             .nodes()
@@ -289,16 +289,16 @@ fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
             &route.input_path[..post_storm_prefix.len()],
             post_storm_prefix
         );
-        assert!(route.input_scope.starts_with("root/storm1/storm_output1/storm2/"));
-        assert!(route.output_scope.starts_with("root/storm1/storm_output1/storm2/"));
+        assert!(route.input_scope.starts_with("root/storm1/storm_stage_output1/storm2/"));
+        assert!(route.output_scope.starts_with("root/storm1/storm_stage_output1/storm2/"));
     }
     assert_eq!(
         post_storm_routes[2].input_scope,
-        "root/storm1/storm_output1/storm2/branch1/limit1/rebind1/cascade1/rebind_output1_1/limit2/rebind2/cascade1/rebind_output2_1/branch_output1/nested1/branch1/limit1/limit2"
+        "root/storm1/storm_stage_output1/storm2/branch1/limit1/rebind1/cascade1/rebind_output1_1/limit2/rebind2/cascade1/rebind_output2_1/branch_output1/nested1/branch1/limit1/limit2"
     );
     assert_eq!(
         post_storm_routes[3].input_scope,
-        "root/storm1/storm_output1/storm2/branch1/limit1/rebind1/cascade1/rebind_output1_1/limit2/rebind2/cascade1/rebind_output2_1/branch_output1/nested1/nested_output1/nested2/branch1/limit1/limit2"
+        "root/storm1/storm_stage_output1/storm2/branch1/limit1/rebind1/cascade1/rebind_output1_1/limit2/rebind2/cascade1/rebind_output2_1/branch_output1/nested1/nested_output1/nested2/branch1/limit1/limit2"
     );
     let third_stage_prefix = [
         PlanByteCapScopeSegment::StormStage { index: 1 },
@@ -318,18 +318,18 @@ fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
         );
         assert!(route
             .input_scope
-            .starts_with("root/storm1/storm_output1/storm2/storm_output2/storm3/"));
+            .starts_with("root/storm1/storm_stage_output1/storm2/storm_stage_output2/storm3/"));
         assert!(route
             .output_scope
-            .starts_with("root/storm1/storm_output1/storm2/storm_output2/storm3/"));
+            .starts_with("root/storm1/storm_stage_output1/storm2/storm_stage_output2/storm3/"));
     }
     assert_eq!(
         third_stage_routes[2].input_scope,
-        "root/storm1/storm_output1/storm2/storm_output2/storm3/branch1/limit1/rebind1/cascade1/rebind_output1_1/limit2/rebind2/cascade1/rebind_output2_1/branch_output1/nested1/branch1/limit1/limit2"
+        "root/storm1/storm_stage_output1/storm2/storm_stage_output2/storm3/branch1/limit1/rebind1/cascade1/rebind_output1_1/limit2/rebind2/cascade1/rebind_output2_1/branch_output1/nested1/branch1/limit1/limit2"
     );
     assert_eq!(
         third_stage_routes[3].input_scope,
-        "root/storm1/storm_output1/storm2/storm_output2/storm3/branch1/limit1/rebind1/cascade1/rebind_output1_1/limit2/rebind2/cascade1/rebind_output2_1/branch_output1/nested1/nested_output1/nested2/branch1/limit1/limit2"
+        "root/storm1/storm_stage_output1/storm2/storm_stage_output2/storm3/branch1/limit1/rebind1/cascade1/rebind_output1_1/limit2/rebind2/cascade1/rebind_output2_1/branch_output1/nested1/nested_output1/nested2/branch1/limit1/limit2"
     );
     assert!(
         post_storm_routes[2]

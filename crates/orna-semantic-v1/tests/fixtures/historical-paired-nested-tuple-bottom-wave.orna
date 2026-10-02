@@ -94,3 +94,79 @@ pub fn paired_nested_tuple_bottom_terminal_wave_atomicity(failure: Error) {
         },
     }
 }
+
+pub fn paired_nested_tuple_bottom_terminal_depth_identities(failure: Error) {
+    let left_root = nested_tuple_wave(sys.snapshot("HEAD~500"));
+    let right_root = nested_tuple_wave(sys.snapshot("HEAD~490"));
+    let left_middle = left_root((sys.snapshot("HEAD~450"), (sys.snapshot("HEAD~440"), sys.snapshot("HEAD~430"))));
+    let right_middle = right_root((sys.snapshot("HEAD~420"), (sys.snapshot("HEAD~410"), sys.snapshot("HEAD~400"))));
+    let left_inner = left_middle((sys.snapshot("HEAD~380"), (sys.snapshot("HEAD~370"), sys.snapshot("HEAD~360"))));
+    let right_inner = right_middle((sys.snapshot("HEAD~350"), (sys.snapshot("HEAD~340"), sys.snapshot("HEAD~330"))));
+
+    let left_values = left_inner((sys.snapshot("HEAD~320"), (sys.snapshot("HEAD~310"), fail(failure))));
+    let right_values = right_inner((sys.snapshot("HEAD~290"), (sys.snapshot("HEAD~280"), sys.snapshot("HEAD~270"))));
+
+    {
+        left: {
+            outer_selected: std.concurrent.parallel([() => left_values.outer_selected, () => left_values.outer_selected]),
+            outer_left: std.concurrent.parallel([() => left_values.outer_left, () => left_values.outer_left]),
+            outer_right: std.concurrent.parallel([() => left_values.outer_right, () => left_values.outer_right]),
+            middle_selected: std.concurrent.parallel([() => left_values.middle_selected, () => left_values.middle_selected]),
+            middle_left: std.concurrent.parallel([() => left_values.middle_left, () => left_values.middle_left]),
+            middle_right: std.concurrent.parallel([() => left_values.middle_right, () => left_values.middle_right]),
+            terminal_selected: std.concurrent.parallel([() => left_values.terminal_selected, () => left_values.terminal_selected]),
+            terminal_left: std.concurrent.parallel([() => left_values.terminal_left, () => left_values.terminal_left]),
+            terminal_right: std.concurrent.parallel([() => left_values.terminal_right, () => left_values.terminal_right]),
+        },
+        right: {
+            outer_selected: std.concurrent.parallel([() => right_values.outer_selected, () => right_values.outer_selected]),
+            outer_left: std.concurrent.parallel([() => right_values.outer_left, () => right_values.outer_left]),
+            outer_right: std.concurrent.parallel([() => right_values.outer_right, () => right_values.outer_right]),
+            middle_selected: std.concurrent.parallel([() => right_values.middle_selected, () => right_values.middle_selected]),
+            middle_left: std.concurrent.parallel([() => right_values.middle_left, () => right_values.middle_left]),
+            middle_right: std.concurrent.parallel([() => right_values.middle_right, () => right_values.middle_right]),
+            terminal_selected: std.concurrent.parallel([() => right_values.terminal_selected, () => right_values.terminal_selected]),
+            terminal_left: std.concurrent.parallel([() => right_values.terminal_left, () => right_values.terminal_left]),
+            terminal_right: std.concurrent.parallel([() => right_values.terminal_right, () => right_values.terminal_right]),
+        },
+    }
+}
+
+pub fn paired_nested_tuple_bottom_cascade_identity(failure: Error) {
+    let left_root = nested_tuple_wave(sys.snapshot("HEAD~500"));
+    let right_root = nested_tuple_wave(sys.snapshot("HEAD~490"));
+    let left_middle = left_root((sys.snapshot("HEAD~450"), (sys.snapshot("HEAD~440"), sys.snapshot("HEAD~430"))));
+    let right_middle = right_root((sys.snapshot("HEAD~420"), (sys.snapshot("HEAD~410"), sys.snapshot("HEAD~400"))));
+
+    // Two consecutive left waves fail at different nested tuple leaves;
+    // the right lane has one valid wave followed by a terminal failure.
+    let left_inner = left_middle((sys.snapshot("HEAD~380"), (sys.snapshot("HEAD~370"), fail(failure))));
+    let right_inner = right_middle((sys.snapshot("HEAD~350"), (sys.snapshot("HEAD~340"), sys.snapshot("HEAD~330"))));
+    let left_values = left_inner((sys.snapshot("HEAD~320"), (sys.snapshot("HEAD~310"), fail(failure))));
+    let right_values = right_inner((sys.snapshot("HEAD~290"), (sys.snapshot("HEAD~280"), fail(failure))));
+
+    {
+        left: {
+            outer_selected: std.concurrent.parallel([() => left_values.outer_selected, () => left_values.outer_selected]),
+            outer_left: std.concurrent.parallel([() => left_values.outer_left, () => left_values.outer_left]),
+            outer_right: std.concurrent.parallel([() => left_values.outer_right, () => left_values.outer_right]),
+            middle_selected: std.concurrent.parallel([() => left_values.middle_selected, () => left_values.middle_selected]),
+            middle_left: std.concurrent.parallel([() => left_values.middle_left, () => left_values.middle_left]),
+            middle_right: std.concurrent.parallel([() => left_values.middle_right, () => left_values.middle_right]),
+            terminal_selected: std.concurrent.parallel([() => left_values.terminal_selected, () => left_values.terminal_selected]),
+            terminal_left: std.concurrent.parallel([() => left_values.terminal_left, () => left_values.terminal_left]),
+            terminal_right: std.concurrent.parallel([() => left_values.terminal_right, () => left_values.terminal_right]),
+        },
+        right: {
+            outer_selected: std.concurrent.parallel([() => right_values.outer_selected, () => right_values.outer_selected]),
+            outer_left: std.concurrent.parallel([() => right_values.outer_left, () => right_values.outer_left]),
+            outer_right: std.concurrent.parallel([() => right_values.outer_right, () => right_values.outer_right]),
+            middle_selected: std.concurrent.parallel([() => right_values.middle_selected, () => right_values.middle_selected]),
+            middle_left: std.concurrent.parallel([() => right_values.middle_left, () => right_values.middle_left]),
+            middle_right: std.concurrent.parallel([() => right_values.middle_right, () => right_values.middle_right]),
+            terminal_selected: std.concurrent.parallel([() => right_values.terminal_selected, () => right_values.terminal_selected]),
+            terminal_left: std.concurrent.parallel([() => right_values.terminal_left, () => right_values.terminal_left]),
+            terminal_right: std.concurrent.parallel([() => right_values.terminal_right, () => right_values.terminal_right]),
+        },
+    }
+}
