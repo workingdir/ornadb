@@ -5921,6 +5921,112 @@ fn shadowed_paired_checkpoint_parameters_keep_their_innermost_pins() {
         );
     }
 }
+
+#[test]
+fn paired_checkpoint_lists_preserve_field_specific_pin_maps() {
+    let source = include_str!("fixtures/historical-paired-checkpoint-field-map-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-checkpoint-field-map-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_checkpoint_field_maps_across_rebind_storms")
+        })
+        .expect("paired checkpoint field-map module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_checkpoint_field_maps_across_rebind_storms"].ty
+    else {
+        panic!("paired checkpoint field map must be callable");
+    };
+    let Type::Record(lanes) = result.as_ref() else {
+        panic!("paired checkpoint field map must retain both lanes");
+    };
+
+    for (lane, expected_maps) in [
+        (
+            "left",
+            [
+                (
+                    "saved",
+                    &["selector:HEAD~840", "selector:HEAD~838"][..],
+                    &["selector:HEAD~740", "selector:HEAD~741"][..],
+                ),
+                (
+                    "after_storm",
+                    &["selector:HEAD~837", "selector:HEAD~840"][..],
+                    &["selector:HEAD~742", "selector:HEAD~743"][..],
+                ),
+                (
+                    "restored",
+                    &["selector:HEAD~840", "selector:HEAD~838"][..],
+                    &["selector:HEAD~740", "selector:HEAD~741"][..],
+                ),
+            ],
+        ),
+        (
+            "right",
+            [
+                (
+                    "saved",
+                    &["selector:HEAD~830", "selector:HEAD~828"][..],
+                    &["selector:HEAD~730", "selector:HEAD~731"][..],
+                ),
+                (
+                    "after_storm",
+                    &["selector:HEAD~827", "selector:HEAD~830"][..],
+                    &["selector:HEAD~732", "selector:HEAD~733"][..],
+                ),
+                (
+                    "restored",
+                    &["selector:HEAD~830", "selector:HEAD~828"][..],
+                    &["selector:HEAD~730", "selector:HEAD~731"][..],
+                ),
+            ],
+        ),
+    ] {
+        let Type::Record(checkpoint_maps) = lanes.get(lane).expect("paired checkpoint lane") else {
+            panic!("{lane} must retain its saved, storm, and restored checkpoint maps");
+        };
+        for (checkpoint_map, roots, children) in expected_maps {
+            let Type::List(element) = checkpoint_maps.get(checkpoint_map).expect("checkpoint map")
+            else {
+                panic!("{lane}.{checkpoint_map} must remain a list");
+            };
+            let Type::Record(checkpoint) = element.as_ref() else {
+                panic!("{lane}.{checkpoint_map} list elements must retain their field map");
+            };
+            for (field, expected) in [
+                ("root_pin", roots),
+                ("root", roots),
+                ("child_pin", children),
+                ("child", children),
+            ] {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(
+                    checkpoint.get(field).expect("checkpoint field"),
+                    &mut contexts,
+                );
+                assert_eq!(
+                    contexts,
+                    expected.iter().map(|context| (*context).to_owned()).collect(),
+                    "{lane}.{checkpoint_map}.{field} must keep its own snapshot map across rebind waves"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn paired_reproduction_checkpoint_types_stay_stable_across_interleaved_analyses() {
     const FUNCTION: &str =
