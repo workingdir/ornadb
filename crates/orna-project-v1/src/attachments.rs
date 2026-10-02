@@ -501,6 +501,21 @@ impl PackageResolver {
             .ok_or(AttachmentError::DatabaseUnavailable)?;
         self.resolve_for_parent(selected)
     }
+
+    /// Resolves a chain of exact aliases from a retained session snapshot.
+    /// Each edge is selected from the session opened at the preceding edge;
+    /// a failure leaves the caller's snapshot untouched.
+    pub fn resolve_nested_path(
+        &self,
+        parent: &AttachedDatabaseSession,
+        aliases: &[&str],
+    ) -> Result<AttachedDatabaseSession, AttachmentError> {
+        let mut current = parent.clone();
+        for alias in aliases {
+            current = self.resolve_nested_for_alias(&current, alias)?;
+        }
+        Ok(current)
+    }
 }
 
 /// A primary database and zero or more read-only, commit-pinned attachments.
