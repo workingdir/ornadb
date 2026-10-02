@@ -7721,6 +7721,89 @@ fn paired_checkpoint_map_shape_rebind_preserves_each_real_selector_set() {
 }
 
 #[test]
+fn pinned_callable_map_width_rebind_preserves_computed_values() {
+    let source = include_str!("fixtures/historical-pinned-map-width-rebind-values.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-map-width-rebind-values.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("pinned_map_width_rebind_returns_values")
+        })
+        .expect("pinned-map-width fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["pinned_map_width_rebind_returns_values"].ty
+    else {
+        panic!("pinned-map-width rebind proof must export a function");
+    };
+    let Type::Record(stages) = result.as_ref() else {
+        panic!("pinned-map-width rebind must return computed values");
+    };
+    for (stage, expected) in [
+        ("saved", ["selector:HEAD~11", "selector:HEAD~12"]),
+        ("rolling", ["selector:HEAD~9", "selector:HEAD~10"]),
+    ] {
+        let value = stages.get(stage).expect("computed checkpoint stage");
+        assert_canonical_snapshot_context_maps(value);
+        let Type::List(_) = value else {
+            panic!("{stage} must remain a computed checkpoint list: {value:?}");
+        };
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(value, &mut contexts);
+        assert_eq!(
+            contexts,
+            expected.map(str::to_owned).into_iter().collect(),
+            "{stage} must retain a two-selector pin map with its actual selectors"
+        );
+    }
+}
+
+#[test]
+fn pinned_callable_map_width_growth_is_rejected_on_rebind() {
+    let source = include_str!("fixtures/historical-pinned-map-width-mismatch-rebind.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-pinned-map-width-mismatch-rebind.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code() == DIAG_TYPE
+                && diagnostic.message() == "static types are incompatible"
+        }),
+        "a three-selector pinned callable must not rebind into a two-selector slot: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn paired_checkpoint_snapshot_maps_survive_chained_depth_storms() {
     let source = include_str!(
         "fixtures/historical-paired-checkpoint-snapshot-retention-depth-storm.orna"
