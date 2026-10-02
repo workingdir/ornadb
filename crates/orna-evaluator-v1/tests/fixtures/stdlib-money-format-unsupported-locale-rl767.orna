@@ -1,0 +1,1 @@
+std.money.format(12.34, "GBP", 2, "half_even", "xx-XX")

@@ -1,0 +1,15 @@
+pub type Profile {
+    pub label: Str,
+    pub aliases: [Int?],
+}
+
+pub table Account(id: Int) {
+    profile: Profile?,
+    region: Str,
+    nickname: Str?,
+    assert all_unique(account => {
+        profile: account.profile,
+        grouping: { region: account.region, nickname: account.nickname },
+        aliases: [account.nickname],
+    });
+}

@@ -111,13 +111,16 @@ fn pinned_collection_helpers_bind_for_collection_and_query_exports() {
         (
             "asof_join",
             include_str!("fixtures/stdlib-collection-asof-join-2213.orna"),
-            Raw::Array(vec![Raw::Array(vec![
-                Raw::Int(10.into()),
-                Value::option(Some(Value::int(9.into())))
-                    .unwrap()
-                    .raw()
-                    .clone(),
-            ])]),
+            Raw::Array(vec![
+                Raw::Array(vec![
+                    Raw::Int(10.into()),
+                    Value::option(Some(Value::int(9.into())))
+                        .unwrap()
+                        .raw()
+                        .clone(),
+                ]),
+                Raw::Array(vec![Raw::Int(1.into()), Raw::Null]),
+            ]),
         ),
         (
             "split_when",
@@ -161,6 +164,16 @@ fn pinned_collection_predicate_callbacks_keep_captured_values() {
 }
 
 #[test]
+fn pinned_core_relation_exports_return_the_section_9_values() {
+    let mut session = pinned_collection_session();
+    assert_collection_proofs(
+        &mut session,
+        include_str!("fixtures/stdlib-relation-core-real-values-m9f62.orna"),
+        16,
+    );
+}
+
+#[test]
 fn pinned_collection_asof_selectors_keep_captured_values() {
     let mut session = pinned_collection_session();
     let source = include_str!("fixtures/stdlib-collection-captured-asof-selectors-yfifu.orna");
@@ -192,6 +205,32 @@ fn pinned_collection_asof_selectors_keep_captured_values() {
             ]),
         ])))
     );
+}
+
+#[test]
+fn asof_join_excludes_future_rows_and_uses_final_canonical_tie_key() {
+    let mut session = pinned_collection_session();
+    let actual = session
+        .submit(include_str!(
+            "fixtures/stdlib-collection-asof-canonical-tie-6844.orna"
+        ))
+        .unwrap_or_else(|error| panic!("as-of canonical tie fixture failed: {}", error.code()));
+
+    let left = Raw::Map(vec![
+        (Raw::Text("id".into()), Raw::Text("left".into())),
+        (Raw::Text("time".into()), Raw::Int(5.into())),
+        (Raw::Text("group".into()), Raw::Text("g".into())),
+    ]);
+    let right = Raw::Map(vec![
+        (Raw::Text("id".into()), Raw::Text("z".into())),
+        (Raw::Text("time".into()), Raw::Int(4.into())),
+        (Raw::Text("group".into()), Raw::Text("g".into())),
+    ]);
+    let expected = Raw::Array(vec![Raw::Array(vec![
+        left,
+        Raw::Tag(60013, Box::new(Raw::Array(vec![Raw::Int(1.into()), right]))),
+    ])]);
+    assert_eq!(actual, Some(canonical(expected)));
 }
 
 #[test]
