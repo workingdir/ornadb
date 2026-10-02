@@ -384,6 +384,10 @@ impl PackageResolver {
     /// and module route. Since the reference does not define cross-session
     /// route refresh, v1 keeps pin and module routing in the same session
     /// snapshot.
+    /// Applying the same paired depth rebinds to sibling sessions in another
+    /// interleaving produces the same per-sibling pin and module-route pairs.
+    /// v1 makes independent sibling route updates order-stable, while keeping
+    /// each earlier closure snapshot tied to its original selected pins.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
