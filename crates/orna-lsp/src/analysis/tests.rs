@@ -1,6 +1,6 @@
 use super::{
     StandardLibrary, check_document, completion_at, declaration_at, hover, references,
-    type_owner_name_from_source,
+    syntax_diagnostics, type_owner_name_from_source,
 };
 use crate::documents::{Document, PositionMapper};
 use lsp_types::{
@@ -55,6 +55,56 @@ fn hover_keyword_is_recognizes_pre_begin_declarations_as_procedural() {
     let markdown = hover_markdown(&hover);
     assert!(markdown.contains("IS declarations BEGIN statements END;"));
 }
+
+#[test]
+fn declaration_hovers_and_completions_reuse_syntax_doc_comments() {
+    let text = include_str!("fixtures/editor-doc-comments.orna");
+    let parse = orna_syntax::parse(text);
+
+    let account_name = text.find("Account AS").expect("type name");
+    let account_hover = hover_at(text, account_name).expect("type hover");
+    assert!(hover_markdown(&account_hover).contains("Data presented by the account picker."));
+
+    let field_name = text.find("display_name").expect("field name");
+    let field_hover = hover_at(text, field_name).expect("field hover");
+    assert!(hover_markdown(&field_hover).contains("Display name shown in the picker."));
+
+    let function_name = text.find("find_account").expect("function name");
+    let function_hover = hover_at(text, function_name).expect("function hover");
+    assert!(hover_markdown(&function_hover).contains("Find one account by its stable identifier."));
+
+    let parameter_name = text.find("account_id").expect("parameter name");
+    let parameter_hover = hover_at(text, parameter_name).expect("parameter hover");
+    assert!(hover_markdown(&parameter_hover).contains("Identifier to search for."));
+
+    let completions = completion_at(&parse, None, None, None);
+    for (label, expected) in [
+        ("Account", "Data presented by the account picker."),
+        ("find_account", "Find one account by its stable identifier."),
+    ] {
+        let item = completions
+            .iter()
+            .find(|item| item.label == label)
+            .unwrap_or_else(|| panic!("missing completion {label}"));
+        assert!(matches!(
+            &item.documentation,
+            Some(lsp_types::Documentation::String(documentation)) if documentation == expected
+        ));
+    }
+
+    let member_byte = text.find("account.display_name").expect("field path") + "account.".len();
+    let member_completions = completion_at(&parse, None, Some(member_byte), None);
+    let display_name = member_completions
+        .iter()
+        .find(|item| item.label == "display_name")
+        .expect("documented field completion");
+    assert!(matches!(
+        &display_name.documentation,
+        Some(lsp_types::Documentation::String(documentation))
+            if documentation == "Display name shown in the picker."
+    ));
+}
+
 #[test]
 fn standard_library_loads_the_pinned_1_0_profile() {
     let standard = StandardLibrary::load().expect("pinned 1.0 standard must load");
@@ -111,6 +161,72 @@ fn lsp_import_analysis_uses_pinned_1_0_standard_modules() {
         diagnostics[0].data.as_ref().unwrap()["standardProfile"],
         "orna.std/v1-reference-library"
     );
+}
+
+#[test]
+fn syntax_diagnostics_project_real_compiler_code_message_and_span() {
+    let text = include_str!("fixtures/compiler-syntax-diagnostic.orna");
+    let document = Document::new(
+        "file:///app/invalid-schema.orna".parse().unwrap(),
+        text.to_owned(),
+        1,
+    );
+    let mapper = PositionMapper::new(&document.text);
+    let compiler = orna_compiler::parse_bundle(
+        &orna_core::source::SourceBundle::new([orna_core::source::SourceUnit::new(
+            document.logical_path(),
+            document.text.clone(),
+        )])
+        .expect("valid open-document source bundle"),
+    );
+    let expected = compiler.diagnostics().first().expect("compiler diagnostic");
+    let diagnostics = syntax_diagnostics(&document, &mapper);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics[0].code,
+        Some(NumberOrString::String(expected.code().as_str().to_owned()))
+    );
+    assert_eq!(diagnostics[0].message, expected.message());
+    assert_eq!(
+        diagnostics[0].range,
+        mapper.range(&orna_syntax::SourceSpan {
+            start: expected.location().span().start(),
+            end: expected.location().span().end(),
+        })
+    );
+}
+
+#[test]
+fn declaration_documents_report_compiler_semantic_errors_on_the_source_token() {
+    let text = include_str!("fixtures/compiler-semantic-diagnostic.orna");
+    let standard = StandardLibrary::load().expect("standard library");
+    let document = Document::new(
+        "file:///app/unknown-type.orna".parse().unwrap(),
+        text.to_owned(),
+        1,
+    );
+    let mapper = PositionMapper::new(&document.text);
+    let diagnostics = check_document(&document, Some(&standard), &mapper);
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.code
+                == Some(NumberOrString::String(
+                    orna_compiler::DiagnosticCode::UnknownQualifiedName
+                        .as_str()
+                        .to_owned(),
+                ))
+        })
+        .expect("compiler unknown-type diagnostic");
+    let start = text.find("MISSING_TYPE").expect("bad type token");
+    assert_eq!(
+        diagnostic.range,
+        mapper.range(&orna_syntax::SourceSpan {
+            start,
+            end: start + "MISSING_TYPE".len(),
+        })
+    );
+    assert!(diagnostic.message.contains("missing_type"));
 }
 
 #[test]
