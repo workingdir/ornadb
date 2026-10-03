@@ -1402,6 +1402,47 @@ impl PackageResolver {
         Ok((route, transitions))
     }
 
+    /// Applies sparse paired terminal pin folds one round at a time, checking
+    /// the expected terminal identity before and after every fold. Depth labels
+    /// selected by earlier folds remain bound and are revalidated after each
+    /// later fold. The reference is silent on per-fold identity edges; v1
+    /// rejects drift at the first changed edge and returns no partial route.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_pin_folds_validating_terminal_identity_transitions(
+        &self,
+        previous: &ReboundPathResolution,
+        pin_folds: &[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]],
+        expected_transitions: &[(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        if pin_folds.len() != expected_transitions.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        let mut route = previous.clone();
+        let mut retained_labels: Vec<NestedPairDepthLabel> = Vec::new();
+        for (fold, (expected_before, expected_after)) in
+            pin_folds.iter().zip(expected_transitions)
+        {
+            route.validate_terminal_route_identity(expected_before)?;
+            for (label, _) in *fold {
+                route.validate_depth_label(label)?;
+                if !retained_labels.contains(label) {
+                    retained_labels.push((*label).clone());
+                }
+            }
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+                    &route,
+                    &[*fold],
+                )?;
+            for label in &retained_labels {
+                route.validate_depth_label(label)?;
+            }
+            route.validate_terminal_route_identity(expected_after)?;
+        }
+
+        Ok(route)
+    }
+
     /// Applies paired rebinding and omission chains as consecutive terminal
     /// route segments. Each omission chain must preserve the terminal identity
     /// computed by its preceding rebind chain. Returns the final route and the
