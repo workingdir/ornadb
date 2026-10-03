@@ -1008,6 +1008,83 @@ fn paired_view_refresh_cursor_omissions_keep_handoff_identity() {
     );
 }
 
+#[test]
+fn paired_view_refresh_filtered_page_omissions_keep_scoped_pagination() {
+    // Rows filtered out by one page still advance its valid cursor chain;
+    // terminal filtered pages contribute nothing. Refreshes reuse tokens.
+    let subscriptions = [
+        (
+            "View.Left",
+            vec![page(&[2], Some(vec![71])), page(&[1, 3], None)],
+        ),
+        ("View.Left", vec![page(&[2], None)]),
+        (
+            "View.Right",
+            vec![page(&[-1], Some(vec![71])), page(&[5], None)],
+        ),
+        (
+            "View.Right",
+            vec![page(&[9], Some(vec![72])), page(&[4, 6], None)],
+        ),
+        (
+            "View.Left",
+            vec![page(&[2], Some(vec![71])), page(&[1], None)],
+        ),
+        (
+            "View.Left",
+            vec![page(&[-1], Some(vec![72])), page(&[2], None)],
+        ),
+        (
+            "View.Right",
+            vec![page(&[-1], Some(vec![71])), page(&[3], None)],
+        ),
+        ("View.Right", vec![page(&[10], None)]),
+        (
+            "View.Left",
+            vec![page(&[2], Some(vec![71])), page(&[3], None)],
+        ),
+        (
+            "View.Left",
+            vec![page(&[1], Some(vec![72])), page(&[2, 4], None)],
+        ),
+        (
+            "View.Right",
+            vec![page(&[5], Some(vec![71])), page(&[1], None)],
+        ),
+        (
+            "View.Right",
+            vec![page(&[9], Some(vec![72])), page(&[6], None)],
+        ),
+    ];
+    let mut source = PairedViewRefreshSource::new(subscriptions);
+
+    let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(first, integer(21));
+    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(second, integer(9));
+    let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(third, integer(21));
+    assert_eq!(first, integer(21), "the first refresh retains rows after filtered pages");
+    assert_eq!(second, integer(9), "the middle refresh keeps its own omission result");
+
+    assert_eq!(source.lanes.len(), 12, "each paired refresh binds four scoped reads");
+    for generation in 0..3 {
+        let start = generation * 4;
+        assert_eq!(source.lanes[start].0, "View.Left");
+        assert_eq!(source.lanes[start + 1].0, "View.Left");
+        assert_eq!(source.lanes[start + 2].0, "View.Right");
+        assert_eq!(source.lanes[start + 3].0, "View.Right");
+    }
+    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "filtered page continuations remain isolated by handoff scope: {scope:?}"
+        );
+    }
+    assert_eq!(source.cursors.len(), 22, "each nonterminal page follows its own continuation");
+}
+
 fn paired_subscription_cascade_body() -> Expr {
     let left = relation_stage(
         relation_stage(
