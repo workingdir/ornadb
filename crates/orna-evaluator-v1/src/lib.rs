@@ -11367,12 +11367,12 @@ fn parse_decimal(text: &str) -> Result<(BigInt, BigInt), EvaluationError> {
         .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
     let coefficient = BigInt::parse_bytes(format!("{whole}{fraction}").as_bytes(), 10)
         .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
-    Ok((
-        coefficient,
-        BigInt::from(
-            exponent - i64::try_from(fraction.len()).map_err(|_| error("ORNA-EVAL-LIMIT"))?,
-        ),
-    ))
+    let fraction_digits =
+        i64::try_from(fraction.len()).map_err(|_| error("ORNA-EVAL-LIMIT"))?;
+    let exponent = exponent
+        .checked_sub(fraction_digits)
+        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+    Ok((coefficient, BigInt::from(exponent)))
 }
 fn unescape_string(text: &str) -> Result<String, EvaluationError> {
     if text.len() < 2 {
