@@ -4,20 +4,17 @@
 
 ## Decision
 
-Use `orna-syntax` as the source for syntax vocabulary and token presentation.
-The `orna-syntax::grammar` module owns shared delimiters, operators,
-punctuation, language metadata, semantic-token order, and the mapping from each
-`HighlightKind` to its TextMate scope and optional semantic-token type. The
-parser-backed classifier remains authoritative for contextual token roles.
+Use `orna-syntax-v1` as the source for the Orna 1.0.0 syntax vocabulary and
+token presentation. `Keyword::ALL`, the v1 lexer, and the editor presentation
+table own keyword spellings, token classes, semantic-token order, and mapping
+to TextMate scopes and optional semantic-token types.
 
-Generate the TextMate grammar, VS Code language metadata, Tree-sitter keyword
-rules and captures, and Vim, Emacs, and Sublime lexical packages from this
-metadata. The structural Tree-sitter productions live in a template under
-`orna-syntax`; its keyword inventory is injected from the same shared source
-as the fallback grammars. Check in every generated file and require the
-generator's check mode to match them byte-for-byte. `orna-lsp` must use the
-shared table for its legend and token indices rather than maintain a duplicate
-mapping.
+Generate the TextMate grammar, VS Code language metadata, Tree-sitter grammar
+and captures, and Vim, Emacs, and Sublime lexical packages from this metadata.
+The generator and its Tree-sitter productions live in `orna-syntax-v1`. Check
+in every generated file and require the generator's check mode to match them
+byte-for-byte. `orna-lsp` uses the shared v1 table for its legend and token
+indices rather than maintaining a duplicate mapping.
 
 Static editor highlighting is a lexical fallback. Since these packages cannot
 use the Rust parser's CST context, ordinary identifiers receive generic scopes
@@ -44,16 +41,17 @@ just editor-artifacts
 just editor-artifacts-check
 ```
 
-Focused fixture tests live inside `orna-syntax` and load `.orna` inputs with
+Focused fixture tests live inside `orna-syntax-v1` and load `.orna` inputs with
 `include_str!`. No editor test reads from the reference checkout. The drift
-check compares all package files and verifies Tree-sitter grammar JavaScript
-syntax with Node; it does not launch editor hosts.
+check compares all generated package files and verifies Tree-sitter grammar
+JavaScript syntax with Node; it does not launch editor hosts. A deterministic
+grep guard rejects pre-1.0 syntax tokens in editor and packaging trees.
 
 ## Consequences
 
-Changing accepted keyword, scalar-type, delimiter, operator, or punctuation
-metadata produces one consistent update for the generated fallback grammar
-and editor configuration. Changing token presentation updates the LSP legend
-and generated mapping together. Contextual highlighting remains implemented
-once in the syntax classifier, with semantic-token capable clients consuming
-that result through `orna-lsp`.
+Changing accepted keyword, delimiter, operator, or punctuation metadata
+produces one consistent update for the generated fallback grammar and editor
+configuration. Changing token presentation updates the LSP legend and
+generated mapping together. Contextual highlighting is implemented once in
+the v1 syntax classifier, with semantic-token capable clients consuming that
+result through `orna-lsp`.

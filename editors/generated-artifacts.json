@@ -1,0 +1,29 @@
+{
+  "source": "orna-syntax-v1",
+  "languageVersion": "1.0.0",
+  "emitters": [
+    "TextMate grammar and VSCode extension",
+    "Tree-sitter grammar and package metadata",
+    "VSCode language configuration",
+    "Vim syntax and filetype detection",
+    "Emacs major mode",
+    "Sublime syntax",
+    "Semantic-token legend"
+  ],
+  "generatedFiles": [
+    "editors/textmate/orna.tmLanguage.json",
+    "editors/vscode/syntaxes/orna.tmLanguage.json",
+    "editors/semantic-token-legend.json",
+    "editors/vscode/language-configuration.json",
+    "editors/tree-sitter-orna/grammar.js",
+    "editors/tree-sitter-orna/queries/highlights.scm",
+    "editors/vim/syntax/orna.vim",
+    "editors/vim/ftdetect/orna.vim",
+    "editors/emacs/orna-eglot.el",
+    "editors/sublime/Orna.sublime-syntax",
+    "editors/vscode/package.json",
+    "editors/tree-sitter-orna/package.json",
+    "editors/tree-sitter-orna/tree-sitter.json",
+    "editors/generated-artifacts.json"
+  ]
+}
