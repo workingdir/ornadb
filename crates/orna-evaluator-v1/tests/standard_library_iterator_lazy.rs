@@ -103,6 +103,7 @@ fn pinned_iterator_and_lazy_modules_are_snapshot_bound_and_catalogued() {
         "pub fn fold<T, U>(source: Iterator<T>, initial: U, combine: fn(U, T): U): U",
         "pub fn take_while<T>(source: Iterator<T>, predicate: fn(T): Bool): Iterator<T>",
         "pub fn scan<T, U>(source: Iterator<T>, initial: U, combine: fn(U, T): U): Iterator<U>",
+        "pub fn last<T>(source: Iterator<T>): T?",
     ] {
         assert!(
             iterator_source.contains(declaration),
@@ -115,6 +116,7 @@ fn pinned_iterator_and_lazy_modules_are_snapshot_bound_and_catalogued() {
         "Folds a finite iterator from left to right",
         "Stops at the first rejected value",
         "Emits one left-to-right accumulated value for each source item",
+        "Returns the last item of a finite iterator, or null when it is empty",
     ] {
         assert!(
             iterator_source.contains(contract),
@@ -226,6 +228,38 @@ fn iterator_boundaries_scans_and_delayed_zip_with_return_computed_values() {
         (
             include_str!("fixtures/stdlib-lazy-from-pull-xef6t.orna"),
             10,
+        ),
+    ] {
+        let parsed = orna_syntax_v1::parse_expression(source);
+        assert!(parsed.is_ok(), "{}: {:#?}", source, parsed.diagnostics);
+        let actual = evaluate_with_functions_and_nominals(
+            &parsed.value,
+            &Environment::new(),
+            &functions,
+            &nominals,
+            Limits::default(),
+        )
+        .unwrap_or_else(|error| panic!("evaluation of {source} failed: {}", error.code()));
+        assert_eq!(
+            actual,
+            canonical(int(expected)),
+            "unexpected result for {source}"
+        );
+    }
+}
+
+#[test]
+fn iterator_last_returns_the_final_value_and_null_for_empty_input() {
+    let functions = pinned_functions();
+    let nominals = pinned_iterator_nominals();
+    for (source, expected) in [
+        (
+            include_str!("fixtures/stdlib-iterator-last-value-xef6t.orna"),
+            9,
+        ),
+        (
+            include_str!("fixtures/stdlib-iterator-last-empty-xef6t.orna"),
+            99,
         ),
     ] {
         let parsed = orna_syntax_v1::parse_expression(source);
