@@ -1,0 +1,5 @@
+[
+    std.stats.rate(points),
+    std.stats.derivative(points),
+    std.stats.integrate(points),
+]
