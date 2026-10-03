@@ -1,0 +1,12 @@
+parse.integer("0") == Some(0)
+&& parse.integer("42") == Some(42)
+&& parse.integer("-42") == Some(-42)
+&& parse.integer("90071992547409931234567890") == Some(90071992547409931234567890)
+&& parse.integer("-90071992547409931234567890") == Some(-90071992547409931234567890)
+&& parse.integer("") == null
+&& parse.integer("-") == null
+&& parse.integer("+42") == null
+&& parse.integer("042") == null
+&& parse.integer("-0") == null
+&& parse.integer("42 ") == null
+&& parse.integer("１２") == null
