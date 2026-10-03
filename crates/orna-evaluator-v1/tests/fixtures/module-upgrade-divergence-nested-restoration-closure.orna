@@ -1,0 +1,9 @@
+fn make_nested_restoration_closure(seed: Int) = delta => value => offset => [
+    math.marker(),
+    collection.marker(),
+    math.marker() + collection.marker(),
+    math.shift(seed + delta + value + offset),
+    std.math.marker(),
+    std.collection.marker(),
+    std.math.shift(seed + delta + value + offset + 1),
+];
