@@ -10,6 +10,7 @@ use orna_storage_v1::{
     BranchMergeConflict, BranchMergeDepthFragmentRecovery,
     BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
     BranchMergeMultiParentTabularColumnDepthWave,
+    BranchMergeParentColumnDepthLadderEvent,
     BranchMergeTombstoneEvent, BranchRowSource,
     BranchMergePlanSequenceError, BranchMergePlanSequencer, BranchMergeTombstoneHistory,
     BranchMergeTabularColumnDepthWave, BranchMergeTabularDepthWave,
@@ -26391,6 +26392,250 @@ fn tabular_restore_storm_releases_uneven_table_depth_identities() {
         history.submit_tabular_depth_wave(&wave(2)),
         Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 2 }),
         "an exact replay after the storm release remains stale",
+    );
+    assert_eq!(history, committed);
+}
+
+#[test]
+fn multi_parent_storm_releases_parent_local_fragment_ladder_labels() {
+    let fixture_rows = MULTI_PARENT_COLUMN_DEPTH
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate multi-parent fixture supplies {path}"))
+            .clone()
+    };
+    let shared = fixture_row("shared");
+    let left = fixture_row("branch/left");
+    let right = fixture_row("branch/right");
+    let deep = fixture_row("branch/right/deep");
+    assert_eq!(shared.fields[&id(2)], string("Root value"));
+    assert_eq!(left.fields[&id(3)], string("Bergen"));
+    assert_eq!(right.fields[&id(2)], string("Right leaf"));
+    assert_eq!(deep.fields[&id(2)], string("Right deep"));
+
+    let cells = |row: &KeyedRow, column| {
+        (row.key.clone(), row.fields[&id(column)].clone())
+    };
+    let depth = |fragment_count, fragments| BranchMergeColumnDepthFragments {
+        fragment_count,
+        fragments,
+    };
+    let wave = |order| {
+        let parents = match order {
+            2 => BTreeMap::from([
+                (
+                    id(10),
+                    BTreeMap::from([(
+                        (id(1), id(2)),
+                        depth(1, BTreeMap::from([(0, vec![cells(&shared, 2)])])),
+                    )]),
+                ),
+                (
+                    id(20),
+                    BTreeMap::from([(
+                        (id(1), id(2)),
+                        depth(
+                            2,
+                            BTreeMap::from([
+                                (0, vec![cells(&shared, 2)]),
+                                (1, vec![cells(&left, 2)]),
+                            ]),
+                        ),
+                    )]),
+                ),
+                (
+                    id(30),
+                    BTreeMap::from([(
+                        (id(1), id(3)),
+                        depth(
+                            3,
+                            BTreeMap::from([
+                                (0, vec![cells(&shared, 3)]),
+                                (1, Vec::new()),
+                                (2, vec![cells(&right, 3)]),
+                            ]),
+                        ),
+                    )]),
+                ),
+            ]),
+            3 => BTreeMap::from([
+                (
+                    id(10),
+                    BTreeMap::from([(
+                        (id(1), id(2)),
+                        depth(
+                            3,
+                            BTreeMap::from([
+                                (0, vec![cells(&shared, 2)]),
+                                (1, Vec::new()),
+                                (2, vec![cells(&left, 2)]),
+                            ]),
+                        ),
+                    )]),
+                ),
+                (
+                    id(20),
+                    BTreeMap::from([(
+                        (id(1), id(2)),
+                        depth(
+                            4,
+                            BTreeMap::from([
+                                (0, vec![cells(&shared, 2)]),
+                                (1, Vec::new()),
+                                (2, vec![cells(&right, 2)]),
+                                (3, vec![cells(&deep, 2)]),
+                            ]),
+                        ),
+                    )]),
+                ),
+                (
+                    id(30),
+                    BTreeMap::from([(
+                        (id(1), id(3)),
+                        depth(
+                            2,
+                            BTreeMap::from([
+                                (0, vec![cells(&shared, 3)]),
+                                (1, vec![cells(&deep, 3)]),
+                            ]),
+                        ),
+                    )]),
+                ),
+            ]),
+            other => panic!("unexpected multi-parent restore wave order: {other}"),
+        };
+        BranchMergeMultiParentTabularColumnDepthWave { order, parents }
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history
+        .submit_multi_parent_tabular_column_depth_wave(&wave(3))
+        .unwrap()
+        .is_empty());
+    assert!(history
+        .submit_multi_parent_tabular_column_depth_wave(&wave(2))
+        .unwrap()
+        .is_empty());
+    assert!(history.parent_column_ladder_events().is_empty());
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+    assert_eq!(history.next_order(), Some(1));
+    assert!(history.parent_column_ladder_events().is_empty());
+    assert!(history.submit(&empty_plan(1)).unwrap().is_empty());
+
+    assert_eq!(history.parent_column_events().len(), 12);
+    assert!(history.parent_column_events().iter().any(|event| {
+        event.order == 3
+            && event.parent == id(20)
+            && event.column == id(2)
+            && event.fragment == 3
+            && event.key == deep.key
+            && event.value == string("Right deep")
+    }));
+    assert_eq!(
+        history.parent_column_ladder_events(),
+        &[
+            BranchMergeParentColumnDepthLadderEvent {
+                order: 2,
+                parent: id(10),
+                table: id(1),
+                column: id(2),
+                depth_labels: vec![0],
+            },
+            BranchMergeParentColumnDepthLadderEvent {
+                order: 2,
+                parent: id(20),
+                table: id(1),
+                column: id(2),
+                depth_labels: vec![0, 1],
+            },
+            BranchMergeParentColumnDepthLadderEvent {
+                order: 2,
+                parent: id(30),
+                table: id(1),
+                column: id(3),
+                depth_labels: vec![0, 1, 2],
+            },
+            BranchMergeParentColumnDepthLadderEvent {
+                order: 3,
+                parent: id(10),
+                table: id(1),
+                column: id(2),
+                depth_labels: vec![0, 1, 2],
+            },
+            BranchMergeParentColumnDepthLadderEvent {
+                order: 3,
+                parent: id(20),
+                table: id(1),
+                column: id(2),
+                depth_labels: vec![0, 1, 2, 3],
+            },
+            BranchMergeParentColumnDepthLadderEvent {
+                order: 3,
+                parent: id(30),
+                table: id(1),
+                column: id(3),
+                depth_labels: vec![0, 1],
+            },
+        ],
+        "each parent retains independent fragment labels and empty positions through storm release",
+    );
+    let committed = history.clone();
+
+    let mut shortened_parent_ladder = wave(2);
+    shortened_parent_ladder
+        .parents
+        .get_mut(&id(30))
+        .unwrap()
+        .get_mut(&(id(1), id(3)))
+        .unwrap()
+        .fragment_count = 2;
+    assert_eq!(
+        history.submit_multi_parent_tabular_column_depth_wave(&shortened_parent_ladder),
+        Err(BranchMergeTombstoneHistoryError::ParentColumnFragmentCountMismatch {
+            order: 2,
+            parent: id(30),
+            table: id(1),
+            column: id(3),
+            expected: 3,
+            actual: 2,
+        }),
+        "one parent's retry cannot borrow the shorter ladder from another branch",
+    );
+    assert_eq!(history, committed);
+
+    let mut missing_empty_depth = wave(3);
+    missing_empty_depth
+        .parents
+        .get_mut(&id(10))
+        .unwrap()
+        .get_mut(&(id(1), id(2)))
+        .unwrap()
+        .fragments
+        .remove(&1);
+    assert_eq!(
+        history.submit_multi_parent_tabular_column_depth_wave(&missing_empty_depth),
+        Err(BranchMergeTombstoneHistoryError::IncompleteParentColumnDepthFragments {
+            order: 3,
+            parent: id(10),
+            table: id(1),
+            column: id(2),
+        }),
+        "an empty parent-local label cannot be omitted from a retry",
     );
     assert_eq!(history, committed);
 }
