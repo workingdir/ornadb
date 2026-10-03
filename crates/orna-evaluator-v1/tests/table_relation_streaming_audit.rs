@@ -3749,7 +3749,7 @@ fn paired_refresh_windows_keep_scope_identity_across_compaction_chains() {
     let long_cursor = vec![0x48, 0xff, 0x00];
     let compact_cursor = vec![0x49];
     let restore = |groups: &[&[i64]]| {
-        assert_eq!(groups.len(), 3, "each five-row snapshot spans three pages");
+        assert_eq!(groups.len(), 3, "each six-row snapshot spans three pages");
         BTreeMap::from([
             (None, page(groups[0], Some(long_cursor.clone()))),
             (
@@ -3760,12 +3760,12 @@ fn paired_refresh_windows_keep_scope_identity_across_compaction_chains() {
         ])
     };
     let mut source = PairedCursorRestoreSource::new([
-        ("View.Left", restore(&[&[1, 2], &[3], &[4, 5]])),
-        ("View.Right", restore(&[&[2], &[4, 6], &[8, 10]])),
-        ("View.Left", restore(&[&[-1], &[3, 5], &[7, 9]])),
-        ("View.Right", restore(&[&[3, 6], &[9], &[12, 15]])),
-        ("View.Left", restore(&[&[2, 0, 4], &[6], &[8]])),
-        ("View.Right", restore(&[&[-2], &[5, 7], &[11, 13]])),
+        ("View.Left", restore(&[&[1, 2], &[3], &[4, 5, 99]])),
+        ("View.Right", restore(&[&[2], &[4, 6], &[8, 10, 99]])),
+        ("View.Left", restore(&[&[-1], &[3, 5], &[7, 9, -99]])),
+        ("View.Right", restore(&[&[3, 6], &[9], &[12, 15, -99]])),
+        ("View.Left", restore(&[&[2, 0, 4], &[6], &[8, 99]])),
+        ("View.Right", restore(&[&[-2], &[5, 7], &[11, 13, 99]])),
     ]);
     let mut functions = paired_window_scope_compaction_functions();
     functions.insert(
@@ -3788,11 +3788,11 @@ fn paired_refresh_windows_keep_scope_identity_across_compaction_chains() {
     };
 
     let first = run_refresh(&mut source);
-    assert_eq!(first, integer_pair(18, 36), "the first cross-page windows sum to (18, 36)");
+    assert_eq!(first, integer_pair(18, 36), "the first complete windows sum to (18, 36)");
     let second = run_refresh(&mut source);
     assert_eq!(second, integer_pair(28, 54), "the next compacted pair sums to (28, 54)");
     let third = run_refresh(&mut source);
-    assert_eq!(third, integer_pair(24, 41), "the final pair sums its own restored windows");
+    assert_eq!(third, integer_pair(24, 41), "the final pair sums complete restored windows");
     assert_eq!(first, integer_pair(18, 36), "later refreshes keep the first window snapshot intact");
     assert_eq!(second, integer_pair(28, 54), "later refreshes keep the second window snapshot intact");
 
