@@ -1192,6 +1192,38 @@ impl PackageResolver {
         Ok(route)
     }
 
+    /// Applies several sparse-round chains as one nested terminal-pair fold.
+    /// Labels seen in an earlier chain remain bound to their original retained
+    /// snapshots and are revalidated after every later chain, including chains
+    /// that omit them. The reference is silent on cross-chain sparse folds; v1
+    /// carries the exact depth identities across segment boundaries and returns
+    /// no partial route if any chain invalidates one.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+        &self,
+        previous: &ReboundPathResolution,
+        chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let mut route = previous.clone();
+        let mut retained_labels: Vec<NestedPairDepthLabel> = Vec::new();
+        for chain in chains {
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+                    &route, chain,
+                )?;
+            for round in *chain {
+                for (label, _) in *round {
+                    if !retained_labels.contains(label) {
+                        retained_labels.push((*label).clone());
+                    }
+                }
+            }
+            for label in &retained_labels {
+                route.validate_depth_label(label)?;
+            }
+        }
+        Ok(route)
+    }
+
     /// Folds checkpoint-rooted terminal-pair storms across independent parent
     /// routes. Each table row is `(route, storms)` and resolves only checkpoints
     /// captured from that row's route; row order and anchor identity are kept
