@@ -1115,6 +1115,26 @@ impl PackageResolver {
         )
     }
 
+    /// Applies ordered rounds of depth-selected sibling checkpoint storms.
+    /// Each round contains one plan slice per sibling row, and its coordinates
+    /// are resolved against the result of the preceding round. The reference
+    /// is silent on composing multi-parent continuation rounds; v1 preserves
+    /// all earlier row-scoped labels and returns no partial result if any
+    /// round selects a missing depth or fails to fold.
+    pub fn extend_sibling_terminal_pair_checkpoint_storm_rounds_from_depths(
+        &self,
+        previous: &SiblingRebindResolution,
+        rounds: &[&[&[(usize, usize, &[[PinnedDatabase; 2]])]]],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let mut folded = previous.clone();
+        for round in rounds {
+            folded = self.extend_sibling_terminal_pair_checkpoint_storms_from_depths(
+                &folded, round,
+            )?;
+        }
+        Ok(folded)
+    }
+
     /// Rebinds each terminal pair in a storm from one saved checkpoint.
     /// Every fold starts from the same exact nested pins and appends that
     /// checkpoint route to retained history. Each emitted route receives its

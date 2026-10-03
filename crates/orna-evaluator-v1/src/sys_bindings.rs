@@ -482,11 +482,14 @@ impl SysHostBindingRegistry {
             ),
             None => OvbRaw::Tag(60013, Box::new(OvbRaw::Array(vec![OvbRaw::Int(0.into())]))),
         };
-        CanonicalValue::new(OvbRaw::Array(vec![
-            exit_status,
-            OvbRaw::Bytes(output.stdout),
-            OvbRaw::Bytes(output.stderr),
-        ]))
+        CanonicalValue::new(OvbRaw::Tag(
+            60015,
+            Box::new(OvbRaw::Array(vec![
+                exit_status,
+                OvbRaw::Bytes(output.stdout),
+                OvbRaw::Bytes(output.stderr),
+            ])),
+        ))
         .map(Some)
         .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))
     }
@@ -686,7 +689,10 @@ fn raw_text_pairs(value: &OvbRaw) -> Option<Vec<(String, String)>> {
     values
         .iter()
         .map(|value| {
-            let OvbRaw::Array(pair) = value else {
+            let OvbRaw::Tag(60015, pair) = value else {
+                return None;
+            };
+            let OvbRaw::Array(pair) = pair.as_ref() else {
                 return None;
             };
             let [name, value] = pair.as_slice() else {
