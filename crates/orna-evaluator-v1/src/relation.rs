@@ -280,6 +280,10 @@ pub(super) struct RelationPlan {
     pub(super) source: String,
     pub(super) source_identity: u64,
     pub(super) source_union: Option<(Box<RelationPlan>, Box<RelationPlan>)>,
+    /// Bounded, already-materialized rows produced by finite collection
+    /// operators over a relation. Keeping these rows behind an Arc lets the
+    /// result remain a Relation<T> and replay safely through later operators.
+    pub(super) source_values: Option<Arc<Vec<Value>>>,
     pub(super) stages: Vec<RelationStage>,
 }
 
@@ -287,6 +291,7 @@ impl PartialEq for RelationPlan {
     fn eq(&self, other: &Self) -> bool {
         self.source == other.source
             && self.source_union == other.source_union
+            && self.source_values == other.source_values
             && self.stages == other.stages
     }
 }
@@ -609,6 +614,17 @@ impl RelationPlan {
             source,
             source_identity: next_relation_source_id(),
             source_union: None,
+            source_values: None,
+            stages: Vec::new(),
+        }
+    }
+
+    pub(super) fn from_values(values: Vec<Value>) -> Self {
+        Self {
+            source: String::new(),
+            source_identity: next_relation_source_id(),
+            source_union: None,
+            source_values: Some(Arc::new(values)),
             stages: Vec::new(),
         }
     }
@@ -623,6 +639,7 @@ impl RelationPlan {
             source: String::new(),
             source_identity: next_relation_source_id(),
             source_union: Some((Box::new(left), Box::new(right))),
+            source_values: None,
             stages: Vec::new(),
         }
     }

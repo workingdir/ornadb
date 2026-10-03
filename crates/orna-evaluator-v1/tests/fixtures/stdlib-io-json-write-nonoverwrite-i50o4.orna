@@ -1,0 +1,1 @@
+std.io.fs.write_text("ROOT_PATH", "value.json", std.encoding.json.encode(9007199254740993), false)
