@@ -1,0 +1,16 @@
+pub table Reading(id: Int) {
+    key: ((Int, Str)?, (Int, Str)?),
+    expected: ((Int, Str)?, (Int, Str)?),
+    assert all_unique(reading => reading.key);
+    assert every(reading =>
+        if reading.id == 1 {
+            reading.key == reading.expected && reading.id == 1
+        } else {
+            reading.key == reading.expected && reading.id == 2
+        });
+}
+
+fn parent() {
+    Reading.insert({ id: 1, key: (null, (2, "east")), expected: (null, (2, "east")) });
+    Reading.insert({ id: 2, key: ((1, "west"), null), expected: ((1, "west"), (3, "blue")) });
+}
