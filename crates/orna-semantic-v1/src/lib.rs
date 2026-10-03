@@ -18140,8 +18140,304 @@ fn pinned_snapshot_reset_type(expected: &Type, selected: &Type) -> Option<Type> 
         && checkpoint_snapshot_maps_are_valid(selected)
         && type_contains_pinned_snapshot_identity(expected)
         && type_contains_pinned_snapshot_identity(selected)
-        && pinned_snapshot_shape_matches(expected, selected))
+        && pinned_snapshot_reset_shape_matches(expected, selected))
     .then(|| selected.clone())
+}
+
+/// A saved source may fill a nested Bottom boundary when another checkpoint
+/// boundary gives the local a concrete shape. Bottom has no selector identity,
+/// so ignore that path while preserving the topology of concrete maps. The
+/// selected source supplies the exact complete map for the reset value.
+fn pinned_snapshot_reset_shape_matches(expected: &Type, selected: &Type) -> bool {
+    if !checkpoint_snapshot_maps_are_valid(expected)
+        || !checkpoint_snapshot_maps_are_valid(selected)
+    {
+        return false;
+    }
+    let mut maps = Vec::new();
+    let mut path = Vec::new();
+    collect_reset_snapshot_context_maps(expected, selected, &mut maps, &mut path)
+        && snapshot_context_topology_matches(&maps)
+        && pinned_snapshot_reset_shape_matches_at_path(expected, selected)
+}
+
+fn pinned_snapshot_reset_shape_matches_at_path(expected: &Type, selected: &Type) -> bool {
+    if matches!(expected, Type::Bottom) || matches!(selected, Type::Bottom) {
+        return true;
+    }
+    if !type_contains_bottom(expected) && !type_contains_bottom(selected) {
+        return pinned_snapshot_shape_matches(expected, selected);
+    }
+    match (expected, selected) {
+        (Type::List(expected), Type::List(selected))
+        | (Type::Range(expected), Type::Range(selected))
+        | (Type::Relation(expected), Type::Relation(selected))
+        | (Type::Stream(expected), Type::Stream(selected))
+        | (Type::Optional(expected), Type::Optional(selected)) => {
+            pinned_snapshot_reset_shape_matches_at_path(expected, selected)
+        }
+        (Type::Tuple(expected), Type::Tuple(selected)) if expected.len() == selected.len() => {
+            expected.iter().zip(selected).all(|(expected, selected)| {
+                pinned_snapshot_reset_shape_matches_at_path(expected, selected)
+            })
+        }
+        (Type::Record(expected), Type::Record(selected)) if expected.len() == selected.len() => {
+            expected.iter().all(|(name, expected)| {
+                selected.get(name).is_some_and(|selected| {
+                    pinned_snapshot_reset_shape_matches_at_path(expected, selected)
+                })
+            })
+        }
+        (
+            Type::Function {
+                parameters: expected_parameters,
+                parameter_names: expected_names,
+                default_parameters: expected_defaults,
+                result: expected_result,
+            },
+            Type::Function {
+                parameters: selected_parameters,
+                parameter_names: selected_names,
+                default_parameters: selected_defaults,
+                result: selected_result,
+            },
+        ) => {
+            expected_names == selected_names
+                && expected_defaults == selected_defaults
+                && expected_parameters.len() == selected_parameters.len()
+                && expected_parameters
+                    .iter()
+                    .zip(selected_parameters)
+                    .all(|(expected, selected)| {
+                        pinned_snapshot_reset_shape_matches_at_path(expected, selected)
+                    })
+                && pinned_snapshot_reset_shape_matches_at_path(expected_result, selected_result)
+        }
+        (
+            Type::Applied {
+                base: expected_base,
+                arguments: expected_arguments,
+            },
+            Type::Applied {
+                base: selected_base,
+                arguments: selected_arguments,
+            },
+        ) if expected_base == selected_base && expected_arguments.len() == selected_arguments.len() => {
+            expected_arguments
+                .iter()
+                .zip(selected_arguments)
+                .all(|(expected, selected)| {
+                    pinned_snapshot_reset_shape_matches_at_path(expected, selected)
+                })
+        }
+        (
+            Type::MoneyPerUnit {
+                currency: expected_currency,
+                unit: expected_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: selected_currency,
+                unit: selected_unit,
+            },
+        ) => {
+            pinned_snapshot_reset_shape_matches_at_path(expected_currency, selected_currency)
+                && pinned_snapshot_reset_shape_matches_at_path(expected_unit, selected_unit)
+        }
+        _ => expected == selected,
+    }
+}
+
+fn type_contains_bottom(ty: &Type) -> bool {
+    match ty {
+        Type::Bottom => true,
+        Type::List(inner)
+        | Type::Range(inner)
+        | Type::Relation(inner)
+        | Type::Stream(inner)
+        | Type::Optional(inner) => type_contains_bottom(inner),
+        Type::Tuple(elements) => elements.iter().any(type_contains_bottom),
+        Type::Record(fields) => fields.values().any(type_contains_bottom),
+        Type::Applied { arguments, .. } => arguments.iter().any(type_contains_bottom),
+        Type::Function {
+            parameters, result, ..
+        } => parameters.iter().any(type_contains_bottom) || type_contains_bottom(result),
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_bottom(currency) || type_contains_bottom(unit)
+        }
+        _ => false,
+    }
+}
+
+fn collect_reset_snapshot_context_maps(
+    expected: &Type,
+    selected: &Type,
+    maps: &mut Vec<SnapshotContextMapPair>,
+    path: &mut Vec<SnapshotTopologyBoundary>,
+) -> bool {
+    if matches!(expected, Type::Bottom) || matches!(selected, Type::Bottom) {
+        return true;
+    }
+    if !type_contains_bottom(expected) && !type_contains_bottom(selected) {
+        return collect_corresponding_snapshot_context_maps_at_path(expected, selected, maps, path);
+    }
+    match (expected, selected) {
+        (Type::List(expected), Type::List(selected)) => collect_reset_maps_at_boundary(
+            expected,
+            selected,
+            maps,
+            path,
+            SnapshotTopologyBoundary::ListElement,
+        ),
+        (Type::Range(expected), Type::Range(selected)) => collect_reset_maps_at_boundary(
+            expected,
+            selected,
+            maps,
+            path,
+            SnapshotTopologyBoundary::RangeElement,
+        ),
+        (Type::Relation(expected), Type::Relation(selected)) => collect_reset_maps_at_boundary(
+            expected,
+            selected,
+            maps,
+            path,
+            SnapshotTopologyBoundary::RelationElement,
+        ),
+        (Type::Stream(expected), Type::Stream(selected)) => collect_reset_maps_at_boundary(
+            expected,
+            selected,
+            maps,
+            path,
+            SnapshotTopologyBoundary::StreamElement,
+        ),
+        (Type::Optional(expected), Type::Optional(selected)) => collect_reset_maps_at_boundary(
+            expected,
+            selected,
+            maps,
+            path,
+            SnapshotTopologyBoundary::OptionalValue,
+        ),
+        (Type::Tuple(expected), Type::Tuple(selected)) if expected.len() == selected.len() => {
+            expected.iter().zip(selected).enumerate().all(|(index, (expected, selected))| {
+                collect_reset_maps_at_boundary(
+                    expected,
+                    selected,
+                    maps,
+                    path,
+                    SnapshotTopologyBoundary::TupleElement(index),
+                )
+            })
+        }
+        (Type::Record(expected), Type::Record(selected)) if expected.len() == selected.len() => {
+            expected.iter().all(|(name, expected)| {
+                selected.get(name).is_some_and(|selected| {
+                    collect_reset_maps_at_boundary(
+                        expected,
+                        selected,
+                        maps,
+                        path,
+                        SnapshotTopologyBoundary::RecordField(name.clone()),
+                    )
+                })
+            })
+        }
+        (
+            Type::Function {
+                parameters: expected_parameters,
+                result: expected_result,
+                ..
+            },
+            Type::Function {
+                parameters: selected_parameters,
+                result: selected_result,
+                ..
+            },
+        ) if expected_parameters.len() == selected_parameters.len() => {
+            expected_parameters
+                .iter()
+                .zip(selected_parameters)
+                .enumerate()
+                .all(|(index, (expected, selected))| {
+                    collect_reset_maps_at_boundary(
+                        expected,
+                        selected,
+                        maps,
+                        path,
+                        SnapshotTopologyBoundary::FunctionParameter(index),
+                    )
+                }) && collect_reset_maps_at_boundary(
+                expected_result,
+                selected_result,
+                maps,
+                path,
+                SnapshotTopologyBoundary::FunctionResult,
+            )
+        }
+        (
+            Type::Applied {
+                base: expected_base,
+                arguments: expected_arguments,
+            },
+            Type::Applied {
+                base: selected_base,
+                arguments: selected_arguments,
+            },
+        ) if expected_base == selected_base && expected_arguments.len() == selected_arguments.len() => {
+            expected_arguments
+                .iter()
+                .zip(selected_arguments)
+                .enumerate()
+                .all(|(index, (expected, selected))| {
+                    collect_reset_maps_at_boundary(
+                        expected,
+                        selected,
+                        maps,
+                        path,
+                        SnapshotTopologyBoundary::AppliedArgument {
+                            base: expected_base.clone(),
+                            index,
+                        },
+                    )
+                })
+        }
+        (
+            Type::MoneyPerUnit {
+                currency: expected_currency,
+                unit: expected_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: selected_currency,
+                unit: selected_unit,
+            },
+        ) => {
+            collect_reset_maps_at_boundary(
+                expected_currency,
+                selected_currency,
+                maps,
+                path,
+                SnapshotTopologyBoundary::MoneyCurrency,
+            ) && collect_reset_maps_at_boundary(
+                expected_unit,
+                selected_unit,
+                maps,
+                path,
+                SnapshotTopologyBoundary::MoneyUnit,
+            )
+        }
+        _ => true,
+    }
+}
+
+fn collect_reset_maps_at_boundary(
+    expected: &Type,
+    selected: &Type,
+    maps: &mut Vec<SnapshotContextMapPair>,
+    path: &mut Vec<SnapshotTopologyBoundary>,
+    boundary: SnapshotTopologyBoundary,
+) -> bool {
+    path.push(boundary);
+    let matched = collect_reset_snapshot_context_maps(expected, selected, maps, path);
+    path.pop();
+    matched
 }
 
 fn type_contains_pinned_snapshot_identity(ty: &Type) -> bool {
