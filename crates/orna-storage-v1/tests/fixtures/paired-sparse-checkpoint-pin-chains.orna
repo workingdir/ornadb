@@ -1,0 +1,23 @@
+{ id: "hugp3/alpha/source-a-fold-a-order-4", name: "pin/alpha/a-left-0", city: "pin/alpha/a-right-0", }
+
+{ id: "hugp3/alpha/source-a-fold-a-order-6", name: "pin/alpha/a-left-1", city: "pin/alpha/a-right-1", }
+
+{ id: "hugp3/alpha/source-a-fold-b-order-6", name: "pin/alpha/a-left-2", city: "pin/alpha/a-right-2", }
+
+{ id: "hugp3/alpha/source-b-fold-a-order-4", name: "pin/alpha/b-left-0", city: "pin/alpha/b-right-0", }
+
+{ id: "hugp3/alpha/source-b-fold-a-order-5", name: "pin/alpha/b-left-1", city: "pin/alpha/b-right-1", }
+
+{ id: "hugp3/alpha/source-b-fold-b-order-7", name: "pin/alpha/b-left-2", city: "pin/alpha/b-right-2", }
+
+{ id: "hugp3/alpha/source-c-fold-a-order-4", name: "pin/alpha/c-left-0", city: "pin/alpha/c-right-0", }
+
+{ id: "hugp3/alpha/source-c-fold-b-order-6", name: "pin/alpha/c-left-1", city: "pin/alpha/c-right-1", }
+
+{ id: "hugp3/alpha/source-c-fold-b-order-9", name: "pin/alpha/c-left-2", city: "pin/alpha/c-right-2", }
+
+{ id: "hugp3/beta/source-a-fold-a-order-6", name: "pin/beta/a-left-0", city: "pin/beta/a-right-0", }
+
+{ id: "hugp3/beta/source-c-fold-a-order-4", name: "pin/beta/c-left-0", city: "pin/beta/c-right-0", }
+
+{ id: "hugp3/late/source-c-fold-b-order-9", name: "pin/late/c-left-0", city: "pin/late/c-right-0", }
