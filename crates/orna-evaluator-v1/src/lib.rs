@@ -5125,7 +5125,13 @@ impl Context<'_, '_> {
                 }
             }
             Value::Relation(plan) => {
+                // The reference fixes flat_map order but leaves query-valued
+                // callbacks implicit. Treat a returned relation as a lateral
+                // child: finish its scoped scan before advancing the outer row.
                 self.for_each_relation_value(&plan, depth + 1, |context, inner_value| {
+                    if inner_value.contains_callable() {
+                        return Err(error("ORNA-EVAL-UNSUPPORTED"));
+                    }
                     let inner_rows = context.apply_relation_stages(
                         inner_value,
                         suffix,
@@ -8495,13 +8501,9 @@ impl Context<'_, '_> {
         self.items(values.len())?;
         let mut flattened = Vec::new();
         for value in values {
-            let inner = match self.invoke_predicate(transform, value.clone(), depth + 1)? {
-                Value::List(inner) => inner,
-                // A relation-valued callback is a lateral finite collection:
-                // scan it for this outer value, retaining its own read scope
-                // while preserving the surrounding flat_map order.
-                Value::Relation(plan) => self.collect_relation_values(&plan, depth + 1)?,
-                _ => return Err(error("ORNA-EVAL-TYPE")),
+            let Value::List(inner) = self.invoke_predicate(transform, value.clone(), depth + 1)?
+            else {
+                return Err(error("ORNA-EVAL-TYPE"));
             };
             self.items(inner.len())?;
             for value in inner {
