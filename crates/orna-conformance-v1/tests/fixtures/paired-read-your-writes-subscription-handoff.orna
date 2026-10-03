@@ -20,6 +20,18 @@ fn paired_identity_total(): Int = Note
 
 fn parent() {
     seed();
-    assert paired_total() == 60;
-    assert paired_identity_total() == 140;
+    let seeded_total = paired_total();
+    let seeded_identity_total = paired_identity_total();
+    assert seeded_total == 60;
+    assert seeded_identity_total == 140;
+
+    Note.update(2, { amount: 25, label: "rebound" });
+    Note.insert({ id: 4, amount: 40, label: "stable" });
+
+    // Captured fold values are snapshots; fresh paired subscriptions see the
+    // activation overlay with the update and insert.
+    assert seeded_total == 60;
+    assert seeded_identity_total == 140;
+    assert paired_total() == 105;
+    assert paired_identity_total() == 260;
 }
