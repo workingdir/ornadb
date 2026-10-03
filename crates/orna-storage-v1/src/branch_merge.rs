@@ -340,7 +340,7 @@ enum BranchMergeTombstoneSubmissionMode {
     DepthFragments,
 }
 
-type PairedRetryPlanSignature = (u64, [u8; 32], Vec<(ObjectId, CanonicalValue)>);
+type PairedRetryPlanSignature = (u64, [u8; 32], [u8; 32]);
 type DepthFragmentRetrySignature = (u64, usize, usize, [u8; 32]);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -365,7 +365,7 @@ impl AppliedDepthFragmentRetryTransaction {
                     (
                         step.order,
                         paired_plan_retry_identity(&step.plan),
-                        step.ordered_row_tombstones.clone(),
+                        tombstone_delta_retry_identity(&step.ordered_row_tombstones),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -379,7 +379,7 @@ impl AppliedDepthFragmentRetryTransaction {
                     recovery.order,
                     recovery.fragment,
                     recovery.fragment_count,
-                    depth_fragment_retry_identity(&recovery.tombstones),
+                    tombstone_delta_retry_identity(&recovery.tombstones),
                 )
             })
             .collect::<Vec<_>>();
@@ -901,7 +901,8 @@ impl BranchMergeTombstoneHistory {
     /// Recovery receipt identity includes each fragment's order, index, count,
     /// and canonical tombstone delta. Tombstone ordering inside one fragment
     /// does not change the receipt identity because released deltas are
-    /// normalized by table and key.
+    /// normalized by table and key. Paired append projections use the same
+    /// order-insensitive delta identity alongside the full paired-plan body.
     /// Before changing paired identities, the batch checks fragment-count
     /// labels against every buffered wave in lineage order. This lets a stale
     /// label in an earlier wave remain visible even if a later binding would
@@ -1406,7 +1407,7 @@ impl BranchMergeTombstoneHistory {
         else {
             return Ok(());
         };
-        if *expected_identity != depth_fragment_retry_identity(tombstones) {
+        if *expected_identity != tombstone_delta_retry_identity(tombstones) {
             return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
         }
         Ok(())
@@ -1442,7 +1443,7 @@ impl BranchMergeTombstoneHistory {
                     fragments
                         .iter()
                         .map(|(fragment, tombstones)| {
-                            (*fragment, depth_fragment_retry_identity(tombstones))
+                            (*fragment, tombstone_delta_retry_identity(tombstones))
                         })
                         .collect(),
                 );
@@ -1724,10 +1725,9 @@ fn update_retry_identity_count(hash: &mut Sha256, count: usize) {
     hash.update(u64::try_from(count).unwrap_or(u64::MAX).to_be_bytes());
 }
 
-/// Retains one depth fragment's exact tombstone delta without keeping its
-/// canonical values in committed retry history. Ordering is normalized so a
-/// retry may submit the same fragment members in any order.
-fn depth_fragment_retry_identity(tombstones: &[(ObjectId, CanonicalValue)]) -> [u8; 32] {
+/// Fingerprints a canonical tombstone delta without retaining its values in
+/// retry history. Ordering is normalized because release sorts by table/key.
+fn tombstone_delta_retry_identity(tombstones: &[(ObjectId, CanonicalValue)]) -> [u8; 32] {
     let mut encoded = tombstones
         .iter()
         .map(|(table, key)| {
@@ -1741,7 +1741,7 @@ fn depth_fragment_retry_identity(tombstones: &[(ObjectId, CanonicalValue)]) -> [
     encoded.sort_unstable();
 
     let mut hash = Sha256::new();
-    hash.update(b"orna-storage-depth-fragment-retry-v1");
+    hash.update(b"orna-storage-tombstone-delta-retry-v1");
     update_retry_identity_count(&mut hash, encoded.len());
     for (table, key) in encoded {
         hash.update(table);

@@ -128,13 +128,17 @@ test:
     cargo test --locked --workspace --all-targets
 
 # Verify provider dispatch metadata export/schema conformance and generated-artifact drift.
-sys-artifact-ci: sys-binding-conformance-ci
+sys-artifact-ci: sys-binding-conformance-ci sys-dispatch-coverage-ci
     cargo test --locked -p orna-sys-v1 --features dev-sys-export --test sys_api_export --test system_registry_parity --test system_provider_abi
     cargo test --locked -p orna-evaluator-v1 --features orna-sys-v1/dev-sys-export --test generated_sys_host_binding_coverage --test standard_library_process_environment --test standard_library_filesystem_network
 
 # Sweep generated declaration parsing, registry typing/dispatch, and embedded schema parity.
 sys-binding-conformance-ci:
     cargo test --locked -p orna-sys-v1 --features dev-sys-export --test system_binding_stubs --test host_registry_parity --test sys_schema_regeneration --test sys_api_generation
+
+# Exercise every generated host operation through its registered evaluator dispatch arm.
+sys-dispatch-coverage-ci:
+    cargo test --locked -p orna-evaluator-v1 --features orna-sys-v1/dev-sys-export --lib every_generated_host_operation_reaches_its_native_dispatch_arm
 
 # Validate the tree-sitter grammar and editor metadata without installing editor runtimes.
 # This static gate requires its CLI prerequisites: Python 3.11+, tree-sitter CLI, node, and cargo.
