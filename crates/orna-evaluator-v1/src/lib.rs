@@ -204,9 +204,10 @@ pub struct StepBudget {
 }
 
 /// One bounded, canonical page of a relation scan. `next` is an exclusive
-/// canonical key cursor owned by the source; when `after` is present, the
-/// next cursor MUST be lexicographically greater than it. An absent cursor
-/// means exhaustion.
+/// canonical key cursor owned by the source read scope; when `after` is
+/// present, the next cursor MUST be lexicographically greater than it. Equal
+/// cursor bytes in different [`RelationReadScope`]s identify independent
+/// continuations. An absent cursor means exhaustion.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelationPage {
     pub rows: Vec<CanonicalValue>,
@@ -217,7 +218,10 @@ pub struct RelationPage {
 ///
 /// Cloned plans retain this identity across their page reads; independently
 /// created sources receive distinct identities, even when their source names
-/// are equal. Effect handlers can use it to scope read-batch cursors.
+/// are equal. A newly built plan for a later view refresh receives a fresh
+/// identity. Effect handlers should bind continuation state by both source
+/// name and this identity so paired same-name reads cannot resume one another's
+/// cursors.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RelationReadScope(u64);
 
@@ -816,8 +820,11 @@ pub trait EffectHandler {
     }
 
     /// Supplies a bounded page together with the identity of its relation
-    /// source. The default delegates to [`EffectHandler::scan_relation_page`]
-    /// to preserve existing handlers while allowing stateful readers to keep
+    /// source. Implementations that retain page continuations should key them
+    /// by both `source` and `scope`: same-name planned reads are independent,
+    /// and a fresh scope starts a fresh observation during a later refresh.
+    /// The default delegates to [`EffectHandler::scan_relation_page`] to
+    /// preserve existing handlers while allowing stateful readers to keep
     /// continuation cursors separate across equal-named view sources.
     fn scan_relation_page_scoped(
         &mut self,

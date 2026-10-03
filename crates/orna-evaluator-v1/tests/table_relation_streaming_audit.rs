@@ -156,6 +156,66 @@ impl ScopedPagedSource {
     }
 }
 
+struct PairedSubscriptionSource {
+    source: &'static str,
+    unbound_pages: VecDeque<VecDeque<RelationPage>>,
+    lanes: Vec<(RelationReadScope, VecDeque<RelationPage>)>,
+    cursors: Vec<(RelationReadScope, Option<Vec<u8>>)>,
+}
+
+impl PairedSubscriptionSource {
+    fn new(lanes: impl IntoIterator<Item = Vec<RelationPage>>) -> Self {
+        Self {
+            source: "View.Paired",
+            unbound_pages: lanes.into_iter().map(VecDeque::from).collect(),
+            lanes: Vec::new(),
+            cursors: Vec::new(),
+        }
+    }
+}
+
+impl EffectHandler for PairedSubscriptionSource {
+    fn handle(&mut self, _: &Expr, _: &[orna_value_v1::Value]) -> Result<Option<orna_value_v1::Value>, EvaluationError> {
+        Ok(None)
+    }
+
+    fn scan_relation_page_scoped(
+        &mut self,
+        source: &str,
+        scope: RelationReadScope,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        if source != self.source {
+            return Ok(None);
+        }
+        if limit == 0 {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        budget.debit(1)?;
+        let lane = match self.lanes.iter().position(|(existing, _)| *existing == scope) {
+            Some(lane) => lane,
+            None => {
+                let pages = self
+                    .unbound_pages
+                    .pop_front()
+                    .expect("each paired subscription binds to one page stream");
+                self.lanes.push((scope, pages));
+                self.lanes.len() - 1
+            }
+        };
+        self.cursors.push((scope, after.map(ToOwned::to_owned)));
+        Ok(Some(self.lanes[lane].1.pop_front().unwrap_or(RelationPage {
+            rows: Vec::new(),
+            next: None,
+        })))
+    }
+}
+
 impl EffectHandler for ScopedPagedSource {
     fn handle(&mut self, _: &Expr, _: &[orna_value_v1::Value]) -> Result<Option<orna_value_v1::Value>, EvaluationError> {
         Ok(None)
@@ -376,5 +436,119 @@ fn incremental_view_refresh_keeps_values_scoped_across_read_batches() {
         first_refresh.scopes["View.Left"],
         second_refresh.scopes["View.Left"],
         "a later refresh receives a fresh scope for newly computed batches"
+    );
+}
+
+fn paired_subscription_cascade_body() -> Expr {
+    let left = relation_stage(
+        relation_stage(
+            relation_source("View.Paired"),
+            "filter",
+            vec![named_function("is_odd")],
+        ),
+        "filter",
+        vec![named_function("below_five")],
+    );
+    let right = relation_stage(
+        relation_stage(
+            relation_source("View.Paired"),
+            "filter",
+            vec![named_function("is_even")],
+        ),
+        "filter",
+        vec![named_function("below_eight")],
+    );
+    let paired = relation_stage(left, "union", vec![right]);
+    let cascaded = relation_stage(
+        relation_stage(paired, "filter", vec![named_function("is_positive")]),
+        "filter",
+        vec![named_function("below_eight")],
+    );
+    let mapped = relation_stage(cascaded, "map", vec![named_function("add_one")]);
+    terminal(mapped, "sum")
+}
+
+#[test]
+fn paired_subscriptions_rebind_independent_scopes_through_refresh_cascades() {
+    // The reference does not define same-name paired subscriptions here.
+    // Treat each planned read as an independent binding: keep its identity
+    // through every page in this refresh, then allocate fresh identities on
+    // the next refresh rather than replaying either old cursor.
+    let mut first_refresh = PairedSubscriptionSource::new([
+        vec![page(&[1, 2], Some(vec![11])), page(&[3, 4], None)],
+        vec![page(&[2, 9], Some(vec![22])), page(&[4, 6], None)],
+    ]);
+    assert_eq!(
+        run_with_fixture_functions(paired_subscription_cascade_body(), &mut first_refresh).unwrap(),
+        integer(21),
+        "paired reads of one source retain their distinct odd/even subscription values"
+    );
+    assert_eq!(first_refresh.lanes.len(), 2);
+    let first_scopes = [first_refresh.lanes[0].0, first_refresh.lanes[1].0];
+    assert_ne!(first_scopes[0], first_scopes[1]);
+    assert_eq!(
+        first_refresh.cursors,
+        vec![
+            (first_scopes[0], None),
+            (first_scopes[0], Some(vec![11])),
+            (first_scopes[1], None),
+            (first_scopes[1], Some(vec![22])),
+        ],
+        "nested view filters retain each subscription's independent continuation"
+    );
+
+    let mut second_refresh = PairedSubscriptionSource::new([
+        vec![page(&[5, 7], Some(vec![31])), page(&[9, 11], None)],
+        vec![page(&[2, 8], Some(vec![42])), page(&[10, 12], None)],
+    ]);
+    assert_eq!(
+        run_with_fixture_functions(paired_subscription_cascade_body(), &mut second_refresh).unwrap(),
+        integer(3),
+        "the rebound pair computes from only its new source pages"
+    );
+    assert_eq!(second_refresh.lanes.len(), 2);
+    let second_scopes = [second_refresh.lanes[0].0, second_refresh.lanes[1].0];
+    assert_ne!(second_scopes[0], second_scopes[1]);
+    for new_scope in second_scopes {
+        assert!(!first_scopes.contains(&new_scope));
+    }
+    assert_eq!(
+        second_refresh.cursors,
+        vec![
+            (second_scopes[0], None),
+            (second_scopes[0], Some(vec![31])),
+            (second_scopes[1], None),
+            (second_scopes[1], Some(vec![42])),
+        ],
+        "a refresh starts both rebound subscriptions without stale continuation state"
+    );
+}
+
+#[test]
+fn paired_read_folds_keep_equal_cursor_bytes_scope_local() {
+    // Cursor tokens are opaque to the evaluator and may be equal across two
+    // subscriptions. Their read scopes still keep continuation batches apart.
+    let mut source = PairedSubscriptionSource::new([
+        vec![page(&[-3, 1], Some(vec![77])), page(&[3, 5], None)],
+        vec![page(&[2, 7], Some(vec![77])), page(&[4, 8], None)],
+    ]);
+
+    assert_eq!(
+        run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap(),
+        integer(14),
+        "the aggregate folds only the odd left and even right values after both page continuations"
+    );
+    assert_eq!(source.lanes.len(), 2);
+    let scopes = [source.lanes[0].0, source.lanes[1].0];
+    assert_ne!(scopes[0], scopes[1]);
+    assert_eq!(
+        source.cursors,
+        vec![
+            (scopes[0], None),
+            (scopes[0], Some(vec![77])),
+            (scopes[1], None),
+            (scopes[1], Some(vec![77])),
+        ],
+        "equal cursor bytes resume only within their own read scope"
     );
 }

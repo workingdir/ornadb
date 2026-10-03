@@ -1,0 +1,1 @@
+std.lazy.force(std.lazy.zip_with(() => 4, () => 7, (left, right) => left * right))
