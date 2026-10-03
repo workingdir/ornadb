@@ -1,0 +1,6 @@
+// ORNA-LEX-003 line comment
+/* ORNA-LEX-004 outer comment
+   /* nested block comment */
+*/
+pub fn lexical(value: Str): Bool =
+    value == "hello {value}" && [1, 2, 3][0] == 1;
