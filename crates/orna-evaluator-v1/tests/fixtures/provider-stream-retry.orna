@@ -1,0 +1,7 @@
+std.stream.for_each(
+    std.stream.retry(
+        std.stream.from_provider("events", "retry"),
+        { max_attempts: 2, initial_delay: 0.s, max_delay: 0.s }
+    ),
+    (value: Str) => { std.io.environment.get(value); }
+)

@@ -1,0 +1,4 @@
+std.stream.for_each(
+    std.stream.from_provider("events", "callback-failure"),
+    (value: Str) => { std.io.environment.get(value); }
+)
