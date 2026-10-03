@@ -134,6 +134,38 @@ pub struct BranchMergePairedCheckpointRedoChainSnapshot {
     pub runs: Vec<BranchMergePairedCheckpointRedoRunSnapshot>,
 }
 
+/// The ordered write-ahead log identities associated with one paired redo frame.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedWriteAheadIdentity {
+    pub left_log: Vec<u8>,
+    pub right_log: Vec<u8>,
+}
+
+/// One paired redo frame with its source write-ahead identities attached.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoIdentityFrame {
+    pub checkpoints: BranchMergePairedCheckpointRedoFrame,
+    pub write_ahead_identity: BranchMergePairedWriteAheadIdentity,
+}
+
+/// One compressed checkpoint run retaining every paired write-ahead identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoIdentityRunSnapshot {
+    pub first_order: u64,
+    pub last_order: u64,
+    pub left: Option<CheckpointGeneration>,
+    pub right: Option<CheckpointGeneration>,
+    /// One pair per input order, in ascending order; repeated IDs are retained.
+    pub write_ahead_identities: Vec<BranchMergePairedWriteAheadIdentity>,
+}
+
+/// One checkpoint identity's compressed redo history and paired log lineage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoIdentityChainSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub runs: Vec<BranchMergePairedCheckpointRedoIdentityRunSnapshot>,
+}
+
 /// Compresses adjacent paired redo frames only when both sides retain exactly
 /// the same checkpoint state for an identity.
 ///
@@ -174,6 +206,59 @@ pub fn compress_paired_checkpoint_redo_chain(
                 }
             }
             BranchMergePairedCheckpointRedoChainSnapshot { checkpoint_id, runs }
+        })
+        .collect()
+}
+
+/// Compresses paired checkpoint redo states while retaining each source log
+/// identity in the order in which it was committed.
+///
+/// Checkpoint state uses the same conservative coalescing rule as
+/// [`compress_paired_checkpoint_redo_chain`]. Different write-ahead identity
+/// pairs do not prevent state compression: every original ordered pair is
+/// copied into the compressed run, including repeated identities. This keeps
+/// the exact left/right log provenance available after a chain is compacted.
+pub fn compress_paired_checkpoint_redo_chain_preserving_write_ahead_identity(
+    frames: &BTreeMap<u64, BranchMergePairedCheckpointRedoIdentityFrame>,
+) -> Vec<BranchMergePairedCheckpointRedoIdentityChainSnapshot> {
+    let checkpoint_ids = frames
+        .values()
+        .flat_map(|frame| {
+            frame
+                .checkpoints
+                .left
+                .keys()
+                .chain(frame.checkpoints.right.keys())
+                .cloned()
+        })
+        .collect::<BTreeSet<_>>();
+
+    checkpoint_ids
+        .into_iter()
+        .map(|checkpoint_id| {
+            let mut runs = Vec::<BranchMergePairedCheckpointRedoIdentityRunSnapshot>::new();
+            for (&order, frame) in frames {
+                let left = frame.checkpoints.left.get(&checkpoint_id).cloned();
+                let right = frame.checkpoints.right.get(&checkpoint_id).cloned();
+                if let Some(last) = runs.last_mut()
+                    && last.left == left
+                    && last.right == right
+                    && last.last_order.checked_add(1) == Some(order)
+                {
+                    last.last_order = order;
+                    last.write_ahead_identities
+                        .push(frame.write_ahead_identity.clone());
+                } else {
+                    runs.push(BranchMergePairedCheckpointRedoIdentityRunSnapshot {
+                        first_order: order,
+                        last_order: order,
+                        left,
+                        right,
+                        write_ahead_identities: vec![frame.write_ahead_identity.clone()],
+                    });
+                }
+            }
+            BranchMergePairedCheckpointRedoIdentityChainSnapshot { checkpoint_id, runs }
         })
         .collect()
 }
