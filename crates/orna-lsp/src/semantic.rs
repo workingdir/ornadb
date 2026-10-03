@@ -5,40 +5,20 @@
 //! own grammar.
 
 use lsp_types::{Range, SemanticToken, SemanticTokenType};
-use orna_syntax::{HighlightKind, Parse};
+use orna_syntax::{HighlightKind, Parse, grammar};
 
 use crate::documents::PositionMapper;
 
-/// The semantic token legend in legend-index order.
-pub const LEGEND: &[SemanticTokenType] = &[
-    SemanticTokenType::KEYWORD,
-    SemanticTokenType::TYPE,
-    SemanticTokenType::FUNCTION,
-    SemanticTokenType::VARIABLE,
-    SemanticTokenType::NAMESPACE,
-    SemanticTokenType::PROPERTY,
-    SemanticTokenType::STRING,
-    SemanticTokenType::NUMBER,
-    SemanticTokenType::COMMENT,
-    SemanticTokenType::OPERATOR,
-];
+/// Build the LSP legend from the shared syntax presentation table.
+pub fn legend() -> Vec<SemanticTokenType> {
+    grammar::semantic_token_types()
+        .map(SemanticTokenType::new)
+        .collect()
+}
 
 /// Maps one classifier kind to its legend index.
 fn legend_index(kind: HighlightKind) -> Option<usize> {
-    let index = match kind {
-        HighlightKind::Keyword => 0,
-        HighlightKind::TypeName => 1,
-        HighlightKind::FunctionName => 2,
-        HighlightKind::VariableName => 3,
-        HighlightKind::NamespaceName => 4,
-        HighlightKind::PropertyName => 5,
-        HighlightKind::StringLiteral => 6,
-        HighlightKind::NumberLiteral => 7,
-        HighlightKind::Comment => 8,
-        HighlightKind::Operator => 9,
-        HighlightKind::Punctuation | HighlightKind::QuotedIdentifier => return None,
-    };
-    Some(index)
+    grammar::semantic_token_index(kind)
 }
 
 /// Returns the delta-encoded semantic tokens for one document.
