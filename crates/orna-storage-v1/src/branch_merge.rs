@@ -624,6 +624,30 @@ pub enum BranchMergePairedCheckpointRedoFoldSegmentRotationMergeRestoreHandoffEr
     },
 }
 
+/// One restored segment occurrence with both pins bound to their stream ID.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationMergeRestorePinHandoffSlotSnapshot {
+    pub restore_ordinal: usize,
+    pub handoff_ordinal: usize,
+    pub merge_ordinal: usize,
+    pub fold_ordinal: usize,
+    pub order: u64,
+    pub left_pin: Option<BranchMergePairedCheckpointSegmentPinIdentity>,
+    pub right_pin: Option<BranchMergePairedCheckpointSegmentPinIdentity>,
+    pub redo_fold_identity: BranchMergePairedRedoFoldIdentity,
+    /// Retained even when a directional checkpoint pin is absent.
+    pub segment_identity: BranchMergePairedWriteAheadSegmentIdentity,
+}
+
+/// A checkpoint stream restored with source-scoped, directional segment pins.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationMergeRestorePinHandoffStreamSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub slots: Vec<
+        BranchMergePairedCheckpointRedoFoldSegmentRotationMergeRestorePinHandoffSlotSnapshot,
+    >,
+}
+
 /// One compacted checkpoint run retaining its fold identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSparseStreamChainCompactionRunSnapshot {
@@ -2449,6 +2473,70 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_merge_handoffs_pre
         );
     }
     Ok(restored)
+}
+
+/// Restores sparse segment chains and binds each present side to its checkpoint pin.
+///
+/// Restore, handoff, merge, fold, and order coordinates retain the underlying
+/// restoration lineage. A directional pin is emitted only when that side has
+/// a checkpoint generation; it carries the enclosing checkpoint ID and the
+/// exact segment ID from the same side. The original pair remains available
+/// when a side is omitted. The reference is silent on this pin projection, so
+/// absent generations stay unpinned instead of receiving synthetic pins.
+pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_merge_handoffs_preserving_pin_identity(
+    known_checkpoint_ids: &[CheckpointId],
+    restore_handoffs: &[Vec<Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionSnapshot>>],
+) -> Result<
+    Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationMergeRestorePinHandoffStreamSnapshot>,
+    BranchMergePairedCheckpointRedoFoldSegmentRotationMergeRestoreHandoffError,
+> {
+    restore_paired_checkpoint_redo_sparse_segment_rotation_merge_handoffs_preserving_identity(
+        known_checkpoint_ids,
+        restore_handoffs,
+    )
+    .map(|streams| {
+        streams
+            .into_iter()
+            .map(|stream| {
+                let checkpoint_id = stream.checkpoint_id;
+                let slots = stream
+                    .slots
+                    .into_iter()
+                    .map(|slot| {
+                        let left_pin = slot.left.clone().map(|generation| {
+                            BranchMergePairedCheckpointSegmentPinIdentity {
+                                checkpoint_id: checkpoint_id.clone(),
+                                generation,
+                                segment_id: slot.segment_identity.left_segment.clone(),
+                            }
+                        });
+                        let right_pin = slot.right.clone().map(|generation| {
+                            BranchMergePairedCheckpointSegmentPinIdentity {
+                                checkpoint_id: checkpoint_id.clone(),
+                                generation,
+                                segment_id: slot.segment_identity.right_segment.clone(),
+                            }
+                        });
+                        BranchMergePairedCheckpointRedoFoldSegmentRotationMergeRestorePinHandoffSlotSnapshot {
+                            restore_ordinal: slot.restore_ordinal,
+                            handoff_ordinal: slot.handoff_ordinal,
+                            merge_ordinal: slot.merge_ordinal,
+                            fold_ordinal: slot.fold_ordinal,
+                            order: slot.order,
+                            left_pin,
+                            right_pin,
+                            redo_fold_identity: slot.redo_fold_identity,
+                            segment_identity: slot.segment_identity,
+                        }
+                    })
+                    .collect();
+                BranchMergePairedCheckpointRedoFoldSegmentRotationMergeRestorePinHandoffStreamSnapshot {
+                    checkpoint_id,
+                    slots,
+                }
+            })
+            .collect()
+    })
 }
 
 /// Compacts equal checkpoint state without losing paired fold identity.
