@@ -1,0 +1,1 @@
+std.iterator.fold(std.iterator.scan(std.iterator.from_list([1, 2, 3]), 0, (sum, value) => sum + value), 0, (total, prefix_sum) => total + prefix_sum)
