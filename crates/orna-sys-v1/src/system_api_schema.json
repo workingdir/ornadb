@@ -150,6 +150,7 @@
         "effect": { "enum": ["read", "invoke", "admin"] },
         "signature": { "$ref": "#/$defs/nonBlankString" },
         "purpose": { "$ref": "#/$defs/nonBlankString" },
+        "documentation": { "$ref": "#/$defs/nonBlankString" },
         "contract": { "$ref": "#/$defs/nonBlankString" },
         "preconditions": { "$ref": "#/$defs/nonBlankString" },
         "ownership": { "$ref": "#/$defs/nonBlankString" },

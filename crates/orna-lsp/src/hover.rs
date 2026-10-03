@@ -9,6 +9,7 @@ use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
 
 use crate::analysis::{DeclarationRef, FieldInfo, FunctionDeclarationView, ParameterInfo};
 use crate::reference::{KeywordReference, ScalarReference};
+use orna_syntax::{NamePart, Parse};
 
 /// Returns the grammar specification link for one document, if reachable.
 ///
@@ -89,17 +90,46 @@ pub fn standard_function_hover(
     name: &str,
     parameters: &str,
     return_type: &str,
+    documentation: Option<&str>,
     doc_link: Option<&str>,
 ) -> Hover {
     let mut value = format!(
         "**{domain} function**\n\n```orna\n{domain} FUNCTION {name}({parameters}) RETURNS {return_type}\n```"
     );
+    append_documentation(&mut value, documentation);
+    append_spec_link(&mut value, doc_link);
+    hover(value)
+}
+
+/// Builds hover content from the generated typed sys registry descriptors.
+pub fn system_function_hover(
+    descriptors: &[&orna_sys_v1::SystemFunctionDescriptor],
+    doc_link: Option<&str>,
+) -> Hover {
+    let mut value = if descriptors.len() == 1 {
+        format!(
+            "**sys function · {}**\n",
+            effect_name(descriptors[0].effect)
+        )
+    } else {
+        format!("**sys function · {} overloads**\n", descriptors.len())
+    };
+    for descriptor in descriptors {
+        value.push_str(&format!("\n```orna\n{}\n```\n", descriptor.signature));
+        value.push_str(&format!("\n{}\n", descriptor.purpose));
+        append_documentation(&mut value, descriptor.documentation);
+        append_labeled_detail(&mut value, "Contract", descriptor.contract);
+        append_labeled_detail(&mut value, "Preconditions", descriptor.preconditions);
+        append_labeled_detail(&mut value, "Ownership", descriptor.ownership);
+        append_labeled_detail(&mut value, "Snapshot rule", descriptor.snapshot_rule);
+    }
     append_spec_link(&mut value, doc_link);
     hover(value)
 }
 
 /// Builds the hover for one declaration.
 pub fn declaration_hover(
+    parse: &Parse,
     declaration: DeclarationRef<'_>,
     text: &str,
     doc_link: Option<&str>,
@@ -109,6 +139,12 @@ pub fn declaration_hover(
             let mut value = format!(
                 "**schema**\n\n```orna\nCREATE SCHEMA {};\n```",
                 qualified(&declaration.name)
+            );
+            append_source_documentation(
+                &mut value,
+                parse,
+                declaration.name.parts.last().expect("qualified name"),
+                None,
             );
             append_example(
                 &mut value,
@@ -139,10 +175,12 @@ pub fn declaration_hover(
                     if let Some(policy) = field.on_delete {
                         entry.push_str(&format!(" ON DELETE {policy:?}"));
                     }
-                    append_inline_documentation(
-                        &mut entry,
+                    let documentation = documentation_for(
+                        parse,
+                        &field.name,
                         documentation_text(field.documentation.as_ref()),
                     );
+                    append_inline_documentation(&mut entry, documentation.as_deref());
                     entry
                 })
                 .collect::<Vec<_>>()
@@ -157,8 +195,10 @@ pub fn declaration_hover(
                 qualified(&declaration.name),
                 fields
             );
-            append_documentation(
+            append_source_documentation(
                 &mut value,
+                parse,
+                declaration.name.parts.last().expect("qualified name"),
                 documentation_text(declaration.documentation.as_ref()),
             );
             append_example(&mut value, &format!("REF {}", qualified(&declaration.name)));
@@ -176,6 +216,12 @@ pub fn declaration_hover(
                 "**enum type**\n\n```orna\nCREATE TYPE {} AS ENUM ({labels});\n```",
                 qualified(&declaration.name)
             );
+            append_source_documentation(
+                &mut value,
+                parse,
+                declaration.name.parts.last().expect("qualified name"),
+                None,
+            );
             append_example(&mut value, &qualified(&declaration.name));
             append_spec_link(&mut value, doc_link);
             hover(value)
@@ -190,10 +236,12 @@ pub fn declaration_hover(
                         field.name.text,
                         type_text(&field.type_specification, text)
                     );
-                    append_inline_documentation(
-                        &mut entry,
+                    let documentation = documentation_for(
+                        parse,
+                        &field.name,
                         documentation_text(field.documentation.as_ref()),
                     );
+                    append_inline_documentation(&mut entry, documentation.as_deref());
                     entry
                 })
                 .collect::<Vec<_>>()
@@ -203,8 +251,10 @@ pub fn declaration_hover(
                 qualified(&declaration.name),
                 fields
             );
-            append_documentation(
+            append_source_documentation(
                 &mut value,
+                parse,
+                declaration.name.parts.last().expect("qualified name"),
                 documentation_text(declaration.documentation.as_ref()),
             );
             append_example(&mut value, &qualified(&declaration.name));
@@ -217,8 +267,10 @@ pub fn declaration_hover(
                 qualified(&declaration.name),
                 declaration.kernel_contract.text
             );
-            append_documentation(
+            append_source_documentation(
                 &mut value,
+                parse,
+                declaration.name.parts.last().expect("qualified name"),
                 documentation_text(declaration.documentation.as_ref()),
             );
             append_example(&mut value, &qualified(&declaration.name));
@@ -231,8 +283,10 @@ pub fn declaration_hover(
                 qualified(&declaration.name),
                 declaration.kernel_contract.text
             );
-            append_documentation(
+            append_source_documentation(
                 &mut value,
+                parse,
+                declaration.name.parts.last().expect("qualified name"),
                 documentation_text(declaration.documentation.as_ref()),
             );
             append_example(&mut value, &qualified(&declaration.name));
@@ -246,7 +300,13 @@ pub fn declaration_hover(
                 parameters(declaration, text),
                 return_text(&declaration.return_type, text)
             );
-            append_parameters(&mut value, declaration, text);
+            append_source_documentation(
+                &mut value,
+                parse,
+                declaration.name.parts.last().expect("qualified name"),
+                None,
+            );
+            append_parameters(&mut value, parse, declaration, text);
             append_example(
                 &mut value,
                 &format!("orna invoke {}", qualified(&declaration.name)),
@@ -276,7 +336,13 @@ pub fn declaration_hover(
                     return_text(&declaration.return_type, text)
                 )
             };
-            append_parameters(&mut value, declaration, text);
+            append_source_documentation(
+                &mut value,
+                parse,
+                declaration.name.parts.last().expect("qualified name"),
+                None,
+            );
+            append_parameters(&mut value, parse, declaration, text);
             append_example(
                 &mut value,
                 &format!("orna invoke {}", qualified(&declaration.name)),
@@ -288,7 +354,12 @@ pub fn declaration_hover(
 }
 
 /// Builds the hover for one object or record field.
-pub fn field_hover(field: &FieldInfo<'_>, text: &str, doc_link: Option<&str>) -> Hover {
+pub fn field_hover(
+    parse: &Parse,
+    field: &FieldInfo<'_>,
+    text: &str,
+    doc_link: Option<&str>,
+) -> Hover {
     let mut value = format!(
         "**field** `{}`: {}\n",
         field.name.text,
@@ -310,13 +381,18 @@ pub fn field_hover(field: &FieldInfo<'_>, text: &str, doc_link: Option<&str>) ->
     if !modifiers.is_empty() {
         value.push_str(&format!("\n`{}`\n", modifiers.join(" ")));
     }
-    append_documentation(&mut value, field.documentation);
+    append_source_documentation(&mut value, parse, field.name, field.documentation);
     append_spec_link(&mut value, doc_link);
     hover(value)
 }
 
 /// Builds the hover for one function parameter.
-pub fn parameter_hover(parameter: &ParameterInfo<'_>, text: &str, doc_link: Option<&str>) -> Hover {
+pub fn parameter_hover(
+    parse: &Parse,
+    parameter: &ParameterInfo<'_>,
+    text: &str,
+    doc_link: Option<&str>,
+) -> Hover {
     let mut value = format!(
         "**parameter** `{}`: {}\n",
         parameter.name.text,
@@ -325,7 +401,7 @@ pub fn parameter_hover(parameter: &ParameterInfo<'_>, text: &str, doc_link: Opti
     if let Some(default) = parameter.default_text {
         value.push_str(&format!("\nDefault: `{default}`\n"));
     }
-    append_documentation(&mut value, parameter.documentation);
+    append_source_documentation(&mut value, parse, parameter.name, parameter.documentation);
     append_spec_link(&mut value, doc_link);
     hover(value)
 }
@@ -369,6 +445,20 @@ fn append_inline_documentation(entry: &mut String, documentation: Option<&str>) 
     }
 }
 
+fn append_labeled_detail(value: &mut String, label: &str, detail: Option<&str>) {
+    if let Some(detail) = detail {
+        value.push_str(&format!("\n**{label}**\n{detail}\n"));
+    }
+}
+
+fn effect_name(effect: orna_sys_v1::SystemEffect) -> &'static str {
+    match effect {
+        orna_sys_v1::SystemEffect::Read => "read",
+        orna_sys_v1::SystemEffect::Invoke => "invoke",
+        orna_sys_v1::SystemEffect::Admin => "admin",
+    }
+}
+
 /// Appends an Example section.
 fn append_example(value: &mut String, example: &str) {
     value.push_str(&format!("\n**Example**\n```orna\n{example}\n```\n"));
@@ -382,7 +472,7 @@ fn append_spec_link(value: &mut String, doc_link: Option<&str>) {
 }
 
 /// Appends a Parameters section from a function declaration.
-fn append_parameters<F>(value: &mut String, declaration: &F, text: &str)
+fn append_parameters<F>(value: &mut String, parse: &Parse, declaration: &F, text: &str)
 where
     F: FunctionDeclarationView,
 {
@@ -398,10 +488,12 @@ where
             if let Some(default) = &parameter.default_expression {
                 entry.push_str(&format!(" = {}", default.text));
             }
-            append_inline_documentation(
-                &mut entry,
+            let documentation = documentation_for(
+                parse,
+                &parameter.name,
                 documentation_text(parameter.documentation.as_ref()),
             );
+            append_inline_documentation(&mut entry, documentation.as_deref());
             entry
         })
         .collect::<Vec<_>>()
@@ -489,6 +581,27 @@ fn documentation_text(slice: Option<&orna_syntax::SourceSlice>) -> Option<&str> 
             .and_then(|inner| inner.strip_suffix('\''))
             .unwrap_or(&slice.text)
     })
+}
+
+fn documentation_for(parse: &Parse, name: &NamePart, modifier: Option<&str>) -> Option<String> {
+    let comment = parse.documentation_comment(name);
+    match (modifier, comment) {
+        (Some(modifier), Some(comment)) => Some(format!("{modifier}\n\n{comment}")),
+        (Some(modifier), None) => Some(modifier.to_owned()),
+        (None, Some(comment)) => Some(comment.to_owned()),
+        (None, None) => None,
+    }
+}
+
+fn append_source_documentation(
+    value: &mut String,
+    parse: &Parse,
+    name: &NamePart,
+    modifier: Option<&str>,
+) {
+    if let Some(documentation) = documentation_for(parse, name, modifier) {
+        append_documentation(value, Some(&documentation));
+    }
 }
 
 /// Renders one qualified name.
