@@ -34,3 +34,10 @@ pub fn text_math_session() -> AdmittedReplSession {
         path == "std/text.orna" || path == "std/math.orna"
     })
 }
+
+#[allow(dead_code)]
+pub fn concurrent_session() -> AdmittedReplSession {
+    admitted_session("orna.std/x6aj2-concurrent-time-contracts", |path| {
+        path == "std/concurrent/main.orna"
+    })
+}
