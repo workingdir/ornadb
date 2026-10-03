@@ -1478,6 +1478,57 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
 
+    let one_root_storm = [(&root_a, root_waves_a.as_slice())];
+    let folded_branch_a = resolver
+        .extend_nested_terminal_pair_checkpoint_storms(&stage_a, &one_root_storm)
+        .unwrap();
+    let folded_branch_b = resolver
+        .extend_nested_terminal_pair_checkpoint_storms(&stage_a, &one_root_storm)
+        .unwrap();
+    let branch_a_anchor = folded_branch_a.retained_wave(2).unwrap().first().unwrap();
+    let branch_b_anchor = folded_branch_b.retained_wave(2).unwrap().first().unwrap();
+    assert_eq!(
+        branch_a_anchor.primary().pin().commit().as_str(),
+        branch_b_anchor.primary().pin().commit().as_str()
+    );
+    assert_eq!(
+        branch_a_anchor
+            .attached()
+            .map(|(name, database)| (name.to_owned(), database.pin().commit().as_str().to_owned()))
+            .collect::<Vec<_>>(),
+        branch_b_anchor
+            .attached()
+            .map(|(name, database)| (name.to_owned(), database.pin().commit().as_str().to_owned()))
+            .collect::<Vec<_>>()
+    );
+    let branch_a_label = folded_branch_a.retained_depth_label(2, 0).unwrap();
+    let branch_b_label = folded_branch_b.retained_depth_label(2, 0).unwrap();
+    assert_ne!(
+        branch_a_label, branch_b_label,
+        "separate folds assign distinct identities to matching route snapshots"
+    );
+    let branch_a_checkpoint = folded_branch_a.handoff_checkpoint(2, 0).unwrap();
+    let no_pair_waves: [[PinnedDatabase; 2]; 0] = [];
+    assert!(resolver
+        .extend_nested_terminal_pair_checkpoint_storms(
+            &folded_branch_a,
+            &[(
+                &branch_a_checkpoint,
+                no_pair_waves.as_slice(),
+            )],
+        )
+        .is_ok());
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_checkpoint_storms(
+            &folded_branch_b,
+            &[(
+                &branch_a_checkpoint,
+                no_pair_waves.as_slice(),
+            )],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
     let folded = resolver
         .extend_sibling_terminal_pair_checkpoint_storms(&paths)
         .unwrap_or_else(|error| panic!("sibling checkpoint folds failed: {error:?}"));
