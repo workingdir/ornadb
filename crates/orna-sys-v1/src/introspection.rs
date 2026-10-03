@@ -550,7 +550,9 @@ pub struct QueryPlanDescription {
     /// Snapshot statistics for `source`. If `mutable_branch` is set, counts
     /// must include the branch's current uncommitted overlay at `generation`.
     pub source_statistics: Option<QuerySourceStatistics>,
-    /// Additional inputs joined in order after `source`.
+    /// Additional inputs joined after `source`. The explain adapter may
+    /// reorder these physical join inputs using complete scan-work estimates;
+    /// unknown-cost inputs and equal-cost inputs keep declaration order.
     pub joins: Vec<QueryJoinDescription>,
     pub predicate: Option<ExpressionRef>,
     pub projections: Vec<ExpressionRef>,
@@ -1773,7 +1775,9 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
         query.source_statistics.as_ref(),
     );
     let mut current_cardinality = source_cardinality(query.source_statistics.as_ref());
-    for join in &query.joins {
+    for (planned_position, (declared_position, join)) in
+        planned_query_join_order(&query.joins).into_iter().enumerate()
+    {
         let right = push_scan(&mut operators, join.source.clone(), join.statistics.as_ref());
         let right_cardinality = source_cardinality(join.statistics.as_ref());
         let cardinality = join_cardinality(
@@ -1796,6 +1800,22 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
             "strategy".to_owned(),
             PlanDetail::Text("hash".to_owned()),
         )]);
+        details.insert(
+            "declared_input_position".to_owned(),
+            PlanDetail::Integer(
+                u64::try_from(declared_position + 1).map_err(|_| ExplainError::TooManyNodes)?,
+            ),
+        );
+        details.insert(
+            "planned_input_position".to_owned(),
+            PlanDetail::Integer(
+                u64::try_from(planned_position + 1).map_err(|_| ExplainError::TooManyNodes)?,
+            ),
+        );
+        details.insert(
+            "join_order_policy".to_owned(),
+            PlanDetail::Text("known_scan_work_then_declared".to_owned()),
+        );
         if work_overflow {
             record_work_overflow(&mut details);
         }
@@ -2657,6 +2677,25 @@ fn source_cardinality(statistics: Option<&QuerySourceStatistics>) -> Cardinality
         rows: statistics.estimated_rows,
         bytes: statistics.estimated_bytes,
     })
+}
+
+/// Selects a deterministic physical order for the right-hand join inputs.
+/// ORNA permits internal reordering when results and observable order are
+/// preserved, but does not prescribe a cost heuristic. This explain-only
+/// adapter ranks fully estimated scans by rows plus 4-KiB byte blocks, then
+/// keeps tied and sparse inputs in declaration order. The executor remains
+/// responsible for restoring any declared result ordering.
+fn planned_query_join_order(joins: &[QueryJoinDescription]) -> Vec<(usize, &QueryJoinDescription)> {
+    let mut ordered = joins.iter().enumerate().collect::<Vec<_>>();
+    ordered.sort_by_key(|(declared_position, join)| {
+        let work = join
+            .statistics
+            .as_ref()
+            .and_then(|statistics| statistics.estimated_rows.zip(statistics.estimated_bytes))
+            .map(|(rows, bytes)| u128::from(rows) + u128::from(ceil_div(bytes, 4096)));
+        (work.is_none(), work.unwrap_or_default(), *declared_position)
+    });
+    ordered
 }
 
 fn push_scan(
