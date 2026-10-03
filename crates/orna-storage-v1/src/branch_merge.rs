@@ -278,6 +278,25 @@ pub struct BranchMergeDepthFragmentRecovery {
     pub tombstones: Vec<(ObjectId, CanonicalValue)>,
 }
 
+/// A table's complete depth layout within one paired tombstone wave.
+///
+/// Peer tables may have different depth counts. Each table supplies every
+/// fragment index in `0..fragment_count`; an empty fragment is still an
+/// identity-bearing depth position.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeTableDepthFragments {
+    pub fragment_count: usize,
+    pub fragments: BTreeMap<usize, Vec<CanonicalValue>>,
+}
+
+/// One complete paired tombstone wave whose peer tables have independent
+/// depth-fragment labels.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeTabularDepthWave {
+    pub order: u64,
+    pub tables: BTreeMap<ObjectId, BranchMergeTableDepthFragments>,
+}
+
 /// One exact-key tombstone event retained in committed paired history.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeTombstoneEvent {
@@ -313,6 +332,17 @@ pub enum BranchMergeTombstoneHistoryError {
     EmptyDepthFragmentRecoveryBatch,
     /// A fragment-recovery request names one position and index more than once.
     DuplicateDepthFragmentRecovery { order: u64, fragment: usize },
+    /// A tabular depth wave does not name any peer tables.
+    EmptyTabularDepthWave { order: u64 },
+    /// A tabular depth wave omits or repeats a table-local fragment index.
+    IncompleteTabularDepthFragments { order: u64, table: ObjectId },
+    /// A committed peer table was restored with a different depth count.
+    TabularFragmentCountMismatch {
+        order: u64,
+        table: ObjectId,
+        expected: usize,
+        actual: usize,
+    },
     /// Overlapping fragments attempted to record one table/key twice in a wave.
     DuplicateTombstone { order: u64 },
     /// Two concurrently buffered lineage positions record one table/key.
@@ -332,15 +362,19 @@ enum BufferedBranchMergeTombstoneDelta {
         fragment_count: usize,
         fragments: BTreeMap<usize, Vec<(ObjectId, CanonicalValue)>>,
     },
+    TabularDepthWave(BranchMergeTabularDepthWave),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BranchMergeTombstoneSubmissionMode {
     WholePlan,
     DepthFragments,
+    TabularDepthWave,
 }
 
-type PairedRetryPlanSignature = (u64, [u8; 32], Vec<(ObjectId, CanonicalValue)>);
+type TabularFragmentRetryIdentity = BTreeMap<ObjectId, (usize, BTreeMap<usize, [u8; 32]>)>;
+
+type PairedRetryPlanSignature = (u64, [u8; 32], [u8; 32]);
 type DepthFragmentRetrySignature = (u64, usize, usize, [u8; 32]);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -365,7 +399,7 @@ impl AppliedDepthFragmentRetryTransaction {
                     (
                         step.order,
                         paired_plan_retry_identity(&step.plan),
-                        step.ordered_row_tombstones.clone(),
+                        tombstone_delta_retry_identity(&step.ordered_row_tombstones),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -379,7 +413,7 @@ impl AppliedDepthFragmentRetryTransaction {
                     recovery.order,
                     recovery.fragment,
                     recovery.fragment_count,
-                    depth_fragment_retry_identity(&recovery.tombstones),
+                    tombstone_delta_retry_identity(&recovery.tombstones),
                 )
             })
             .collect::<Vec<_>>();
@@ -475,6 +509,7 @@ pub struct BranchMergeTombstoneHistory {
     committed_modes: BTreeMap<u64, BranchMergeTombstoneSubmissionMode>,
     committed_fragment_counts: BTreeMap<u64, usize>,
     committed_fragment_retry_identities: BTreeMap<u64, BTreeMap<usize, [u8; 32]>>,
+    committed_tabular_fragment_retry_identities: BTreeMap<u64, TabularFragmentRetryIdentity>,
     committed_plan_identities: BTreeMap<u64, [u8; 32]>,
     duplicate_retry_modes: BTreeMap<u64, BranchMergeTombstoneSubmissionMode>,
     applied_fragment_retry_transactions: Vec<AppliedDepthFragmentRetryTransaction>,
@@ -491,6 +526,7 @@ impl BranchMergeTombstoneHistory {
             committed_modes: BTreeMap::new(),
             committed_fragment_counts: BTreeMap::new(),
             committed_fragment_retry_identities: BTreeMap::new(),
+            committed_tabular_fragment_retry_identities: BTreeMap::new(),
             committed_plan_identities: BTreeMap::new(),
             duplicate_retry_modes: BTreeMap::new(),
             applied_fragment_retry_transactions: Vec::new(),
@@ -627,6 +663,9 @@ impl BranchMergeTombstoneHistory {
             Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => unreachable!(
                 "whole-plan mode conflicts are classified before fragment validation"
             ),
+            Some(BufferedBranchMergeTombstoneDelta::TabularDepthWave(_)) => unreachable!(
+                "tabular-wave mode conflicts are classified before fragment validation"
+            ),
             Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
                 fragment_count: expected_count,
                 fragments,
@@ -689,6 +728,77 @@ impl BranchMergeTombstoneHistory {
             unreachable!("whole-plan submissions are rejected before inserting a fragment")
         };
         fragments.insert(fragment, tombstones.to_vec());
+        Ok(self.release_contiguous())
+    }
+
+    /// Submits a complete paired wave with a table-local depth layout.
+    ///
+    /// A peer table may have a different fragment count from the other tables
+    /// in the same paired restore. Every table must provide all indices in
+    /// its declared count; empty fragments retain their depth identity. The
+    /// wave is queued atomically behind earlier lineage positions and commits
+    /// tombstones in table/key order. After release, a retry must preserve the
+    /// peer table set, each table's fragment count, and each fragment's
+    /// tombstone identity. MERGE-1 is silent on peer-table depth labels; this
+    /// v1 policy preserves them independently across restore folds.
+    pub fn submit_tabular_depth_wave(
+        &mut self,
+        wave: &BranchMergeTabularDepthWave,
+    ) -> Result<Vec<BranchMergeTombstoneEvent>, BranchMergeTombstoneHistoryError> {
+        let order = wave.order;
+        self.classify_submission_mode_conflict(
+            order,
+            BranchMergeTombstoneSubmissionMode::TabularDepthWave,
+        )?;
+
+        if let Some(expected) = self.committed_tabular_fragment_retry_identities.get(&order) {
+            if wave.tables.len() != expected.len() || wave.tables.keys().ne(expected.keys()) {
+                return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+            }
+            for (table, fragments) in &wave.tables {
+                let (expected_count, _) = expected
+                    .get(table)
+                    .expect("the peer table set was checked above");
+                if *expected_count != fragments.fragment_count {
+                    return Err(
+                        BranchMergeTombstoneHistoryError::TabularFragmentCountMismatch {
+                            order,
+                            table: *table,
+                            expected: *expected_count,
+                            actual: fragments.fragment_count,
+                        },
+                    );
+                }
+            }
+        }
+
+        let tombstones = tabular_depth_wave_tombstones(wave)?;
+        if has_duplicate_tombstones_in_wave(&tombstones) {
+            return Err(BranchMergeTombstoneHistoryError::DuplicateTombstone { order });
+        }
+        if let Some(expected) = self.committed_tabular_fragment_retry_identities.get(&order)
+            && *expected != tabular_depth_wave_retry_identity(wave)
+        {
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+        }
+
+        self.classify_submission_position(
+            order,
+            BranchMergeTombstoneSubmissionMode::TabularDepthWave,
+        )?;
+        if let Some(other_order) = self.pending_duplicate_order(order, &tombstones) {
+            self.reserve_duplicate_retry_mode(
+                order,
+                BranchMergeTombstoneSubmissionMode::TabularDepthWave,
+            );
+            return Err(concurrent_duplicate_error(order, other_order));
+        }
+
+        self.duplicate_retry_modes.remove(&order);
+        self.pending_deltas.insert(
+            order,
+            BufferedBranchMergeTombstoneDelta::TabularDepthWave(wave.clone()),
+        );
         Ok(self.release_contiguous())
     }
 
@@ -901,7 +1011,8 @@ impl BranchMergeTombstoneHistory {
     /// Recovery receipt identity includes each fragment's order, index, count,
     /// and canonical tombstone delta. Tombstone ordering inside one fragment
     /// does not change the receipt identity because released deltas are
-    /// normalized by table and key.
+    /// normalized by table and key. Paired append projections use the same
+    /// order-insensitive delta identity alongside the full paired-plan body.
     /// Before changing paired identities, the batch checks fragment-count
     /// labels against every buffered wave in lineage order. This lets a stale
     /// label in an earlier wave remain visible even if a later binding would
@@ -1291,6 +1402,9 @@ impl BranchMergeTombstoneHistory {
             Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => unreachable!(
                 "whole-plan mode conflicts are classified before fragment recovery"
             ),
+            Some(BufferedBranchMergeTombstoneDelta::TabularDepthWave(_)) => unreachable!(
+                "tabular-wave mode conflicts are classified before fragment recovery"
+            ),
             None => {
                 if recovery.fragment >= recovery.fragment_count {
                     return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
@@ -1359,6 +1473,7 @@ impl BranchMergeTombstoneHistory {
                     ..
                 }) => Some(*fragment_count),
                 Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => None,
+                Some(BufferedBranchMergeTombstoneDelta::TabularDepthWave(_)) => None,
                 None => self.committed_fragment_counts.get(&recovery.order).copied(),
             };
             let Some(expected_count) = expected_count else {
@@ -1406,7 +1521,7 @@ impl BranchMergeTombstoneHistory {
         else {
             return Ok(());
         };
-        if *expected_identity != depth_fragment_retry_identity(tombstones) {
+        if *expected_identity != tombstone_delta_retry_identity(tombstones) {
             return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
         }
         Ok(())
@@ -1421,6 +1536,7 @@ impl BranchMergeTombstoneHistory {
                     fragment_count,
                     fragments,
                 }) => fragments.len() == *fragment_count,
+                Some(BufferedBranchMergeTombstoneDelta::TabularDepthWave(_)) => true,
                 None => false,
             };
             if !ready {
@@ -1442,10 +1558,14 @@ impl BranchMergeTombstoneHistory {
                     fragments
                         .iter()
                         .map(|(fragment, tombstones)| {
-                            (*fragment, depth_fragment_retry_identity(tombstones))
+                            (*fragment, tombstone_delta_retry_identity(tombstones))
                         })
                         .collect(),
                 );
+            }
+            if let BufferedBranchMergeTombstoneDelta::TabularDepthWave(wave) = &delta {
+                self.committed_tabular_fragment_retry_identities
+                    .insert(order, tabular_depth_wave_retry_identity(wave));
             }
             self.duplicate_retry_modes.remove(&order);
             if let Some(identity) = self.pending_plan_identities.remove(&order) {
@@ -1457,6 +1577,10 @@ impl BranchMergeTombstoneHistory {
                 BufferedBranchMergeTombstoneDelta::WholePlan(tombstones) => tombstones,
                 BufferedBranchMergeTombstoneDelta::DepthFragments { fragments, .. } => {
                     fragments.into_values().flatten().collect()
+                }
+                BufferedBranchMergeTombstoneDelta::TabularDepthWave(wave) => {
+                    tabular_depth_wave_tombstones(&wave)
+                        .expect("buffered tabular depth waves were validated before insertion")
                 }
             };
             self.committed_modes.insert(order, mode);
@@ -1499,6 +1623,10 @@ impl BranchMergeTombstoneHistory {
             (
                 Some(BufferedBranchMergeTombstoneDelta::DepthFragments { .. }),
                 BranchMergeTombstoneSubmissionMode::DepthFragments,
+            )
+            | (
+                Some(BufferedBranchMergeTombstoneDelta::TabularDepthWave(_)),
+                BranchMergeTombstoneSubmissionMode::TabularDepthWave,
             )
             | (None, _) => Ok(()),
             (Some(_), _) => unreachable!(
@@ -1586,6 +1714,7 @@ impl BufferedBranchMergeTombstoneDelta {
         match self {
             Self::WholePlan(_) => BranchMergeTombstoneSubmissionMode::WholePlan,
             Self::DepthFragments { .. } => BranchMergeTombstoneSubmissionMode::DepthFragments,
+            Self::TabularDepthWave(_) => BranchMergeTombstoneSubmissionMode::TabularDepthWave,
         }
     }
 
@@ -1603,6 +1732,13 @@ impl BufferedBranchMergeTombstoneDelta {
                 .values()
                 .flatten()
                 .any(|(candidate_table, candidate_key)| contains(candidate_table, candidate_key)),
+            Self::TabularDepthWave(wave) => wave.tables.iter().any(|(table_id, table)| {
+                table
+                    .fragments
+                    .values()
+                    .flatten()
+                    .any(|candidate_key| contains(table_id, candidate_key))
+            }),
         }
     }
 }
@@ -1724,10 +1860,9 @@ fn update_retry_identity_count(hash: &mut Sha256, count: usize) {
     hash.update(u64::try_from(count).unwrap_or(u64::MAX).to_be_bytes());
 }
 
-/// Retains one depth fragment's exact tombstone delta without keeping its
-/// canonical values in committed retry history. Ordering is normalized so a
-/// retry may submit the same fragment members in any order.
-fn depth_fragment_retry_identity(tombstones: &[(ObjectId, CanonicalValue)]) -> [u8; 32] {
+/// Fingerprints a canonical tombstone delta without retaining its values in
+/// retry history. Ordering is normalized because release sorts by table/key.
+fn tombstone_delta_retry_identity(tombstones: &[(ObjectId, CanonicalValue)]) -> [u8; 32] {
     let mut encoded = tombstones
         .iter()
         .map(|(table, key)| {
@@ -1741,7 +1876,7 @@ fn depth_fragment_retry_identity(tombstones: &[(ObjectId, CanonicalValue)]) -> [
     encoded.sort_unstable();
 
     let mut hash = Sha256::new();
-    hash.update(b"orna-storage-depth-fragment-retry-v1");
+    hash.update(b"orna-storage-tombstone-delta-retry-v1");
     update_retry_identity_count(&mut hash, encoded.len());
     for (table, key) in encoded {
         hash.update(table);
@@ -1749,6 +1884,67 @@ fn depth_fragment_retry_identity(tombstones: &[(ObjectId, CanonicalValue)]) -> [
         hash.update(key);
     }
     hash.finalize().into()
+}
+
+fn tabular_depth_wave_tombstones(
+    wave: &BranchMergeTabularDepthWave,
+) -> Result<Vec<(ObjectId, CanonicalValue)>, BranchMergeTombstoneHistoryError> {
+    if wave.tables.is_empty() {
+        return Err(BranchMergeTombstoneHistoryError::EmptyTabularDepthWave {
+            order: wave.order,
+        });
+    }
+
+    let mut tombstones = Vec::new();
+    for (table, depth) in &wave.tables {
+        if depth.fragment_count == 0 {
+            return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+                fragment: 0,
+                fragment_count: 0,
+            });
+        }
+        if depth.fragments.len() != depth.fragment_count
+            || depth
+                .fragments
+                .keys()
+                .enumerate()
+                .any(|(expected, actual)| *actual != expected)
+        {
+            return Err(
+                BranchMergeTombstoneHistoryError::IncompleteTabularDepthFragments {
+                    order: wave.order,
+                    table: *table,
+                },
+            );
+        }
+        for keys in depth.fragments.values() {
+            tombstones.extend(keys.iter().cloned().map(|key| (*table, key)));
+        }
+    }
+    Ok(tombstones)
+}
+
+fn tabular_depth_wave_retry_identity(
+    wave: &BranchMergeTabularDepthWave,
+) -> TabularFragmentRetryIdentity {
+    wave.tables
+        .iter()
+        .map(|(table, depth)| {
+            let fragments = depth
+                .fragments
+                .iter()
+                .map(|(fragment, keys)| {
+                    let tombstones = keys
+                        .iter()
+                        .cloned()
+                        .map(|key| (*table, key))
+                        .collect::<Vec<_>>();
+                    (*fragment, tombstone_delta_retry_identity(&tombstones))
+                })
+                .collect();
+            (*table, (depth.fragment_count, fragments))
+        })
+        .collect()
 }
 
 fn update_retry_identity_value(hash: &mut Sha256, value: &CanonicalValue) {

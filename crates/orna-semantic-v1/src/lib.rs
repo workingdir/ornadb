@@ -7185,20 +7185,51 @@ fn infer(
             infer_nominal(path, fields, scope, local, diagnostics)
         }
         Expr::List { elements, .. } => {
-            let mut ty = None;
+            let mut element_types = Vec::with_capacity(elements.len());
             let mut effects = EffectSummary::default();
             for element in elements {
                 let value = infer(element, scope, local, diagnostics);
                 effects.join(&value.effects);
+                element_types.push(value.ty);
+            }
+
+            let first_parent = element_types.first().cloned();
+            let transactional_checkpoint_fold = element_types.len() > 2
+                && first_parent.as_ref().is_some_and(|first| {
+                    matches!(first, Type::Tuple(_))
+                        && type_contains_pinned_snapshot_identity(first)
+                });
+            let mut rejected_checkpoint_parent = false;
+            let mut ty = None;
+            for value in element_types {
                 if let Some(prior) = &ty {
-                    if let Some(merged) = merge_list_element_types(prior, &value.ty) {
+                    let merged = if transactional_checkpoint_fold {
+                        merge_multi_parent_checkpoint_tuple(
+                            prior,
+                            &value,
+                            first_parent.as_ref().expect("transactional fold has a parent"),
+                        )
+                    } else {
+                        merge_list_element_types(prior, &value)
+                    };
+                    if let Some(merged) = merged {
                         ty = Some(merged);
                     } else {
-                        require_same(prior, &value.ty, diagnostics);
+                        require_same(prior, &value, diagnostics);
+                        rejected_checkpoint_parent |= transactional_checkpoint_fold;
                     }
                 } else {
-                    ty = Some(value.ty);
+                    ty = Some(value);
                 }
+            }
+
+            // The reference does not define recovery when one parent in a
+            // multi-parent checkpoint fold cannot reconcile. Keep the first
+            // parent's concrete labels as the recovery anchor; otherwise a
+            // later parent could be partially promoted after an earlier
+            // rejection, making the recovered pin map depend on parent order.
+            if rejected_checkpoint_parent {
+                ty = first_parent;
             }
             if ty.is_none() {
                 diagnostics.push(diag(
@@ -7617,6 +7648,11 @@ fn infer(
             }
             if let Some(inferred) =
                 infer_relation_collection_call(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
+                infer_relation_statistics_call(callee, arguments, None, scope, local, diagnostics)
             {
                 return inferred;
             }
@@ -10076,6 +10112,63 @@ fn standard_collection_module_operation<'a>(
     }
 }
 
+fn standard_statistics_module_operation<'a>(
+    callee: &'a Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+) -> Option<&'a str> {
+    let path = qualified_path(callee)?;
+    match path.as_slice() {
+        ["std", "stats", operation]
+            if !local.contains_key("std") && is_portable_statistics_operation(operation) =>
+        {
+            Some(*operation)
+        }
+        [alias, operation] if !local.contains_key(*alias) => {
+            let namespace = scope.modules.get(*alias)?;
+            if namespace.0.len() == 2
+                && namespace.0[0] == "std"
+                && namespace.0[1] == "stats"
+                && is_portable_statistics_operation(operation)
+                && scope
+                    .available_modules
+                    .get(namespace)
+                    .is_some_and(|module| {
+                        module
+                            .exports
+                            .get(*operation)
+                            .is_some_and(|symbol| symbol.kind == SymbolKind::Function)
+                    })
+            {
+                Some(*operation)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn is_portable_statistics_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "mean"
+            | "median"
+            | "percentile"
+            | "sum"
+            | "min"
+            | "max"
+            | "range"
+            | "mode"
+            | "variance"
+            | "standard_deviation"
+            | "histogram"
+            | "rate"
+            | "derivative"
+            | "integrate"
+    )
+}
+
 // The pinned collection source declares one generic finite-list signature.
 // Nonempty calls get their element type from the rows; empty aggregates use
 // the caller's context where available and otherwise keep the Int zero rule.
@@ -11674,6 +11767,291 @@ fn infer_relation_call(
     })
 }
 
+/// Applies the pinned statistics signatures to relation rows and points.
+/// Finite-list calls keep using the standard module's generic source signatures.
+fn infer_relation_statistics_call(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    input: Option<Inferred>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let operation = standard_statistics_module_operation(callee, scope, local)?;
+    let (parameters, required) = match operation {
+        "mean" | "median" | "variance" | "standard_deviation" => {
+            (&["rows", "scale", "rounding"][..], 1)
+        }
+        "percentile" => (&["rows", "p", "interpolation", "scale", "rounding"][..], 3),
+        "sum" | "min" | "max" | "range" | "mode" => (&["rows"][..], 1),
+        "histogram" => (&["rows", "bins", "include_final_upper"][..], 2),
+        "rate" | "derivative" | "integrate" => (&["points"][..], 1),
+        _ => return None,
+    };
+    let implicit = usize::from(input.is_some());
+    let mut malformed = arguments.len() + implicit > parameters.len();
+    let mut slots = vec![None; parameters.len()];
+    if input.is_some() {
+        slots[0] = Some(usize::MAX);
+    }
+    let mut positional = implicit;
+    let mut named_started = false;
+    for (index, argument) in arguments.iter().enumerate() {
+        let slot = match argument.name.as_deref() {
+            Some(name) => {
+                named_started = true;
+                parameters.iter().position(|parameter| *parameter == name)
+            }
+            None if named_started => None,
+            None => {
+                let slot = Some(positional);
+                positional += 1;
+                slot
+            }
+        };
+        match slot {
+            Some(0) if implicit > 0 => malformed = true,
+            Some(slot) if slot < slots.len() && slots[slot].is_none() => {
+                slots[slot] = Some(index);
+            }
+            _ => malformed = true,
+        }
+    }
+    if slots[..required].iter().any(Option::is_none) {
+        malformed = true;
+    }
+
+    if implicit == 0 {
+        let Some(index) = slots[0] else {
+            return None;
+        };
+        let mut probe_diagnostics = Vec::new();
+        if !matches!(
+            infer(
+                &arguments[index].value,
+                scope,
+                local,
+                &mut probe_diagnostics
+            )
+            .ty,
+            Type::Relation(_)
+        ) {
+            return None;
+        }
+    } else if !matches!(
+        input.as_ref().map(|input| &input.ty),
+        Some(Type::Relation(_))
+    ) {
+        return None;
+    }
+
+    let mut effects = input
+        .as_ref()
+        .map_or_else(EffectSummary::default, |input| input.effects.clone());
+    let mut values = vec![None; parameters.len()];
+    if let Some(input) = input {
+        values[0] = Some(input);
+    }
+    for (index, argument) in arguments.iter().enumerate() {
+        let Some(slot) = slots.iter().position(|slot| *slot == Some(index)) else {
+            continue;
+        };
+        let inferred = infer(&argument.value, scope, local, diagnostics);
+        effects.join(&inferred.effects);
+        values[slot] = Some(inferred);
+    }
+
+    let Some(Type::Relation(element)) = values[0].as_ref().map(|value| &value.ty) else {
+        return None;
+    };
+    let element = element.as_ref().clone();
+    let mut valid = !malformed;
+    if malformed {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            format!("std.stats.{operation} relation arguments do not match its static signature"),
+        ));
+    }
+    let argument_type = |slot: usize| {
+        values
+            .get(slot)
+            .and_then(Option::as_ref)
+            .map(|value| &value.ty)
+    };
+    let numeric = is_statistics_numeric_type(&element);
+    match operation {
+        "mean" | "median" | "variance" | "standard_deviation" | "percentile" => {
+            if !numeric {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!("std.stats.{operation} requires numeric relation rows"),
+                ));
+                valid = false;
+            }
+        }
+        "sum" if !is_sum_element_type(&element) => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "std.stats.sum requires numeric relation rows",
+            ));
+            valid = false;
+        }
+        "min" | "max" if !is_sort_key_type(&element) => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                format!("std.stats.{operation} requires ordered relation rows"),
+            ));
+            valid = false;
+        }
+        "range" if !numeric => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "std.stats.range requires numeric relation rows",
+            ));
+            valid = false;
+        }
+        "mode" if is_default_float_equality_type(&element) => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "std.stats.mode requires a lawful equality relation; default Float equality is unavailable",
+            ));
+            valid = false;
+        }
+        "histogram" if !is_sort_key_type(&element) => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "std.stats.histogram requires ordered relation rows",
+            ));
+            valid = false;
+        }
+        "rate" | "derivative" | "integrate" => match &element {
+            Type::Tuple(parts)
+                if parts.len() == 2
+                    && parts[0] == Type::Instant
+                    && is_statistics_numeric_type(&parts[1]) => {}
+            _ => {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!("std.stats.{operation} requires (Instant, numeric) relation rows"),
+                ));
+                valid = false;
+            }
+        },
+        _ => {}
+    }
+
+    let numeric_argument_slots = match operation {
+        "percentile" => &[1][..],
+        _ => &[][..],
+    };
+    for slot in numeric_argument_slots {
+        if let Some(ty) = argument_type(*slot)
+            && *ty != Type::Error
+            && !is_statistics_numeric_type(ty)
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "std.stats.percentile probability must be numeric",
+            ));
+            valid = false;
+        }
+    }
+    if operation == "percentile"
+        && let Some(ty) = argument_type(2)
+        && !matches!(ty, Type::Text | Type::Error)
+    {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "std.stats.percentile interpolation must be Str",
+        ));
+        valid = false;
+    }
+    for (slot, base) in [(1, Type::Int), (2, Type::Text)] {
+        let applies = matches!(
+            operation,
+            "mean" | "median" | "variance" | "standard_deviation"
+        ) && slot < parameters.len();
+        if applies
+            && let Some(ty) = argument_type(slot)
+            && *ty != Type::Error
+            && !is_optional_stat_argument(ty, &base)
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "statistics scale and rounding options have invalid types",
+            ));
+            valid = false;
+        }
+    }
+    if operation == "percentile" {
+        for (slot, base) in [(3, Type::Int), (4, Type::Text)] {
+            if let Some(ty) = argument_type(slot)
+                && *ty != Type::Error
+                && !is_optional_stat_argument(ty, &base)
+            {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "statistics scale and rounding options have invalid types",
+                ));
+                valid = false;
+            }
+        }
+    }
+    if operation == "histogram" {
+        if let Some(ty) = argument_type(1)
+            && !matches!(ty, Type::List(bins) if matches!(bins.as_ref(), Type::Tuple(parts) if parts.len() == 2 && parts[0] == element && parts[1] == element))
+            && *ty != Type::Error
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "std.stats.histogram bins must be a list of matching boundary pairs",
+            ));
+            valid = false;
+        }
+        if let Some(ty) = argument_type(2)
+            && !matches!(ty, Type::Bool | Type::Error)
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "std.stats.histogram include_final_upper must be Bool",
+            ));
+            valid = false;
+        }
+    }
+    effects.may_fail = true;
+    let result = match operation {
+        "sum" => element.clone(),
+        "mode" => Type::List(Box::new(element.clone())),
+        "histogram" => Type::List(Box::new(Type::Int)),
+        "derivative" => Type::List(Box::new(element.clone())),
+        "mean" | "median" | "percentile" | "min" | "max" | "range" | "variance"
+        | "standard_deviation" | "rate" | "integrate" => {
+            Type::Optional(Box::new(if matches!(operation, "rate" | "integrate") {
+                match element {
+                    Type::Tuple(parts) if parts.len() == 2 => parts[1].clone(),
+                    _ => Type::Error,
+                }
+            } else {
+                element.clone()
+            }))
+        }
+        _ => Type::Error,
+    };
+    Some(Inferred {
+        ty: if valid { result } else { Type::Error },
+        effects,
+    })
+}
+
+fn is_statistics_numeric_type(ty: &Type) -> bool {
+    matches!(ty, Type::Int | Type::Decimal | Type::Float)
+        || matches!(ty, Type::Applied { base, .. } if base == "Float")
+}
+
+fn is_optional_stat_argument(ty: &Type, inner: &Type) -> bool {
+    ty == inner || ty == &Type::Null || ty == &Type::Optional(Box::new(inner.clone()))
+}
+
 /// Checks the direct core relation overloads. The finite-list overloads are
 /// intentionally checked by their existing source/profile path; this helper
 /// only claims an unqualified intrinsic when its rows argument is a relation.
@@ -12595,6 +12973,22 @@ fn infer_success_pipeline(
             ty: Type::Error,
             effects: input.effects,
         };
+    }
+    if matches!(&input.ty, Type::Relation(_))
+        && let Expr::Call {
+            callee, arguments, ..
+        } = rhs
+        && standard_statistics_module_operation(callee, scope, local).is_some()
+    {
+        return infer_relation_statistics_call(
+            callee,
+            arguments,
+            Some(input),
+            scope,
+            local,
+            diagnostics,
+        )
+        .expect("recognized statistics module operation has relation input");
     }
     if matches!(&input.ty, Type::Relation(_))
         && let Expr::Call {
@@ -17836,6 +18230,35 @@ fn tuple_checkpoint_promotion_matches(left: &[Type], right: &[Type]) -> bool {
         && tuple_checkpoint_compaction_fold_preserves_pin_identity(left, right)
 }
 
+/// Reconcile another parent into a multi-parent tuple checkpoint fold. Each
+/// source parent must have the first parent's map width, while the accumulated
+/// result may grow as it collects more parent labels. The fold guard still
+/// rejects any new cross-slot identity introduced by the accumulated union.
+fn merge_multi_parent_checkpoint_tuple(
+    accumulated: &Type,
+    parent: &Type,
+    first_parent: &Type,
+) -> Option<Type> {
+    let (Type::Tuple(accumulated), Type::Tuple(parent), Type::Tuple(first_parent)) =
+        (accumulated, parent, first_parent)
+    else {
+        return None;
+    };
+    if accumulated.len() != first_parent.len() || parent.len() != first_parent.len() {
+        return None;
+    }
+    if !first_parent
+        .iter()
+        .zip(parent)
+        .all(|(first, parent)| checkpoint_pin_map_widths_match(first, parent))
+        || !tuple_checkpoint_compaction_fold_preserves_pin_identity(accumulated, parent)
+    {
+        return None;
+    }
+
+    merge_checkpoint_field_map(&Type::Tuple(accumulated.clone()), &Type::Tuple(parent.clone()))
+}
+
 /// A folded tuple map must not invent cross-slot identity by unioning maps
 /// from opposite rows. The reference does not define that compaction case;
 /// only promote when every identity shared after the fold was shared within
@@ -18107,7 +18530,10 @@ fn snapshot_context_topology_matches(
         signatures
     }
 
-    membership_signatures(pin_maps, true) == membership_signatures(pin_maps, false)
+    pin_maps
+        .iter()
+        .all(|pair| pair.expected.len() == pair.actual.len())
+        && membership_signatures(pin_maps, true) == membership_signatures(pin_maps, false)
 }
 
 fn collect_corresponding_snapshot_context_maps_at_boundary(
