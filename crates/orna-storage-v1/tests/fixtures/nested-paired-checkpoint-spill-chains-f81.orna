@@ -1,0 +1,31 @@
+{ id: "f81/spill/reused", name: "f81/checkpoint/result", city: "f81/source/main", }
+
+{ id: "f81/spill/reused", name: "f81/checkpoint/result", city: "f81/source/peer", }
+
+{ id: "f81/spill/secondary", name: "f81/checkpoint/result", city: "f81/source/main", }
+
+{ id: "f81/spill/secondary", name: "f81/checkpoint/beta", city: "f81/source/beta", }
+
+{ id: "f81/spill/reused", name: "f81/checkpoint/result", city: "f81/source/main", }
+
+{ id: "f81/spill/late", name: "f81/checkpoint/late", city: "f81/source/late", }
+
+{ id: "f81/checkpoint-pair/a", name: "f81/checkpoint/left-a", city: "f81/checkpoint/right-a", }
+
+{ id: "f81/checkpoint-pair/b", name: "f81/checkpoint/left-b", city: "f81/checkpoint/right-b", }
+
+{ id: "f81/segment/0", name: "f81/left/replay-10", city: "f81/right/replay-10", }
+
+{ id: "f81/segment/1", name: "f81/left/replay-11", city: "f81/right/replay-11", }
+
+{ id: "f81/segment/2", name: "f81/left/rotation-15", city: "f81/right/rotation-15", }
+
+{ id: "f81/segment/3", name: "f81/left/peer-10", city: "f81/right/peer-10", }
+
+{ id: "f81/segment/4", name: "f81/left/later-10", city: "f81/right/later-10", }
+
+{ id: "f81/segment/5", name: "f81/left/beta-6", city: "f81/right/beta-6", }
+
+{ id: "f81/segment/6", name: "f81/left/restored-10", city: "f81/right/restored-10", }
+
+{ id: "f81/segment/7", name: "f81/left/late-9", city: "f81/right/late-9", }
