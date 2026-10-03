@@ -9695,6 +9695,22 @@ fn is_terminal_historical_callable(ty: &Type) -> bool {
 }
 
 fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
+    merge_checkpoint_field_map_inner(left, right, false)
+}
+
+/// Multi-parent folds validate source rows against the first accepted parent
+/// before merging. The accumulated value may therefore have wider context
+/// maps than the next row; retain structural and binder checks while allowing
+/// those already-validated identities to grow through nested callable results.
+fn merge_checkpoint_field_map_multi_parent(left: &Type, right: &Type) -> Option<Type> {
+    merge_checkpoint_field_map_inner(left, right, true)
+}
+
+fn merge_checkpoint_field_map_inner(
+    left: &Type,
+    right: &Type,
+    source_topology_validated: bool,
+) -> Option<Type> {
     if !checkpoint_snapshot_maps_are_valid(left) || !checkpoint_snapshot_maps_are_valid(right) {
         return None;
     }
@@ -9731,7 +9747,11 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
                 ([left_snapshot, left_callable], [right_snapshot, right_callable]) => Some(
                     historical_callable_type(
                         &merge_snapshot_context_map(left_snapshot, right_snapshot)?,
-                        &merge_checkpoint_field_map(left_callable, right_callable)?,
+                        &merge_checkpoint_field_map_inner(
+                            left_callable,
+                            right_callable,
+                            source_topology_validated,
+                        )?,
                     ),
                 ),
                 _ => None,
@@ -9754,12 +9774,14 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
             if left_parameters.len() != right_parameters.len() {
                 return None;
             }
-            if !function_snapshot_pin_identity_topology_matches(
-                left_parameters,
-                left_result,
-                right_parameters,
-                right_result,
-            ) {
+            if !source_topology_validated
+                && !function_snapshot_pin_identity_topology_matches(
+                    left_parameters,
+                    left_result,
+                    right_parameters,
+                    right_result,
+                )
+            {
                 return None;
             }
             // Distinct checkpoint closures can have the same callable shape
@@ -9776,7 +9798,11 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
                         && type_contains_pinned_snapshot_identity(right)
                         && pinned_snapshot_shape_matches(left, right)
                     {
-                        merge_checkpoint_field_map(left, right)
+                        merge_checkpoint_field_map_inner(
+                            left,
+                            right,
+                            source_topology_validated,
+                        )
                     } else {
                         None
                     }
@@ -9791,12 +9817,17 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
                 parameter_names: (left_names == right_names)
                     .then(|| left_names.clone())
                     .flatten(),
-                result: Box::new(merge_checkpoint_field_map(left_result, right_result)?),
+                result: Box::new(merge_checkpoint_field_map_inner(
+                    left_result,
+                    right_result,
+                    source_topology_validated,
+                )?),
             })
         }
         (Type::List(left), Type::List(right)) => {
-            if (type_contains_pinned_checkpoint_tuple(left)
-                || type_contains_pinned_checkpoint_tuple(right))
+            if !source_topology_validated
+                && (type_contains_pinned_checkpoint_tuple(left)
+                    || type_contains_pinned_checkpoint_tuple(right))
                 && (!checkpoint_pin_map_widths_match(left, right)
                     || !checkpoint_value_pin_identity_topology_matches(left, right)
                     || !nested_checkpoint_compaction_fold_preserves_pin_identity(left, right))
@@ -9808,29 +9839,39 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
             // inferred tuple slots. Keep this check at collection promotion
             // so ordinary tuple rebinding (including Bottom recovery) retains
             // its existing binder semantics.
-            if let (Type::Tuple(left), Type::Tuple(right)) = (left.as_ref(), right.as_ref())
+            if !source_topology_validated
+                && let (Type::Tuple(left), Type::Tuple(right)) = (left.as_ref(), right.as_ref())
                 && !tuple_checkpoint_promotion_matches(left, right)
             {
                 return None;
             }
-            if let (Type::Record(left), Type::Record(right)) = (left.as_ref(), right.as_ref())
+            if !source_topology_validated
+                && let (Type::Record(left), Type::Record(right)) = (left.as_ref(), right.as_ref())
                 && !record_checkpoint_promotion_matches(left, right)
             {
                 return None;
             }
-            Some(Type::List(Box::new(merge_checkpoint_field_map(left, right)?)))
+            Some(Type::List(Box::new(merge_checkpoint_field_map_inner(
+                left,
+                right,
+                source_topology_validated,
+            )?)))
         }
         (Type::Range(left), Type::Range(right)) => {
-            Some(Type::Range(Box::new(merge_checkpoint_field_map(left, right)?)))
+            Some(Type::Range(Box::new(merge_checkpoint_field_map_inner(
+                left,
+                right,
+                source_topology_validated,
+            )?)))
         }
         (Type::Relation(left), Type::Relation(right)) => Some(Type::Relation(Box::new(
-            merge_checkpoint_field_map(left, right)?,
+            merge_checkpoint_field_map_inner(left, right, source_topology_validated)?,
         ))),
         (Type::Stream(left), Type::Stream(right)) => Some(Type::Stream(Box::new(
-            merge_checkpoint_field_map(left, right)?,
+            merge_checkpoint_field_map_inner(left, right, source_topology_validated)?,
         ))),
         (Type::Optional(left), Type::Optional(right)) => Some(Type::Optional(Box::new(
-            merge_checkpoint_field_map(left, right)?,
+            merge_checkpoint_field_map_inner(left, right, source_topology_validated)?,
         ))),
         (Type::Record(left), Type::Record(right)) if left.len() == right.len() => {
             Some(Type::Record(
@@ -9838,7 +9879,11 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
                     .map(|(name, left)| {
                         Some((
                             name.clone(),
-                            merge_checkpoint_field_map(left, right.get(name)?)?,
+                            merge_checkpoint_field_map_inner(
+                                left,
+                                right.get(name)?,
+                                source_topology_validated,
+                            )?,
                         ))
                     })
                     .collect::<Option<BTreeMap<_, _>>>()?,
@@ -9848,7 +9893,9 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
             Some(Type::Tuple(
                 left.iter()
                     .zip(right)
-                    .map(|(left, right)| merge_checkpoint_field_map(left, right))
+                    .map(|(left, right)| {
+                        merge_checkpoint_field_map_inner(left, right, source_topology_validated)
+                    })
                     .collect::<Option<Vec<_>>>()?,
             ))
         }
@@ -9867,7 +9914,9 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
                 arguments: left_arguments
                     .iter()
                     .zip(right_arguments)
-                    .map(|(left, right)| merge_checkpoint_field_map(left, right))
+                    .map(|(left, right)| {
+                        merge_checkpoint_field_map_inner(left, right, source_topology_validated)
+                    })
                     .collect::<Option<Vec<_>>>()?,
             })
         }
@@ -9881,8 +9930,16 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
                 unit: right_unit,
             },
         ) => Some(Type::MoneyPerUnit {
-            currency: Box::new(merge_checkpoint_field_map(left_currency, right_currency)?),
-            unit: Box::new(merge_checkpoint_field_map(left_unit, right_unit)?),
+            currency: Box::new(merge_checkpoint_field_map_inner(
+                left_currency,
+                right_currency,
+                source_topology_validated,
+            )?),
+            unit: Box::new(merge_checkpoint_field_map_inner(
+                left_unit,
+                right_unit,
+                source_topology_validated,
+            )?),
         }),
         _ => None,
     }
@@ -18942,7 +18999,10 @@ fn merge_multi_parent_checkpoint_tuple(
         return None;
     }
 
-    merge_checkpoint_field_map(&Type::Tuple(accumulated.clone()), &Type::Tuple(parent.clone()))
+    merge_checkpoint_field_map_multi_parent(
+        &Type::Tuple(accumulated.clone()),
+        &Type::Tuple(parent.clone()),
+    )
 }
 
 /// Find a pinned tuple at any structural depth so parent-list inference can
@@ -19436,7 +19496,7 @@ fn merge_multi_parent_checkpoint_value(
         return None;
     }
 
-    merge_checkpoint_field_map(accumulated, parent)
+    merge_checkpoint_field_map_multi_parent(accumulated, parent)
 }
 
 struct ScopedCheckpointFold {
