@@ -7109,6 +7109,122 @@ fn nested_three_way_tuple_rebind_chains_preserve_pair_identity() {
 }
 
 #[test]
+fn three_way_tuple_storm_preserves_independent_sibling_rebinds() {
+    let source = include_str!("fixtures/historical-three-way-tuple-storm-sibling-rebind.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-three-way-tuple-storm-sibling-rebind.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        1,
+        "only the terminal tuple split should fail: {:?}",
+        type_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("accepts_three_way_tuple_rebind_storm")
+        })
+        .expect("three-way tuple storm fixture module");
+    let row_fields = |function: &str| {
+        let Type::Function { result, .. } = &module.symbols[function].ty else {
+            panic!("{function} must retain its computed function type");
+        };
+        let Type::Record(fields) = result.as_ref() else {
+            panic!("{function} must return its parent fold: {result:?}");
+        };
+        let Type::List(row) = fields.get("parent_fold").expect("parent fold") else {
+            panic!("{function} must retain its parent list");
+        };
+        let Type::Record(fields) = row.as_ref() else {
+            panic!("{function} must retain its row: {row:?}");
+        };
+        fields
+    };
+    let pin_slots = |function: &str| {
+        let fields = row_fields(function);
+        let Type::Tuple(slots) = fields.get("pins").expect("paired pins") else {
+            panic!("{function}.pins must retain its tuple");
+        };
+        assert_eq!(slots.len(), 2, "{function} must preserve both tuple slots");
+        slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                contexts
+            })
+            .collect::<Vec<_>>()
+    };
+    let witness_contexts = |function: &str| {
+        let fields = row_fields(function);
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(fields.get("witness").expect("witness sibling"), &mut contexts);
+        contexts
+    };
+
+    let accepted_pair = BTreeSet::from([
+        "selector:HEAD~500".into(),
+        "selector:HEAD~510".into(),
+        "selector:HEAD~520".into(),
+        "selector:HEAD~530".into(),
+        "selector:HEAD~540".into(),
+    ]);
+    assert_eq!(
+        pin_slots("accepts_three_way_tuple_rebind_storm"),
+        [accepted_pair.clone(), accepted_pair],
+        "the aligned pair stays deterministic through dense three-way rebinds"
+    );
+    assert_eq!(
+        witness_contexts("accepts_three_way_tuple_rebind_storm"),
+        BTreeSet::from([
+            "selector:HEAD~501".into(),
+            "selector:HEAD~511".into(),
+            "selector:HEAD~521".into(),
+            "selector:HEAD~531".into(),
+            "selector:HEAD~541".into(),
+        ]),
+        "the independent callback sibling accumulates every accepted rebind"
+    );
+    assert_eq!(
+        pin_slots("rejects_three_way_tuple_storm_split_without_losing_witnesses"),
+        [
+            BTreeSet::from(["selector:HEAD~600".into()]),
+            BTreeSet::from(["selector:HEAD~600".into()]),
+        ],
+        "a terminal split rolls both tuple slots back to their common anchor"
+    );
+    assert_eq!(
+        witness_contexts("rejects_three_way_tuple_storm_split_without_losing_witnesses"),
+        BTreeSet::from([
+            "selector:HEAD~601".into(),
+            "selector:HEAD~611".into(),
+            "selector:HEAD~621".into(),
+            "selector:HEAD~632".into(),
+            "selector:HEAD~641".into(),
+        ]),
+        "tuple rollback leaves the callback sibling's actual values intact"
+    );
+}
+
+#[test]
 fn multi_parent_selector_topology_storm_preserves_label_depth_identity() {
     let source = include_str!("fixtures/historical-multi-parent-selector-topology-storm.orna");
     let parsed = orna_syntax_v1::parse_module(source);
@@ -13073,6 +13189,102 @@ fn paired_checkpoint_reset_replay_preserves_each_lane_identity() {
                 BTreeSet::from([expected.to_owned()]),
                 "{stage}.{field} must replay the identity belonging to its paired checkpoint"
             );
+        }
+    }
+}
+
+#[test]
+fn paired_nested_omission_reset_replay_restores_lane_pin_maps() {
+    let source = include_str!("fixtures/historical-paired-nested-omission-reset-replay.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-omission-reset-replay.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired nested omission folds must remain resettable and replay their saved pin maps: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_nested_omission_reset_replay_values")
+        })
+        .expect("paired nested omission reset replay module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_nested_omission_reset_replay_values"].ty
+    else {
+        panic!("paired nested omission replay must be callable");
+    };
+    let Type::Record(stages) = result.as_ref() else {
+        panic!("paired nested omission replay must return saved and replayed values");
+    };
+    let Type::Record(saved_lanes) = stages.get("saved").expect("saved paired values") else {
+        panic!("saved paired value must contain both lanes");
+    };
+    let Type::Record(replayed_lanes) = stages.get("replayed").expect("replayed values") else {
+        panic!("replayed paired value must contain both lanes");
+    };
+    assert_eq!(
+        saved_lanes, replayed_lanes,
+        "resetting after complete and partial paired omission folds must replay each exact saved value"
+    );
+
+    for (lane, pins) in [
+        (
+            "left",
+            [
+                ("root", Some("HEAD~500")),
+                ("terminal", Some("HEAD~430")),
+                ("middle_right", None),
+            ],
+        ),
+        (
+            "right",
+            [
+                ("root", Some("HEAD~450")),
+                ("terminal", Some("HEAD~420")),
+                ("middle_selected", None),
+            ],
+        ),
+    ] {
+        let Type::Record(fields) = replayed_lanes.get(lane).expect("replayed lane") else {
+            panic!("{lane} must retain its computed checkpoint fields");
+        };
+        for (field, selector) in pins {
+            let value = fields.get(field).expect("computed checkpoint field");
+            assert_canonical_snapshot_context_maps(value);
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(value, &mut contexts);
+            if let Some(selector) = selector {
+                assert_eq!(
+                    contexts,
+                    BTreeSet::from([format!("selector:{selector}")]),
+                    "{lane}.{field} must replay its saved selector"
+                );
+            } else {
+                assert_eq!(
+                    contexts.len(),
+                    1,
+                    "{lane}.{field} must retain one symbolic identity for its omitted pin"
+                );
+                assert!(
+                    contexts.iter().all(|context| context.starts_with("selector:dynamic-call:")),
+                    "{lane}.{field} must remain a symbolic omitted pin, not inherit a storm pin: {contexts:?}"
+                );
+            }
         }
     }
 }

@@ -581,6 +581,91 @@ fn paired_view_refresh_handoff_keeps_scoped_batches_independent() {
     );
 }
 
+#[test]
+fn paired_view_cursor_scopes_rebind_across_three_page_refresh_handoffs() {
+    // Reuse the local `.orna` callback fixture while each scoped view crosses
+    // two cursor handoffs. Left and right intentionally share their first
+    // opaque checkpoint; each later refresh gets new page streams.
+    let mut source = PairedViewRefreshSource::new([
+        (
+            "View.Left",
+            vec![
+                page(&[1], Some(vec![11])),
+                page(&[3], Some(vec![33])),
+                page(&[5], None),
+            ],
+        ),
+        (
+            "View.Right",
+            vec![
+                page(&[2], Some(vec![11])),
+                page(&[4], Some(vec![44])),
+                page(&[6], None),
+            ],
+        ),
+        (
+            "View.Left",
+            vec![
+                page(&[-3], Some(vec![11])),
+                page(&[5], Some(vec![55])),
+                page(&[7], None),
+            ],
+        ),
+        (
+            "View.Right",
+            vec![
+                page(&[2], Some(vec![11])),
+                page(&[9], Some(vec![66])),
+                page(&[8], None),
+            ],
+        ),
+    ]);
+
+    assert_eq!(
+        run_with_fixture_functions(incremental_scoped_view_body(), &mut source).unwrap(),
+        integer(21),
+        "first paired fold computes the positive odd and even values over three pages"
+    );
+    assert_eq!(source.lanes.len(), 2);
+    assert_eq!(source.lanes[0].0, "View.Left");
+    assert_eq!(source.lanes[1].0, "View.Right");
+    let first_left = source.lanes[0].1;
+    let first_right = source.lanes[1].1;
+    assert_ne!(first_left, first_right);
+
+    assert_eq!(
+        run_with_fixture_functions(incremental_scoped_view_body(), &mut source).unwrap(),
+        integer(3),
+        "refreshed fold computes only its new positive even value"
+    );
+    assert_eq!(source.lanes.len(), 4);
+    assert_eq!(source.lanes[2].0, "View.Left");
+    assert_eq!(source.lanes[3].0, "View.Right");
+    let refreshed_left = source.lanes[2].1;
+    let refreshed_right = source.lanes[3].1;
+    assert_ne!(refreshed_left, refreshed_right);
+    assert_ne!(first_left, refreshed_left);
+    assert_ne!(first_right, refreshed_right);
+    assert_eq!(
+        source.cursors,
+        vec![
+            ("View.Left".into(), first_left, None),
+            ("View.Left".into(), first_left, Some(vec![11])),
+            ("View.Left".into(), first_left, Some(vec![33])),
+            ("View.Right".into(), first_right, None),
+            ("View.Right".into(), first_right, Some(vec![11])),
+            ("View.Right".into(), first_right, Some(vec![44])),
+            ("View.Left".into(), refreshed_left, None),
+            ("View.Left".into(), refreshed_left, Some(vec![11])),
+            ("View.Left".into(), refreshed_left, Some(vec![55])),
+            ("View.Right".into(), refreshed_right, None),
+            ("View.Right".into(), refreshed_right, Some(vec![11])),
+            ("View.Right".into(), refreshed_right, Some(vec![66])),
+        ],
+        "each view advances within its own cursor scope and refresh begins both at the head"
+    );
+}
+
 fn paired_subscription_cascade_body() -> Expr {
     let left = relation_stage(
         relation_stage(

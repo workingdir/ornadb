@@ -1,0 +1,62 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn nested_checkpoint_wave(root_pin: sys.SnapshotRef) =
+    ((outer_selected, (outer_left, outer_right)): (sys.SnapshotRef, (sys.SnapshotRef, sys.SnapshotRef))) =>
+    ((middle_selected, (middle_left, middle_right)): (sys.SnapshotRef, (sys.SnapshotRef, sys.SnapshotRef))) =>
+    (terminal_pin: sys.SnapshotRef) => {
+        root: factory_at(root_pin),
+        outer_selected: factory_at(outer_selected),
+        outer_left: factory_at(outer_left),
+        outer_right: factory_at(outer_right),
+        middle_selected: factory_at(middle_selected),
+        middle_left: factory_at(middle_left),
+        middle_right: factory_at(middle_right),
+        terminal: factory_at(terminal_pin),
+    };
+
+pub fn paired_nested_omission_reset_replay_values(failure: Error) {
+    let left_root = nested_checkpoint_wave(sys.snapshot("HEAD~500"));
+    let right_root = nested_checkpoint_wave(sys.snapshot("HEAD~450"));
+    let left_middle = left_root((sys.snapshot("HEAD~490"), (sys.snapshot("HEAD~489"), sys.snapshot("HEAD~488"))));
+    let right_middle = right_root((sys.snapshot("HEAD~440"), (sys.snapshot("HEAD~439"), sys.snapshot("HEAD~438"))));
+
+    let saved = (
+        left_middle((sys.snapshot("HEAD~480"), (sys.snapshot("HEAD~479"), fail(failure)))),
+        right_middle((fail(failure), (sys.snapshot("HEAD~429"), sys.snapshot("HEAD~428")))),
+    );
+    let (saved_left, saved_right) = saved;
+    let saved_values = {
+        left: saved_left(sys.snapshot("HEAD~430")),
+        right: saved_right(sys.snapshot("HEAD~420")),
+    };
+    let rolling = saved;
+
+    let left_storm_root = nested_checkpoint_wave(sys.snapshot("HEAD~400"));
+    let right_storm_root = nested_checkpoint_wave(sys.snapshot("HEAD~350"));
+    rolling = (
+        left_storm_root((sys.snapshot("HEAD~390"), (sys.snapshot("HEAD~389"), sys.snapshot("HEAD~388"))))
+            ((sys.snapshot("HEAD~380"), (sys.snapshot("HEAD~379"), sys.snapshot("HEAD~378")))),
+        right_storm_root((sys.snapshot("HEAD~340"), (sys.snapshot("HEAD~339"), sys.snapshot("HEAD~338"))))
+            ((sys.snapshot("HEAD~330"), (sys.snapshot("HEAD~329"), sys.snapshot("HEAD~328")))),
+    );
+
+    let left_partial_root = nested_checkpoint_wave(sys.snapshot("HEAD~300"));
+    let right_partial_root = nested_checkpoint_wave(sys.snapshot("HEAD~250"));
+    rolling = (
+        left_partial_root((sys.snapshot("HEAD~290"), (sys.snapshot("HEAD~289"), sys.snapshot("HEAD~288"))))
+            ((fail(failure), (sys.snapshot("HEAD~279"), sys.snapshot("HEAD~278")))),
+        right_partial_root((sys.snapshot("HEAD~240"), (sys.snapshot("HEAD~239"), sys.snapshot("HEAD~238"))))
+            ((sys.snapshot("HEAD~230"), (fail(failure), sys.snapshot("HEAD~228")))),
+    );
+    rolling = saved;
+
+    let (left_replay, right_replay) = rolling;
+    {
+        saved: saved_values,
+        replayed: {
+            left: left_replay(sys.snapshot("HEAD~430")),
+            right: right_replay(sys.snapshot("HEAD~420")),
+        },
+    }
+}
