@@ -1,0 +1,4 @@
+use std.map as map;
+
+pub fn canonical_entry_view(entries: [(Str, Int)]): [(Str, Int)] =
+    map.entries_by_ovb_key(entries);

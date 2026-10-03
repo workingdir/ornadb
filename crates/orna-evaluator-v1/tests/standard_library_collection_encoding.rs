@@ -207,6 +207,71 @@ fn stable_sort_orders_binary_ovb_keys_lexicographically() {
 }
 
 #[test]
+fn map_projection_uses_complete_ovb_key_bytes_at_text_length_boundaries() {
+    assert_eq!(
+        evaluate(include_str!("fixtures/stdlib-map-ovb-key-order-w02pm.orna")),
+        Ok(value(Raw::Array(vec![
+            tuple(vec![Raw::Text("é".into()), integer(2)]),
+            tuple(vec![
+                Raw::Text("12345678901234567890123".into()),
+                integer(23),
+            ]),
+            tuple(vec![
+                Raw::Text("abcdefghijklmnopqrstuvwx".into()),
+                integer(24),
+            ]),
+        ])))
+    );
+}
+
+#[test]
+fn map_projection_sorts_nested_tuple_key_encodings() {
+    assert_eq!(
+        evaluate(include_str!("fixtures/stdlib-map-nested-ovb-key-order-w02pm.orna")),
+        Ok(value(Raw::Array(vec![
+            tuple(vec![
+                tuple(vec![Raw::Text("z".into()), integer(0)]),
+                integer(1),
+            ]),
+            tuple(vec![
+                tuple(vec![Raw::Text("aa".into()), integer(0)]),
+                integer(2),
+            ]),
+        ])))
+    );
+}
+
+#[test]
+fn map_projection_orders_a_four_entry_map_by_canonical_key() {
+    assert_eq!(
+        evaluate(include_str!("fixtures/stdlib-map-four-entry-ovb-order-w02pm.orna")),
+        Ok(value(Raw::Array(vec![
+            tuple(vec![Raw::Text("a".into()), integer(1)]),
+            tuple(vec![Raw::Text("b".into()), integer(2)]),
+            tuple(vec![Raw::Text("c".into()), integer(3)]),
+            tuple(vec![Raw::Text("d".into()), integer(4)]),
+        ])))
+    );
+}
+
+#[test]
+fn structural_record_ovb_order_uses_encoded_nfc_field_keys() {
+    let expected = encoded(Raw::Map(vec![
+        (Raw::Text("aa".into()), integer(1)),
+        (Raw::Text("é".into()), integer(2)),
+        (Raw::Text("aaaaaaaaaaaaaaaaaaaaaaa".into()), integer(23)),
+        (
+            Raw::Text("bbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            integer(24),
+        ),
+    ]));
+    assert_eq!(
+        evaluate(include_str!("fixtures/stdlib-record-key-boundaries-w02pm.orna")),
+        Ok(expected)
+    );
+}
+
+#[test]
 fn map_entry_tuples_roundtrip_as_list_of_tuples() {
     let expected_tuple = value(Raw::Array(vec![tuple(vec![
         Raw::Text("x".into()),
