@@ -1,0 +1,4 @@
+use std.encoding;
+use std.io;
+
+pub fn marker(): Int = 0;
