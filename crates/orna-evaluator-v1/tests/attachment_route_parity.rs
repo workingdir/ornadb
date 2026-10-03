@@ -2700,6 +2700,58 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         leaf_final,
         "identity validation preserves the actual terminal package snapshot"
     );
+    let (audited_omission_fold, omission_identity_transitions) = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_capturing_terminal_identity_transitions(
+            &first_stage,
+            &first_only_rebind_chains,
+            &first_chain_identity,
+            &omission_tail_chains,
+        )
+        .unwrap();
+    assert_eq!(
+        omission_identity_transitions,
+        vec![
+            (first_chain_identity.clone(), first_chain_identity.clone()),
+            (first_chain_identity.clone(), first_chain_identity.clone()),
+        ],
+        "each paired omission chain reports its exact unchanged terminal identity"
+    );
+    assert_eq!(
+        audited_omission_fold.terminal_route_identity(),
+        first_chain_identity,
+        "the audited omission fold retains its computed rebound identity"
+    );
+    assert_eq!(
+        audited_omission_fold
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "auditing identity edges retains the computed terminal package value"
+    );
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_capturing_terminal_identity_transitions(
+                &first_stage,
+                &first_only_rebind_chains,
+                &middle_chain_identity,
+                &omission_tail_chains,
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_capturing_terminal_identity_transitions(
+                &first_stage,
+                &first_only_rebind_chains,
+                &first_chain_identity,
+                &[invalid_omission_chain.as_slice()],
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
     assert!(matches!(
         resolver
             .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_validating_rebound_terminal_identity(
