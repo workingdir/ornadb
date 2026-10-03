@@ -1,7 +1,9 @@
 use orna_syntax_v1::{Declaration, Expr, LiteralKind, TypeExpr, parse_module};
+use std::{collections::BTreeMap, fs, path::Path};
+
 use orna_sys_v1::{
     AbiType, EffectSet, OperationContract, SystemEffect, system_binding_stubs, system_provider_abi,
-    system_provider_abi_json,
+    system_binding_modules_json, system_provider_abi_json,
 };
 use serde_json::Value;
 
@@ -435,6 +437,85 @@ fn generated_sys_stubs_parse_resolve_to_registry_types_and_dispatch_one_to_one()
     assert_eq!(validated_stub_bodies, operation_count);
     println!(
         "generated_stub_validation operations={operation_count} canonical_placeholder_bodies={validated_stub_bodies}"
+    );
+}
+
+#[test]
+fn generated_idl_modules_parse_and_validate_registry_contracts_independently() {
+    let abi = system_provider_abi();
+    let modules: BTreeMap<String, String> = serde_json::from_str(system_binding_modules_json())
+        .expect("generated binding-module manifest maps paths to source");
+    let module_root = Path::new(env!("OUT_DIR")).join("system_bindings");
+    assert!(!modules.is_empty(), "generated IDL has module files");
+    let mut validated_modules = 0;
+    let mut validated_operations = 0;
+
+    for (relative_path, manifest_source) in &modules {
+        let module = relative_path
+            .strip_suffix(".orna")
+            .expect("generated module paths use the Orna extension")
+            .replace('/', ".");
+        let file_source = fs::read_to_string(module_root.join(relative_path))
+            .unwrap_or_else(|error| panic!("read generated IDL module {relative_path}: {error}"));
+        assert_eq!(
+            &file_source, manifest_source,
+            "generated module {relative_path} matches its embedded manifest source"
+        );
+        let parsed = parse_module(&file_source);
+        assert!(
+            parsed.is_ok(),
+            "generated IDL module {relative_path} parses independently: {:?}",
+            parsed.diagnostics
+        );
+
+        let expected_operations = abi
+            .operations()
+            .filter(|operation| {
+                operation
+                    .signature
+                    .callable
+                    .rsplit_once('.')
+                    .is_some_and(|(parent, _)| parent == module)
+            })
+            .collect::<Vec<_>>();
+        let markers = file_source
+            .lines()
+            .filter_map(|line| line.strip_prefix("// sys-op: "))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            markers,
+            expected_operations
+                .iter()
+                .map(|operation| operation.id.as_str())
+                .collect::<Vec<_>>(),
+            "module {relative_path} owns exactly its registry operations in order"
+        );
+        assert_eq!(parsed.value.items.len(), expected_operations.len());
+
+        for (block, operation) in file_source
+            .split("\n\n")
+            .filter(|block| block.lines().any(|line| line.starts_with("// sys-op: ")))
+            .zip(expected_operations)
+        {
+            let contract_source = format!("// sys-module: {module}\n{block}\n");
+            validate_stub_contract(&contract_source, operation).unwrap_or_else(|error| {
+                panic!(
+                    "generated IDL stub for {} in {relative_path} violates its registry contract: {error}",
+                    operation.id.as_str()
+                )
+            });
+            validated_operations += 1;
+        }
+        validated_modules += 1;
+    }
+
+    assert_eq!(
+        validated_operations,
+        abi.operations().count(),
+        "standalone module validation covers every typed registry operation"
+    );
+    println!(
+        "generated_idl_module_validation modules={validated_modules} operations={validated_operations} standalone_parse=true manifest_bytes_match=true typed_contracts=true"
     );
 }
 
