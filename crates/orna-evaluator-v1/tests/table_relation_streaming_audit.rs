@@ -1236,6 +1236,103 @@ fn paired_view_variable_depth_pagination_keeps_scope_through_refresh_folds() {
     );
 }
 
+#[test]
+fn paired_view_long_cursor_spill_chains_keep_refresh_identity() {
+    let cursor = |tag: u8| {
+        let mut token = vec![0x5a; 128];
+        token.push(tag);
+        token
+    };
+    let subscriptions = [
+        (
+            "View.Left",
+            vec![
+                page(&[1], Some(cursor(1))),
+                page(&[3], Some(cursor(2))),
+                page(&[5], Some(cursor(3))),
+                page(&[7], None),
+            ],
+        ),
+        (
+            "View.Left",
+            vec![page(&[2], Some(cursor(1))), page(&[4], Some(cursor(2))), page(&[6], None)],
+        ),
+        ("View.Right", vec![page(&[-1], Some(cursor(1))), page(&[1], None)]),
+        ("View.Right", vec![page(&[2], None)]),
+        ("View.Left", vec![page(&[3], Some(cursor(1))), page(&[5], None)]),
+        (
+            "View.Left",
+            vec![
+                page(&[2], Some(cursor(1))),
+                page(&[4], Some(cursor(2))),
+                page(&[6], Some(cursor(3))),
+                page(&[8], None),
+            ],
+        ),
+        (
+            "View.Right",
+            vec![page(&[1], Some(cursor(1))), page(&[3], Some(cursor(2))), page(&[5], None)],
+        ),
+        ("View.Right", vec![page(&[4], Some(cursor(1))), page(&[6], None)]),
+        ("View.Left", vec![page(&[1], None)]),
+        ("View.Left", vec![page(&[2], Some(cursor(1))), page(&[4], None)]),
+        (
+            "View.Right",
+            vec![
+                page(&[-1], Some(cursor(1))),
+                page(&[1], Some(cursor(2))),
+                page(&[3], Some(cursor(3))),
+                page(&[5], None),
+            ],
+        ),
+        (
+            "View.Right",
+            vec![page(&[2], Some(cursor(1))), page(&[4], Some(cursor(2))), page(&[6], None)],
+        ),
+    ];
+    let mut source = PairedViewRefreshSource::new(subscriptions);
+
+    let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(first, integer(26));
+    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(second, integer(37));
+    let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(third, integer(31));
+    assert_eq!(first, integer(26), "the first spilled cursor fold remains captured");
+    assert_eq!(second, integer(37), "the middle spilled cursor fold remains captured");
+
+    assert_eq!(source.lanes.len(), 12, "four scoped subscriptions bind per refresh");
+    for generation in 0..3 {
+        let start = generation * 4;
+        assert_eq!(source.lanes[start].0, "View.Left");
+        assert_eq!(source.lanes[start + 1].0, "View.Left");
+        assert_eq!(source.lanes[start + 2].0, "View.Right");
+        assert_eq!(source.lanes[start + 3].0, "View.Right");
+    }
+    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "long cursor payloads remain isolated to their paired refresh scope: {scope:?}"
+        );
+    }
+    assert_eq!(source.cursors.len(), 31, "all one-to-four-page chains are consumed");
+    let depths = [4, 3, 2, 1, 2, 4, 3, 2, 1, 2, 4, 3];
+    let mut expected_cursors = Vec::new();
+    for (lane, depth) in depths.into_iter().enumerate() {
+        let (source_name, scope, _) = &source.lanes[lane];
+        expected_cursors.push((source_name.clone(), *scope, None));
+        for tag in 1..depth {
+            expected_cursors.push((source_name.clone(), *scope, Some(cursor(tag))));
+        }
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "128-byte shared cursor prefixes retain their exact payload and scope through each spill chain"
+    );
+}
+
 fn paired_subscription_cascade_body() -> Expr {
     let left = relation_stage(
         relation_stage(
