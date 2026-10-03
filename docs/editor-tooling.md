@@ -16,6 +16,12 @@ The checked-in editor files are generated from this metadata:
 | `editors/vscode/package.json` | `.orna` association and grammar registration |
 | `editors/vscode/language-configuration.json` | Comments, brackets, and quote pairs |
 | `editors/semantic-token-legend.json` | LSP token order and classifier-to-editor mapping |
+| `editors/tree-sitter-orna/grammar.js` | Parser grammar with keyword tokens derived from `KEYWORDS` and `SCALAR_TYPES` |
+| `editors/tree-sitter-orna/queries/highlights.scm` | Tree-sitter token captures and contextual name roles |
+| `editors/tree-sitter-orna/{tree-sitter.json,package.json}` | Tree-sitter package registration and release metadata |
+| `editors/vim/` | Vim syntax groups and `.orna` file detection |
+| `editors/emacs/orna-eglot.el` | Emacs font-lock mode and Eglot setup |
+| `editors/sublime/Orna.sublime-syntax` | Sublime Text lexical scopes |
 
 Regenerate the files after changing syntax metadata, and check for drift with:
 
@@ -24,21 +30,31 @@ just editor-artifacts
 just editor-artifacts-check
 ```
 
-`just check` includes the drift check. The focused `orna-syntax` proof tests
-load their `.orna` source from `crates/orna-syntax/tests/fixtures/` with
-`include_str!` and compare every generated JSON artifact byte-for-byte with the
-renderer.
+`just check` includes the drift check. It compares every checked-in artifact
+byte-for-byte with the Rust renderer and runs Node's parser check on the
+generated Tree-sitter grammar. The focused `orna-syntax` proof tests load their
+`.orna` source from `crates/orna-syntax/tests/fixtures/` with `include_str!`,
+validate generated JSON manifests, and prove that Tree-sitter, Vim, Emacs,
+Sublime, and TextMate contain the shared keyword and scalar-type inventory.
 
-TextMate grammars recognize lexical patterns but do not have the parser's
-context for distinguishing a declared type, function, property, namespace, or
-variable. The fallback grammar therefore scopes ordinary identifiers
-generically; clients with semantic-token support receive the contextual
-classifications from `orna-syntax` through `orna-lsp`. This is a pragmatic
-editor mapping because the frozen Orna 1.0.0 reference defines source syntax,
-but does not prescribe TextMate scopes, semantic-token names, or editor package
-metadata. This work does not claim that a static TextMate grammar provides
-parser-equivalent context.
+The Tree-sitter parser shape lives in a template inside `orna-syntax`; its
+keyword token rules and highlight-query vocabulary are rendered from the same
+`KEYWORDS` and `SCALAR_TYPES` tables used by the other editors. The query's
+contextual captures use the `TOKEN_PRESENTATIONS` table for comments, literals,
+names, operators, and punctuation.
+
+TextMate, Vim, Emacs, and Sublime fallback grammars recognize lexical patterns
+but do not have the Rust parser's context for distinguishing a declared type,
+function, property, namespace, or variable. These fallback grammars therefore
+scope ordinary identifiers generically; clients with semantic-token support
+receive contextual classifications from `orna-syntax` through `orna-lsp`.
+This is a pragmatic editor mapping because the frozen Orna 1.0.0 reference
+defines source syntax, but does not prescribe editor scopes, semantic-token
+names, or package metadata. This work does not claim that a static grammar
+provides parser-equivalent context.
 
 The generated VS Code package contributes syntax association only. Configure
 `orna-lsp` separately in the editor to receive diagnostics, navigation, and
-semantic tokens. No editor host is launched by the focused proof tests.
+semantic tokens. Focused checks do not launch editor hosts; Tree-sitter
+generation is structurally checked by Node, while the grammar/query package is
+drift-checked as generated text.
