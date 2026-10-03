@@ -2183,7 +2183,8 @@ fn explain_query_core_with_subqueries(
         let decorrelated_subquery = declared_position
             .checked_sub(declared_join_count)
             .and_then(|offset| decorrelated_subqueries.get(offset));
-        let right = if let Some(candidate) = partial_index_for_join(join, partial_indexes) {
+        let selected_partial_index = partial_index_for_join(join, partial_indexes);
+        let right = if let Some(candidate) = selected_partial_index {
             push_index_lookup(&mut operators, candidate, join.statistics.as_ref())
         } else {
             push_scan(&mut operators, join.source.clone(), join.statistics.as_ref())
@@ -2258,6 +2259,9 @@ fn explain_query_core_with_subqueries(
         }
         if let Some(pair_identity) = join_pair_identity {
             add_join_pair_identity_details(&mut details, pair_identity);
+        }
+        if let Some(candidate) = selected_partial_index {
+            add_partial_index_pair_identity_details(&mut details, candidate);
         }
         let prior = current;
         current = operators.len();
@@ -3272,6 +3276,7 @@ fn push_index_lookup(
             PlanDetail::Text("exact_table_and_predicate_identity".to_owned()),
         ),
     ]);
+    add_partial_index_pair_identity_details(&mut details, candidate);
     if let Some(branch) = statistics.and_then(|stats| stats.mutable_branch.as_ref()) {
         details.insert(
             "mutable_branch".to_owned(),
@@ -3308,6 +3313,34 @@ fn push_index_lookup(
         work,
     ));
     index
+}
+
+/// Returns the stable identity of the exact logical predicate pushdown and
+/// selected index pair. ORNA specifies the `index_lookup` node kind but does
+/// not prescribe its identity encoding, so the explain adapter hashes the
+/// table/index/predicate tuple. Cost reordering may move its join fold, but
+/// cannot change this value while that tuple stays fixed.
+fn partial_index_pair_identity(candidate: &QueryPartialIndexDescription) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.partial-index-pair.v1\0");
+    hash_part(&mut hash, candidate.table.as_str().as_bytes());
+    hash_part(&mut hash, candidate.index.as_str().as_bytes());
+    hash_part(&mut hash, candidate.partial_predicate.as_str().as_bytes());
+    format!("index-pair:{}", hex(&hash.finalize()))
+}
+
+fn add_partial_index_pair_identity_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    candidate: &QueryPartialIndexDescription,
+) {
+    details.insert(
+        "predicate_pushdown_identity".to_owned(),
+        PlanDetail::Text(partial_index_pair_identity(candidate)),
+    );
+    details.insert(
+        "predicate_pushdown_pairing".to_owned(),
+        PlanDetail::Text("exact_table_index_and_predicate".to_owned()),
+    );
 }
 
 fn push_scan(
