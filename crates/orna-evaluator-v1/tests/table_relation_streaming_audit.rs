@@ -887,6 +887,36 @@ fn paired_view_refresh_cursor_chains_keep_identity_across_handoffs() {
             "refresh and sibling subscriptions retain distinct scopes despite repeated cursor bytes: {scope:?}"
         );
     }
+
+    assert_eq!(source.cursors.len(), 36, "each subscription consumes its three-page chain");
+    let chains: [(&str, &[u8], &[u8]); 12] = [
+        ("View.Left", &[11], &[33]),
+        ("View.Left", &[11], &[44]),
+        ("View.Right", &[11], &[55]),
+        ("View.Right", &[11], &[66]),
+        ("View.Left", &[71], &[73]),
+        ("View.Left", &[81], &[83]),
+        ("View.Right", &[91], &[93]),
+        ("View.Right", &[101], &[103]),
+        ("View.Left", &[11], &[33]),
+        ("View.Left", &[11], &[44]),
+        ("View.Right", &[11], &[55]),
+        ("View.Right", &[11], &[66]),
+    ];
+    let mut expected_cursors = Vec::new();
+    for (index, (source_name, first_cursor, second_cursor)) in chains.into_iter().enumerate() {
+        let scope = scopes[index];
+        expected_cursors.extend([
+            (source_name.to_owned(), scope, None),
+            (source_name.to_owned(), scope, Some(first_cursor.to_vec())),
+            (source_name.to_owned(), scope, Some(second_cursor.to_vec())),
+        ]);
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "replayed cursor bytes advance only their own subscription scope across refresh chains"
+    );
 }
 
 fn paired_subscription_cascade_body() -> Expr {
