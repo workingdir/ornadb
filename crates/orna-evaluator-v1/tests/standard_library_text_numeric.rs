@@ -1,4 +1,4 @@
-use orna_evaluator_v1::{AdmittedReplSession, Limits};
+use orna_evaluator_v1::{AdmittedReplSession, Environment, Limits, evaluate_expression};
 use orna_foundation_v1::CanonicalValue;
 use orna_value_v1::Raw;
 
@@ -73,4 +73,15 @@ fn exact_core_numeric_types_remain_available_without_std() {
         session.submit(include_str!("fixtures/stdlib-core-numeric-z09xc.orna")),
         Ok(Some(bool_value(true)))
     );
+}
+
+#[test]
+fn decimal_exponent_underflow_returns_a_bounded_error() {
+    let failure = evaluate_expression(
+        include_str!("fixtures/stdlib-decimal-exponent-underflow-pyyhx.orna"),
+        &Environment::new(),
+        Limits::default(),
+    )
+    .unwrap_err();
+    assert_eq!(failure.code(), "ORNA-EVAL-LIMIT");
 }
