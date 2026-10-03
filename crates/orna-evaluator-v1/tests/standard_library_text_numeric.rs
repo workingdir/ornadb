@@ -24,6 +24,34 @@ fn pinned_text_and_numeric_modules_expose_their_documented_behaviour() {
 }
 
 #[test]
+fn pinned_text_casing_and_decimal_edges_return_exact_values() {
+    assert_eq!(unicode_case_mapping::UNICODE_VERSION, (16, 0, 0));
+    assert_eq!(unicode_normalization::UNICODE_VERSION, (16, 0, 0));
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    for import in [
+        include_str!("fixtures/stdlib-use-text-z09xc.orna"),
+        include_str!("fixtures/stdlib-use-math-z09xc.orna"),
+    ] {
+        assert_eq!(session.submit(import), Ok(None));
+    }
+    assert_eq!(
+        session.submit(include_str!(
+            "fixtures/stdlib-text-numeric-edges-etsj1.orna"
+        )),
+        Ok(Some(bool_value(true)))
+    );
+
+    let mut without_std = AdmittedReplSession::new(Limits::default());
+    assert_eq!(
+        without_std
+            .submit("1.decimal / 3.decimal")
+            .unwrap_err()
+            .code(),
+        "InexactDivision"
+    );
+}
+
+#[test]
 fn pinned_statistics_exports_compute_all_aggregate_and_series_results() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
     assert_eq!(
