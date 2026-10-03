@@ -52,6 +52,8 @@ pub use branch_merge::{
     BranchMergePairedCheckpointRedoFoldSpillRestoreSlotSnapshot,
     BranchMergePairedCheckpointRedoFoldSpillRestoreStreamSnapshot,
     BranchMergePairedCheckpointRedoFoldSpillRestoreError,
+    BranchMergePairedCheckpointRedoFoldSpillRestorePinSlotSnapshot,
+    BranchMergePairedCheckpointRedoFoldSpillRestorePinStreamSnapshot,
     BranchMergePairedCheckpointRedoFoldSparseRestorePinHandoffSlotSnapshot,
     BranchMergePairedCheckpointRedoFoldSparseRestorePinHandoffStreamSnapshot,
     BranchMergePairedCheckpointRedoFoldWalRestoreHandoffSlotSnapshot,
