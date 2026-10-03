@@ -728,6 +728,7 @@ pub struct LiveEvalTransaction {
     pub mutations: Vec<TableMutation>,
     pub next_digest: [u8; 32],
     pub faults: Arc<dyn FaultInjector>,
+    request_identity: Option<RequestIdentity>,
     after_commit: Option<Box<dyn FnOnce() + Send>>,
 }
 
@@ -742,8 +743,25 @@ impl LiveEvalTransaction {
             mutations,
             next_digest,
             faults,
+            request_identity: None,
             after_commit: None,
         }
+    }
+
+    /// Binds staged writes to the admitted session/request tuple that produced
+    /// them. The host rejects transactional results whose tuple is missing or
+    /// differs from the authenticated request at the process boundary.
+    #[must_use]
+    pub fn for_request(mut self, identity: RequestIdentity) -> Self {
+        self.request_identity = Some(identity);
+        self
+    }
+
+    /// Returns the admitted request tuple carried across the application
+    /// boundary, if the adapter supplied one.
+    #[must_use]
+    pub const fn request_identity(&self) -> Option<RequestIdentity> {
+        self.request_identity
     }
 
     /// Registers application-owned ephemeral state to publish after the host
@@ -4281,6 +4299,13 @@ impl LiveHost {
         response: Envelope,
         transaction: LiveEvalTransaction,
     ) -> Result<Envelope> {
+        let identity = RequestIdentity {
+            session_id: session,
+            request_id: request,
+        };
+        if transaction.request_identity != Some(identity) {
+            return Err(Error::ApplicationRejected);
+        }
         if !matches!(
             &response.message,
             Message::Result {
@@ -4295,14 +4320,11 @@ impl LiveHost {
             mutations,
             next_digest,
             faults,
+            request_identity: _,
             after_commit,
         } = transaction;
         let lease = self.writer_lease().await?;
         let runtime = self.runtime.as_ref().ok_or(Error::UnsupportedOperation)?;
-        let identity = RequestIdentity {
-            session_id: session,
-            request_id: request,
-        };
         let terminal = self.terminal_outcome(&DispatchOutcome {
             outcome: FrameOutcome::Accepted,
             response: Some(response),
