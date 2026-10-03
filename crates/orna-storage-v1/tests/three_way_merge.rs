@@ -74,6 +74,7 @@ use orna_storage_v1::{
     compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_chain_compaction_identity,
     fold_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity,
     compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity,
+    restore_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity,
     fold_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_log_segment_identity,
     compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_log_segment_identity,
     restore_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_log_segment_identity,
@@ -24866,7 +24867,7 @@ fn paired_segment_rotation_identity_survives_sparse_checkpoint_fold_compaction_c
 }
 
 #[test]
-fn paired_redo_fold_identity_survives_sparse_segment_rotation_chains() {
+fn paired_redo_fold_identity_restores_sparse_segment_compaction_chains() {
     let fold_rows = PAIRED_REDO_FOLD_IDENTITIES
         .split("\n\n")
         .map(|record| parse_fixture(record, RowKeyKind::Explicit))
@@ -25132,6 +25133,35 @@ fn paired_redo_fold_identity_survives_sparse_segment_rotation_chains() {
     );
     assert_eq!(runs(&observed_late).len(), 4);
     assert_eq!(runs(&observed_late)[3].left, Some(positionless));
+
+    let restored = restore_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity(
+        &compacted,
+    )
+    .unwrap();
+    assert_eq!(restored, streams, "all checkpoint and directional identity values roundtrip");
+
+    let mut truncated = compacted.clone();
+    let first_run = &mut truncated
+        .iter_mut()
+        .find(|stream| stream.checkpoint_id == alpha)
+        .unwrap()
+        .runs[0];
+    first_run.segment_identities.pop();
+    assert!(
+        matches!(
+            restore_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity(
+                &truncated,
+            ),
+            Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreError::SegmentIdentityCountMismatch {
+                fold_ordinal: 0,
+                first_order: 40,
+                last_order: 41,
+                expected: 2,
+                actual: 1,
+            })
+        ),
+        "a truncated compacted rotation cannot silently lose a segment incarnation",
+    );
 }
 
 #[test]
