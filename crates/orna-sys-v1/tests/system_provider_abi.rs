@@ -607,6 +607,157 @@ fn generated_binding_effect_edge_diagnostics_match_direct_and_registry_routes() 
 }
 
 #[test]
+fn round_tripped_generated_bindings_preserve_provider_edge_diagnostics() {
+    let baked = system_dispatch_table();
+    let round_tripped = round_trip_generated_provider_artifacts();
+    let registry = ProviderRoleRegistry::from_baked_abi(&round_tripped)
+        .expect("round-tripped typed registry resolves generated provider offers");
+    let mut generated_bindings = 0;
+    let mut provider_routes = 0;
+    let mut diagnostic_pairs = 0;
+
+    for contract in baked.operations() {
+        let generated = system_function_descriptor(contract.id.as_str())
+            .unwrap_or_else(|| panic!("missing generated binding for {}", contract.id.as_str()));
+        assert_eq!(generated.name, contract.id.as_str());
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(
+            contract.effects.iter().next(),
+            Some(generated.effect),
+            "generated binding effect matches {}",
+            contract.id.as_str()
+        );
+        generated_bindings += 1;
+
+        let Some(role_id) = &contract.role else {
+            continue;
+        };
+        assert_eq!(
+            round_tripped.operation(contract.id.as_str()),
+            Some(contract),
+            "round-tripped typed metadata retains generated provider edge {}",
+            contract.id.as_str()
+        );
+        let selected = registry
+            .resolve(role_id.as_str())
+            .expect("round-tripped registry selects the generated provider")
+            .clone();
+
+        let mut invalid_offers = Vec::new();
+        let incompatible_version = AbiVersion {
+            major: selected.version.major ^ 1,
+            minor: selected.version.minor,
+        };
+        invalid_offers.push((
+            "version",
+            ProviderOffer {
+                version: incompatible_version,
+                ..selected.clone()
+            },
+            ProviderDiagnostic::RoleVersionMismatch {
+                role: role_id.clone(),
+                required: selected.version,
+                provided: incompatible_version,
+            },
+            "sys.abi.role_version_mismatch",
+        ));
+
+        let extra_effect = [
+            SystemEffect::Read,
+            SystemEffect::Invoke,
+            SystemEffect::Admin,
+        ]
+        .into_iter()
+        .find(|effect| {
+            !selected
+                .effects
+                .iter()
+                .any(|registered| registered == *effect)
+        })
+        .expect("typed provider role has an effect outside its declared ceiling");
+        invalid_offers.push((
+            "effect",
+            ProviderOffer {
+                effects: EffectSet::new(selected.effects.iter().chain([extra_effect])),
+                ..selected.clone()
+            },
+            ProviderDiagnostic::EffectIncompatible(role_id.clone()),
+            "sys.abi.effect_incompatible",
+        ));
+
+        let unselected = ProviderOffer {
+            provider: ProviderId::new("fixture.unselected").unwrap(),
+            ..selected.clone()
+        };
+        invalid_offers.push((
+            "selection",
+            unselected.clone(),
+            ProviderDiagnostic::ProviderNotSelected {
+                role: role_id.clone(),
+                expected: selected.clone(),
+                provided: unselected,
+            },
+            "sys.abi.provider_not_selected",
+        ));
+
+        for (edge, offer, expected, expected_code) in invalid_offers {
+            let provider_for = || InvokeValueProvider {
+                offer: offer.clone(),
+                operation: contract.id.clone(),
+                argument_types: Vec::new(),
+                response: Ok(TypedValue::public(
+                    TypeId::new("sys.conformance.MustNotInvoke"),
+                    b"must-not-run".to_vec(),
+                )),
+                calls: AtomicUsize::new(0),
+            };
+            let direct_provider = provider_for();
+            let round_tripped_provider = provider_for();
+            let direct = baked.dispatch_to_provider(
+                generated.name,
+                &direct_provider,
+                &[],
+                |_| Ok(()),
+            );
+            let mediated = registry.dispatch_to_provider(
+                &round_tripped,
+                generated.name,
+                &round_tripped_provider,
+                &[],
+                |_| Ok(()),
+            );
+
+            assert_eq!(
+                direct,
+                Err(expected.clone()),
+                "direct {edge} edge diagnostic for {}",
+                contract.id.as_str()
+            );
+            assert_eq!(
+                mediated,
+                Err(expected.clone()),
+                "round-tripped registry {edge} edge diagnostic for {}",
+                contract.id.as_str()
+            );
+            assert_eq!(direct.unwrap_err().code(), expected_code);
+            assert_eq!(mediated.unwrap_err().code(), expected_code);
+            assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(round_tripped_provider.calls.load(Ordering::SeqCst), 0);
+            diagnostic_pairs += 1;
+        }
+        provider_routes += 1;
+    }
+
+    assert_eq!(generated_bindings, baked.operations().count());
+    assert!(provider_routes > 0);
+    assert_eq!(diagnostic_pairs, provider_routes * 3);
+    println!(
+        "generated_binding_round_trip_provider_edge_diagnostics bindings={generated_bindings} provider_routes={provider_routes} edge_categories=version,effect,selection direct_registry_pairs={diagnostic_pairs} codes=role_version_mismatch,effect_incompatible,provider_not_selected providers_called=0 total_cases={}",
+        generated_bindings + diagnostic_pairs * 2
+    );
+}
+
+#[test]
 fn provider_abi_rejects_nonconformant_role_edges_and_effects() {
     let baseline: Value = serde_json::from_str(system_provider_abi_json()).unwrap();
     let first_role = baseline["roles"]
