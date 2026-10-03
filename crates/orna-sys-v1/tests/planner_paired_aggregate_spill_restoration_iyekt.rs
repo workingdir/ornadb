@@ -9,6 +9,8 @@ use orna_sys_v1::{
 
 const FIXTURE: &str =
     include_str!("fixtures/planner_paired_aggregate_spill_restoration_iyekt.orna");
+const SPARSE_IDENTITY_FIXTURE: &str =
+    include_str!("fixtures/planner_paired_aggregate_spill_identity_xymnf.orna");
 
 fn object(reference: &str) -> ObjectRef {
     ObjectRef::descriptive(reference)
@@ -541,5 +543,124 @@ fn spill_fold_identity_survives_sparse_aggregate_restoration_chains() {
             "join_cost_fold_identity"
         ),
         "changed spill cost propagates to the final join-cost identity"
+    );
+}
+
+#[test]
+fn aggregate_fold_components_survive_sparse_spill_restoration() {
+    let parsed = orna_syntax_v1::parse_module(SPARSE_IDENTITY_FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    let declared = [
+        "table:Unknown",
+        "table:Large",
+        "table:Middle",
+        "table:Small",
+    ];
+    let aggregates = aggregates();
+    let spills = spills();
+    let original = plan(
+        "table:AnchorLeft",
+        declared,
+        &pairs("table:AnchorLeft", declared),
+        &aggregates,
+        &spills,
+    );
+    let joins = joins_by_source(&original);
+    let small = joins["table:Small"];
+    let middle = joins["table:Middle"];
+    let large = joins["table:Large"];
+
+    assert_eq!(
+        text(small, "paired_aggregate_spill_restoration_aggregate_fold_identity"),
+        text(small, "paired_aggregate_anchor_cascade_fold_identity"),
+        "the paired restore fold exposes its exact aggregate cascade component"
+    );
+    assert_eq!(
+        text(small, "paired_aggregate_spill_restoration_spill_fold_identity"),
+        text(small, "paired_window_spill_cascade_fold_identity"),
+        "the paired restore fold exposes its exact spill cascade component"
+    );
+    assert_eq!(
+        text(middle, "paired_aggregate_spill_restoration_fold_identity"),
+        text(small, "paired_aggregate_spill_restoration_fold_identity"),
+        "a sparse join carries the complete paired restore fold"
+    );
+    assert_eq!(
+        text(middle, "paired_aggregate_spill_restoration_aggregate_fold_identity"),
+        text(middle, "paired_aggregate_anchor_cascade_fold_identity"),
+        "the aggregate component stays bound to the carried aggregate cascade"
+    );
+    assert_eq!(
+        text(middle, "paired_aggregate_spill_restoration_spill_fold_identity"),
+        text(middle, "paired_window_spill_cascade_fold_identity"),
+        "the spill component stays bound to accumulated spill history"
+    );
+
+    let mut changed_aggregates = aggregates.clone();
+    changed_aggregates[2].frame_identity = expression("frame:large-prior-two");
+    changed_aggregates[2].frame_start = PlanWindowFrameBound::Preceding(2);
+    let changed_aggregate = plan(
+        "table:AnchorLeft",
+        declared,
+        &pairs("table:AnchorLeft", declared),
+        &changed_aggregates,
+        &spills,
+    );
+    let changed_large = joins_by_source(&changed_aggregate)["table:Large"];
+    assert_ne!(
+        text(large, "paired_aggregate_spill_restoration_aggregate_fold_identity"),
+        text(
+            changed_large,
+            "paired_aggregate_spill_restoration_aggregate_fold_identity"
+        ),
+        "changing the restored frame changes the exposed aggregate component"
+    );
+    assert_eq!(
+        text(large, "paired_aggregate_spill_restoration_spill_fold_identity"),
+        text(
+            changed_large,
+            "paired_aggregate_spill_restoration_spill_fold_identity"
+        ),
+        "an aggregate-only change preserves the spill component"
+    );
+
+    let mut changed_spills = spills.clone();
+    changed_spills[0].memory_budget_bytes += 1;
+    let changed_spill = plan(
+        "table:AnchorLeft",
+        declared,
+        &pairs("table:AnchorLeft", declared),
+        &aggregates,
+        &changed_spills,
+    );
+    let changed_middle = joins_by_source(&changed_spill)["table:Middle"];
+    assert_eq!(
+        text(
+            changed_middle,
+            "paired_aggregate_spill_restoration_aggregate_fold_identity"
+        ),
+        text(
+            changed_middle,
+            "paired_aggregate_anchor_cascade_fold_identity"
+        ),
+        "the restored pair exposes the aggregate cascade selected for the changed plan"
+    );
+    assert_ne!(
+        text(middle, "paired_aggregate_spill_restoration_spill_fold_identity"),
+        text(
+            changed_middle,
+            "paired_aggregate_spill_restoration_spill_fold_identity"
+        ),
+        "the sparse restoration fold exposes the changed spill component"
+    );
+    assert_ne!(
+        text(middle, "paired_aggregate_spill_restoration_fold_identity"),
+        text(
+            changed_middle,
+            "paired_aggregate_spill_restoration_fold_identity"
+        ),
+        "the combined identity changes when either component changes"
     );
 }
