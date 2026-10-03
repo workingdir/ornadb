@@ -8993,9 +8993,14 @@ fn infer_assignment(
                         // incompatible structured checkpoint resets. Keep the
                         // local unchanged and explain why this source cannot
                         // continue the pin-stable chain.
+                        let message = if paired_dynamic_snapshot_reset(&expected, &value.ty) {
+                            "paired checkpoint reset must preserve each omitted lane's snapshot identity"
+                        } else {
+                            "checkpoint reset source must preserve nested snapshot pin topology and callable contracts"
+                        };
                         diagnostics.push(diag(
                             DIAG_TYPE,
-                            "checkpoint reset source must preserve nested snapshot pin topology and callable contracts",
+                            message,
                         ));
                     } else {
                         require_same(&expected, &value.ty, diagnostics);
@@ -18571,6 +18576,42 @@ fn type_contains_pinned_snapshot_identity(ty: &Type) -> bool {
     checkpoint_snapshot_maps_are_valid(ty) && type_contains_valid_pinned_snapshot_identity(ty)
 }
 
+/// Paired reset chains can contain symbolic selectors for omitted closure
+/// inputs. Keep their lane-specific failure actionable; the reference is
+/// silent on diagnostics for incompatible local checkpoint resets.
+fn paired_dynamic_snapshot_reset(expected: &Type, selected: &Type) -> bool {
+    matches!((expected, selected), (Type::Tuple(expected), Type::Tuple(selected))
+        if expected.len() > 1
+            && expected.len() == selected.len()
+            && expected.iter().any(type_contains_dynamic_snapshot_identity)
+            && selected.iter().any(type_contains_dynamic_snapshot_identity))
+}
+
+fn type_contains_dynamic_snapshot_identity(ty: &Type) -> bool {
+    match ty {
+        Type::Applied { base, arguments } if base == "sys.SnapshotRefContext" => {
+            matches!(arguments.as_slice(), [Type::Named(selector)] if selector.starts_with("selector:dynamic-call:"))
+        }
+        Type::List(inner)
+        | Type::Range(inner)
+        | Type::Relation(inner)
+        | Type::Stream(inner)
+        | Type::Optional(inner) => type_contains_dynamic_snapshot_identity(inner),
+        Type::Tuple(elements) => elements.iter().any(type_contains_dynamic_snapshot_identity),
+        Type::Record(fields) => fields.values().any(type_contains_dynamic_snapshot_identity),
+        Type::Applied { arguments, .. } => arguments.iter().any(type_contains_dynamic_snapshot_identity),
+        Type::Function { parameters, result, .. } => {
+            parameters.iter().any(type_contains_dynamic_snapshot_identity)
+                || type_contains_dynamic_snapshot_identity(result)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_dynamic_snapshot_identity(currency)
+                || type_contains_dynamic_snapshot_identity(unit)
+        }
+        _ => false,
+    }
+}
+
 fn type_contains_valid_pinned_snapshot_identity(ty: &Type) -> bool {
     match ty {
         Type::Applied { base, .. } if base == "sys.SnapshotRefContext" => {
@@ -20499,19 +20540,22 @@ fn checkpoint_value_pin_identity_topology_matches(expected: &Type, actual: &Type
 }
 
 /// Sparse parent folds may contribute different counts of selector labels to
-/// otherwise paired tuple slots. Keep the paired membership paths stable, but
-/// let singleton labels remain in the concrete slot where each sparse source
-/// supplied them. The enclosing compaction guard still rejects any merge that
-/// would introduce new cross-path identity. The reference does not specify
-/// these local sparse multi-parent folds.
+/// otherwise paired tuple slots or sibling record fields. Keep paired paths
+/// stable, but let singleton labels remain in the concrete lane where each
+/// sparse source supplied them. The enclosing compaction guard still rejects
+/// new cross-path identity. The reference does not specify these local sparse
+/// multi-parent folds.
 fn checkpoint_value_paired_pin_membership_matches(expected: &Type, actual: &Type) -> bool {
     fn paired_membership_patterns(
         pin_maps: &[SnapshotContextMapPair],
         expected: bool,
-    ) -> BTreeMap<BTreeSet<(Vec<SnapshotTopologyBoundary>, usize)>, usize> {
+    ) -> BTreeMap<
+        BTreeSet<(Vec<SnapshotTopologyBoundary>, BTreeSet<SnapshotTopologyBoundary>)>,
+        usize,
+    > {
         let mut memberships = BTreeMap::<
             String,
-            BTreeSet<(Vec<SnapshotTopologyBoundary>, usize)>,
+            BTreeMap<Vec<SnapshotTopologyBoundary>, BTreeSet<SnapshotTopologyBoundary>>,
         >::new();
         for pair in pin_maps {
             let selectors = if expected {
@@ -20519,26 +20563,39 @@ fn checkpoint_value_paired_pin_membership_matches(expected: &Type, actual: &Type
             } else {
                 &pair.actual
             };
-            let tuple_lanes = pair
+            let sibling_lanes = pair
                 .boundary_path
                 .iter()
                 .enumerate()
                 .filter_map(|(index, boundary)| match boundary {
-                    SnapshotTopologyBoundary::TupleElement(slot) => {
-                        Some((pair.boundary_path[..index].to_vec(), *slot))
-                    }
+                    SnapshotTopologyBoundary::TupleElement(_)
+                    | SnapshotTopologyBoundary::RecordField(_) => Some((
+                        pair.boundary_path[..index].to_vec(),
+                        boundary.clone(),
+                    )),
                     _ => None,
                 })
                 .collect::<Vec<_>>();
             for selector in selectors {
-                memberships.entry(selector.clone()).or_default().extend(
-                    tuple_lanes.iter().cloned(),
-                );
+                for (parent, lane) in &sibling_lanes {
+                    memberships
+                        .entry(selector.clone())
+                        .or_default()
+                        .entry(parent.clone())
+                        .or_default()
+                        .insert(lane.clone());
+                }
             }
         }
         let mut patterns = BTreeMap::new();
-        for membership in memberships.into_values().filter(|membership| membership.len() > 1) {
-            *patterns.entry(membership).or_insert(0) += 1;
+        for parent_memberships in memberships.into_values() {
+            let paired_membership = parent_memberships
+                .into_iter()
+                .filter(|(_, siblings)| siblings.len() > 1)
+                .collect::<BTreeSet<_>>();
+            if !paired_membership.is_empty() {
+                *patterns.entry(paired_membership).or_insert(0) += 1;
+            }
         }
         patterns
     }
@@ -20553,7 +20610,8 @@ fn checkpoint_value_paired_pin_membership_matches(expected: &Type, actual: &Type
         return false;
     }
     let expected_patterns = paired_membership_patterns(&pin_maps, true);
-    !expected_patterns.is_empty() && expected_patterns == paired_membership_patterns(&pin_maps, false)
+    let actual_patterns = paired_membership_patterns(&pin_maps, false);
+    !expected_patterns.is_empty() && expected_patterns == actual_patterns
 }
 
 fn checkpoint_tuple_pin_identity_topology_matches(expected: &[Type], actual: &[Type]) -> bool {
