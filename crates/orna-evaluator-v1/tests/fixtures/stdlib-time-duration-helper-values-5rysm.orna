@@ -1,0 +1,10 @@
+time_ops.duration_abs((-1.250000001).seconds) == 1.250000001.seconds
+&& time_ops.duration_abs(0.000000001.seconds) == 0.000000001.seconds
+&& time_ops.duration_signum((-0.000000001).seconds) == -1
+&& time_ops.duration_signum(0.seconds) == 0
+&& time_ops.duration_signum(0.000000001.seconds) == 1
+&& time_ops.duration_min(4.5.seconds, (-1.25).seconds) == (-1.25).seconds
+&& time_ops.duration_max(4.5.seconds, (-1.25).seconds) == 4.5.seconds
+&& time_ops.duration_clamp(15.seconds, 0.seconds, 10.seconds) == 10.seconds
+&& time_ops.duration_clamp((-1).seconds, 0.seconds, 10.seconds) == 0.seconds
+&& time_ops.duration_clamp(1.seconds, 10.seconds, 0.seconds) == 10.seconds
