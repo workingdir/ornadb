@@ -1,0 +1,29 @@
+(() => {
+    let (first_status, first_stdout, first_stderr) = std.io.process.run(
+        "/usr/bin/cat",
+        [],
+        ".",
+        [],
+        std.encoding.base64.decode("__BASE64_INPUT__"),
+        2.seconds,
+        64,
+    );
+    assert first_status == Some(0);
+    assert first_stdout == std.encoding.base64.decode("__BASE64_INPUT__");
+    assert first_stderr == std.encoding.base64.decode("");
+    std.io.process.run(
+        "/usr/bin/cat",
+        [],
+        ".",
+        [],
+        std.encoding.base64.decode(
+            std.encoding.base64.encode(
+                std.encoding.base64.decode(
+                    std.encoding.base64.encode(first_stdout)
+                )
+            )
+        ),
+        2.seconds,
+        64,
+    )
+})()

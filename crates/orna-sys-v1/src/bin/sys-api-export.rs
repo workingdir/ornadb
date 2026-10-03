@@ -8,10 +8,14 @@ use std::{
 };
 
 use orna_sys_v1::{
-    SystemProviderAbi, system_api_json, system_api_schema_json, system_dispatch_table,
-    system_provider_abi_json, system_provider_abi_schema_json,
+    SystemProviderAbi, system_api_json, system_api_schema_json, system_binding_stubs,
+    system_dispatch_table, system_host_operation_registry_json,
+    system_host_operation_registry_schema_json, system_provider_abi_json,
+    system_provider_abi_schema_json,
 };
 use serde_json::Value;
+
+const USAGE: &str = "sys-api-export [--schema|--provider-abi|--provider-abi-schema|--host-operations|--host-operations-schema|--bindings] [output-path]";
 
 fn validate_embedded_schema(api_json: &str, schema_json: &str) -> Result<(), Box<dyn Error>> {
     let api: Value = serde_json::from_str(api_json)?;
@@ -112,19 +116,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some("--schema") => (schema_json, arguments.next()),
         Some("--provider-abi") => (provider_json, arguments.next()),
         Some("--provider-abi-schema") => (provider_schema_json, arguments.next()),
+        Some("--host-operations") => (system_host_operation_registry_json(), arguments.next()),
+        Some("--host-operations-schema") => (
+            system_host_operation_registry_schema_json(),
+            arguments.next(),
+        ),
+        Some("--bindings") => (system_binding_stubs(), arguments.next()),
         Some(argument) if argument.starts_with("--") => {
-            return Err(format!(
-                "unknown option `{argument}`; usage: sys-api-export [--schema|--provider-abi|--provider-abi-schema] [output-path]"
-            )
-            .into());
+            return Err(format!("unknown option `{argument}`; usage: {USAGE}").into());
         }
         _ => (api_json.as_str(), first),
     };
     if arguments.next().is_some() {
-        return Err(
-            "usage: sys-api-export [--schema|--provider-abi|--provider-abi-schema] [output-path]"
-                .into(),
-        );
+        return Err(format!("usage: {USAGE}").into());
     }
 
     if let Some(output) = output {
