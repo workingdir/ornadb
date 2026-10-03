@@ -7055,11 +7055,19 @@ fn multi_parent_selector_topology_storm_preserves_label_depth_identity() {
                 BTreeSet::from(["selector:HEAD~301".into()]),
             ],
             vec![
-                BTreeSet::from(["selector:HEAD~311".into()]),
-                BTreeSet::from(["selector:HEAD~312".into()]),
+                BTreeSet::from([
+                    "selector:HEAD~311".into(),
+                    "selector:HEAD~314".into(),
+                    "selector:HEAD~318".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~312".into(),
+                    "selector:HEAD~315".into(),
+                    "selector:HEAD~319".into(),
+                ]),
             ],
         ],
-        "a rejected middle row must leave first-row identities in every sibling depth"
+        "a rejected tuple must roll back locally while its sibling keeps later pins"
     );
     assert_eq!(
         sibling_pin_maps("accepts_alpha_renamed_selector_topology_across_parent_storm"),
