@@ -1254,7 +1254,7 @@ fn dispatch_to_provider_checks_arity_argument_types_and_generic_result_binding()
             "effects": ["read"],
             "operations": ["sys.meta<T>"],
             "required": true,
-            "replaceable": false,
+            "replaceable": true,
             "builtin_provider": "fixture.metadata"
         }]
     });
@@ -1290,8 +1290,66 @@ fn dispatch_to_provider_checks_arity_argument_types_and_generic_result_binding()
     );
     assert_eq!(generic_provider.calls.load(Ordering::SeqCst), 1);
 
+    let selected_generic_offer = generic_registry
+        .resolve(generic_role.as_str())
+        .unwrap()
+        .clone();
+    let alternate_generic_offer = ProviderOffer {
+        provider: ProviderId::new("fixture.generic_alternate").unwrap(),
+        ..selected_generic_offer.clone()
+    };
+    let mut alternate_registry = ProviderRoleRegistry::from_baked_abi(&generic_table).unwrap();
+    alternate_registry
+        .bind(alternate_generic_offer.clone())
+        .expect("replaceable generic role selects a compatible alternate provider");
+    let alternate_result = TypedValue::public(
+        TypeId::new("sys.ValueMetadata<sys.Example>"),
+        b"alternate-metadata".to_vec(),
+    );
+    let alternate_provider = InvokeValueProvider {
+        offer: alternate_generic_offer.clone(),
+        operation: generic_contract.id.clone(),
+        argument_types: vec!["sys.Example".to_owned()],
+        response: Ok(alternate_result.clone()),
+        calls: AtomicUsize::new(0),
+    };
+    assert_eq!(
+        generic_table.dispatch_to_provider(
+            generic_operation_name,
+            &alternate_provider,
+            &[TypedValue::public(
+                TypeId::new("sys.Example"),
+                b"example".to_vec()
+            )],
+            |_| Ok(())
+        ),
+        Err(ProviderDiagnostic::ProviderNotSelected {
+            role: generic_role.clone(),
+            expected: selected_generic_offer,
+            provided: alternate_generic_offer.clone(),
+        }),
+        "direct dispatch cannot bypass a replaceable role's selected offer"
+    );
+    assert_eq!(alternate_provider.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        alternate_registry.dispatch_to_provider(
+            &generic_table,
+            generic_operation_name,
+            &alternate_provider,
+            &[TypedValue::public(
+                TypeId::new("sys.Example"),
+                b"example".to_vec()
+            )],
+            |_| Ok(())
+        ),
+        Ok(orna_sys_v1::SystemDispatchResult::Returned(
+            alternate_result
+        ))
+    );
+    assert_eq!(alternate_provider.calls.load(Ordering::SeqCst), 1);
+
     println!(
-        "dispatch_to_provider_type_matrix operation={operation_name} rejected=argument_count,argument_type,result_type generic_bindings=1 total_cases=4"
+        "dispatch_to_provider_type_matrix operation={operation_name} rejected=argument_count,argument_type,result_type,direct_unselected_provider generic_bindings=1 selected_replacement=1 total_cases=6"
     );
 }
 
@@ -1303,6 +1361,8 @@ fn registry_dispatch_enforces_provider_selection_and_generated_binding_parity() 
     let mut generated_operation_cases = 0;
     let mut provider_route_cases = 0;
     let mut unselected_provider_rejections = 0;
+    let mut direct_provider_rejections = 0;
+    let mut replaceable_provider_routes = 0;
 
     for contract in table.operations() {
         let operation_name = contract.id.as_str();
@@ -1389,31 +1449,73 @@ fn registry_dispatch_enforces_provider_selection_and_generated_binding_parity() 
         assert_eq!(unselected_provider.calls.load(Ordering::SeqCst), 0);
         unselected_provider_rejections += 1;
 
+        assert_eq!(
+            table.dispatch_to_provider(
+                operation_name,
+                &unselected_provider,
+                &arguments,
+                |_| Ok(())
+            ),
+            Err(ProviderDiagnostic::ProviderNotSelected {
+                role: role_id.clone(),
+                expected: selected_offer.clone(),
+                provided: unselected_offer.clone(),
+            }),
+            "direct dispatch cannot bypass selected-offer identity for {operation_name}"
+        );
+        assert_eq!(unselected_provider.calls.load(Ordering::SeqCst), 0);
+        direct_provider_rejections += 1;
+
         let role = table.role(role_id.as_str()).unwrap();
-        if !role.replaceable {
+        if role.replaceable {
+            let mut replacement_registry = ProviderRoleRegistry::from_baked_abi(table).unwrap();
+            replacement_registry
+                .bind(unselected_offer.clone())
+                .expect("replaceable role accepts the selected alternate provider");
+            let replacement_result = TypedValue::public(
+                TypeId::new(contract.signature.result.canonical()),
+                b"selected-alternate-result".to_vec(),
+            );
+            let replacement_provider = InvokeValueProvider {
+                offer: unselected_offer.clone(),
+                operation: contract.id.clone(),
+                argument_types: contract
+                    .signature
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.ty.canonical())
+                    .collect(),
+                response: Ok(replacement_result.clone()),
+                calls: AtomicUsize::new(0),
+            };
             assert_eq!(
-                table.dispatch_to_provider(
+                replacement_registry.dispatch_to_provider(
+                    table,
                     operation_name,
-                    &unselected_provider,
+                    &replacement_provider,
                     &arguments,
                     |_| Ok(())
                 ),
-                Err(ProviderDiagnostic::ProviderNotSelected {
-                    role: role_id.clone(),
-                    expected: selected_offer,
-                    provided: unselected_offer,
-                }),
-                "direct dispatch preserves nonreplaceable baked provider identity"
+                Ok(orna_sys_v1::SystemDispatchResult::Returned(
+                    replacement_result
+                )),
+                "registry-selected replacement dispatches {operation_name}"
             );
-            assert_eq!(unselected_provider.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(replacement_provider.calls.load(Ordering::SeqCst), 1);
+            replaceable_provider_routes += 1;
         }
     }
 
     assert_eq!(generated_operation_cases, table.operations().count());
     assert!(provider_route_cases > 0);
     assert_eq!(provider_route_cases, unselected_provider_rejections);
+    assert_eq!(provider_route_cases, direct_provider_rejections);
     println!(
-        "generated_binding_provider_dispatch_parity operations={generated_operation_cases} provider_routes={provider_route_cases} unselected_rejections={unselected_provider_rejections} total_cases={} ",
-        generated_operation_cases + provider_route_cases + unselected_provider_rejections
+        "generated_binding_provider_dispatch_parity operations={generated_operation_cases} provider_routes={provider_route_cases} unselected_rejections={unselected_provider_rejections} direct_rejections={direct_provider_rejections} replaceable_routes={replaceable_provider_routes} total_cases={}",
+        generated_operation_cases
+            + provider_route_cases
+            + unselected_provider_rejections
+            + direct_provider_rejections
+            + replaceable_provider_routes
     );
 }
