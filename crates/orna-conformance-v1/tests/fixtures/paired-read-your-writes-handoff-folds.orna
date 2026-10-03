@@ -21,9 +21,16 @@ fn rebound_identity(): Int = Note
 fn parent() {
     assert total() == 0;
     seed();
-    assert total() == 60;
-    assert seed_identity() == 40;
+    // Fold results are values captured by this read scope; a later refresh
+    // changes fresh reads but does not rewrite these earlier results.
+    let seeded_total = total();
+    let seeded_identity = seed_identity();
+    assert seeded_total == 60;
+    assert seeded_identity == 40;
     Note.update(2, { amount: 25, label: "rebound" });
+    assert seeded_total == 60;
+    assert seeded_identity == 40;
     assert total() == 65;
+    assert seed_identity() == 0;
     assert rebound_identity() == 50;
 }
