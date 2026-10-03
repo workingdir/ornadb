@@ -288,12 +288,26 @@ fn base64_padding_matrix_value() -> CanonicalValue {
         cases
             .into_iter()
             .map(|(bytes, encoded)| {
-                Raw::Array(vec![
-                    Raw::Bytes(bytes.to_vec()),
-                    Raw::Text(encoded.to_owned()),
-                ])
+                Raw::Tag(
+                    60015,
+                    Box::new(Raw::Array(vec![
+                        Raw::Bytes(bytes.to_vec()),
+                        Raw::Text(encoded.to_owned()),
+                    ])),
+                )
             })
             .collect(),
+    ))
+    .unwrap()
+}
+
+fn base64_snapshot_marker_value(marker: i64) -> CanonicalValue {
+    CanonicalValue::new(Raw::Tag(
+        60015,
+        Box::new(Raw::Array(vec![
+            Raw::Int(marker.into()),
+            Raw::Text("AP8AQQ==".to_owned()),
+        ])),
     ))
     .unwrap()
 }
@@ -383,24 +397,12 @@ fn captured_codec_snapshots_replay_real_base64_values_without_retargeting() {
         );
         assert_eq!(
             session.submit(include_str!("fixtures/snapshot-host-codec-tagged.orna")),
-            Ok(Some(
-                CanonicalValue::new(Raw::Array(vec![
-                    Raw::Int(expected_marker.into()),
-                    Raw::Text("AP8AQQ==".to_owned()),
-                ]))
-                .unwrap()
-            ))
+            Ok(Some(base64_snapshot_marker_value(expected_marker)))
         );
     }
     assert_eq!(
         historical.submit(include_str!("fixtures/snapshot-host-codec-tagged.orna")),
-        Ok(Some(
-            CanonicalValue::new(Raw::Array(vec![
-                Raw::Int(1.into()),
-                Raw::Text("AP8AQQ==".to_owned()),
-            ]))
-            .unwrap()
-        ))
+        Ok(Some(base64_snapshot_marker_value(1)))
     );
 }
 
@@ -516,11 +518,7 @@ fn captured_codec_snapshots_reject_noncanonical_base64_without_losing_the_pin() 
                 .submit(include_str!("fixtures/snapshot-host-codec-tagged.orna"))
                 .unwrap()
                 .unwrap(),
-            CanonicalValue::new(Raw::Array(vec![
-                Raw::Int(marker.into()),
-                Raw::Text("AP8AQQ==".to_owned()),
-            ]))
-            .unwrap()
+            base64_snapshot_marker_value(marker)
         );
         for invalid in ["A===", "AAA", "-w==", "AA==\n", "AA=A", "AB==", "AAB="] {
             let source = include_str!("fixtures/snapshot-host-codec-decode-probe.orna")
@@ -611,11 +609,7 @@ fn captured_codec_snapshots_fold_host_process_values_across_interleaved_pins() {
             .submit(include_str!("fixtures/snapshot-host-codec-tagged.orna"))
             .unwrap_or_else(|error| panic!("snapshot marker failed: {}", error.code()))
             .expect("the captured snapshot marker returns a value");
-        let expected_tagged = CanonicalValue::new(Raw::Array(vec![
-            Raw::Int(expected_marker.into()),
-            Raw::Text("AP8AQQ==".to_owned()),
-        ]))
-        .unwrap();
+        let expected_tagged = base64_snapshot_marker_value(expected_marker);
         assert_eq!(tagged, expected_tagged);
 
         let process_values = session
@@ -638,11 +632,7 @@ fn captured_codec_snapshots_fold_host_process_values_across_interleaved_pins() {
     let expected = [1, 2, 1]
         .into_iter()
         .map(|marker| {
-            let tagged = CanonicalValue::new(Raw::Array(vec![
-                Raw::Int(marker.into()),
-                Raw::Text("AP8AQQ==".to_owned()),
-            ]))
-            .unwrap();
+            let tagged = base64_snapshot_marker_value(marker);
             CanonicalValue::new(Raw::Array(vec![
                 tagged.raw().clone(),
                 process_values.raw().clone(),
@@ -650,10 +640,7 @@ fn captured_codec_snapshots_fold_host_process_values_across_interleaved_pins() {
             .unwrap()
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        folded_outputs,
-        expected
-    );
+    assert_eq!(folded_outputs, expected);
 }
 
 fn capture_standard_gitlink(project_path: &Path, standard_snapshot: &str, message: &str) -> String {
