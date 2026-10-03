@@ -89,11 +89,39 @@ pub fn standard_function_hover(
     name: &str,
     parameters: &str,
     return_type: &str,
+    documentation: Option<&str>,
     doc_link: Option<&str>,
 ) -> Hover {
     let mut value = format!(
         "**{domain} function**\n\n```orna\n{domain} FUNCTION {name}({parameters}) RETURNS {return_type}\n```"
     );
+    append_documentation(&mut value, documentation);
+    append_spec_link(&mut value, doc_link);
+    hover(value)
+}
+
+/// Builds hover content from the generated typed sys registry descriptors.
+pub fn system_function_hover(
+    descriptors: &[&orna_sys_v1::SystemFunctionDescriptor],
+    doc_link: Option<&str>,
+) -> Hover {
+    let mut value = if descriptors.len() == 1 {
+        format!(
+            "**sys function · {}**\n",
+            effect_name(descriptors[0].effect)
+        )
+    } else {
+        format!("**sys function · {} overloads**\n", descriptors.len())
+    };
+    for descriptor in descriptors {
+        value.push_str(&format!("\n```orna\n{}\n```\n", descriptor.signature));
+        value.push_str(&format!("\n{}\n", descriptor.purpose));
+        append_documentation(&mut value, descriptor.documentation);
+        append_labeled_detail(&mut value, "Contract", descriptor.contract);
+        append_labeled_detail(&mut value, "Preconditions", descriptor.preconditions);
+        append_labeled_detail(&mut value, "Ownership", descriptor.ownership);
+        append_labeled_detail(&mut value, "Snapshot rule", descriptor.snapshot_rule);
+    }
     append_spec_link(&mut value, doc_link);
     hover(value)
 }
@@ -366,6 +394,20 @@ fn append_documentation(value: &mut String, documentation: Option<&str>) {
 fn append_inline_documentation(entry: &mut String, documentation: Option<&str>) {
     if let Some(documentation) = documentation {
         entry.push_str(&format!(" — {documentation}"));
+    }
+}
+
+fn append_labeled_detail(value: &mut String, label: &str, detail: Option<&str>) {
+    if let Some(detail) = detail {
+        value.push_str(&format!("\n**{label}**\n{detail}\n"));
+    }
+}
+
+fn effect_name(effect: orna_sys_v1::SystemEffect) -> &'static str {
+    match effect {
+        orna_sys_v1::SystemEffect::Read => "read",
+        orna_sys_v1::SystemEffect::Invoke => "invoke",
+        orna_sys_v1::SystemEffect::Admin => "admin",
     }
 }
 
