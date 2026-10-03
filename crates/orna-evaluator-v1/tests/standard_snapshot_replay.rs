@@ -4372,6 +4372,53 @@ fn captured_snapshot_identity_survives_paired_divergence_project_pin_folds() {
 }
 
 #[test]
+fn captured_nested_closures_keep_paired_pin_identity_across_divergence_folds() {
+    let (_directory, projects, pins, _) = paired_divergence_project_pin_fold_projects();
+    let expected = [
+        [40, 4, 44, 40, 4, 44, 1_014, 1_015],
+        [50, 4, 54, 50, 4, 54, 10_014, 10_015],
+        [40, 5, 45, 40, 5, 45, 1_014, 1_015],
+        [50, 5, 55, 50, 5, 55, 10_014, 10_015],
+    ];
+    let imports = include_str!("fixtures/module-upgrade-paired-divergence-use.orna");
+    let nested_closure = include_str!("fixtures/module-upgrade-divergence-fold-nested-closure.orna");
+    let bind_nested_closure =
+        include_str!("fixtures/module-upgrade-divergence-fold-nested-closure-bind.orna");
+    let replay =
+        include_str!("fixtures/module-upgrade-divergence-fold-nested-closure-replay.orna");
+
+    assert!(pins.windows(2).all(|pair| pair[0] != pair[1]));
+    let mut sessions = Vec::with_capacity(projects.len());
+    for (index, project) in projects.iter().enumerate() {
+        assert_eq!(
+            project.standard_profile().unwrap().snapshot(),
+            &pins[index],
+            "nested closure project {index} must load its exact paired pin"
+        );
+        let mut session = AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .unwrap();
+        for import in imports.lines() {
+            assert_eq!(session.submit(import), Ok(None));
+        }
+        assert_eq!(session.submit(nested_closure), Ok(None));
+        for binding in bind_nested_closure.lines() {
+            assert_eq!(session.submit(binding), Ok(None));
+        }
+        assert_eq!(
+            session.submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "nested closure must compute from paired pin {}",
+            pins[index]
+        );
+        sessions.push(session);
+    }
+}
+
+#[test]
 fn captured_snapshot_identity_survives_paired_divergence_compaction_folds() {
     let (directory, projects, pins) = paired_divergence_compaction_projects();
     let expected = [
