@@ -143,6 +143,153 @@ fn embedded_host_registry_matches_deterministic_annotated_method_projection() {
 }
 
 #[test]
+fn generated_tuple_return_provider_bindings_match_schema_and_typed_rows() {
+    const TUPLE_OPERATIONS: [(&str, &str, &[&str], usize); 5] = [
+        (
+            "std.io.process.run",
+            "fn std.io.process.run(executable: Str, arguments: [Str], working_directory: Str, environment: [(Str, Str)], input: Blob?, timeout: Duration?, max_output_bytes: Int): (Int?, Blob, Blob)",
+            &[
+                "executable",
+                "arguments",
+                "working_directory",
+                "environment",
+                "input",
+                "timeout",
+                "max_output_bytes",
+            ],
+            3,
+        ),
+        (
+            "std.io.fs.metadata",
+            "fn std.io.fs.metadata(root: Str, path: Str): (Str, Int?, Instant?, Instant?)",
+            &["root", "path"],
+            4,
+        ),
+        (
+            "std.io.fs.symlink_metadata",
+            "fn std.io.fs.symlink_metadata(root: Str, path: Str): (Str, Int?, Instant?, Instant?)",
+            &["root", "path"],
+            4,
+        ),
+        (
+            "std.net.http.send",
+            "fn std.net.http.send(method: Str, url: Str, headers: [(Str, Str)], request_body: Blob?, timeout: Duration?, max_header_bytes: Int, max_body_bytes: Int): (Int, [(Str, Str)], Blob)",
+            &[
+                "method",
+                "url",
+                "headers",
+                "request_body",
+                "timeout",
+                "max_header_bytes",
+                "max_body_bytes",
+            ],
+            3,
+        ),
+        (
+            "std.net.http.wait",
+            "fn std.net.http.wait(handle: Uuid, timeout: Duration?): (Int, [(Str, Str)], Blob)",
+            &["handle", "timeout"],
+            3,
+        ),
+    ];
+
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let registry_json = build_host::generate_host_registry(&source_root)
+        .expect("tuple-return provider registry regenerates from Rust annotations");
+    assert_eq!(registry_json, system_host_operation_registry_json());
+    let schema_json = build_host::generate_host_registry_schema()
+        .expect("tuple-return provider schema regenerates");
+    assert_eq!(schema_json, system_host_operation_registry_schema_json());
+    build_host::validate_host_registry_json(&registry_json, &schema_json)
+        .expect("generated tuple-return provider rows conform to the generated schema");
+
+    let out_dir = Path::new(env!("OUT_DIR"));
+    assert_eq!(
+        std::fs::read_to_string(out_dir.join("system_host_operations.json"))
+            .expect("compiled host registry artifact exists"),
+        registry_json,
+        "compile-time host artifact preserves regenerated tuple signatures"
+    );
+    assert_eq!(
+        std::fs::read_to_string(out_dir.join("system_host_operations.schema.json"))
+            .expect("compiled host schema artifact exists"),
+        schema_json,
+        "compile-time host schema equals its regenerated schema"
+    );
+
+    let raw: serde_json::Value =
+        serde_json::from_str(&registry_json).expect("generated host registry is valid JSON");
+    let rows = raw["operations"]
+        .as_array()
+        .expect("generated host registry has operation rows");
+    let typed = system_host_operation_registry();
+    let mut tuple_components = 0;
+    for (name, expected_signature, expected_parameters, expected_arity) in TUPLE_OPERATIONS {
+        let descriptor = typed
+            .operation(name)
+            .expect("tuple-return operation is in the typed host registry");
+        let row = rows
+            .iter()
+            .find(|row| row["name"] == name)
+            .expect("generated registry row exists");
+        assert_eq!(
+            descriptor.signature, expected_signature,
+            "typed signature for {name}"
+        );
+        assert_eq!(row["signature"].as_str(), Some(expected_signature));
+        assert_eq!(
+            descriptor.parameters, expected_parameters,
+            "typed parameter names for {name}"
+        );
+        let row_parameters = row["parameters"]
+            .as_array()
+            .expect("generated row parameter names are an array")
+            .iter()
+            .map(|parameter| {
+                parameter
+                    .as_str()
+                    .expect("generated parameter name is a string")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            row_parameters, expected_parameters,
+            "generated row parameter names for {name}"
+        );
+
+        let expected_result = expected_signature
+            .rsplit_once("): ")
+            .expect("tuple-return signature has a result separator")
+            .1;
+        assert!(expected_result.starts_with('(') && expected_result.ends_with(')'));
+        let result_inner = &expected_result[1..expected_result.len() - 1];
+        let (mut parentheses, mut brackets, mut angles, mut commas) = (0_i32, 0_i32, 0_i32, 0);
+        for character in result_inner.chars() {
+            match character {
+                '(' => parentheses += 1,
+                ')' => parentheses -= 1,
+                '[' => brackets += 1,
+                ']' => brackets -= 1,
+                '<' => angles += 1,
+                '>' => angles -= 1,
+                ',' if parentheses == 0 && brackets == 0 && angles == 0 => commas += 1,
+                _ => {}
+            }
+        }
+        assert_eq!((parentheses, brackets, angles), (0, 0, 0));
+        let arity = commas + 1;
+        assert_eq!(arity, expected_arity, "tuple component count for {name}");
+        tuple_components += arity;
+    }
+
+    assert_eq!(TUPLE_OPERATIONS.len(), 5);
+    assert_eq!(tuple_components, 17);
+    println!(
+        "generated_host_tuple_return_parity operations={} tuple_shapes=3 tuple_components={tuple_components} typed_rows=5 compile_time_registry=1 schema_validated=1 total_cases=30",
+        TUPLE_OPERATIONS.len()
+    );
+}
+
+#[test]
 fn generated_registry_schema_rejects_unknown_fields_and_malformed_failure_codes() {
     let mut registry: serde_json::Value =
         serde_json::from_str(system_host_operation_registry_json()).unwrap();
