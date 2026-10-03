@@ -5338,8 +5338,13 @@ impl Context<'_, '_> {
     }
 
     fn ui_node(&mut self, values: Vec<Value>) -> Result<Value, EvaluationError> {
-        let [Value::String(kind), Value::Record(properties), Value::List(children), Value::List(actions)] =
-            values.as_slice()
+        let [
+            Value::String(kind),
+            Value::Record(properties),
+            Value::List(children),
+            Value::List(actions),
+            Value::List(property_types),
+        ] = values.as_slice()
         else {
             return Err(error("ORNA-EVAL-TYPE"));
         };
@@ -5348,31 +5353,29 @@ impl Context<'_, '_> {
             | "code" | "diff" | "chart" | "button" | "form" | "input" => kind,
             _ => return Err(error("ORNA-EVAL-ARGUMENT")),
         };
-        self.items(properties.len() + children.len() + actions.len() + 5)?;
+        self.items(properties.len() + children.len() + actions.len() + property_types.len() + 5)?;
         self.string(contract_name.clone())?;
 
-        let properties = properties
-            .iter()
-            .map(|(name, value)| {
-                self.string(name.clone())?;
-                value.clone().canonical()?;
-                let mut typed = BTreeMap::new();
-                typed.insert(
-                    "type".into(),
-                    Value::String(ui_value_type_name(value).to_owned()),
-                );
-                typed.insert("value".into(), value.clone());
-                Ok((name.clone(), Value::Record(typed)))
-            })
-            .collect::<Result<BTreeMap<_, _>, EvaluationError>>()?;
-
-        let mut slots = BTreeMap::new();
-        for child in children {
-            if !is_ui_presentation_node(child) {
+        let mut type_overrides = BTreeMap::new();
+        for hint in property_types {
+            let Value::Tuple(pair) = hint else {
                 return Err(error("ORNA-EVAL-TYPE"));
+            };
+            let [Value::String(name), Value::String(type_name)] = pair.as_slice() else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            if name.is_empty()
+                || type_name.is_empty()
+                || !properties.contains_key(name)
+                || type_overrides
+                    .insert(name.clone(), type_name.clone())
+                    .is_some()
+            {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
             }
+            self.string(name.clone())?;
+            self.string(type_name.clone())?;
         }
-        slots.insert("content".into(), Value::List(children.clone()));
 
         let mut action_map = BTreeMap::new();
         for action in actions {
@@ -5390,6 +5393,59 @@ impl Context<'_, '_> {
                 return Err(error("ORNA-EVAL-ARGUMENT"));
             }
         }
+
+        if kind == "input" {
+            let Value::Record(descriptor) = action_map
+                .get("change")
+                .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?
+            else {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            };
+            let Some(Value::String(input_type)) = descriptor.get("input_type") else {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            };
+            match properties.get("value") {
+                Some(Value::Option(Some(value)))
+                    if ui_value_type_name(value) != input_type.as_str() =>
+                {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                }
+                Some(Value::Option(None) | Value::Null) => {
+                    type_overrides
+                        .entry("value".into())
+                        .or_insert_with(|| format!("std.option<{input_type}>"));
+                }
+                Some(Value::Option(Some(_))) => {}
+                _ => return Err(error("ORNA-EVAL-TYPE")),
+            }
+        }
+
+        let properties = properties
+            .iter()
+            .map(|(name, value)| {
+                self.string(name.clone())?;
+                value.clone().canonical()?;
+                let type_name = type_overrides
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| ui_value_type_name(value));
+                if !ui_property_type_matches(&type_name, value) {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                }
+                let mut typed = BTreeMap::new();
+                typed.insert("type".into(), Value::String(type_name));
+                typed.insert("value".into(), value.clone());
+                Ok((name.clone(), Value::Record(typed)))
+            })
+            .collect::<Result<BTreeMap<_, _>, EvaluationError>>()?;
+
+        let mut slots = BTreeMap::new();
+        for child in children {
+            if !is_ui_presentation_node(child) {
+                return Err(error("ORNA-EVAL-TYPE"));
+            }
+        }
+        slots.insert("content".into(), Value::List(children.clone()));
 
         let mut contract = BTreeMap::new();
         contract.insert(
@@ -12201,6 +12257,20 @@ fn ui_value_type_name(value: &Value) -> String {
     }
 }
 
+fn ui_property_type_matches(type_name: &str, value: &Value) -> bool {
+    let is_typed_option = || {
+        type_name
+            .strip_prefix("std.option<")
+            .and_then(|inner| inner.strip_suffix('>'))
+            .is_some_and(|inner| !inner.is_empty())
+    };
+    match value {
+        Value::Null => type_name == "std.null" || is_typed_option(),
+        Value::Option(None) => is_typed_option(),
+        _ => type_name == ui_value_type_name(value),
+    }
+}
+
 fn is_ui_presentation_node(value: &Value) -> bool {
     let Value::Record(fields) = value else {
         return false;
@@ -12229,7 +12299,7 @@ fn is_ui_presentation_node(value: &Value) -> bool {
             return false;
         };
         !name.is_empty()
-            && type_name == &ui_value_type_name(value)
+            && ui_property_type_matches(type_name, value)
             && value.clone().canonical().is_ok()
     }) {
         return false;
