@@ -2134,12 +2134,17 @@ impl LiveApplication for ApplicationLiveAdapter {
                         request_id: request,
                     }),
                 )?;
+                let identity = RequestIdentity {
+                    session_id: session,
+                    request_id: request,
+                };
                 let sessions = Arc::clone(&self.sessions);
                 let transaction = LiveEvalTransaction::new(
                     activation.mutations().to_vec(),
                     activation.next_digest(),
                     Arc::new(NoFault),
                 )
+                .for_request(identity)
                 .after_commit(move || {
                     sessions
                         .lock()
@@ -2174,7 +2179,11 @@ impl LiveApplication for ApplicationLiveAdapter {
                 activation.mutations().to_vec(),
                 activation.next_digest(),
                 Arc::new(NoFault),
-            );
+            )
+            .for_request(RequestIdentity {
+                session_id: session,
+                request_id: request,
+            });
             Ok(LiveEvalResponse::transaction(envelope, transaction))
         })
     }
@@ -2248,7 +2257,11 @@ impl LiveApplication for ApplicationLiveAdapter {
                     activation.mutations().to_vec(),
                     activation.next_digest(),
                     Arc::new(NoFault),
-                );
+                )
+                .for_request(RequestIdentity {
+                    session_id: session,
+                    request_id: request,
+                });
                 LiveEvalResponse::transaction(envelope, transaction)
             };
             work.complete();
