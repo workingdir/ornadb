@@ -1,5 +1,9 @@
 use orna_syntax_v1::{Declaration, Expr, LiteralKind, TypeExpr, parse_module};
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+};
 
 use orna_sys_v1::{
     AbiType, EffectSet, OperationContract, SystemEffect, system_binding_modules_json,
@@ -1325,6 +1329,165 @@ fn generated_provider_callback_binding_matches_schema_and_idl() {
         "generated_provider_callback_binding_parity schema_validated=1 typed_contracts=1 macro_bindings=1 idl_parameters={} idl_results=1 provider_role=1 total_cases={}",
         signature.parameters.len(),
         5 + signature.parameters.len()
+    );
+}
+
+#[test]
+fn generated_provider_variadic_error_bindings_match_schema_and_idl() {
+    const VARIADIC_ERROR_OPERATIONS: [&str; 4] = [
+        "sys.invoke(Value)",
+        "sys.invoke<T>",
+        "sys.start(Value)",
+        "sys.start<T>",
+    ];
+    const SHARED_PROVIDER_FAILURES: [&str; 3] = [
+        "sys.abi.precondition_failed",
+        "sys.abi.unavailable",
+        "sys.abi.provider_failed",
+    ];
+
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("provider variadic error schema regenerates from its typed source");
+    assert_eq!(generated_schema, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &generated_schema)
+        .expect("embedded provider error contracts conform to their regenerated schema");
+    let registry_json: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded provider registry");
+    let raw_operations = registry_json["operations"]
+        .as_array()
+        .expect("embedded provider registry has operation rows");
+    let registry = orna_sys_v1::SystemProviderAbi::from_json(system_provider_abi_json())
+        .expect("embedded provider registry parses into typed contracts");
+    let source = system_binding_stubs();
+    let parsed = parse_module(source);
+    assert!(
+        parsed.is_ok(),
+        "generated invoke/start bundle parses: {:?}",
+        parsed.diagnostics
+    );
+    let markers = source
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+
+    let mut schema_rows = 0;
+    let mut typed_contracts = 0;
+    let mut generated_bindings = 0;
+    let mut map_slots = 0;
+    let mut declared_failure_codes = 0;
+    let mut idl_parameters = 0;
+    let mut idl_results = 0;
+    for operation_name in VARIADIC_ERROR_OPERATIONS {
+        let contract = registry
+            .operation(operation_name)
+            .expect("variadic provider operation exists in typed registry");
+        let row = raw_operations
+            .iter()
+            .find(|row| row["name"] == operation_name)
+            .expect("generated schema input contains each variadic operation");
+        assert_eq!(
+            row["signature"].as_str(),
+            Some(contract.signature.source.as_str()),
+            "schema row carries typed signature for {operation_name}"
+        );
+        let schema_failure_codes = row["failures"]
+            .as_array()
+            .expect("schema row publishes its operation failure vocabulary")
+            .iter()
+            .map(|code| code.as_str().expect("failure code is a string").to_owned())
+            .collect::<BTreeSet<_>>();
+        let typed_operation_failures = contract
+            .failures
+            .iter()
+            .filter(|code| !SHARED_PROVIDER_FAILURES.contains(&code.as_str()))
+            .map(|code| code.as_str().to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(schema_failure_codes, typed_operation_failures);
+        assert!(contract.role.is_some());
+        schema_rows += 1;
+        typed_contracts += 1;
+
+        let generated = system_function_descriptor(operation_name)
+            .expect("variadic provider operation has a macro-generated binding");
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+        generated_bindings += 1;
+
+        let map_indexes = contract
+            .signature
+            .parameters
+            .iter()
+            .enumerate()
+            .filter_map(|(index, parameter)| (parameter.name == "arguments").then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(map_indexes, [1], "one outer map slot in {operation_name}");
+        assert_eq!(
+            contract.signature.parameters[map_indexes[0]].ty,
+            AbiType::Named("sys.ArgumentMap".to_owned())
+        );
+        map_slots += 1;
+        declared_failure_codes += schema_failure_codes.len();
+
+        let item_index = markers
+            .iter()
+            .position(|marker| *marker == operation_name)
+            .expect("generated IDL contains each variadic operation marker");
+        let Declaration::Function { signature, .. } = &parsed.value.items[item_index].declaration
+        else {
+            panic!("generated variadic operation {operation_name} is not a function")
+        };
+        assert_eq!(
+            signature.parameters.len(),
+            contract.signature.parameters.len()
+        );
+        for (idl_parameter, registry_parameter) in signature
+            .parameters
+            .iter()
+            .zip(&contract.signature.parameters)
+        {
+            let parsed_type = resolve_type(
+                idl_parameter
+                    .annotation
+                    .as_ref()
+                    .expect("generated variadic IDL parameter has a type"),
+            )
+            .expect("generated variadic IDL parameter type resolves");
+            assert_eq!(parsed_type, registry_parameter.ty);
+            let parsed_default = idl_parameter
+                .default
+                .as_ref()
+                .map(|default| &source[default.span().start..default.span().end]);
+            assert_eq!(parsed_default, registry_parameter.default.as_deref());
+        }
+        assert_eq!(
+            resolve_type(
+                signature
+                    .result
+                    .as_ref()
+                    .expect("generated variadic IDL declares its result")
+            )
+            .expect("generated variadic IDL result resolves"),
+            contract.signature.result
+        );
+        idl_parameters += signature.parameters.len();
+        idl_results += 1;
+    }
+
+    assert_eq!(schema_rows, VARIADIC_ERROR_OPERATIONS.len());
+    assert_eq!(typed_contracts, VARIADIC_ERROR_OPERATIONS.len());
+    assert_eq!(generated_bindings, VARIADIC_ERROR_OPERATIONS.len());
+    assert_eq!(map_slots, VARIADIC_ERROR_OPERATIONS.len());
+    assert_eq!(idl_results, VARIADIC_ERROR_OPERATIONS.len());
+    assert!(declared_failure_codes > 0);
+    println!(
+        "generated_provider_variadic_error_binding_parity operations={generated_bindings} schema_rows={schema_rows} typed_contracts={typed_contracts} map_slots={map_slots} operation_failure_codes={declared_failure_codes} idl_parameters={idl_parameters} idl_results={idl_results} total_cases={}",
+        schema_rows
+            + typed_contracts
+            + generated_bindings
+            + map_slots
+            + declared_failure_codes
+            + idl_parameters
+            + idl_results
     );
 }
 
