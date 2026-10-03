@@ -3629,6 +3629,58 @@ fn captured_snapshot_identity_survives_paired_divergence_escalations() {
 }
 
 #[test]
+fn captured_snapshot_identity_survives_paired_divergence_suppression_folds() {
+    let (_directory, projects, pins) = paired_divergence_escalation_projects();
+    let expected = [
+        [99, 40, 4, 40, 4, 1_007, 1_008],
+        [99, 50, 4, 50, 4, 10_007, 10_008],
+        [99, 40, 5, 40, 5, 1_007, 1_008],
+        [99, 50, 5, 50, 5, 10_007, 10_008],
+        [99, 50, 6, 50, 6, 10_007, 10_008],
+        [99, 60, 6, 60, 6, 100_007, 100_008],
+    ];
+    let shadow = include_str!("fixtures/module-upgrade-divergence-suppression-shadow.orna");
+    let imports = include_str!("fixtures/module-upgrade-divergence-suppression-use.orna");
+    let capture = include_str!("fixtures/module-upgrade-divergence-suppression-capture.orna");
+    let replay = include_str!("fixtures/module-upgrade-divergence-suppression-replay.orna");
+
+    assert!(pins.windows(2).all(|pair| pair[0] != pair[1]));
+    let mut sessions = Vec::with_capacity(projects.len());
+    for (index, project) in projects.iter().enumerate() {
+        assert_eq!(
+            project.standard_profile().unwrap().snapshot(),
+            &pins[index],
+            "suppressed paired imports must retain dependency pin {}",
+            pins[index]
+        );
+        let mut session = AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(session.submit(shadow), Ok(None));
+        for import in imports.lines() {
+            assert_eq!(
+                session.submit(import),
+                Ok(None),
+                "wildcard imports must accept local marker suppression at pin {}",
+                pins[index]
+            );
+        }
+        assert_eq!(session.submit(capture), Ok(None));
+        assert_eq!(
+            session.submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "local marker suppression must preserve qualified paired values at pin {}",
+            pins[index]
+        );
+        sessions.push(session);
+    }
+
+}
+
+#[test]
 fn captured_paired_resolution_identity_survives_stepwise_repins() {
     let (_directory, projects, pins) = paired_resolution_fold_projects();
     let expected = [
