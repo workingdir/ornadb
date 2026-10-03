@@ -2884,6 +2884,9 @@ fn explain_query_core_with_segment_rotation_chains(
     let mut paired_window_spill_cascade_fold: Option<QueryWindowSpillCascadeFold> = None;
     let mut paired_aggregate_anchor_cascade_fold: Option<QueryPairedAggregateAnchorCascadeFold> =
         None;
+    let mut paired_scoped_window_compaction_fold: Option<
+        QueryPairedScopedWindowCompactionFold,
+    > = None;
     let mut paired_limit_aggregate_restoration_fold:
         Option<QueryPairedLimitAggregateRestorationFold> = None;
     let mut paired_aggregate_spill_restoration_fold: Option<
@@ -3556,6 +3559,53 @@ fn explain_query_core_with_segment_rotation_chains(
                 );
             }
         }
+        let paired_scoped_window_compaction_pair_identity = join_pair_identity
+            .zip(window_anchor_fold_id.as_deref())
+            .zip(paired_aggregate_anchor_cascade_fold.as_ref())
+            .map(|((pair, window_scope_identity), aggregate_fold)| {
+                query_paired_scoped_window_compaction_pair_identity(
+                    pair,
+                    window_scope_identity,
+                    &aggregate_fold.identity,
+                )
+            });
+        if let (Some(pair_identity), Some(window_scope_identity), Some(aggregate_fold)) = (
+            paired_scoped_window_compaction_pair_identity.as_deref(),
+            window_anchor_fold_id.as_deref(),
+            paired_aggregate_anchor_cascade_fold.as_ref(),
+        ) {
+            let window_stage_count =
+                u64::try_from(operators.len() - right_window_operator_start).unwrap_or(u64::MAX);
+            paired_scoped_window_compaction_fold =
+                Some(query_paired_scoped_window_compaction_fold(
+                    paired_scoped_window_compaction_fold.as_ref(),
+                    pair_identity,
+                    window_scope_identity,
+                    window_stage_count,
+                    aggregate_fold,
+                ));
+        }
+        if let Some(identity) = paired_scoped_window_compaction_pair_identity.as_deref() {
+            let mut scope_nodes = BTreeSet::from([right_access, right]);
+            scope_nodes.extend(right_window_operator_start..operators.len());
+            for index in scope_nodes {
+                add_paired_scoped_window_compaction_pair_details(
+                    &mut operators[index].details,
+                    identity,
+                );
+            }
+        }
+        if let Some(fold) = paired_scoped_window_compaction_fold.as_ref() {
+            let mut scope_nodes = BTreeSet::from([right_access, right]);
+            scope_nodes.extend(right_window_operator_start..operators.len());
+            for index in scope_nodes {
+                add_paired_scoped_window_compaction_fold_details(
+                    &mut operators[index].details,
+                    fold,
+                    paired_scoped_window_compaction_pair_identity.is_some(),
+                );
+            }
+        }
         let paired_limit_aggregate_restoration_pair_identity =
             query_paired_limit_aggregate_restoration_pair_identity(
                 paired_limit_pushdown_anchor_fold_id.as_deref(),
@@ -4036,6 +4086,9 @@ fn explain_query_core_with_segment_rotation_chains(
             paired_aggregate_anchor_cascade_fold
                 .as_ref()
                 .map(|fold| fold.identity.as_str()),
+            paired_scoped_window_compaction_fold
+                .as_ref()
+                .map(|fold| fold.identity.as_str()),
             paired_window_spill_cascade_fold
                 .as_ref()
                 .map(|fold| fold.identity.as_str()),
@@ -4275,6 +4328,16 @@ fn explain_query_core_with_segment_rotation_chains(
         }
         if let Some(cascade_fold) = paired_aggregate_anchor_cascade_fold.as_ref() {
             add_paired_aggregate_cascade_fold_details(&mut details, cascade_fold);
+        }
+        if let Some(identity) = paired_scoped_window_compaction_pair_identity.as_deref() {
+            add_paired_scoped_window_compaction_pair_details(&mut details, identity);
+        }
+        if let Some(fold) = paired_scoped_window_compaction_fold.as_ref() {
+            add_paired_scoped_window_compaction_fold_details(
+                &mut details,
+                fold,
+                paired_scoped_window_compaction_pair_identity.is_some(),
+            );
         }
         if let Some(identity) = paired_window_spill_anchor_fold_id.as_deref() {
             add_paired_window_spill_anchor_fold_details(&mut details, identity);
@@ -6682,6 +6745,19 @@ struct QueryPairedAggregateAnchorCascadeFold {
     overflowed: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryPairedScopedWindowCompactionFold {
+    identity: String,
+    latest_pair_identity: String,
+    latest_window_scope_identity: String,
+    aggregate_compaction_identity: String,
+    window_pair_count: u64,
+    window_stage_count: u64,
+    aggregate_pair_count: u64,
+    aggregate_stage_count: u64,
+    overflowed: bool,
+}
+
 /// Appends an exact paired aggregate chain to the sparse planned sequence.
 /// Inputs without a window chain carry the previous identity through; the
 /// next aggregate chain restores it by folding the new exact pair.
@@ -6750,6 +6826,164 @@ fn add_paired_aggregate_cascade_fold_details(
     );
     details.insert(
         "paired_aggregate_anchor_cascade_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.overflowed),
+    );
+}
+
+/// Binds an exact logical pair and anchor-scoped window chain to the current
+/// cumulative paired-aggregate compaction fold. ORNA leaves this explain-only
+/// digest composition unspecified; source and frame scope remain explicit.
+fn query_paired_scoped_window_compaction_pair_identity(
+    pair: &QueryJoinPairIdentityDescription,
+    window_scope_identity: &str,
+    aggregate_compaction_identity: &str,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-scoped-window-compaction-pair.v1\0");
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    hash_part(&mut hash, window_scope_identity.as_bytes());
+    hash_part(&mut hash, aggregate_compaction_identity.as_bytes());
+    format!(
+        "paired-scoped-window-compaction-pair:{}",
+        hex(&hash.finalize())
+    )
+}
+
+/// Accumulates exact scoped window chains over the paired aggregate
+/// compaction history. A window chain advances both identities; joins without
+/// a window chain carry the latest scope and aggregate fold unchanged.
+fn query_paired_scoped_window_compaction_fold(
+    previous: Option<&QueryPairedScopedWindowCompactionFold>,
+    pair_identity: &str,
+    window_scope_identity: &str,
+    window_stage_count: u64,
+    aggregate_fold: &QueryPairedAggregateAnchorCascadeFold,
+) -> QueryPairedScopedWindowCompactionFold {
+    let mut overflowed = previous.is_some_and(|fold| fold.overflowed) || aggregate_fold.overflowed;
+    let window_pair_count = previous
+        .map_or(1, |fold| fold.window_pair_count.checked_add(1).unwrap_or_else(|| {
+            overflowed = true;
+            u64::MAX
+        }));
+    let window_stage_count = previous.map_or(window_stage_count, |fold| {
+        fold.window_stage_count
+            .checked_add(window_stage_count)
+            .unwrap_or_else(|| {
+                overflowed = true;
+                u64::MAX
+            })
+    });
+
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-scoped-window-compaction-fold.v1\0");
+    hash_optional_text(
+        &mut hash,
+        previous.map(|fold| fold.identity.as_str()),
+    );
+    hash_part(&mut hash, pair_identity.as_bytes());
+    hash_part(&mut hash, window_scope_identity.as_bytes());
+    hash_part(&mut hash, aggregate_fold.identity.as_bytes());
+    hash.update(window_pair_count.to_be_bytes());
+    hash.update(window_stage_count.to_be_bytes());
+    hash.update(aggregate_fold.pair_count.to_be_bytes());
+    hash.update(aggregate_fold.aggregate_stage_count.to_be_bytes());
+    hash.update([u8::from(overflowed)]);
+
+    QueryPairedScopedWindowCompactionFold {
+        identity: format!(
+            "paired-scoped-window-compaction-fold:{}",
+            hex(&hash.finalize())
+        ),
+        latest_pair_identity: pair_identity.to_owned(),
+        latest_window_scope_identity: window_scope_identity.to_owned(),
+        aggregate_compaction_identity: aggregate_fold.identity.clone(),
+        window_pair_count,
+        window_stage_count,
+        aggregate_pair_count: aggregate_fold.pair_count,
+        aggregate_stage_count: aggregate_fold.aggregate_stage_count,
+        overflowed,
+    }
+}
+
+fn add_paired_scoped_window_compaction_pair_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "paired_scoped_window_compaction_pair_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_scoped_window_compaction_pairing".to_owned(),
+        PlanDetail::Text(
+            "exact_join_pair_scoped_window_anchor_and_cumulative_aggregate_compaction".to_owned(),
+        ),
+    );
+}
+
+fn add_paired_scoped_window_compaction_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryPairedScopedWindowCompactionFold,
+    advanced_on_window_pair: bool,
+) {
+    details.insert(
+        "paired_scoped_window_compaction_fold_identity".to_owned(),
+        PlanDetail::Text(fold.identity.clone()),
+    );
+    details.insert(
+        "paired_scoped_window_compaction_fold_pairing".to_owned(),
+        PlanDetail::Text(
+            "sparse_scoped_window_chains_over_paired_aggregate_compaction_folds".to_owned(),
+        ),
+    );
+    details.insert(
+        "paired_scoped_window_compaction_fold_transition".to_owned(),
+        PlanDetail::Text(if advanced_on_window_pair {
+            "advanced_scoped_window_pair".to_owned()
+        } else {
+            "carried_across_sparse_input".to_owned()
+        }),
+    );
+    details.insert(
+        "paired_scoped_window_compaction_window_anchor_fold_identity".to_owned(),
+        PlanDetail::Text(fold.latest_window_scope_identity.clone()),
+    );
+    details.insert(
+        "paired_scoped_window_compaction_latest_pair_identity".to_owned(),
+        PlanDetail::Text(fold.latest_pair_identity.clone()),
+    );
+    details.insert(
+        "paired_scoped_window_compaction_aggregate_fold_identity".to_owned(),
+        PlanDetail::Text(fold.aggregate_compaction_identity.clone()),
+    );
+    for (key, value) in [
+        (
+            "paired_scoped_window_compaction_window_pair_count",
+            fold.window_pair_count,
+        ),
+        (
+            "paired_scoped_window_compaction_window_stage_count",
+            fold.window_stage_count,
+        ),
+        (
+            "paired_scoped_window_compaction_aggregate_pair_count",
+            fold.aggregate_pair_count,
+        ),
+        (
+            "paired_scoped_window_compaction_aggregate_stage_count",
+            fold.aggregate_stage_count,
+        ),
+    ] {
+        details.insert(key.to_owned(), PlanDetail::Integer(value));
+    }
+    details.insert(
+        "paired_scoped_window_compaction_overflowed".to_owned(),
         PlanDetail::Boolean(fold.overflowed),
     );
 }
@@ -9114,6 +9348,7 @@ fn query_join_cost_fold(
     paired_window_spill_anchor_fold_identity: Option<&str>,
     paired_aggregate_spill_anchor_fold_identity: Option<&str>,
     paired_aggregate_anchor_cascade_fold_identity: Option<&str>,
+    paired_scoped_window_compaction_fold_identity: Option<&str>,
     paired_window_spill_cascade_fold_identity: Option<&str>,
     paired_aggregate_spill_restoration_fold_identity: Option<&str>,
     paired_window_compaction_spill_fold_identity: Option<&str>,
@@ -9161,6 +9396,7 @@ fn query_join_cost_fold(
     }
     hash_optional_text(&mut hash, paired_aggregate_spill_anchor_fold_identity);
     hash_optional_text(&mut hash, paired_aggregate_anchor_cascade_fold_identity);
+    hash_optional_text(&mut hash, paired_scoped_window_compaction_fold_identity);
     hash_optional_text(&mut hash, paired_window_spill_cascade_fold_identity);
     hash_optional_text(
         &mut hash,
