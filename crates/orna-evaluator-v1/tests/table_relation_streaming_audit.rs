@@ -2621,6 +2621,8 @@ fn paired_limit_compaction_refreshes_keep_scoped_prefix_values() {
 
 #[test]
 fn paired_sparse_window_folds_keep_identity_across_checkpoint_rotation_chains() {
+    // The reference is silent on provider checkpoint rotation between refreshes;
+    // pin every `(source, scope)` to one forward-moving rotation chain.
     let checkpoint_epochs = [0x41, 0x42, 0x43, 0x44];
     let restore = |groups: &[&[i64]], tokens: &[Vec<u8>]| {
         assert_eq!(groups.len(), tokens.len() + 1);
@@ -2682,6 +2684,52 @@ fn paired_sparse_window_folds_keep_identity_across_checkpoint_rotation_chains() 
     assert_eq!(third, integer_pair(90, 118), "the next rotation retains independent left/right window folds");
     assert_eq!(first, integer_pair(60, 72), "later rotations leave the first fold snapshot unchanged");
     assert_eq!(second, integer_pair(84, 94), "later rotations leave the middle fold snapshot unchanged");
+
+    assert_eq!(source.lanes.len(), lane_names.len());
+    assert_eq!(
+        rotated_chains
+            .iter()
+            .map(|chain| chain[0][0])
+            .collect::<Vec<_>>(),
+        [0x41, 0x42, 0x43, 0x44, 0x42, 0x41],
+        "checkpoint epochs rotate across both source lanes and all refreshes"
+    );
+    for chain in &rotated_chains {
+        for adjacent in chain.windows(2) {
+            assert!(
+                adjacent[0] < adjacent[1],
+                "each rotated checkpoint chain still advances lexicographically"
+            );
+        }
+    }
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(lane_names.iter().copied())
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name, "each refresh folds left then right");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "sibling checkpoint rotations cannot alias an earlier source scope: {scope:?}"
+        );
+    }
+    let mut expected_cursors = Vec::new();
+    for (index, chain) in rotated_chains.iter().enumerate() {
+        let source_name = lane_names[index].to_owned();
+        expected_cursors.push((source_name.clone(), scopes[index], None));
+        expected_cursors.extend(chain.iter().cloned().map(|cursor| {
+            (source_name.clone(), scopes[index], Some(cursor))
+        }));
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "each sparse window fold restores all pages only through its scoped rotation chain"
+    );
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
 }
