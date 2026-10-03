@@ -78,3 +78,34 @@ fn nested_predicate_continuations_keep_each_lexical_row_identity() {
         assert_eq!(row_field(&row, "token"), &Raw::Text(token.into()));
     }
 }
+
+#[test]
+fn deepest_nested_predicate_uses_the_current_family_continuation() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-relation-predicate-identity-mismatch-usygy.orna"
+    )));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-MODULE-ASSERT"
+        ),
+        "the blue family must reject an amber deepest proof: {outcome:?}"
+    );
+    for (table, ids) in [
+        ("Family", &[1, 2][..]),
+        ("Branch", &[10, 20][..]),
+        ("Leaf", &[100, 200][..]),
+        ("Proof", &[1000, 2000][..]),
+    ] {
+        for id in ids {
+            assert_eq!(
+                runtime.committed_row(table, &Value::int((*id).into())),
+                None,
+                "failed continuation identity published {table} row {id}"
+            );
+        }
+    }
+}
