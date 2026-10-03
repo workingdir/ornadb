@@ -5089,6 +5089,16 @@ fn explain_query_core_with_wal_rotation_chains(
                 );
             }
         }
+        let paired_window_spill_rule_cost_pair_identity = join_pair_identity
+            .zip(paired_window_spill_rule_cost_fold.as_ref())
+            .map(|(pair, fold)| {
+                query_paired_window_spill_rule_cost_pair_identity(
+                    &left_fold_identity,
+                    &right_fold_identity,
+                    pair,
+                    fold,
+                )
+            });
         let next_join_cost_fold_identity = query_join_cost_fold(
             &left_fold_identity,
             &right_fold_identity,
@@ -5118,6 +5128,7 @@ fn explain_query_core_with_wal_rotation_chains(
             paired_window_spill_rule_cost_fold
                 .as_ref()
                 .map(|fold| fold.identity.as_str()),
+            paired_window_spill_rule_cost_pair_identity.as_deref(),
             paired_aggregate_spill_restoration_fold
                 .as_ref()
                 .map(|fold| fold.identity.as_str()),
@@ -5531,6 +5542,12 @@ fn explain_query_core_with_wal_rotation_chains(
                 "paired_join_cost_fold_identity".to_owned(),
                 PlanDetail::Text(next_join_cost_fold_identity.clone()),
             );
+            if let Some(identity) = paired_window_spill_rule_cost_pair_identity.as_deref() {
+                add_paired_window_spill_rule_cost_pair_identity_details(
+                    &mut operators[index].details,
+                    identity,
+                );
+            }
         }
         let mut details = BTreeMap::from([(
             "strategy".to_owned(),
@@ -5899,6 +5916,9 @@ fn explain_query_core_with_wal_rotation_chains(
             &right_fold_identity,
             &next_join_cost_fold_identity,
         );
+        if let Some(identity) = paired_window_spill_rule_cost_pair_identity.as_deref() {
+            add_paired_window_spill_rule_cost_pair_identity_details(&mut details, identity);
+        }
         if let (
             Some(fold),
             Some(parent_identity),
@@ -9313,6 +9333,52 @@ fn add_paired_window_spill_rule_cost_fold_details(
             details.remove(key);
         }
     }
+}
+
+/// The reference leaves planner-local join-cost digests unspecified. Bind a
+/// rule-local spill history to the exact join edge and both cost ancestors so
+/// nested rules cannot be mistaken for costs from a neighboring pair.
+fn query_paired_window_spill_rule_cost_pair_identity(
+    left_cost_identity: &str,
+    right_cost_identity: &str,
+    pair: &QueryJoinPairIdentityDescription,
+    fold: &QueryPairedWindowSpillRuleCostFold,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-window-spill-rule-cost-pair.v1\0");
+    hash_part(&mut hash, left_cost_identity.as_bytes());
+    hash_part(&mut hash, right_cost_identity.as_bytes());
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    hash_part(&mut hash, fold.identity.as_bytes());
+    hash.update((fold.rules.len() as u64).to_be_bytes());
+    for (rule_identity, rule_fold) in &fold.rules {
+        hash_part(&mut hash, rule_identity.as_bytes());
+        hash_part(&mut hash, rule_fold.identity.as_bytes());
+    }
+    format!(
+        "paired-window-spill-rule-cost-pair:{}",
+        hex(&hash.finalize())
+    )
+}
+
+fn add_paired_window_spill_rule_cost_pair_identity_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "paired_window_spill_rule_cost_pair_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_window_spill_rule_cost_pair_identity_policy".to_owned(),
+        PlanDetail::Text("join_ancestors_exact_pair_nested_rule_folds_sha256_v1".to_owned()),
+    );
 }
 
 /// Folds each exact paired window chain together with the cumulative spill
@@ -13205,6 +13271,7 @@ fn query_join_cost_fold(
     paired_scoped_window_compaction_fold_identity: Option<&str>,
     paired_window_spill_cascade_fold_identity: Option<&str>,
     paired_window_spill_rule_cost_fold_identity: Option<&str>,
+    paired_window_spill_rule_cost_pair_identity: Option<&str>,
     paired_aggregate_spill_restoration_fold_identity: Option<&str>,
     paired_limit_aggregate_spill_restoration_fold_identity: Option<&str>,
     paired_window_compaction_spill_fold_identity: Option<&str>,
@@ -13262,6 +13329,7 @@ fn query_join_cost_fold(
     hash_optional_text(&mut hash, paired_scoped_window_compaction_fold_identity);
     hash_optional_text(&mut hash, paired_window_spill_cascade_fold_identity);
     hash_optional_text(&mut hash, paired_window_spill_rule_cost_fold_identity);
+    hash_optional_text(&mut hash, paired_window_spill_rule_cost_pair_identity);
     hash_optional_text(
         &mut hash,
         paired_aggregate_spill_restoration_fold_identity,
