@@ -87,3 +87,13 @@ fn time_series_rejects_reversal_between_disjoint_windows() {
         .expect_err("window boundaries must not hide a source timestamp reversal");
     assert_eq!(error.code(), "ORNA-EVAL-ERROR");
 }
+
+#[test]
+fn time_series_window_rejects_a_singleton_source_even_without_complete_windows() {
+    let error = session()
+        .submit(include_str!(
+            "fixtures/stdlib-query-window-time-singleton-pkbay.orna"
+        ))
+        .expect_err("Section 9 time-series statistics require at least two source points");
+    assert_eq!(error.code(), "ORNA-EVAL-ERROR");
+}

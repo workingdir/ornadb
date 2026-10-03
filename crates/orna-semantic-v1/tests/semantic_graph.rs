@@ -7370,6 +7370,142 @@ fn omitted_nested_fold_rolls_back_only_the_rejected_depth_scope() {
 }
 
 #[test]
+fn nested_container_omission_rolls_back_only_the_conflicting_depth() {
+    let source = include_str!("fixtures/historical-nested-container-rollback.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-nested-container-rollback.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "the crossed nested depth remains a type error: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("nested_container_omission_rolls_back_one_depth")
+        })
+        .expect("nested-container rollback fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["nested_container_omission_rolls_back_one_depth"].ty
+    else {
+        panic!("fixture function must preserve its computed result type");
+    };
+    let Type::Record(fields) = result.as_ref() else {
+        panic!("fixture function must return its computed record: {result:?}");
+    };
+    let Type::List(row) = fields.get("parent_fold").expect("parent fold result") else {
+        panic!("parent fold must preserve its rows");
+    };
+    let Type::Record(siblings) = row.as_ref() else {
+        panic!("parent row must preserve its siblings: {row:?}");
+    };
+    let collect_depths = |pins: &Type| {
+        let Type::Tuple(depths) = pins else {
+            panic!("pin field must preserve both nested depths: {pins:?}");
+        };
+        depths
+            .iter()
+            .map(|depth| {
+                let Type::Tuple(slots) = depth else {
+                    panic!("each depth must preserve its selector pair");
+                };
+                slots
+                    .iter()
+                    .map(|slot| {
+                        let mut contexts = BTreeSet::new();
+                        collect_snapshot_contexts(slot, &mut contexts);
+                        contexts
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let Type::List(left_element) = &siblings["left"] else {
+        panic!("left nested list must remain a real list type");
+    };
+    let Type::Record(left_fields) = left_element.as_ref() else {
+        panic!("left list element must preserve its nested record");
+    };
+    assert_eq!(
+        collect_depths(&left_fields["pins"]),
+        [
+            vec![BTreeSet::new(), BTreeSet::new()],
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~812".into(),
+                    "selector:HEAD~822".into(),
+                    "selector:HEAD~832".into(),
+                    "selector:HEAD~842".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~813".into(),
+                    "selector:HEAD~823".into(),
+                    "selector:HEAD~833".into(),
+                    "selector:HEAD~843".into(),
+                ]),
+            ],
+        ],
+        "rollback must reach through the list element and retain its unaffected nested depth"
+    );
+    let Type::Record(right_fields) = &siblings["right"] else {
+        panic!("right sibling must preserve its computed record");
+    };
+    assert_eq!(
+        collect_depths(&right_fields["pins"]),
+        [
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~910".into(),
+                    "selector:HEAD~920".into(),
+                    "selector:HEAD~930".into(),
+                    "selector:HEAD~940".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~911".into(),
+                    "selector:HEAD~921".into(),
+                    "selector:HEAD~931".into(),
+                    "selector:HEAD~941".into(),
+                ]),
+            ],
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~912".into(),
+                    "selector:HEAD~922".into(),
+                    "selector:HEAD~932".into(),
+                    "selector:HEAD~942".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~913".into(),
+                    "selector:HEAD~923".into(),
+                    "selector:HEAD~933".into(),
+                    "selector:HEAD~943".into(),
+                ]),
+            ],
+        ],
+        "rollback under a list wrapper must not erase its independent sibling labels"
+    );
+}
+
+#[test]
 fn stacked_record_checkpoint_folds_preserve_selector_depth_labels() {
     let source = include_str!("fixtures/historical-stacked-selector-depth-fold.orna");
     let parsed = orna_syntax_v1::parse_module(source);

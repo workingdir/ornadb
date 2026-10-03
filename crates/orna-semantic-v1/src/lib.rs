@@ -18406,11 +18406,7 @@ fn merge_multi_parent_checkpoint_value(
     parent: &Type,
     first_parent: &Type,
 ) -> Option<Type> {
-    if !checkpoint_paired_boundary_fold_topology_matches(
-        accumulated,
-        parent,
-        first_parent,
-    ) {
+    if !checkpoint_paired_boundary_fold_topology_matches(accumulated, parent, first_parent) {
         return None;
     }
     if matches!(first_parent, Type::Tuple(_)) {
@@ -18433,10 +18429,13 @@ struct ScopedCheckpointFold {
 }
 
 /// Reconcile one parent while allowing all-omitted-first-row folds to recover
-/// locally. A rejected record field or tuple element is restored to the first
-/// row and frozen for later parents; unaffected sibling paths keep folding.
-/// Rebuild the effective parent with those restored paths before rechecking
-/// cross-path pin identity, so local recovery cannot manufacture sharing.
+/// locally. A rejected nested scope is restored to the first row and frozen
+/// for later parents across record, tuple, and collection-element boundaries;
+/// unaffected sibling paths keep folding. The reference is silent on rollback
+/// through nested containers, so these existing structural boundaries use
+/// the same smallest-failing-scope rule. Rebuild the effective parent with
+/// restored paths before rechecking cross-path pin identity, so local recovery
+/// cannot manufacture sharing.
 fn merge_multi_parent_checkpoint_value_scoped(
     accumulated: &Type,
     parent: &Type,
@@ -18544,6 +18543,126 @@ fn merge_multi_parent_checkpoint_value_scoped(
             }
             (Type::Tuple(merged_slots), Type::Tuple(effective_slots))
         }
+        (
+            Type::List(accumulated_element),
+            Type::List(parent_element),
+            Type::List(rollback_element),
+            Type::List(topology_element),
+        ) => {
+            let child = merge_scoped_checkpoint_child(
+                accumulated_element,
+                parent_element,
+                rollback_element,
+                topology_element,
+                SnapshotTopologyBoundary::ListElement,
+                path,
+                rolled_back_paths,
+            );
+            let Some(child) = child else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= child.rejected_scope;
+            (
+                Type::List(Box::new(child.merged)),
+                Type::List(Box::new(child.effective_parent)),
+            )
+        }
+        (
+            Type::Range(accumulated_element),
+            Type::Range(parent_element),
+            Type::Range(rollback_element),
+            Type::Range(topology_element),
+        ) => {
+            let child = merge_scoped_checkpoint_child(
+                accumulated_element,
+                parent_element,
+                rollback_element,
+                topology_element,
+                SnapshotTopologyBoundary::RangeElement,
+                path,
+                rolled_back_paths,
+            );
+            let Some(child) = child else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= child.rejected_scope;
+            (
+                Type::Range(Box::new(child.merged)),
+                Type::Range(Box::new(child.effective_parent)),
+            )
+        }
+        (
+            Type::Relation(accumulated_element),
+            Type::Relation(parent_element),
+            Type::Relation(rollback_element),
+            Type::Relation(topology_element),
+        ) => {
+            let child = merge_scoped_checkpoint_child(
+                accumulated_element,
+                parent_element,
+                rollback_element,
+                topology_element,
+                SnapshotTopologyBoundary::RelationElement,
+                path,
+                rolled_back_paths,
+            );
+            let Some(child) = child else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= child.rejected_scope;
+            (
+                Type::Relation(Box::new(child.merged)),
+                Type::Relation(Box::new(child.effective_parent)),
+            )
+        }
+        (
+            Type::Stream(accumulated_element),
+            Type::Stream(parent_element),
+            Type::Stream(rollback_element),
+            Type::Stream(topology_element),
+        ) => {
+            let child = merge_scoped_checkpoint_child(
+                accumulated_element,
+                parent_element,
+                rollback_element,
+                topology_element,
+                SnapshotTopologyBoundary::StreamElement,
+                path,
+                rolled_back_paths,
+            );
+            let Some(child) = child else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= child.rejected_scope;
+            (
+                Type::Stream(Box::new(child.merged)),
+                Type::Stream(Box::new(child.effective_parent)),
+            )
+        }
+        (
+            Type::Optional(accumulated_value),
+            Type::Optional(parent_value),
+            Type::Optional(rollback_value),
+            Type::Optional(topology_value),
+        ) => {
+            let child = merge_scoped_checkpoint_child(
+                accumulated_value,
+                parent_value,
+                rollback_value,
+                topology_value,
+                SnapshotTopologyBoundary::OptionalValue,
+                path,
+                rolled_back_paths,
+            );
+            let Some(child) = child else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= child.rejected_scope;
+            (
+                Type::Optional(Box::new(child.merged)),
+                Type::Optional(Box::new(child.effective_parent)),
+            )
+        }
         _ => return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths),
     };
 
@@ -18559,6 +18678,28 @@ fn merge_multi_parent_checkpoint_value_scoped(
         effective_parent,
         rejected_scope,
     })
+}
+
+fn merge_scoped_checkpoint_child(
+    accumulated: &Type,
+    parent: &Type,
+    rollback_anchor: &Type,
+    topology_anchor: &Type,
+    boundary: SnapshotTopologyBoundary,
+    path: &mut Vec<SnapshotTopologyBoundary>,
+    rolled_back_paths: &mut BTreeSet<Vec<SnapshotTopologyBoundary>>,
+) -> Option<ScopedCheckpointFold> {
+    path.push(boundary);
+    let child = merge_multi_parent_checkpoint_value_scoped(
+        accumulated,
+        parent,
+        rollback_anchor,
+        topology_anchor,
+        path,
+        rolled_back_paths,
+    );
+    path.pop();
+    child
 }
 
 fn scoped_checkpoint_rollback(
