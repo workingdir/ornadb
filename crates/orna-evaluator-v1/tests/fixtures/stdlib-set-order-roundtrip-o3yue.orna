@@ -1,0 +1,1 @@
+std.encoding.ovb.decode(std.encoding.ovb.encode(std.set.to_list(["é", "e\u{301}", "z", "é"])), as: [Str])
