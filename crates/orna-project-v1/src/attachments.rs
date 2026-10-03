@@ -1605,13 +1605,11 @@ impl PackageResolver {
         previous: &ReboundPathResolution,
         rebind_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
         omission_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
-        expected_transitions: &[
-            (
-                NestedPairTerminalRouteIdentity,
-                NestedPairTerminalRouteIdentity,
-                NestedPairTerminalRouteIdentity,
-            ),
-        ],
+        expected_transitions: &[(
+            NestedPairTerminalRouteIdentity,
+            NestedPairTerminalRouteIdentity,
+            NestedPairTerminalRouteIdentity,
+        )],
     ) -> Result<ReboundPathResolution, AttachmentError> {
         if rebind_chains.len() != omission_chains.len()
             || rebind_chains.len() != expected_transitions.len()
