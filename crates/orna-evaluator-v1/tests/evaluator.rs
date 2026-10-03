@@ -5765,6 +5765,19 @@ fn std_collection_partition_debits_one_step_per_scanned_value_without_duplicate_
 }
 
 #[test]
+fn generic_callback_can_precede_its_value_and_returns_the_projected_field() {
+    assert_eq!(
+        call_module(
+            include_str!("fixtures/ovc-callback-after-value-mqger.orna"),
+            "project_reordered()",
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::new(Raw::Text("ada".into())).unwrap(),
+    );
+}
+
+#[test]
 fn std_collection_filter_accepts_direct_pipeline_and_named_calls() {
     let expected = Value::new(Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())])).unwrap();
     assert_eq!(

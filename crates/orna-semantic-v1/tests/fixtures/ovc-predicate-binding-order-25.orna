@@ -1,0 +1,28 @@
+use std.collection as collection;
+use std.option as option;
+
+pub fn option_filter_reordered() =
+    option.filter(
+        predicate: row => row.name == "ada",
+        value: Some({ name: "ada" })
+    );
+
+enum LocalEither<L, R> {
+    Left { value: L },
+    Right { value: R },
+}
+
+fn fold<L, R>(value: LocalEither<L, R>, on_left: fn(L): Text, on_right: fn(R): Text): Text = "fold";
+
+pub fn variant_left_reordered(value: LocalEither<{ name: Text }, { label: Text }>) =
+    fold(
+        on_left: row => row.name,
+        on_right: row => row.label,
+        value: value
+    );
+
+pub fn collection_filter_reordered() =
+    collection.filter(
+        predicate: row => row.score > 0,
+        rows: [{ score: 4 }, { score: -2 }, { score: 9 }]
+    );
