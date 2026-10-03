@@ -7607,6 +7607,121 @@ fn paired_tuple_rebind_cascades_preserve_both_depths_of_identity() {
 }
 
 #[test]
+fn opposed_sparse_three_way_chains_preserve_paired_tuple_identity() {
+    let source = include_str!("fixtures/historical-opposed-sparse-paired-three-way-rebind-chains.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-opposed-sparse-paired-three-way-rebind-chains.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.diagnostics.is_empty(),
+        "opposed sparse three-way chains retain tuple-slot identity: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("accepts_opposed_sparse_paired_rebind_chains")
+        })
+        .expect("sparse rebind chain fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["accepts_opposed_sparse_paired_rebind_chains"].ty
+    else {
+        panic!("sparse chain must return its computed function type");
+    };
+    let Type::Record(fields) = result.as_ref() else {
+        panic!("sparse chain must return a computed record: {result:?}");
+    };
+    let Type::List(cascade_row) = fields.get("cascades").expect("cascade rows") else {
+        panic!("cascades must retain a computed list");
+    };
+    let Type::Record(cascade_fields) = cascade_row.as_ref() else {
+        panic!("cascade rows must retain their record values: {cascade_row:?}");
+    };
+    let Type::List(inner_row) = cascade_fields.get("history").expect("nested histories") else {
+        panic!("nested histories must retain their computed list");
+    };
+    let Type::Record(inner_fields) = inner_row.as_ref() else {
+        panic!("history rows must retain their record values: {inner_row:?}");
+    };
+    let Type::Tuple(slots) = inner_fields.get("pins").expect("paired tuple pins") else {
+        panic!("history rows must retain their paired tuple pins");
+    };
+    assert_eq!(slots.len(), 2, "both tuple positions remain represented");
+    let pin_contexts = slots
+        .iter()
+        .map(|slot| {
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(slot, &mut contexts);
+            contexts
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        pin_contexts,
+        [
+            BTreeSet::from([
+                "selector:HEAD~9000".into(),
+                "selector:HEAD~9020".into(),
+                "selector:HEAD~9040".into(),
+                "selector:HEAD~9120".into(),
+                "selector:HEAD~9140".into(),
+            ]),
+            BTreeSet::from([
+                "selector:HEAD~9020".into(),
+                "selector:HEAD~9040".into(),
+                "selector:HEAD~9100".into(),
+                "selector:HEAD~9120".into(),
+                "selector:HEAD~9140".into(),
+            ]),
+        ],
+        "each sparse chain preserves only its concrete selectors in the corresponding tuple slot"
+    );
+    let mut inner_witnesses = BTreeSet::new();
+    collect_snapshot_contexts(
+        inner_fields.get("witness").expect("inner computed witness"),
+        &mut inner_witnesses,
+    );
+    assert_eq!(
+        inner_witnesses,
+        BTreeSet::from([
+            "selector:HEAD~9001".into(),
+            "selector:HEAD~9021".into(),
+            "selector:HEAD~9041".into(),
+            "selector:HEAD~9101".into(),
+            "selector:HEAD~9121".into(),
+            "selector:HEAD~9141".into(),
+        ]),
+        "inner witness values remain computed across each three-way rebind chain"
+    );
+    let mut outer_witnesses = BTreeSet::new();
+    collect_snapshot_contexts(
+        cascade_fields.get("witness").expect("outer computed witness"),
+        &mut outer_witnesses,
+    );
+    assert_eq!(
+        outer_witnesses,
+        BTreeSet::from([
+            "selector:HEAD~9300".into(),
+            "selector:HEAD~9310".into(),
+            "selector:HEAD~9320".into(),
+        ]),
+        "the omission row preserves all real outer witness values"
+    );
+}
+
+#[test]
 fn multi_parent_selector_topology_storm_preserves_label_depth_identity() {
     let source = include_str!("fixtures/historical-multi-parent-selector-topology-storm.orna");
     let parsed = orna_syntax_v1::parse_module(source);

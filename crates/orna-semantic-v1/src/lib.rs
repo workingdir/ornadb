@@ -18972,10 +18972,10 @@ fn checkpoint_topology_anchor_with_first_pins_local(anchor: &Type, source: &Type
     }
 }
 
-/// Reconcile another parent into a multi-parent tuple checkpoint fold. Each
-/// source parent must have the first parent's map width, while the accumulated
-/// result may grow as it collects more parent labels. The fold guard still
-/// rejects any new cross-slot identity introduced by the accumulated union.
+/// Reconcile another parent into a multi-parent tuple checkpoint fold. Source
+/// parents keep the same paired selector paths, while singleton labels may be
+/// contributed by different sparse lanes. The fold guard rejects any new
+/// cross-slot identity introduced by the accumulated union.
 fn merge_multi_parent_checkpoint_tuple(
     accumulated: &Type,
     parent: &Type,
@@ -18989,20 +18989,16 @@ fn merge_multi_parent_checkpoint_tuple(
     if accumulated.len() != first_parent.len() || parent.len() != first_parent.len() {
         return None;
     }
-    if !first_parent
-        .iter()
-        .zip(parent)
-        .all(|(first, parent)| checkpoint_pin_map_widths_match(first, parent))
-        || !checkpoint_tuple_pin_identity_topology_matches(first_parent, parent)
+    let first_parent_value = Type::Tuple(first_parent.clone());
+    let parent_value = Type::Tuple(parent.clone());
+    if (!checkpoint_value_pin_identity_topology_matches(&first_parent_value, &parent_value)
+        && !checkpoint_value_paired_pin_membership_matches(&first_parent_value, &parent_value))
         || !tuple_checkpoint_compaction_fold_preserves_pin_identity(accumulated, parent)
     {
         return None;
     }
 
-    merge_checkpoint_field_map_multi_parent(
-        &Type::Tuple(accumulated.clone()),
-        &Type::Tuple(parent.clone()),
-    )
+    merge_checkpoint_field_map_multi_parent(&Type::Tuple(accumulated.clone()), &parent_value)
 }
 
 /// Find a pinned tuple at any structural depth so parent-list inference can
@@ -19475,25 +19471,23 @@ fn checkpoint_value_is_omitted(ty: &Type) -> bool {
 }
 
 /// Reconcile another parent into a nested checkpoint fold. Source parents
-/// retain the first parent's map widths and selector membership at each
-/// structural path, while accumulated maps may grow only without introducing
-/// new cross-path identity between nested sibling tuples.
+/// retain the first parent's paired selector membership, while singleton
+/// labels may come from different sparse tuple lanes. Accumulated maps may
+/// grow only without introducing new cross-path identity between siblings.
 fn merge_multi_parent_checkpoint_value(
     accumulated: &Type,
     parent: &Type,
     first_parent: &Type,
 ) -> Option<Type> {
-    if !checkpoint_paired_boundary_fold_topology_matches(accumulated, parent, first_parent) {
+    let paired = checkpoint_paired_boundary_fold_topology_matches(accumulated, parent, first_parent);
+    let source_topology_matches = checkpoint_value_pin_identity_topology_matches(first_parent, parent)
+        || checkpoint_value_paired_pin_membership_matches(first_parent, parent);
+    let compaction = nested_checkpoint_compaction_fold_preserves_pin_identity(accumulated, parent);
+    if !paired || !source_topology_matches || !compaction {
         return None;
     }
     if matches!(first_parent, Type::Tuple(_)) {
         return merge_multi_parent_checkpoint_tuple(accumulated, parent, first_parent);
-    }
-    if !checkpoint_pin_map_widths_match(first_parent, parent)
-        || !checkpoint_value_pin_identity_topology_matches(first_parent, parent)
-        || !nested_checkpoint_compaction_fold_preserves_pin_identity(accumulated, parent)
-    {
-        return None;
     }
 
     merge_checkpoint_field_map_multi_parent(accumulated, parent)
@@ -20502,6 +20496,64 @@ fn checkpoint_value_pin_identity_topology_matches(expected: &Type, actual: &Type
         &mut pin_maps,
         &mut Vec::new(),
     ) && snapshot_context_topology_matches_over_present_maps(&pin_maps)
+}
+
+/// Sparse parent folds may contribute different counts of selector labels to
+/// otherwise paired tuple slots. Keep the paired membership paths stable, but
+/// let singleton labels remain in the concrete slot where each sparse source
+/// supplied them. The enclosing compaction guard still rejects any merge that
+/// would introduce new cross-path identity. The reference does not specify
+/// these local sparse multi-parent folds.
+fn checkpoint_value_paired_pin_membership_matches(expected: &Type, actual: &Type) -> bool {
+    fn paired_membership_patterns(
+        pin_maps: &[SnapshotContextMapPair],
+        expected: bool,
+    ) -> BTreeMap<BTreeSet<(Vec<SnapshotTopologyBoundary>, usize)>, usize> {
+        let mut memberships = BTreeMap::<
+            String,
+            BTreeSet<(Vec<SnapshotTopologyBoundary>, usize)>,
+        >::new();
+        for pair in pin_maps {
+            let selectors = if expected {
+                &pair.expected
+            } else {
+                &pair.actual
+            };
+            let tuple_lanes = pair
+                .boundary_path
+                .iter()
+                .enumerate()
+                .filter_map(|(index, boundary)| match boundary {
+                    SnapshotTopologyBoundary::TupleElement(slot) => {
+                        Some((pair.boundary_path[..index].to_vec(), *slot))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            for selector in selectors {
+                memberships.entry(selector.clone()).or_default().extend(
+                    tuple_lanes.iter().cloned(),
+                );
+            }
+        }
+        let mut patterns = BTreeMap::new();
+        for membership in memberships.into_values().filter(|membership| membership.len() > 1) {
+            *patterns.entry(membership).or_insert(0) += 1;
+        }
+        patterns
+    }
+
+    let mut pin_maps = Vec::new();
+    if !collect_corresponding_snapshot_context_maps_at_path(
+        expected,
+        actual,
+        &mut pin_maps,
+        &mut Vec::new(),
+    ) {
+        return false;
+    }
+    let expected_patterns = paired_membership_patterns(&pin_maps, true);
+    !expected_patterns.is_empty() && expected_patterns == paired_membership_patterns(&pin_maps, false)
 }
 
 fn checkpoint_tuple_pin_identity_topology_matches(expected: &[Type], actual: &[Type]) -> bool {
