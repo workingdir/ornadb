@@ -1125,4 +1125,30 @@ fn paired_subscription_refresh_chain_retains_values_across_variable_page_handoff
             "refresh generation {generation} owns distinct paired subscription scopes"
         );
     }
+    let scopes = source.lanes.iter().map(|(scope, _)| *scope).collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "all refresh handoffs allocate fresh subscription scopes"
+        );
+    }
+    assert_eq!(
+        source.cursors,
+        vec![
+            (scopes[0], None),
+            (scopes[0], Some(vec![11])),
+            (scopes[0], Some(vec![33])),
+            (scopes[1], None),
+            (scopes[1], Some(vec![11])),
+            (scopes[2], None),
+            (scopes[2], Some(vec![11])),
+            (scopes[3], None),
+            (scopes[3], Some(vec![11])),
+            (scopes[3], Some(vec![66])),
+            (scopes[4], None),
+            (scopes[5], None),
+            (scopes[5], Some(vec![11])),
+        ],
+        "each variable-length fold terminates and resumes only inside its own handoff scope"
+    );
 }
