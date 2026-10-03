@@ -927,7 +927,9 @@ pub struct QueryWindowAggregatePushdownDescription {
 /// unit. A missing working-set estimate remains unknown; explain never
 /// executes or infers a spill. ORNA does not prescribe a spill threshold or
 /// cost model, so these are planner-local estimates carried on the existing
-/// window aggregate node, not runtime spill instructions.
+/// window aggregate node, not runtime spill instructions. Explain also folds
+/// each aggregate identity's spill costs independently across the sparse
+/// paired chain; pairs without spill descriptors carry those local folds.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryWindowSpillDescription {
     pub identity: ObjectRef,
@@ -3609,6 +3611,8 @@ fn explain_query_core_with_wal_rotation_chains(
     > = None;
     let mut paired_decorrelation_cost_restoration_chain_identity: Option<String> = None;
     let mut paired_window_spill_cascade_fold: Option<QueryWindowSpillCascadeFold> = None;
+    let mut paired_window_spill_rule_cost_fold: Option<QueryPairedWindowSpillRuleCostFold> =
+        None;
     let mut paired_aggregate_anchor_cascade_fold: Option<QueryPairedAggregateAnchorCascadeFold> =
         None;
     let mut paired_scoped_window_compaction_fold: Option<
@@ -4497,6 +4501,21 @@ fn explain_query_core_with_wal_rotation_chains(
                     *totals,
                 ),
             );
+            if let Some(pair) = join_pair_identity {
+                let cascade = paired_window_spill_cascade_fold
+                    .as_ref()
+                    .expect("a spill pair advanced the cumulative cascade");
+                paired_window_spill_rule_cost_fold = Some(
+                    query_paired_window_spill_rule_cost_fold(
+                        paired_window_spill_rule_cost_fold.as_ref(),
+                        pair,
+                        pair_spill_fold_identity,
+                        window_aggregates,
+                        window_spills,
+                        cascade,
+                    ),
+                );
+            }
         }
         let paired_window_compaction_spill_pair_identity = join_pair_identity
             .zip(paired_aggregate_pushdown_anchor_fold_id.as_deref())
@@ -4694,6 +4713,17 @@ fn explain_query_core_with_wal_rotation_chains(
                 add_paired_window_spill_cascade_fold_details(
                     &mut operators[index].details,
                     cascade_fold,
+                );
+            }
+        }
+        if let Some(rule_cost_fold) = paired_window_spill_rule_cost_fold.as_ref() {
+            let mut spill_nodes = BTreeSet::from([right_access, right]);
+            spill_nodes.extend(right_window_operator_start..operators.len());
+            for index in spill_nodes {
+                add_paired_window_spill_rule_cost_fold_details(
+                    &mut operators[index].details,
+                    rule_cost_fold,
+                    paired_aggregate_spill_fold.is_some(),
                 );
             }
         }
@@ -5007,6 +5037,9 @@ fn explain_query_core_with_wal_rotation_chains(
                 .as_ref()
                 .map(|fold| fold.identity.as_str()),
             paired_window_spill_cascade_fold
+                .as_ref()
+                .map(|fold| fold.identity.as_str()),
+            paired_window_spill_rule_cost_fold
                 .as_ref()
                 .map(|fold| fold.identity.as_str()),
             paired_aggregate_spill_restoration_fold
@@ -5544,6 +5577,13 @@ fn explain_query_core_with_wal_rotation_chains(
         }
         if let Some(cascade_fold) = paired_window_spill_cascade_fold.as_ref() {
             add_paired_window_spill_cascade_fold_details(&mut details, cascade_fold);
+        }
+        if let Some(rule_cost_fold) = paired_window_spill_rule_cost_fold.as_ref() {
+            add_paired_window_spill_rule_cost_fold_details(
+                &mut details,
+                rule_cost_fold,
+                paired_aggregate_spill_fold.is_some(),
+            );
         }
         if let Some(identity) = paired_aggregate_spill_restoration_pair_identity.as_deref() {
             add_paired_aggregate_spill_restoration_pair_details(
@@ -8519,6 +8559,26 @@ struct QueryWindowSpillCascadeFold {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryWindowSpillRuleCostFold {
+    identity: String,
+    pair_count: u64,
+    stage_count: u64,
+    unknown_working_set_count: u64,
+    estimated_bytes: Option<u64>,
+    estimated_io_blocks: Option<u64>,
+    estimated_io_work: Option<u64>,
+    overflowed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryPairedWindowSpillRuleCostFold {
+    identity: String,
+    pair_count: u64,
+    totals: QueryAggregateSpillTotals,
+    rules: BTreeMap<String, QueryWindowSpillRuleCostFold>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct QueryPairedLimitAggregateSpillRestorationFold {
     identity: String,
     pair_identity: String,
@@ -8827,6 +8887,310 @@ fn add_paired_window_spill_cascade_fold_details(
             "computed".to_owned()
         }),
     );
+}
+
+/// Folds each window aggregate's spill work below the paired spill cascade.
+/// The reference leaves explain-only digest structure open; this adapter uses
+/// the exact aggregate identity as the local rule key and preserves sparse
+/// pair carry independently from each rule's computed totals.
+fn query_paired_window_spill_rule_cost_fold(
+    previous: Option<&QueryPairedWindowSpillRuleCostFold>,
+    pair: &QueryJoinPairIdentityDescription,
+    spill_chain_identity: &str,
+    window_aggregates: &[QueryWindowAggregatePushdownDescription],
+    window_spills: &[QueryWindowSpillDescription],
+    cascade: &QueryWindowSpillCascadeFold,
+) -> QueryPairedWindowSpillRuleCostFold {
+    let mut rules = previous.map_or_else(BTreeMap::new, |fold| fold.rules.clone());
+    for aggregate in window_aggregates
+        .iter()
+        .filter(|aggregate| aggregate.source == pair.right_source)
+    {
+        let Some(spill) = window_spills.iter().find(|spill| {
+            spill.join_pair_identity == pair.identity
+                && spill.source == pair.right_source
+                && spill.window_aggregate_identity == aggregate.identity
+        }) else {
+            continue;
+        };
+        let (estimated_bytes, estimated_io_blocks, estimated_io_work) =
+            query_window_spill_estimate(spill);
+        let pair_totals = QueryAggregateSpillTotals {
+            stage_count: 1,
+            unknown_working_set_count: u64::from(spill.estimated_working_set_bytes.is_none()),
+            estimated_bytes,
+            estimated_io_blocks,
+            estimated_io_work,
+            overflowed: spill.estimated_working_set_bytes.is_some() && estimated_io_work.is_none(),
+        };
+        let previous_rule = rules.get(aggregate.identity.as_str());
+        let fold =
+            query_window_spill_rule_cost_fold(previous_rule, pair, aggregate, spill, pair_totals);
+        rules.insert(aggregate.identity.as_str().to_owned(), fold);
+    }
+
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-window-spill-rule-cost-fold.v1\0");
+    hash_optional_text(&mut hash, previous.map(|fold| fold.identity.as_str()));
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    hash_part(&mut hash, spill_chain_identity.as_bytes());
+    hash_part(&mut hash, cascade.identity.as_bytes());
+    hash.update((rules.len() as u64).to_be_bytes());
+    for (aggregate_identity, rule_fold) in &rules {
+        hash_part(&mut hash, aggregate_identity.as_bytes());
+        hash_part(&mut hash, rule_fold.identity.as_bytes());
+    }
+    hash.update(cascade.spill_pair_count.to_be_bytes());
+    hash_query_aggregate_spill_totals(&mut hash, cascade.totals);
+
+    QueryPairedWindowSpillRuleCostFold {
+        identity: format!(
+            "paired-window-spill-rule-cost-fold:{}",
+            hex(&hash.finalize())
+        ),
+        pair_count: cascade.spill_pair_count,
+        totals: cascade.totals,
+        rules,
+    }
+}
+
+fn query_window_spill_rule_cost_fold(
+    previous: Option<&QueryWindowSpillRuleCostFold>,
+    pair: &QueryJoinPairIdentityDescription,
+    aggregate: &QueryWindowAggregatePushdownDescription,
+    spill: &QueryWindowSpillDescription,
+    pair_totals: QueryAggregateSpillTotals,
+) -> QueryWindowSpillRuleCostFold {
+    let mut overflowed = previous.is_some_and(|fold| fold.overflowed) || pair_totals.overflowed;
+    let (
+        pair_count,
+        stage_count,
+        unknown_working_set_count,
+        estimated_bytes,
+        estimated_io_blocks,
+        estimated_io_work,
+    ) = if let Some(previous) = previous {
+        let next_count = |prior: u64, next: u64, overflowed: &mut bool| {
+            prior.checked_add(next).unwrap_or_else(|| {
+                *overflowed = true;
+                u64::MAX
+            })
+        };
+        (
+            next_count(previous.pair_count, 1, &mut overflowed),
+            next_count(
+                previous.stage_count,
+                pair_totals.stage_count,
+                &mut overflowed,
+            ),
+            next_count(
+                previous.unknown_working_set_count,
+                pair_totals.unknown_working_set_count,
+                &mut overflowed,
+            ),
+            merge_query_spill_estimate(
+                previous.estimated_bytes,
+                pair_totals.estimated_bytes,
+                &mut overflowed,
+            ),
+            merge_query_spill_estimate(
+                previous.estimated_io_blocks,
+                pair_totals.estimated_io_blocks,
+                &mut overflowed,
+            ),
+            merge_query_spill_estimate(
+                previous.estimated_io_work,
+                pair_totals.estimated_io_work,
+                &mut overflowed,
+            ),
+        )
+    } else {
+        (
+            1,
+            pair_totals.stage_count,
+            pair_totals.unknown_working_set_count,
+            pair_totals.estimated_bytes,
+            pair_totals.estimated_io_blocks,
+            pair_totals.estimated_io_work,
+        )
+    };
+
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-window-spill-rule-cost-fold.v1\0");
+    hash_optional_text(&mut hash, previous.map(|fold| fold.identity.as_str()));
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    hash_part(&mut hash, aggregate.identity.as_str().as_bytes());
+    hash_part(&mut hash, aggregate.aggregate.as_str().as_bytes());
+    hash_part(&mut hash, aggregate.frame_identity.as_str().as_bytes());
+    hash_part(&mut hash, aggregate.frame_start.as_detail().as_bytes());
+    hash_part(&mut hash, aggregate.frame_end.as_detail().as_bytes());
+    hash_part(&mut hash, spill.identity.as_str().as_bytes());
+    hash_optional_u64(&mut hash, spill.estimated_working_set_bytes);
+    hash.update(spill.memory_budget_bytes.to_be_bytes());
+    hash.update(pair_count.to_be_bytes());
+    hash.update(stage_count.to_be_bytes());
+    hash.update(unknown_working_set_count.to_be_bytes());
+    hash_optional_u64(&mut hash, estimated_bytes);
+    hash_optional_u64(&mut hash, estimated_io_blocks);
+    hash_optional_u64(&mut hash, estimated_io_work);
+    hash.update([u8::from(overflowed)]);
+
+    QueryWindowSpillRuleCostFold {
+        identity: format!("window-spill-rule-cost-fold:{}", hex(&hash.finalize())),
+        pair_count,
+        stage_count,
+        unknown_working_set_count,
+        estimated_bytes,
+        estimated_io_blocks,
+        estimated_io_work,
+        overflowed,
+    }
+}
+
+fn add_paired_window_spill_rule_cost_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryPairedWindowSpillRuleCostFold,
+    advanced_on_pair: bool,
+) {
+    details.insert(
+        "paired_window_spill_rule_cost_fold_identity".to_owned(),
+        PlanDetail::Text(fold.identity.clone()),
+    );
+    details.insert(
+        "paired_window_spill_rule_cost_pairing".to_owned(),
+        PlanDetail::Text("paired_window_spill_chain_with_nested_aggregate_rule_folds".to_owned()),
+    );
+    details.insert(
+        "paired_window_spill_rule_cost_transition".to_owned(),
+        PlanDetail::Text(if advanced_on_pair {
+            "advanced_exact_pair_spill_rules".to_owned()
+        } else {
+            "carried_across_sparse_pair".to_owned()
+        }),
+    );
+    details.insert(
+        "paired_window_spill_rule_cost_pair_count".to_owned(),
+        PlanDetail::Integer(fold.pair_count),
+    );
+    details.insert(
+        "paired_window_spill_rule_cost_rule_count".to_owned(),
+        PlanDetail::Integer(fold.rules.len() as u64),
+    );
+    details.insert(
+        "paired_window_spill_rule_cost_stage_count".to_owned(),
+        PlanDetail::Integer(fold.totals.stage_count),
+    );
+    details.insert(
+        "paired_window_spill_rule_cost_unknown_working_set_count".to_owned(),
+        PlanDetail::Integer(fold.totals.unknown_working_set_count),
+    );
+    details.insert(
+        "paired_window_spill_rule_cost_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.totals.overflowed),
+    );
+    details.insert(
+        "paired_window_spill_rule_cost_estimate_status".to_owned(),
+        PlanDetail::Text(if fold.totals.overflowed {
+            "overflow".to_owned()
+        } else if fold.totals.unknown_working_set_count > 0 {
+            "unknown_working_set".to_owned()
+        } else {
+            "computed".to_owned()
+        }),
+    );
+    for (key, value) in [
+        (
+            "paired_window_spill_rule_cost_estimated_bytes",
+            fold.totals.estimated_bytes,
+        ),
+        (
+            "paired_window_spill_rule_cost_estimated_io_blocks",
+            fold.totals.estimated_io_blocks,
+        ),
+        (
+            "paired_window_spill_rule_cost_estimated_io_work",
+            fold.totals.estimated_io_work,
+        ),
+    ] {
+        if let Some(value) = value {
+            details.insert(key.to_owned(), PlanDetail::Integer(value));
+        } else {
+            details.remove(key);
+        }
+    }
+
+    let Some(PlanDetail::Text(rule_identity)) = details.get("window_aggregate_identity") else {
+        return;
+    };
+    let Some(rule) = fold.rules.get(rule_identity) else {
+        return;
+    };
+    details.insert(
+        "paired_window_spill_rule_cost_rule_identity".to_owned(),
+        PlanDetail::Text(rule_identity.clone()),
+    );
+    details.insert(
+        "paired_window_spill_rule_cost_identity".to_owned(),
+        PlanDetail::Text(rule.identity.clone()),
+    );
+    details.insert(
+        "paired_window_spill_rule_cost_rule_pair_count".to_owned(),
+        PlanDetail::Integer(rule.pair_count),
+    );
+    details.insert(
+        "paired_window_spill_rule_cost_rule_stage_count".to_owned(),
+        PlanDetail::Integer(rule.stage_count),
+    );
+    details.insert(
+        "paired_window_spill_rule_cost_rule_unknown_working_set_count".to_owned(),
+        PlanDetail::Integer(rule.unknown_working_set_count),
+    );
+    details.insert(
+        "paired_window_spill_rule_cost_rule_overflowed".to_owned(),
+        PlanDetail::Boolean(rule.overflowed),
+    );
+    details.insert(
+        "paired_window_spill_rule_cost_rule_estimate_status".to_owned(),
+        PlanDetail::Text(if rule.overflowed {
+            "overflow".to_owned()
+        } else if rule.unknown_working_set_count > 0 {
+            "unknown_working_set".to_owned()
+        } else {
+            "computed".to_owned()
+        }),
+    );
+    for (key, value) in [
+        (
+            "paired_window_spill_rule_cost_rule_estimated_bytes",
+            rule.estimated_bytes,
+        ),
+        (
+            "paired_window_spill_rule_cost_rule_estimated_io_blocks",
+            rule.estimated_io_blocks,
+        ),
+        (
+            "paired_window_spill_rule_cost_rule_estimated_io_work",
+            rule.estimated_io_work,
+        ),
+    ] {
+        if let Some(value) = value {
+            details.insert(key.to_owned(), PlanDetail::Integer(value));
+        } else {
+            details.remove(key);
+        }
+    }
 }
 
 /// Folds each exact paired window chain together with the cumulative spill
@@ -12509,6 +12873,7 @@ fn query_join_cost_fold(
     paired_aggregate_anchor_cascade_fold_identity: Option<&str>,
     paired_scoped_window_compaction_fold_identity: Option<&str>,
     paired_window_spill_cascade_fold_identity: Option<&str>,
+    paired_window_spill_rule_cost_fold_identity: Option<&str>,
     paired_aggregate_spill_restoration_fold_identity: Option<&str>,
     paired_limit_aggregate_spill_restoration_fold_identity: Option<&str>,
     paired_window_compaction_spill_fold_identity: Option<&str>,
@@ -12564,6 +12929,7 @@ fn query_join_cost_fold(
     hash_optional_text(&mut hash, paired_aggregate_anchor_cascade_fold_identity);
     hash_optional_text(&mut hash, paired_scoped_window_compaction_fold_identity);
     hash_optional_text(&mut hash, paired_window_spill_cascade_fold_identity);
+    hash_optional_text(&mut hash, paired_window_spill_rule_cost_fold_identity);
     hash_optional_text(
         &mut hash,
         paired_aggregate_spill_restoration_fold_identity,
