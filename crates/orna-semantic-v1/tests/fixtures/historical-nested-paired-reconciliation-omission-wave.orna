@@ -1,0 +1,36 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn nested_paired_reconciliation_omission_wave(failure: Error) {
+    let parents = [
+        {
+            nested: {
+                left: { pins: (((fail(failure), fail(failure)), (factory_at(sys.snapshot("HEAD~110")), factory_at(sys.snapshot("HEAD~111")))), ((factory_at(sys.snapshot("HEAD~120")), factory_at(sys.snapshot("HEAD~121"))), (factory_at(sys.snapshot("HEAD~130")), factory_at(sys.snapshot("HEAD~131"))))) },
+                right: { pins: (((factory_at(sys.snapshot("HEAD~200")), factory_at(sys.snapshot("HEAD~201"))), (factory_at(sys.snapshot("HEAD~210")), factory_at(sys.snapshot("HEAD~211")))), ((factory_at(sys.snapshot("HEAD~220")), factory_at(sys.snapshot("HEAD~221"))), (fail(failure), fail(failure)))) },
+                steady: { pins: (((factory_at(sys.snapshot("HEAD~800")), factory_at(sys.snapshot("HEAD~801"))), (factory_at(sys.snapshot("HEAD~810")), factory_at(sys.snapshot("HEAD~811")))), ((factory_at(sys.snapshot("HEAD~820")), factory_at(sys.snapshot("HEAD~821"))), (factory_at(sys.snapshot("HEAD~830")), factory_at(sys.snapshot("HEAD~831"))))) },
+            },
+        },
+        {
+            nested: {
+                left: { pins: (((factory_at(sys.snapshot("HEAD~300")), factory_at(sys.snapshot("HEAD~301"))), (factory_at(sys.snapshot("HEAD~310")), factory_at(sys.snapshot("HEAD~311")))), ((factory_at(sys.snapshot("HEAD~320")), factory_at(sys.snapshot("HEAD~321"))), (factory_at(sys.snapshot("HEAD~330")), factory_at(sys.snapshot("HEAD~331"))))) },
+                right: { pins: (((factory_at(sys.snapshot("HEAD~400")), factory_at(sys.snapshot("HEAD~401"))), (factory_at(sys.snapshot("HEAD~410")), factory_at(sys.snapshot("HEAD~411")))), ((factory_at(sys.snapshot("HEAD~420")), factory_at(sys.snapshot("HEAD~421"))), (factory_at(sys.snapshot("HEAD~430")), factory_at(sys.snapshot("HEAD~431"))))) },
+                steady: { pins: (((factory_at(sys.snapshot("HEAD~900")), factory_at(sys.snapshot("HEAD~901"))), (factory_at(sys.snapshot("HEAD~910")), factory_at(sys.snapshot("HEAD~911")))), ((factory_at(sys.snapshot("HEAD~920")), factory_at(sys.snapshot("HEAD~921"))), (factory_at(sys.snapshot("HEAD~930")), factory_at(sys.snapshot("HEAD~931"))))) },
+            },
+        },
+        {
+            nested: {
+                left: { pins: (((factory_at(sys.snapshot("HEAD~200")), factory_at(sys.snapshot("HEAD~501"))), (factory_at(sys.snapshot("HEAD~510")), factory_at(sys.snapshot("HEAD~511")))), ((factory_at(sys.snapshot("HEAD~520")), factory_at(sys.snapshot("HEAD~521"))), (factory_at(sys.snapshot("HEAD~530")), factory_at(sys.snapshot("HEAD~531"))))) },
+                right: { pins: (((factory_at(sys.snapshot("HEAD~500")), factory_at(sys.snapshot("HEAD~502"))), (factory_at(sys.snapshot("HEAD~550")), factory_at(sys.snapshot("HEAD~552")))), ((factory_at(sys.snapshot("HEAD~560")), factory_at(sys.snapshot("HEAD~562"))), (factory_at(sys.snapshot("HEAD~570")), factory_at(sys.snapshot("HEAD~572"))))) },
+                steady: { pins: (((factory_at(sys.snapshot("HEAD~1000")), factory_at(sys.snapshot("HEAD~1001"))), (factory_at(sys.snapshot("HEAD~1010")), factory_at(sys.snapshot("HEAD~1011")))), ((factory_at(sys.snapshot("HEAD~1020")), factory_at(sys.snapshot("HEAD~1021"))), (factory_at(sys.snapshot("HEAD~1030")), factory_at(sys.snapshot("HEAD~1031"))))) },
+            },
+        },
+        {
+            nested: {
+                left: { pins: (((factory_at(sys.snapshot("HEAD~600")), factory_at(sys.snapshot("HEAD~601"))), (factory_at(sys.snapshot("HEAD~610")), factory_at(sys.snapshot("HEAD~611")))), ((factory_at(sys.snapshot("HEAD~620")), factory_at(sys.snapshot("HEAD~621"))), (factory_at(sys.snapshot("HEAD~630")), factory_at(sys.snapshot("HEAD~631"))))) },
+                right: { pins: (((factory_at(sys.snapshot("HEAD~700")), factory_at(sys.snapshot("HEAD~701"))), (factory_at(sys.snapshot("HEAD~710")), factory_at(sys.snapshot("HEAD~711")))), ((factory_at(sys.snapshot("HEAD~720")), factory_at(sys.snapshot("HEAD~721"))), (factory_at(sys.snapshot("HEAD~730")), factory_at(sys.snapshot("HEAD~731"))))) },
+                steady: { pins: (((factory_at(sys.snapshot("HEAD~1100")), factory_at(sys.snapshot("HEAD~1101"))), (factory_at(sys.snapshot("HEAD~1110")), factory_at(sys.snapshot("HEAD~1111")))), ((factory_at(sys.snapshot("HEAD~1120")), factory_at(sys.snapshot("HEAD~1121"))), (factory_at(sys.snapshot("HEAD~1130")), factory_at(sys.snapshot("HEAD~1131"))))) },
+            },
+        },
+    ];
+    { parent_fold: parents }
+}
