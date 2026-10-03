@@ -537,6 +537,14 @@ fn generated_stub_contract_validation_rejects_parseable_and_syntactic_drift() {
             replace_once(stub, "): T =", "): sys.Value ="),
         ),
         (
+            "stub body",
+            replace_once(
+                stub,
+                "error(code: \"sys.binding.stub\", message: \"generated declaration stub\")",
+                "error(code: \"sys.abi.unavailable\", message: \"generated declaration stub\")",
+            ),
+        ),
+        (
             "parameter inventory",
             replace_once(stub, ", idempotency_key: Str? = null", ""),
         ),
