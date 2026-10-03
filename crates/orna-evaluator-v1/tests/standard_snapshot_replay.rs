@@ -4404,7 +4404,14 @@ fn captured_nested_closures_keep_paired_pin_identity_across_divergence_folds() {
         for import in imports.lines() {
             assert_eq!(session.submit(import), Ok(None));
         }
-        assert_eq!(session.submit(nested_closure), Ok(None));
+        let definition = session.submit(nested_closure);
+        assert!(
+            definition.is_ok(),
+            "nested closure definition failed at pin {} with {}",
+            pins[index],
+            definition.as_ref().unwrap_err().code()
+        );
+        assert_eq!(definition, Ok(None));
         for binding in bind_nested_closure.lines() {
             assert_eq!(session.submit(binding), Ok(None));
         }
