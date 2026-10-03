@@ -1298,6 +1298,39 @@ pub fn explain_query_with_join_pair_identities_and_limit_window_aggregate_pushdo
     )
 }
 
+/// Explains paired input limits composed with exact window aggregate and spill
+/// chains. Spill estimates remain bound to their resolver-approved pair and
+/// aggregate, while the sparse planner carries all three identities through
+/// joins where one or more chains are absent. The adapter reports estimated
+/// spill work; it does not perform or infer runtime compaction.
+pub fn explain_query_with_join_pair_identities_limit_window_aggregate_and_spill_pushdowns(
+    query: &QueryPlanDescription,
+    pairs: &[QueryJoinPairIdentityDescription],
+    limit_pushdowns: &[QueryLimitPushdownDescription],
+    aggregates: &[QueryWindowAggregatePushdownDescription],
+    spills: &[QueryWindowSpillDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_limit_pushdowns(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        aggregates,
+        pairs,
+        limit_pushdowns,
+        spills,
+    )
+}
+
 /// Explains a sparse join cascade while retaining logical join-pair,
 /// window-pushdown, and paired aggregate-pushdown identities through physical
 /// cost reordering. Window aggregates remain attached to their exact source
