@@ -600,3 +600,71 @@ fn paired_subscription_handoffs_keep_identity_when_cursors_repeat_across_refresh
         "each paired refresh begins at the head and resumes only its own repeated cursor"
     );
 }
+
+#[test]
+fn paired_subscription_batch_scopes_survive_three_page_handoffs_and_refresh() {
+    // The `.orna` callback fixture drives real filtering and folding. Three
+    // page batches per subscription make scope continuity observable beyond a
+    // single continuation, while each refresh reuses opaque cursor bytes.
+    let mut source = PairedSubscriptionSource::new([
+        vec![
+            page(&[1], Some(vec![11])),
+            page(&[3], Some(vec![33])),
+            page(&[5], None),
+        ],
+        vec![
+            page(&[2], Some(vec![11])),
+            page(&[4], Some(vec![44])),
+            page(&[6], None),
+        ],
+        vec![
+            page(&[-1], Some(vec![11])),
+            page(&[7], Some(vec![55])),
+            page(&[9], None),
+        ],
+        vec![
+            page(&[8], Some(vec![11])),
+            page(&[2], Some(vec![44])),
+            page(&[10], None),
+        ],
+    ]);
+
+    assert_eq!(
+        run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap(),
+        integer(21),
+        "first fold combines the filtered odd and even values across three batches"
+    );
+    assert_eq!(source.lanes.len(), 2);
+    let first_scopes = [source.lanes[0].0, source.lanes[1].0];
+    assert_ne!(first_scopes[0], first_scopes[1]);
+
+    assert_eq!(
+        run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap(),
+        integer(3),
+        "refreshed fold uses only the newly rebound even value across its batches"
+    );
+    assert_eq!(source.lanes.len(), 4);
+    let refreshed_scopes = [source.lanes[2].0, source.lanes[3].0];
+    assert_ne!(refreshed_scopes[0], refreshed_scopes[1]);
+    for scope in refreshed_scopes {
+        assert!(!first_scopes.contains(&scope));
+    }
+    assert_eq!(
+        source.cursors,
+        vec![
+            (first_scopes[0], None),
+            (first_scopes[0], Some(vec![11])),
+            (first_scopes[0], Some(vec![33])),
+            (first_scopes[1], None),
+            (first_scopes[1], Some(vec![11])),
+            (first_scopes[1], Some(vec![44])),
+            (refreshed_scopes[0], None),
+            (refreshed_scopes[0], Some(vec![11])),
+            (refreshed_scopes[0], Some(vec![55])),
+            (refreshed_scopes[1], None),
+            (refreshed_scopes[1], Some(vec![11])),
+            (refreshed_scopes[1], Some(vec![44])),
+        ],
+        "each batch resumes its subscription scope and each refresh starts a new pair"
+    );
+}
