@@ -1209,10 +1209,11 @@ impl PackageResolver {
         for chain in chains {
             let omission_only = chain
                 .iter()
-                .flatten()
-                .all(|(_, replacements)| match replacements {
-                    Some(waves) => waves.is_empty(),
-                    None => true,
+                .all(|round| {
+                    round.iter().all(|(_, replacements)| match replacements {
+                        Some(waves) => waves.is_empty(),
+                        None => true,
+                    })
                 });
             let terminal_identity = omission_only.then(|| route.terminal_route_identity());
             route = self
